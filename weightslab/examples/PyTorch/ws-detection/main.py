@@ -120,6 +120,7 @@ if __name__ == "__main__":
     parameters.setdefault("compute_natural_sort", True)
 
     # --- 2) Register hyperparameters ---
+    exp_name = parameters["experiment_name"]
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
@@ -128,7 +129,6 @@ if __name__ == "__main__":
         poll_interval=1.0,
     )
 
-    exp_name = parameters["experiment_name"]
     num_classes = int(parameters["num_classes"])
     image_size = int(parameters["image_size"])
     grid_size = int(parameters["grid_size"])

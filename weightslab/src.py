@@ -3006,22 +3006,9 @@ class _EvalManagedLoader:
         if self._controller.is_cancel_requested():
             raise _EvalCanceled(f"Evaluation on '{self._split_name}' canceled by user")
 
-        elapsed = time.monotonic() - self._start_time
-        if self._absolute_timeout > 0 and elapsed > self._absolute_timeout:
-            raise _EvalTimeout(
-                f"Evaluation timeout on '{self._split_name}' after {elapsed:.1f}s (configured {self._absolute_timeout:.1f}s)"
-            )
-
         if self._total_batches <= 0 or self._processed_batches <= 0 or self._avg_batch_seconds <= 0:
             return
 
-        projected = self._avg_batch_seconds * self._total_batches
-        timeout_seconds = max(self._min_seconds, projected * self._multiplier)
-        if elapsed > timeout_seconds:
-            raise _EvalTimeout(
-                f"Evaluation timeout on '{self._split_name}' after {elapsed:.1f}s "
-                f"(projected={projected:.1f}s, limit={timeout_seconds:.1f}s, multiplier={self._multiplier:.2f})"
-            )
     def __len__(self):
         return len(self._loader)
 

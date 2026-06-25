@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import logging
@@ -365,10 +366,8 @@ class H5DataFrameStore:
             if not isinstance(val, (list, set, np.ndarray)) and pd.isna(val):
                 return np.nan
 
-            if isinstance(val, np.ndarray) and val.ndim <= 1:
-                if val.ndim == 0:
-                    val = val.reshape(-1)
-                val = val.tolist()
+            if isinstance(val, np.ndarray):
+                val = val.item() if val.ndim == 0 else val.tolist()
 
             if isinstance(val, (list, dict)):
                 try:
@@ -428,18 +427,30 @@ class H5DataFrameStore:
         # Handle deserialization of nested objects (lists, dicts) stored as JSON strings
         cols_to_deserialize = [col for col in SampleStats.MODEL_INOUT_LIST if col in df.columns]
         if cols_to_deserialize:
+            _MISSING = {"nan", "none", "<na>", ""}
+
             def deserialize_value(val):
-                if not isinstance(val, str) or not (val.startswith('[') or val.startswith('{')):
+                if not isinstance(val, str):
+                    return val
+                stripped = val.strip()
+                if stripped.lower() in _MISSING:
+                    return np.nan
+                if not (stripped.startswith('[') or stripped.startswith('{')):
                     return val
                 try:
-                    obj = json.loads(val)
-                except Exception:
-                    return val
-
-                # Unwrap single-element lists to scalars for consistency with active training data
-                if isinstance(obj, list) and len(obj) == 1:
-                    return obj[0]
-                return obj
+                    return json.loads(stripped)
+                except json.JSONDecodeError:
+                    # Fallback: numpy repr uses spaces as delimiters without commas.
+                    # E.g. "[0.1 0.2]" or "[[0.1 0.2]\n [0.3 0.4]]"
+                    try:
+                        normalized = re.sub(
+                            r'(?<=[0-9.])\s+(?=[-0-9.\[])',
+                            ', ',
+                            stripped.replace('\n', ' '),
+                        )
+                        return json.loads(normalized)
+                    except Exception:
+                        return val
 
             for col in cols_to_deserialize:
                 df[col] = df[col].apply(deserialize_value)

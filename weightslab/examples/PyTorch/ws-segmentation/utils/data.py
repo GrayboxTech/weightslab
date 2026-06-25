@@ -32,6 +32,7 @@ class BDD100kSegDataset(Dataset):
         root,
         split="train",
         num_classes=6,
+        class_names=None,
         ignore_index=255,
         image_size=256,
         max_samples=None
@@ -40,6 +41,7 @@ class BDD100kSegDataset(Dataset):
         self.root = root
         self.split = split
         self.num_classes = num_classes
+        self.class_names = class_names
         self.ignore_index = ignore_index
         self.task_type = "segmentation"
 
@@ -114,31 +116,31 @@ class BDD100kSegDataset(Dataset):
             img_t = self.image_transform(img)
 
         # Process labels/masks
-        # # Sample wise segmentation
+        # # # Sample wise segmentation
+        # mask_t = None
+        # if include_labels:
+        #     mask = Image.open(mask_path)
+        #     mask_r = self.mask_resize(mask)
+        #     mask_np = np.array(mask_r, dtype=np.int64)
+        #     mask_t = torch.from_numpy(mask_np) # [H, W] int64
+        # return img_t, uid, mask_t, metadata
+        # # Instance wise segmentaiton
+        # Process labels/masks
+        mask_t_instances = list()
         mask_t = None
         if include_labels:
             mask = Image.open(mask_path)
             mask_r = self.mask_resize(mask)
             mask_np = np.array(mask_r, dtype=np.int64)
-            mask_t = torch.from_numpy(mask_np)[None] # [H, W] int64
-        return img_t, uid, mask_t, metadata
-        # # # Instance wise segmentaiton
-        # # Process labels/masks
-        # mask_t_instances = list()
-        # mask_t = None
-        # if include_labels:
-        # mask = Image.open(mask_path)
-        # mask_r = self.mask_resize(mask)
-        # mask_np = np.array(mask_r, dtype=np.int64)
-        # mask_t = torch.from_numpy(mask_np)[None] # [H, W] int64
+            mask_t = torch.from_numpy(mask_np) # [H, W] int64
 
-        # # Format labels to register multiple instance_ids
-        # lbl_max = mask_t.max().item()
-        # for i in range(1, lbl_max + 1):
-        # m = torch.zeros_like(mask_t)
-        # m[mask_t == i] = i # Assign class ID as instance ID for simplicity; if set to 1, all instances of the same class would be merged...
-        # mask_t_instances.append(m)
-        # return img_t, uid, mask_t_instances, metadata
+            # Format labels to register multiple instance_ids
+            lbl_max = mask_t.max().item()
+            for i in range(1, lbl_max + 1):
+                m = torch.zeros_like(mask_t)
+                m[mask_t == i] = i # Assign class ID as instance ID for simplicity; if set to 1, all instances of the same class would be merged...
+                mask_t_instances.append(m)
+        return img_t, uid, mask_t_instances, metadata
 
 def seg_collate(batch):
     """Collate WL per-sample tuples for instance-segmentation.
