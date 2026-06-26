@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import logging
@@ -15,7 +16,7 @@ from typing import Iterable, Optional, Union
 from weightslab.data.sample_stats import SampleStats
 
 
-logger = logging.getLogger(__name__)  # Initialize logger
+logger = logging.getLogger(__name__) # Initialize logger
 
 # WL signal columns use dotted names (e.g. "signals.defaults.brightness"), which
 # PyTables flags with NaturalNameWarning because they aren't valid Python
@@ -42,7 +43,7 @@ def _align_col_dtype_for_assign(existing: pd.DataFrame, source: pd.DataFrame, co
     Best-effort: dtype alignment must never break a merge.
     """
     try:
-        src_kind = source[col].dtype.kind  # 'O' object, 'b' bool, 'i'/'u'/'f' numeric
+        src_kind = source[col].dtype.kind # 'O' object, 'b' bool, 'i'/'u'/'f' numeric
         tgt_dtype = existing[col].dtype
         if src_kind in ("O", "b") and tgt_dtype != object and tgt_dtype.kind != src_kind:
             existing[col] = existing[col].astype(object)
@@ -101,7 +102,7 @@ class _InterProcessFileLock:
                 except OSError:
                     pass
 
-        self._unlock = _unlock  # type: ignore[attr-defined]
+        self._unlock = _unlock # type: ignore[attr-defined]
 
         while True:
             if _try_lock():
@@ -113,7 +114,7 @@ class _InterProcessFileLock:
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
             if hasattr(self, "_unlock"):
-                self._unlock()  # type: ignore[attr-defined]
+                self._unlock() # type: ignore[attr-defined]
         finally:
             if self._fh:
                 try:
@@ -184,9 +185,9 @@ class H5DataFrameStore:
                 # Detect tag type from data
                 non_null = df[col].dropna()
                 if non_null.empty:
-                    tag_cols[col] = None  # Auto-detect if all null
+                    tag_cols[col] = None # Auto-detect if all null
                 elif all(isinstance(v, bool) for v in non_null):
-                    tag_cols[col] = [True, False]  # Boolean tag
+                    tag_cols[col] = [True, False] # Boolean tag
                 else:
                     # String tag: use unique values as categories
                     tag_cols[col] = non_null.unique().tolist()
@@ -365,10 +366,8 @@ class H5DataFrameStore:
             if not isinstance(val, (list, set, np.ndarray)) and pd.isna(val):
                 return np.nan
 
-            if isinstance(val, np.ndarray) and val.ndim <= 1:
-                if val.ndim == 0:
-                    val = val.reshape(-1)
-                val = val.tolist()
+            if isinstance(val, np.ndarray):
+                val = val.item() if val.ndim == 0 else val.tolist()
 
             if isinstance(val, (list, dict)):
                 try:
@@ -428,27 +427,39 @@ class H5DataFrameStore:
         # Handle deserialization of nested objects (lists, dicts) stored as JSON strings
         cols_to_deserialize = [col for col in SampleStats.MODEL_INOUT_LIST if col in df.columns]
         if cols_to_deserialize:
+            _MISSING = {"nan", "none", "<na>", ""}
+
             def deserialize_value(val):
-                if not isinstance(val, str) or not (val.startswith('[') or val.startswith('{')):
+                if not isinstance(val, str):
+                    return val
+                stripped = val.strip()
+                if stripped.lower() in _MISSING:
+                    return np.nan
+                if not (stripped.startswith('[') or stripped.startswith('{')):
                     return val
                 try:
-                    obj = json.loads(val)
-                except Exception:
-                    return val
-
-                # Unwrap single-element lists to scalars for consistency with active training data
-                if isinstance(obj, list) and len(obj) == 1:
-                    return obj[0]
-                return obj
+                    return json.loads(stripped)
+                except json.JSONDecodeError:
+                    # Fallback: numpy repr uses spaces as delimiters without commas.
+                    # E.g. "[0.1 0.2]" or "[[0.1 0.2]\n [0.3 0.4]]"
+                    try:
+                        normalized = re.sub(
+                            r'(?<=[0-9.])\s+(?=[-0-9.\[])',
+                            ', ',
+                            stripped.replace('\n', ' '),
+                        )
+                        return json.loads(normalized)
+                    except Exception:
+                        return val
 
             for col in cols_to_deserialize:
                 df[col] = df[col].apply(deserialize_value)
 
         # Everything was persisted as plain strings (see upsert). Reconstruct the
         # in-memory representation for tag/discarded columns:
-        #   1. missing tokens ("nan"/"none"/"") → real NaN
-        #   2. boolean columns ("True"/"False") → real bool  (bool('False') is truthy,
-        #      so this MUST run before any bool checks)
+        # 1. missing tokens ("nan"/"none"/"") → real NaN
+        # 2. boolean columns ("True"/"False") → real bool (bool('False') is truthy,
+        # so this MUST run before any bool checks)
         # String categorical tags keep their string values here; their categorical
         # dtype + full category set is restored by _optimize_categorical_tags below.
         _BOOL_TOKENS = {"true": True, "false": False, "1": True, "0": False}
@@ -505,7 +516,7 @@ class H5DataFrameStore:
         try:
             checksum_key = f"{key}/_checksum"
             if checksum_key not in store:
-                return True  # No checksum to verify
+                return True # No checksum to verify
             checksum_df = store.get(checksum_key)
             stored_checksum = checksum_df["checksum"].iloc[0]
             return stored_checksum == expected_checksum
@@ -562,7 +573,7 @@ class H5DataFrameStore:
                                 return pd.DataFrame()
                             df = store.select(key, start=start, stop=stop, columns=list(columns) if columns else None)
                     except (FileNotFoundError, OSError, KeyError) as exc:
-                        if not non_blocking:  # Only warn on blocking reads
+                        if not non_blocking: # Only warn on blocking reads
                             logger.warning(f"[H5DataFrameStore] Failed to load {key} from {self._path}: {exc}")
                         return pd.DataFrame()
             except TimeoutError:
@@ -811,7 +822,7 @@ class H5DataFrameStore:
             True if successful, False otherwise
         """
         if not self._path.exists():
-            return True  # Nothing to delete
+            return True # Nothing to delete
 
         # Create backup BEFORE any modifications
         backup_path = self._create_backup()

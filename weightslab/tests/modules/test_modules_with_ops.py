@@ -13,7 +13,7 @@ from weightslab.utils.tools import \
 
 
 # Set Global Default Settings
-th.manual_seed(42)  # Set SEED
+th.manual_seed(42) # Set SEED
 
 
 class LayerWiseOperationsTest(unittest.TestCase):
@@ -85,7 +85,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
 
         self._create_layers(device=device)
         layer_instance = self.all_layers.get(layer_key)
-        layer_instance.to(device)  # Update tracker device
+        layer_instance.to(device) # Update tracker device
 
         if layer_instance == None:
             self.fail(f"Layer key '{layer_key}' not found in setup.")
@@ -134,7 +134,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                 f"[{layer_key}/{op_name}] failed to increase parameters." +
                 f"Init:{initial_nb_trainable_parameters}," +
                 f"Final:{final_nb_trainable_parameters}"
-            )  # ADD must strictly increase the count
+            ) # ADD must strictly increase the count
             self.assertEqual(
                 layer_instance.get_neurons(attr_name='out_neurons'),
                 initial_nb_out_neurons + len(neuron_indices),
@@ -142,7 +142,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                 "by 2." +
                 f"Init:{initial_nb_out_neurons}," +
                 f"Final:{layer_instance.get_neurons(attr_name='out_neurons')}"
-            )  # ADD 2 neurons must increase the count by 2
+            ) # ADD 2 neurons must increase the count by 2
 
             # --- Incoming ---
             if len(layer_instance.weight.shape) > 1:
@@ -166,7 +166,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                     f"[{layer_key}/{op_name}] failed to increase parameters." +
                     f"Init:{initial_nb_trainable_parameters}," +
                     f"Final:{final_nb_trainable_parameters}"
-                )  # ADD must strictly increase the count
+                ) # ADD must strictly increase the count
                 self.assertEqual(
                     layer_instance.get_neurons(attr_name='in_neurons'),
                     initial_nb_in_neurons + len(neuron_indices),
@@ -174,7 +174,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                     "by 2." +
                     f"Init:{initial_nb_out_neurons}," +
                     f"Final:{layer_instance.get_neurons(attr_name='out_neurons')}"
-                )  # ADD 2 neurons must increase the count by 2
+                ) # ADD 2 neurons must increase the count by 2
 
         elif op == ArchitectureNeuronsOpType.PRUNE:
             # --- Not Incoming ---
@@ -198,7 +198,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                 f"[{layer_key}/{op_name}] failed to decrease parameters." +
                 f"Init:{initial_nb_trainable_parameters}," +
                 f"Final:{final_nb_trainable_parameters}"
-            )  # PRUNE must strictly decrease the count
+            ) # PRUNE must strictly decrease the count
             self.assertEqual(
                 layer_instance.get_neurons(attr_name='out_neurons'),
                 initial_nb_out_neurons - len(neuron_indices),
@@ -206,7 +206,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                 "by 2." +
                 f"Init:{initial_nb_out_neurons}," +
                 f"Final:{layer_instance.get_neurons(attr_name='out_neurons')}"
-            )  # PRUNE 2 neurons must decrease the count by 2
+            ) # PRUNE 2 neurons must decrease the count by 2
 
             # --- Incoming ---
             if len(layer_instance.weight.shape) > 1:
@@ -230,7 +230,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                     f"[{layer_key}/{op_name}] failed to decrease parameters." +
                     f"Init:{initial_nb_trainable_parameters}," +
                     f"Final:{final_nb_trainable_parameters}"
-                )  # PRUNE must strictly decrease the count
+                ) # PRUNE must strictly decrease the count
                 self.assertEqual(
                     layer_instance.get_neurons(attr_name='in_neurons'),
                     initial_nb_in_neurons - len(neuron_indices),
@@ -238,7 +238,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                     "by 2." +
                     f"Init:{initial_nb_out_neurons}," +
                     f"Final:{layer_instance.get_neurons(attr_name='out_neurons')}"
-                )  # PRUNE 2 neurons must decrease the count by 2
+                ) # PRUNE 2 neurons must decrease the count by 2
 
         elif op == ArchitectureNeuronsOpType.FREEZE:
             # --- Not Incoming ---
@@ -261,7 +261,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                 f"[{layer_key}/{op_name}] failed to decrease parameters." +
                 f"Init:{initial_nb_trainable_parameters}," +
                 f"Final:{final_nb_trainable_parameters}"
-            )  # FREEZE must strictly decrease the count
+            ) # FREEZE must strictly decrease the count
             #
             for tensor_name in layer_instance.learnable_tensors_name:
                 # reverse neuron index
@@ -300,7 +300,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                 f"[{layer_key}/{op_name}] failed to unfreeze parameters." +
                 f"Init:{initial_nb_trainable_parameters}," +
                 f"Final:{final_nb_trainable_parameters}"
-            )  # UNFREEZE must match initial count
+            ) # UNFREEZE must match initial count
             #
             # FREEZE & UNFREEZE every neurons
             # # FREEZE
@@ -319,7 +319,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                 f"[{layer_key}/{op_name}] failed to freeze every params." +
                 f"Init:{layer_instance.get_neurons(attr_name='in_neurons')}," +
                 f"Final:{final_nb_trainable_parameters}"
-            )  # FREEZE every out neurons
+            ) # FREEZE every out neurons
             #
             # # UNFREEZE
             layer_instance.operate(
@@ -337,7 +337,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                 f"[{layer_key}/{op_name}] failed to unfreeze every params." +
                 f"Init:{initial_nb_trainable_parameters}," +
                 f"Final:{final_nb_trainable_parameters}"
-            )  # UNFREEZE every out neurons
+            ) # UNFREEZE every out neurons
 
             # --- Incoming ---
             if len(layer_instance.weight.shape) > 1:
@@ -360,7 +360,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                     f"[{layer_key}/{op_name}] failed to decrease parameters." +
                     f"Init:{initial_nb_trainable_parameters}," +
                     f"Final:{final_nb_trainable_parameters}"
-                )  # FREEZE must strictly decrease the count
+                ) # FREEZE must strictly decrease the count
                 #
                 for tensor_name in layer_instance.learnable_tensors_name:
                     # reverse neuron index
@@ -400,7 +400,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                     f"[{layer_key}/{op_name}] failed to unfreeze parameters." +
                     f"Init:{initial_nb_trainable_parameters}," +
                     f"Final:{final_nb_trainable_parameters}"
-                )  # UNFREEZE must match initial count
+                ) # UNFREEZE must match initial count
                 #
                 # FREEZE & UNFREEZE every neurons
                 # # FREEZE
@@ -419,7 +419,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                     f"[{layer_key}/{op_name}] failed to freeze every params." +
                     f"Init:{layer_instance.get_neurons(attr_name='in_neurons')}," +
                     f"Final:{final_nb_trainable_parameters}"
-                )  # FREEZE every out neurons
+                ) # FREEZE every out neurons
                 #
                 # # UNFREEZE
                 layer_instance.operate(
@@ -438,7 +438,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                     "params." +
                     f"Init:{initial_nb_trainable_parameters}," +
                     f"Final:{final_nb_trainable_parameters}"
-                )  # UNFREEZE every out neurons
+                ) # UNFREEZE every out neurons
 
         elif op == ArchitectureNeuronsOpType.RESET:
             # RESET must preserve the number of parameters

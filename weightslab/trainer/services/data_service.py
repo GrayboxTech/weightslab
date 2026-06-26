@@ -52,6 +52,34 @@ from weightslab.trainer.services.data_image_utils import (
 logger = logging.getLogger(__name__)
 
 
+# Streamed chunk size for GetPointCloud (raw float32 bytes per gRPC message).
+# Larger chunks mean fewer messages but more memory per message. Override with
+# the WL_POINT_CLOUD_CHUNK_BYTES env variable (see docs/configuration.rst).
+_DEFAULT_POINT_CLOUD_CHUNK_BYTES = 1 << 20 # 1 MiB
+
+
+def _point_cloud_chunk_bytes() -> int:
+    """Read WL_POINT_CLOUD_CHUNK_BYTES; non-positive/invalid falls back to the default."""
+    raw = os.getenv("WL_POINT_CLOUD_CHUNK_BYTES")
+    if raw is None or raw == "":
+        return _DEFAULT_POINT_CLOUD_CHUNK_BYTES
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "WL_POINT_CLOUD_CHUNK_BYTES=%r is not an integer — using default %d",
+            raw, _DEFAULT_POINT_CLOUD_CHUNK_BYTES,
+        )
+        return _DEFAULT_POINT_CLOUD_CHUNK_BYTES
+    if val <= 0:
+        logger.warning(
+            "WL_POINT_CLOUD_CHUNK_BYTES=%r must be > 0 — using default %d",
+            raw, _DEFAULT_POINT_CLOUD_CHUNK_BYTES,
+        )
+        return _DEFAULT_POINT_CLOUD_CHUNK_BYTES
+    return val
+
+
 def normalize_metadata_copy_source_name(source_name: str, experiment_hash: str = None) -> str:
     """Normalize a source metadata name for deterministic copied-column naming."""
     name = str(source_name or "").strip()
@@ -72,19 +100,25 @@ def normalize_metadata_copy_source_name(source_name: str, experiment_hash: str =
     return name
 
 
-def build_metadata_copy_column_names(existing_columns, experiment_hash: str, source_name: str):
-    """Build backend/ui copied metadata names with incrementing suffix _1, _2, ..."""
-    exp_hash = str(experiment_hash or "current_experiment_hash").strip() or "current_experiment_hash"
-    normalized_source = normalize_metadata_copy_source_name(source_name, exp_hash)
+def build_metadata_copy_column_names(existing_columns, experiment_hash: str, source_name: str) -> str:
+    """Build backend/ui copied metadata column names.
+
+    All copies use ``{base}_{n}@{hash}`` starting from n=1. The base name is
+    derived by normalizing the source (stripping any hash prefix and trailing
+    numeric suffix) so cloning a clone produces a sibling, not a grandchild.
+    """
     existing_iterable = [] if existing_columns is None else existing_columns
     existing = {str(col) for col in existing_iterable}
 
-    index = 1
+    exp_hash = str(experiment_hash or "current_experiment_hash").strip() or "current_experiment_hash"
+    base = normalize_metadata_copy_source_name(source_name)
+
+    n = 1
     while True:
-        copy_name = f"{normalized_source}_{index}@{exp_hash}"
-        if copy_name not in existing:
-            return copy_name
-        index += 1
+        candidate = f"{base}_{n}@{exp_hash}"
+        if candidate not in existing:
+            return candidate
+        n += 1
 
 
 def duplicate_metadata_column_in_dataframe(df: pd.DataFrame, source_column: str, experiment_hash: str):
@@ -99,7 +133,9 @@ def duplicate_metadata_column_in_dataframe(df: pd.DataFrame, source_column: str,
 
 def is_copy_metadata_column_name(column_name: str) -> bool:
     name = str(column_name or "").strip()
-    return bool(re.match(r".+_\d+@.+$", name))
+    # Copy columns always have the form {base}_{n}@{hash} — the numeric suffix
+    # before '@' is mandatory; bare "name@hash" is not a copy column.
+    return bool(re.match(r".+_\d+@.+", name))
 
 
 def detect_bbox_format(bboxes: np.ndarray) -> str:
@@ -231,12 +267,16 @@ class DataService:
         # rather than queuing to redo the same work.
         #
         # Protocol:
-        #   1. try_acquire(_update_lock, blocking=False)
-        #      → won: clear _update_done, do the update, release, set _update_done
-        #      → lost: _update_done.wait() then return (result already fresh)
+        # 1. try_acquire(_update_lock, blocking=False)
+        # → won: clear _update_done, do the update, release, set _update_done
+        # → lost: _update_done.wait() then return (result already fresh)
         self._update_lock = threading.Lock()
         self._update_done = threading.Event()
-        self._update_done.set()   # "done" initially so the very first call proceeds
+        self._update_done.set() # "done" initially so the very first call proceeds
+        # Guard so a non-force (reader-triggered) view refresh runs in the BACKGROUND
+        # at most once at a time — readers never pay the rebuild cost (they read the
+        # current snapshot; the bg thread swaps in fresh data when ready).
+        self._refresh_in_flight = threading.Lock()
         self._df_manager = get_dataframe()
 
         # init references to the context components
@@ -258,7 +298,7 @@ class DataService:
         # Check hyperparameters for compute_natural_sort flag (default: False)
         # Users can enable it by setting compute_natural_sort=True in their hyperparameters.
         hp = self._ctx.components.get("hyperparams") if self._ctx and self._ctx.components else None
-        hp_dict = hp.get() if Proxy.is_proxy(hp) else (hp if isinstance(hp, dict) else {})  # is it already a proxy ?
+        hp_dict = hp.get() if Proxy.is_proxy(hp) else (hp if isinstance(hp, dict) else {}) # is it already a proxy ?
         self._compute_natural_sort = bool((hp_dict or {}).get("compute_natural_sort", False))
 
         # How per-instance (per-annotation) numeric columns are folded to a single
@@ -291,14 +331,14 @@ class DataService:
             max_workers=8
         )
 
-        self._is_filtered = False  # Track if the current view is filtered/modified by user
+        self._is_filtered = False # Track if the current view is filtered/modified by user
         # logger.info("[DataService] Skipping expensive startup computations (aspect ratio, natural sort, signals).")
         # These should be triggered on-demand or run in background to avoid blocking training start.
 
         if self._compute_natural_sort:
            self._compute_natural_sort_stats()
 
-        self._is_filtered = False  # Track if the current view is filtered/modified by user
+        self._is_filtered = False # Track if the current view is filtered/modified by user
 
         # =====================================================================
         # Preview cache: pre-generate 64×64 or less WebP thumbnails + RLE masks for
@@ -321,7 +361,7 @@ class DataService:
                 daemon=True,
             ).start()
         else:
-            self._preview_cache_ready.set()  # No preload → mark immediately ready
+            self._preview_cache_ready.set() # No preload → mark immediately ready
 
         logger.info("DataService initialized.")
 
@@ -346,8 +386,8 @@ class DataService:
         """Pre-generate 64×64 or less or less thumbnail + RLE mask for every row in the DF.
 
                 Each entry is a lightweight ``DataRecord`` containing only:
-                    • raw_data  (bytes) — 64×64 or less or less WebP thumbnail
-                    • target    (rle_mask) — RLE-encoded GT mask resized to 64×64 or less or less
+                    • raw_data (bytes) — 64×64 or less or less WebP thumbnail
+                    • target (rle_mask) — RLE-encoded GT mask resized to 64×64 or less or less
                     • pred_mask (rle_mask) — RLE-encoded prediction mask resized to 64×64 or less or less
                     • origin, task_type, num_classes, class_names (metadata)
             Respects ``_preview_cache_max`` to cap memory usage.
@@ -363,7 +403,7 @@ class DataService:
             logger.info("[PreviewCache] Building 64×64 or less or less preview cache for %d samples …", total)
             t0 = time.time()
 
-            PREVIEW_SIZE = 64  # fixed low-res dimension
+            PREVIEW_SIZE = 64 # fixed low-res dimension
             built = 0
 
             index_names = list(getattr(df.index, "names", []) or [])
@@ -762,49 +802,49 @@ class DataService:
             return True
 
     def _pull_into_all_data_view_df(self):
-            """Stream stats from the global in-memory dataframe (ledger manager).
+        """Stream stats from the global in-memory dataframe (ledger manager).
 
-            Uses the shared dataframe manager instead of the H5 store and avoids
-            blocking on IO. Falls back to last snapshot if retrieval fails.
-            """
-            try:
-                # Load dataframe from the shared dataframe manager with arrays autoloaded from h5 storage
-                df = self._df_manager.get_combined_df() if self._df_manager is not None else pd.DataFrame()
-                if df.empty:
-                    logger.debug(f"[DataService] Pull returned empty dataframe (manager: {self._df_manager is not None})")
-                    return df
-
-                # The manager now expands samples into one row per (sample_id, annotation_id)
-                # instance. Collapse back to one row per sample for the sample-centric UI/agent
-                # view, nesting per-instance signals into a dict column.
-                df = self._df_manager.get_collapse_annotations_to_samples_df()
-
-                # Ensure sample_id is a column if it was the index
-                df = safe_reset_index(df)
-
-                # Ensure we have a unique index across all origins by using a MultiIndex (origin, sample_id)
-                # This is CRITICAL for correctly applying reindex() in _slowUpdateInternals without
-                # exploding the dataframe size due to duplicate sample_id index labels.
-                if SampleStatsEx.ORIGIN.value in df.columns:
-                    # Use drop=True to ensure origin is NOT in both index and columns (avoids ambiguity)
-                    # GetDataSamples calls reset_index() before processing rows, which restores them as columns
-                    df = df.set_index([SampleStatsEx.ORIGIN.value, SampleStatsEx.SAMPLE_ID.value], drop=True)
-                else:
-                    # Fallback to single index if origin is missing, though manager should provide it
-                    df = df.set_index([SampleStatsEx.SAMPLE_ID.value], drop=True)
-
-                # DEDUPLICATE: Ensure index is unique before returning.
-                # If duplicates exist, reindex() will fail later.
-                if df.index.has_duplicates:
-                    logger.debug(f"[DataService] Dropping {df.index.duplicated().sum()} duplicate index labels from data view.")
-                    df = df[~df.index.duplicated(keep='last')]
-
+        Uses the shared dataframe manager instead of the H5 store and avoids
+        blocking on IO. Falls back to last snapshot if retrieval fails.
+        """
+        try:
+            # Load dataframe from the shared dataframe manager with arrays autoloaded from h5 storage
+            df = self._df_manager.get_combined_df() if self._df_manager is not None else pd.DataFrame()
+            if df.empty:
+                logger.debug(f"[DataService] Pull returned empty dataframe (manager: {self._df_manager is not None})")
                 return df
-            except Exception as e:
-                logger.debug(f"[DataService] Error pulling data view: {e}")
-                # Use getattr to safely check for attribute during __init__
-                current_df = getattr(self, "_all_datasets_df", None)
-                return current_df if current_df is not None else pd.DataFrame()
+
+            # The manager now expands samples into one row per (sample_id, annotation_id)
+            # instance. Collapse back to one row per sample for the sample-centric UI/agent
+            # view, nesting per-instance signals into a dict column.
+            df = self._df_manager.get_collapse_annotations_to_samples_df()
+
+            # Ensure sample_id is a column if it was the index
+            df = safe_reset_index(df)
+
+            # Ensure we have a unique index across all origins by using a MultiIndex (origin, sample_id)
+            # This is CRITICAL for correctly applying reindex() in _slowUpdateInternals without
+            # exploding the dataframe size due to duplicate sample_id index labels.
+            if SampleStatsEx.ORIGIN.value in df.columns:
+                # Use drop=True to ensure origin is NOT in both index and columns (avoids ambiguity)
+                # GetDataSamples calls reset_index() before processing rows, which restores them as columns
+                df = df.set_index([SampleStatsEx.ORIGIN.value, SampleStatsEx.SAMPLE_ID.value], drop=True)
+            else:
+                # Fallback to single index if origin is missing, though manager should provide it
+                df = df.set_index([SampleStatsEx.SAMPLE_ID.value], drop=True)
+
+            # DEDUPLICATE: Ensure index is unique before returning.
+            # If duplicates exist, reindex() will fail later.
+            if df.index.has_duplicates:
+                logger.debug(f"[DataService] Dropping {df.index.duplicated().sum()} duplicate index labels from data view.")
+                df = df[~df.index.duplicated(keep='last')]
+
+            return df
+        except Exception as e:
+            logger.debug(f"[DataService] Error pulling data view: {e}")
+            # Use getattr to safely check for attribute during __init__
+            current_df = getattr(self, "_all_datasets_df", None)
+            return current_df if current_df is not None else pd.DataFrame()
 
     def _get_origin_filter(self, request):
         """Extract requested origins if present on request (backward compatible)."""
@@ -815,7 +855,7 @@ class DataService:
                 if val:
                     # Normalize to list
                     if isinstance(val, str):
-                        origins = [val] if val.strip() else []  # Filter empty strings
+                        origins = [val] if val.strip() else [] # Filter empty strings
                     else:
                         # Filter out empty strings from list
                         origins = [o for o in list(val) if o and str(o).strip()]
@@ -877,7 +917,6 @@ class DataService:
             except (TypeError, ValueError):
                 return False
 
-
     def _compute_natural_sort_stats(self):
         """
         Compute hardcoded natural sort statistics (brightness, hue, saturation, entropy) for all samples
@@ -894,33 +933,30 @@ class DataService:
         # 4. "Grouped" (Pseudo-primary key): Brightness=5.0, Entropy=1.0 (Forces clustering by light)
 
         SORT_WEIGHTS = {
-            "brightness": 0.7,  # Primary cue: Lighting conditions
-            "entropy": 0.3,     # Secondary cue: Texture/Scene complexity
-            "hue": 0.0          # Optional: Color tint
+            "brightness": 0.7, # Primary cue: Lighting conditions
+            "entropy": 0.3, # Secondary cue: Texture/Scene complexity
+            "hue": 0.0 # Optional: Color tint
         }
 
         logger.info(f"[DataService] Starting natural sort stats computation with weights: {SORT_WEIGHTS}")
 
-        try:
-            import cv2
-        except ImportError:
-            logger.warning("[DataService] OpenCV not found. Skipping natural sort computation.")
-            return "OpenCV not installed"
-
         if self._all_datasets_df is None or self._all_datasets_df.empty:
              return "No data to process"
 
-        # Helper: Calculate Shannon Entropy (Complexity)
+        # Helper: Calculate Shannon Entropy (Complexity).
+        # 256-bin histogram of the 8-bit grayscale image via numpy (no OpenCV).
         def calc_entropy(img_gray):
             try:
-                # Calculate histogram (256 bins for 8-bit)
-                hist = cv2.calcHist([img_gray], [0], None, [256], [0, 256])
-                # Normalize histogram to get probabilities
-                p = hist.ravel() / hist.sum()
-                # Filter out zero probabilities to avoid log(0)
+                gray_u8 = np.clip(np.rint(img_gray), 0, 255).astype(np.uint8)
+                counts = np.bincount(gray_u8.ravel(), minlength=256).astype(np.float64)
+                total = counts.sum()
+                if total <= 0:
+                    return 0.0
+                # Normalize to probabilities, dropping zeros to avoid log(0)
+                p = counts / total
                 p = p[p > 0]
                 # Shannon Entropy in bits
-                return -np.sum(p * np.log2(p))
+                return float(-np.sum(p * np.log2(p)))
             except Exception:
                 return 0.0
 
@@ -961,27 +997,28 @@ class DataService:
                 # Convert to numpy (RGB)
                 img_np = np.array(pil_img)
 
-                # Brightness (mean pixel intensity)
-                # If RGB, convert to Gray, else just mean
-                if img_np.ndim == 3:
-                    # OpenCV expects BGR usually, but PIL gives RGB.
-                    # cvtColor RGB2GRAY is correct.
-                    try:
-                        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-                    except Exception:
-                         gray = img_np
+                # Brightness (mean pixel intensity). For color images, reduce to
+                # luma using the ITU-R 601-2 transform — the same weights PIL's
+                # "L" mode uses — with plain numpy.
+                if img_np.ndim == 3 and img_np.shape[2] >= 3:
+                    luma = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+                    gray = img_np[..., :3].astype(np.float32) @ luma
+                elif img_np.ndim == 3:
+                    gray = img_np[..., 0].astype(np.float32)
                 else:
-                    gray = img_np
+                    gray = img_np.astype(np.float32)
 
-                brightness = np.mean(gray)
+                brightness = float(np.mean(gray))
                 entropy = calc_entropy(gray)
 
-                # HSV Stats
-                if img_np.ndim == 3:
+                # HSV stats (hue/saturation). Computed with Pillow's "HSV" mode
+                # (H, S, V each in 0-255) to avoid an OpenCV dependency.
+                if img_np.ndim == 3 and img_np.shape[2] >= 3:
                     try:
-                        hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV)
-                        hue = np.mean(hsv[:, :, 0])
-                        saturation = np.mean(hsv[:, :, 1])
+                        rgb_img = pil_img if pil_img.mode == "RGB" else pil_img.convert("RGB")
+                        hsv = np.asarray(rgb_img.convert("HSV"))
+                        hue = float(np.mean(hsv[:, :, 0]))
+                        saturation = float(np.mean(hsv[:, :, 1]))
                     except Exception:
                         hue = 0.0
                         saturation = 0.0
@@ -997,8 +1034,8 @@ class DataService:
                 # Entropy: 0-8 bits typical for 8-bit image
                 norm_entropy = min(max(entropy / 8.0, 0.0), 1.0)
 
-                # Hue: 0-179 in OpenCV
-                norm_hue = min(max(hue / 179.0, 0.0), 1.0)
+                # Hue: 0-255 in Pillow's HSV space
+                norm_hue = min(max(hue / 255.0, 0.0), 1.0)
 
                 score = (
                     SORT_WEIGHTS.get("brightness", 0) * norm_brightness +
@@ -1121,7 +1158,7 @@ class DataService:
         try:
             origin = row.get(SampleStatsEx.ORIGIN.value, 'unknown')
             sample_id = row.get(SampleStatsEx.SAMPLE_ID.value, 0)
-            # logger.debug(f"Processing sample_id={sample_id} from origin={origin} with request: {request}")
+            logger.debug(f"Processing sample_id={sample_id} from origin={origin} with request: {request}")
 
             # ===== Timing accumulators =====
             t_image_load = 0.0
@@ -1179,7 +1216,7 @@ class DataService:
                 task_type = "unknown"
             else:
                 # 4. Safe Heuristic evaluation
-                task_type = "classification"  # Default fallback
+                task_type = "classification" # Default fallback
                 if label is not None:
                     if isinstance(label, dict):
                         if ('boxes' in label or 'bboxes' in label):
@@ -1204,58 +1241,14 @@ class DataService:
                             except Exception:
                                 pass
 
-            # ====== Step 5a: Process stats ======
-            stats_to_retrieve = list(request.stats_to_retrieve)
+            # ====== Step 5a: Metadata stats — moved to GetMetaData ======
+            # Generic dataframe metadata columns (signals, tags, custom fields, etc.)
+            # are no longer returned by GetDataSamples; the dedicated GetMetaData RPC
+            # serves them. GetDataSamples returns only the rendering flags
+            # origin / task_type / discarded (needed for the split border, overlay
+            # mode and gray-out) plus image / label / prediction data below.
 
-            # These columns are handled explicitly later in the pipeline
-            exclude_cols = {
-                SampleStatsEx.SAMPLE_ID.value,
-                SampleStatsEx.ORIGIN.value,
-                SampleStatsEx.TARGET.value if not skip_label_for_request else None,
-                SampleStatsEx.PREDICTION.value,
-                SampleStatsEx.TASK_TYPE.value,
-                '_instance_signals',  # Special handling for multi-instance signals
-                'annotation_id',       # Internal multi-index tracking
-            }
-
-            if not stats_to_retrieve:
-                stats_to_retrieve = [col for col in df_columns if col not in exclude_cols]
-
-            # Optimized bulk processing of stats
-            for stat_name in stats_to_retrieve:
-                # Never re-process core fields generically (prevents duplicates/bad db state overwriting calculated state)
-                if stat_name in exclude_cols:
-                    continue
-
-                value = row.get(stat_name)
-
-                # Skip prediction raw array
-                if (isinstance(value, np.ndarray) and value.ndim > 1) or (isinstance(value, (list, tuple, np.ndarray)) and len(value) == 0):
-                    continue
-                elif isinstance(value, float):
-                    value = round(value, 7)
-                elif isinstance(value, bool):
-                    value = int(value)
-
-                # Check if it s a tag column here and handle it as a string stat with the tag name as value
-                value_string = str(value)
-                if stat_name.startswith(f"{SampleStatsEx.TAG.value}"):
-                    tag_name = stat_name[len(f"{SampleStatsEx.TAG.value}:"):]  # Remove "tags_" prefix to get tag name
-                    data_stats.append(
-                        create_data_stat(
-                            f"{SampleStatsEx.TAG.value}:{tag_name}",
-                            "string",
-                            shape=[1],
-                            value_string=value_string,
-                            thumbnail=b""
-                        )
-                    )
-                else:
-                    data_stats.append(
-                        create_data_stat(stat_name, "string", shape=[1], value_string=value_string[:512], thumbnail=b"")
-                    )
-
-            # ====== Step 6: Add origin and task_type stats ======
+            # ====== Step 6: Add origin, task_type and discarded rendering flags ======
             data_stats.append(
                 create_data_stat(
                     "origin", 'string', shape=[1], value_string=origin, thumbnail=b""
@@ -1264,6 +1257,18 @@ class DataService:
             data_stats.append(
                 create_data_stat(
                     "task_type", 'string', shape=[1], value_string=str(task_type), thumbnail=b""
+                )
+            )
+            # 'discarded' drives the grayed-out cell rendering, so it rides with the
+            # image data as "1"/"0" (not treated as analytical metadata). This keeps
+            # the gray-out reliable on every grid (re)fetch / scroll.
+            try:
+                _discarded_str = "1" if bool(row.get(SampleStatsEx.DISCARDED.value)) else "0"
+            except Exception:
+                _discarded_str = "0"
+            data_stats.append(
+                create_data_stat(
+                    SampleStatsEx.DISCARDED.value, 'string', shape=[1], value_string=_discarded_str, thumbnail=b""
                 )
             )
 
@@ -1340,6 +1345,8 @@ class DataService:
                             except Exception:
                                 label_arr = np.array([])
 
+                        if label_arr.ndim == 1 and label_arr.size >= 4:
+                            label_arr = label_arr.reshape(1, -1)
                         if label_arr.size > 0 and label_arr.ndim == 2 and label_arr.shape[-1] >= 4:
                             # 6-col rows when class+score present: [x,y,x,y,class,score]
                             # (or [tl_x,tl_y,w,h,class,score] for the xywh-top-left flavor).
@@ -1403,7 +1410,7 @@ class DataService:
                         max_id = int(label_arr.max())
                         num_classes = max(1, max_id) + 1
                     else:
-                        num_classes = 2  # Always at least 2 classes for segmentation (foreground/background)
+                        num_classes = 2 # Always at least 2 classes for segmentation (foreground/background)
 
                 data_stats.append(
                     create_data_stat(
@@ -1468,7 +1475,7 @@ class DataService:
                 else:
                     # Check if label is NaN (handle both scalars and arrays)
                     if self._is_nan_value(label):
-                        pass  # Skip NaN labels
+                        pass # Skip NaN labels
 
                     # Handle scalar labels
                     try:
@@ -1617,7 +1624,7 @@ class DataService:
             else:
                 # Classification: get prediction from row or dataset
                 if pred is None:
-                    pass  # No prediction to process
+                    pass # No prediction to process
 
                 else:
                     # Handle scalar predictions (int, float, or unwrapped from H5)
@@ -1699,7 +1706,7 @@ class DataService:
                             target_width = w_limit
                             target_height = int(target_width / aspect_ratio)
                     elif request.resize_width == 0 and request.resize_height == 0:
-                        target_height = int(os.environ.get("WL_DEFAULT_THUMBNAIL_SIZE", 180))  # Default full resolution image is 360p on the longest side, but can be overridden by env var
+                        target_height = int(os.environ.get("WL_DEFAULT_THUMBNAIL_SIZE", 180)) # Default full resolution image is 360p on the longest side, but can be overridden by env var
                         target_width = int(target_height * aspect_ratio)
 
                     if is_full_resolution:
@@ -1877,7 +1884,7 @@ class DataService:
         """
         total_count = len(df)
         discarded_count = (
-            len(df[df.get(SampleStatsEx.DISCARDED.value, False) == True])  # noqa: E712
+            len(df[df.get(SampleStatsEx.DISCARDED.value, False) == True]) # noqa: E712
             if df is not None and SampleStatsEx.DISCARDED.value in df.columns
             else 0
         )
@@ -2222,7 +2229,7 @@ class DataService:
                 # We must split the updates by origin and upsert them to the manager
                 if self._df_manager is not None:
                     # Create a minimal update dataframe with just the modified column
-                    update_payload = df[[col]]  #  .copy()  # Remove copy because memory waste and slowdown
+                    update_payload = df[[col]] # .copy() # Remove copy because memory waste and slowdown
 
                     # Ensure origin is available for grouping
                     if isinstance(df.index, pd.MultiIndex) and "origin" in df.index.names:
@@ -2271,7 +2278,7 @@ class DataService:
                      if start < len(df):
                          logger.debug(f"[sort_view_slice] Sorting slice {start}:{end}")
                          # Extract and sort slice
-                         sub_df = df.iloc[start:end]  #  .copy()  # Remove copy because memory waste and slowdown
+                         sub_df = df.iloc[start:end] # .copy() # Remove copy because memory waste and slowdown
 
                          # Apply sort to slice
                          # Filter params for sort_values
@@ -2331,12 +2338,12 @@ class DataService:
                          # otherwise Sample ID X will point to data from Sample ID Y (corruption).
                          try:
                              if isinstance(df.index, pd.MultiIndex):
-                                 new_index_values = df.index.to_numpy()  #  .copy()  # Remove copy because memory waste and slowdown
+                                 new_index_values = df.index.to_numpy() # .copy() # Remove copy because memory waste and slowdown
                                  new_index_values[start:end] = sub_df.index.to_numpy()
                                  df.index = pd.MultiIndex.from_tuples(new_index_values, names=df.index.names)
                              else:
                                  idx_name = df.index.name
-                                 new_index = df.index.to_numpy()  #  .copy()  # Remove copy because memory waste and slowdown
+                                 new_index = df.index.to_numpy() # .copy() # Remove copy because memory waste and slowdown
                                  new_index[start:end] = sub_df.index.to_numpy()
                                  df.index = pd.Index(new_index, name=idx_name)
                          except Exception as e:
@@ -2466,7 +2473,7 @@ class DataService:
     # Lock watchdog helpers
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
-    # Lock watchdog helpers  (build on MonitoredRLock from watchdog/)
+    # Lock watchdog helpers (build on MonitoredRLock from watchdog/)
     # ------------------------------------------------------------------
     @staticmethod
     def _lock_caller() -> str:
@@ -2503,7 +2510,7 @@ class DataService:
         self._lock.acquire()
         waited_ms = (time.time() - t0) * 1000
         logger.debug(
-            "[LockWatchdog] %-36s ACQUIRED by %-30s  caller=%s  (waited %.1f ms)",
+            "[LockWatchdog] %-36s ACQUIRED by %-30s caller=%s (waited %.1f ms)",
             lock_name, thread, caller, waited_ms,
         )
         t_held = time.time()
@@ -2514,18 +2521,29 @@ class DataService:
             self._lock.release()
             if held_ms > 1000:
                 logger.warning(
-                    "[LockWatchdog] %-36s RELEASED by %-30s  held %.1f ms  ← SLOW",
+                    "[LockWatchdog] %-36s RELEASED by %-30s held %.1f ms ← SLOW",
                     lock_name, thread, held_ms,
                 )
             else:
                 logger.debug(
-                    "[LockWatchdog] %-36s RELEASED by %-30s  held %.1f ms",
+                    "[LockWatchdog] %-36s RELEASED by %-30s held %.1f ms",
                     lock_name, thread, held_ms,
                 )
 
     # ------------------------------------------------------------------
     # Main update method
     # ------------------------------------------------------------------
+    def _bg_view_refresh(self) -> None:
+        """Background view rebuild for reader-triggered (non-force) refreshes. Runs the
+        real rebuild+swap via force=True OFF the request path, then releases the guard so
+        a later stale read can trigger another. Never raises into a request."""
+        try:
+            self._slowUpdateInternals(force=True)
+        except Exception:
+            logger.exception("[ViewRefresh] background view refresh failed")
+        finally:
+            self._refresh_in_flight.release()
+
     def _slowUpdateInternals(self, force: bool = False, reset_view: bool = False) -> None:
         """Update the internal dataframe view with the latest data from the manager.
 
@@ -2555,12 +2573,29 @@ class DataService:
                 current_time - self._last_internals_update_time <= 10:
             return
 
-        # --- Try to become the single updater ---
+        # --- Non-force (reader-triggered) refresh: run it in the BACKGROUND ---
+        # The view is stale, but a reader (grid/histogram/periodic fetch) must NOT block
+        # on the multi-second collapse+combine rebuild. Kick a single background refresh
+        # (the WL-ViewRefresh thread calls force=True, which does the real rebuild+atomic
+        # swap below) and return immediately — the caller reads the current (last-completed)
+        # snapshot. If a refresh is already running, just return; the next fetch sees the swap.
+        if not force:
+            if self._refresh_in_flight.acquire(blocking=False):
+                try:
+                    threading.Thread(
+                        target=self._bg_view_refresh, name="WL-ViewRefresh", daemon=True
+                    ).start()
+                except Exception:
+                    self._refresh_in_flight.release() # never leak the guard
+                    logger.exception("[ViewRefresh] failed to start background refresh")
+            return
+
+        # --- Try to become the single updater (force path: rebuild inline) ---
         t_wait_start = time.time()
         acquired = self._update_lock.acquire(blocking=False)
 
         if not acquired:
-            # Another worker is already updating.  Wait for it to finish (bounded),
+            # Another worker is already updating. Wait for it to finish (bounded),
             # then return — the caller will read the already-refreshed view.
             thread = threading.current_thread().name
             logger.debug(
@@ -2576,7 +2611,7 @@ class DataService:
         thread = threading.current_thread().name
         caller = self._lock_caller()
         logger.debug(
-            "[LockWatchdog] %-36s ACQUIRED by %-30s  caller=%s  (waited %.1f ms)",
+            "[LockWatchdog] %-36s ACQUIRED by %-30s caller=%s (waited %.1f ms)",
             "_update_lock[_slowUpdateInternals]", thread, caller, waited_ms,
         )
         # Signal to latecomers that an update is now in progress.
@@ -2685,12 +2720,12 @@ class DataService:
             self._update_lock.release()
             if held_ms > 1000:
                 logger.warning(
-                    "[LockWatchdog] %-36s RELEASED by %-30s  held %.1f ms  ← SLOW",
+                    "[LockWatchdog] %-36s RELEASED by %-30s held %.1f ms ← SLOW",
                     "_update_lock[_slowUpdateInternals]", threading.current_thread().name, held_ms,
                 )
             else:
                 logger.debug(
-                    "[LockWatchdog] %-36s RELEASED by %-30s  held %.1f ms",
+                    "[LockWatchdog] %-36s RELEASED by %-30s held %.1f ms",
                     "_update_lock[_slowUpdateInternals]", threading.current_thread().name, held_ms,
                 )
             # Unblock all workers that were waiting on this update.
@@ -2716,12 +2751,13 @@ class DataService:
         except Exception:
             return False
 
-    def _build_metadata_only_response(self, df_slice: pd.DataFrame, request):
-        """Build DataSamplesResponse from dataframe columns only (no dataset/image traversal).
+    def _build_metadata_only_response(self, df_slice: pd.DataFrame, requested_cols=None):
+        """Build a DataSamplesResponse of metadata DataRecords from dataframe columns only.
 
-        This is a single-job vectorized path: the entire df_slice is processed
-        at once using pandas operations rather than dispatching per-sample_id
-        work to the thread pool.
+        No dataset/image traversal: the entire df_slice is processed at once using
+        vectorized pandas operations rather than dispatching per-sample_id work to
+        the thread pool. ``requested_cols`` restricts the columns; when None/empty
+        all columns are returned except heavy per-sample blobs. Used by GetMetaData.
         """
         if df_slice is None or df_slice.empty:
             return pb2.DataSamplesResponse(
@@ -2730,7 +2766,7 @@ class DataService:
                 data_records=[],
             )
 
-        requested_cols = list(getattr(request, 'stats_to_retrieve', []) or [])
+        requested_cols = list(requested_cols or [])
         # NOTE: ORIGIN is intentionally NOT excluded. The histogram (and any caller
         # that needs per-sample split coloring) requests 'origin' explicitly and
         # relies on this fast vectorized path to return it — without this, the client
@@ -2749,7 +2785,7 @@ class DataService:
         # detection) pred/target are large JSON arrays (~310 KB/record) that bloat the
         # response to 100s of MB and silently break the histogram fetch.
         if not requested_cols:
-            _HEAVY_BLOB_COLS = {"pred", "prediction", "prediction_raw", "target"}
+            _HEAVY_BLOB_COLS = {"prediction_raw"}
             requested_cols = [c for c in df_slice.columns if c not in _HEAVY_BLOB_COLS]
 
         metadata_cols = [
@@ -2769,7 +2805,7 @@ class DataService:
 
         # -- Vectorized pre-processing: build string matrices via pandas ------
         # Separate tag columns from regular metadata columns for different
-        # handling.  All heavy conversion is done once on the full column
+        # handling. All heavy conversion is done once on the full column
         # vectors, not per-row.
         tag_cols = [c for c in metadata_cols if c.startswith(tag_prefix)]
         meta_cols = [c for c in metadata_cols if not c.startswith(tag_prefix)]
@@ -2783,15 +2819,20 @@ class DataService:
         # -- Column-wise DataStat construction --------------------------------
         # Build all DataStat objects for one column at a time using list
         # comprehensions (CPython fast-path) and inline pb2.DataStat() to
-        # eliminate the create_data_stat wrapper overhead.  Then scatter
-        # them into the per-row bins.  At 1M rows × 10 cols this avoids
+        # eliminate the create_data_stat wrapper overhead. Then scatter
+        # them into the per-row bins. At 1M rows × 10 cols this avoids
         # a 10M-iteration nested Python loop.
-        _DataStat = pb2.DataStat  # local ref – avoids repeated attr lookup
+        _DataStat = pb2.DataStat # local ref – avoids repeated attr lookup
 
         for col in meta_cols:
             series = df_slice[col]
             if series.dtype.kind == 'f':
                 str_vals = series.round(7).astype(str).str[:512].tolist()
+            elif series.dtype.kind == 'b':
+                # Booleans (e.g. 'discarded') → "1"/"0" so the UI's boolean/discarded
+                # handling — which expects the legacy per-sample "1"/"0" form — keeps
+                # working now that metadata is served exclusively by GetMetaData.
+                str_vals = series.astype(int).astype(str).tolist()
             else:
                 str_vals = series.astype(str).str[:512].tolist()
             # NaN → None
@@ -2840,6 +2881,132 @@ class DataService:
             message=f"Retrieved {len(data_records)} metadata records (columns: {', '.join(metadata_cols)})",
             data_records=data_records,
         )
+
+    def _get_all_metadata_column_names(self) -> list:
+        """Return every metadata column name available across the WHOLE dataset.
+
+        Excludes heavy per-sample blob columns (pred/target) and internal
+        bookkeeping columns, matching the column set _build_metadata_only_response
+        emits. Order follows the dataframe columns (de-duplicated) so the UI column
+        picker stays stable across refreshes.
+        """
+        try:
+            df = self._all_datasets_df
+            if df is None or df.empty:
+                return []
+            _HEAVY_BLOB_COLS = {"pred", "prediction", "prediction_raw", "target"}
+            _INTERNAL_COLS = {
+                SampleStatsEx.SAMPLE_ID.value,
+                SampleStatsEx.TASK_TYPE.value,
+                "annotation_id",
+                "_instance_signals",
+            }
+            seen, names = set(), []
+            for col in df.columns:
+                name = str(col)
+                if col in _HEAVY_BLOB_COLS or col in _INTERNAL_COLS:
+                    continue
+                if name in seen:
+                    continue
+                seen.add(name)
+                names.append(name)
+            # Include index-level names too (e.g. 'origin' in the (origin, sample_id)
+            # multi-index), excluding internal levels like sample_id/annotation_id.
+            if isinstance(df.index, pd.MultiIndex):
+                index_names = [n for n in (df.index.names or []) if n]
+            elif df.index.name:
+                index_names = [df.index.name]
+            else:
+                index_names = []
+            for n in index_names:
+                name = str(n)
+                if n in _HEAVY_BLOB_COLS or n in _INTERNAL_COLS or name in seen:
+                    continue
+                seen.add(name)
+                names.append(name)
+            return names
+        except Exception as e:
+            logger.warning("Error enumerating metadata column names: %s", e)
+            return []
+
+    def GetMetaData(self, request, context):
+        """Metadata-only retrieval, separated from GetDataSamples.
+
+        Returns:
+            - all_metadata_names: every metadata column for the WHOLE dataset
+            - grid_records: per-sample metadata for the requested grid slice
+            - modal_record: metadata for the open modal sample (by sample_id), if any
+        """
+        try:
+            # Read the current view directly (kept fresh by the same mechanisms
+            # GetDataSamples relies on); no forced refresh on the 15s metadata poll.
+            all_names = self._get_all_metadata_column_names()
+            df = self._all_datasets_df
+
+            if df is None or df.empty:
+                return pb2.GetMetaDataResponse(
+                    success=False,
+                    message="Internal dataframe is empty or not initialized.",
+                    all_metadata_names=all_names,
+                    grid_records=[],
+                )
+
+            # ---- Grid slice metadata (current view order) ----
+            grid_records = []
+            start = max(0, int(getattr(request, "start_index", 0)))
+            count = int(getattr(request, "records_cnt", 0))
+            if count > 0:
+                try:
+                    df_slice = safe_reset_index(df.iloc[start:start + count])
+                except IndexError:
+                    df_slice = None
+                if df_slice is not None and not df_slice.empty:
+                    df_slice, _ = self._merge_multi_instance_signals(df_slice)
+                    grid_resp = self._build_metadata_only_response(df_slice)
+                    if grid_resp.success:
+                        grid_records = list(grid_resp.data_records)
+
+            # ---- Modal sample metadata (optional, by sample_id) ----
+            modal_record = None
+            modal_id = str(getattr(request, "modal_sample_id", "") or "").strip()
+            if modal_id:
+                try:
+                    sid_col = SampleStatsEx.SAMPLE_ID.value
+                    matches = None
+                    if sid_col in df.columns:
+                        matches = df[df[sid_col].astype(str) == modal_id]
+                    elif isinstance(df.index, pd.MultiIndex) and sid_col in (df.index.names or []):
+                        # sample_id is a multi-index level (origin, sample_id).
+                        level_vals = df.index.get_level_values(sid_col).astype(str)
+                        matches = df[level_vals == modal_id]
+                    else:
+                        matches = df[df.index.astype(str) == modal_id]
+                    if matches is not None and not matches.empty:
+                        modal_df = safe_reset_index(matches.iloc[[0]])
+                        modal_df, _ = self._merge_multi_instance_signals(modal_df)
+                        modal_resp = self._build_metadata_only_response(modal_df)
+                        if modal_resp.success and modal_resp.data_records:
+                            modal_record = modal_resp.data_records[0]
+                except Exception as e:
+                    logger.warning("GetMetaData modal lookup failed for %s: %s", modal_id, e)
+
+            resp = pb2.GetMetaDataResponse(
+                success=True,
+                message=f"Retrieved {len(grid_records)} metadata records, {len(all_names)} columns",
+                all_metadata_names=all_names,
+                grid_records=grid_records,
+            )
+            if modal_record is not None:
+                resp.modal_record.CopyFrom(modal_record)
+            return resp
+        except Exception as e:
+            logger.error("Error in GetMetaData: %s", str(e), exc_info=True)
+            return pb2.GetMetaDataResponse(
+                success=False,
+                message=f"Failed to retrieve metadata: {str(e)}",
+                all_metadata_names=[],
+                grid_records=[],
+            )
 
     def _merge_multi_instance_signals(self, df_slice):
         """Merge per-instance signals into dictionaries for multi-index dataframes.
@@ -2922,14 +3089,14 @@ class DataService:
            resolution (both dims ≤ ``_PREVIEW_CACHE_THRESHOLD``), serve from
            the cache instantly without touching the file system.
         2. **Parallel batch processing** – All samples are submitted to the
-           thread pool at once so all 8 workers stay busy.  The chunk-size
+           thread pool at once so all 8 workers stay busy. The chunk-size
            env-var ``WL_BATCH_CHUNK_SIZE`` is kept for backward compat but
            the default is now the full request size (all at once).
         """
-        _PREVIEW_CACHE_THRESHOLD = 80      # max px to consider a "preview" request
+        _PREVIEW_CACHE_THRESHOLD = 80 # max px to consider a "preview" request
         # Default: process ALL rows at once in the thread pool (workers = 8).
         # Override with WL_BATCH_CHUNK_SIZE to throttle concurrency.
-        _BATCH_CHUNK_SIZE = int(os.environ.get("WL_BATCH_CHUNK_SIZE", "0"))  # 0 = all at once
+        _BATCH_CHUNK_SIZE = int(os.environ.get("WL_BATCH_CHUNK_SIZE", "0")) # 0 = all at once
 
         try:
             start_time = time.time()
@@ -2988,8 +3155,9 @@ class DataService:
             logger.debug(
                 "Retrieving samples from %s to %s", request.start_index, request.start_index + request.records_cnt)
 
-            if self._is_metadata_only_request(request):
-                return self._build_metadata_only_response(df_slice, request)
+            # NOTE: metadata-only requests are no longer served here. GetDataSamples
+            # returns image / label / prediction data only; metadata columns are
+            # served by the dedicated GetMetaData RPC.
 
             # ---- Preview-cache tolerant path -------------------------------
             # For preview-tier requests, serve what is available from cache
@@ -3095,7 +3263,7 @@ class DataService:
 
             # ---- Parallel batch processing ---------------------------------
             # Submit ALL rows to the thread pool at once so all 8 workers
-            # stay busy.  This avoids the old sequential-chunk bottleneck
+            # stay busy. This avoids the old sequential-chunk bottleneck
             # where each sub-batch had to finish before the next started.
             data_records: list = []
             rows_list = list(df_slice.iterrows())
@@ -3161,7 +3329,7 @@ class DataService:
         new_tag_name = f'{SampleStatsEx.TAG.value}:{stripped_tag_name}'
 
         # Get current tags from the in-memory dataframe or df_manager
-        existing_tag_value = True  # Default to True for new tags
+        existing_tag_value = True # Default to True for new tags
         try:
             if self._all_datasets_df is not None:
                 # Read current tag columns from in-memory dataframe
@@ -3177,7 +3345,7 @@ class DataService:
 
                 if row is not None:
                     for col in row.index:
-                        if col == new_tag_name and row[col]:  # If existing, revert the value
+                        if col == new_tag_name and row[col]: # If existing, revert the value
                             existing_tag_value = bool(1 - row[col])
 
         except (KeyError, AttributeError) as e:
@@ -3185,7 +3353,7 @@ class DataService:
 
         # Calculate target tags based on edit type
         if edit_type == SampleEditType.EDIT_REMOVE:
-            existing_tag_value = False  # For removal, we set the tag to False
+            existing_tag_value = False # For removal, we set the tag to False
             target_tags_set = self._parse_tags(new_tag_name)
         else:
             # Override: replace all tags with the new value
@@ -3227,8 +3395,8 @@ class DataService:
         Apply a query on the in-memory dataframe.
 
         Modes:
-          - request.query == ""  -> just return counts, do not modify df
-          - request.query != ""  -> always handled by the agent (natural language path)
+          - request.query == "" -> just return counts, do not modify df
+          - request.query != "" -> always handled by the agent (natural language path)
 
         Counts returned:
           - number_of_all_samples: all rows currently in the dataframe
@@ -3262,14 +3430,20 @@ class DataService:
 
                 # Apply operations with lock
                 with self._watched_lock("_lock[ApplyDataQuery/ops]"):
-                    # If this is JUST a view-sort for a specific page, DO NOT force an internal refresh
-                    # as that wipes out the existing slice/sort state before we try to modify the next slice.
-                    is_only_view_sort = len(operations) == 1 and operations[0].get("function") == "df.sort_view_slice"
-                    if not is_only_view_sort:
-                        self._slowUpdateInternals(force=True)  # Refresh internals before applying Agent operations
+                    # Skip the forced full-view rebuild for SORT-ONLY operations. Sorting just
+                    # re-orders the existing snapshot, so a fresh collapse+combine (hundreds of
+                    # ms on large views, and — being lock-held — contends with the training
+                    # thread for multi-second stalls) is unnecessary. Filters/edits still refresh
+                    # so they operate on the latest data. The view is frozen on direct queries
+                    # anyway (_is_filtered=True), so it wasn't auto-refreshing mid-sort regardless.
+                    _SORT_FUNCS = {"df.sort_values", "df.sort_index", "df.sort_view_slice"}
+                    is_sort_only = bool(operations) and all(
+                        op.get("function") in _SORT_FUNCS for op in operations)
+                    if not is_sort_only:
+                        self._slowUpdateInternals(force=True) # Refresh internals before applying non-sort operations
 
                     # Work on a copy to allow concurrent readers to see a consistent state
-                    df = self._all_datasets_df  # Remove copy because memory waste and slowdown
+                    df = self._all_datasets_df # Remove copy because memory waste and slowdown
                     messages = []
 
                     for op in operations:
@@ -3300,7 +3474,7 @@ class DataService:
                     logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct DataFrame operation: {request.query[:100]}...")
 
                     with self._lock:
-                        self._all_datasets_df, message = execute_df_operation(self._all_datasets_df, request.query)  # in-place operation, or replace previous dataframe
+                        self._all_datasets_df, message = execute_df_operation(self._all_datasets_df, request.query) # in-place operation, or replace previous dataframe
                         logger.info(f"[ApplyDataQuery] Executed direct DataFrame operation. Message: {message}")
 
                         if operations:
@@ -3316,8 +3490,8 @@ class DataService:
                     logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct reset/clear operation: {request.query[:100]}...")
                     # Force view reset
                     with self._lock:
-                        self._is_filtered = False  # Unfreeze view first
-                        self._slowUpdateInternals(force=True)  # Force update to ensure we have the latest data
+                        self._is_filtered = False # Unfreeze view first
+                        self._slowUpdateInternals(force=True) # Force update to ensure we have the latest data
                         logger.info(f"[ApplyDataQuery] Force view reset and unfrozen.")
 
                         return pb2.DataQueryResponse(
@@ -3367,7 +3541,7 @@ class DataService:
                         if self._all_datasets_df is None:
                             self._all_datasets_df = self._pull_into_all_data_view_df() or pd.DataFrame()
 
-                        df = self._all_datasets_df  #  .copy()  # Remove copy because memory waste and slowdown
+                        df = self._all_datasets_df # .copy() # Remove copy because memory waste and slowdown
                         messages = []
                         intent_type = pb2.INTENT_FILTER
                         analysis_result = ""
@@ -3440,8 +3614,74 @@ class DataService:
                 data_records=[]
             )
 
-    # Streamed chunk size for GetPointCloud (raw float32 bytes per message).
-    _POINT_CLOUD_CHUNK_BYTES = 1 << 20  # 1 MiB
+    def GetHistogram(self, request, context):
+        """Server-side histogram binning of one column (typed RPC).
+
+        Bins the current all-data view by ROW ORDER into <= max_bins equal-
+        population bins; each bin carries {min,max,avg,count} over its finite
+        values plus a per-(origin,discarded) sub-bar breakdown. Returns typed
+        HistogramBin messages (no DataStat name-encoding). Empty bins are emitted
+        with count=0 and NaN stats so the client's positional bars stay aligned.
+        """
+        try:
+            column = request.column or ""
+            max_bins = int(request.max_bins) if request.max_bins > 0 else 512
+            df = getattr(self, "_all_datasets_df", None)
+            if df is None or df.empty:
+                return pb2.HistogramResponse(
+                    success=False, message="empty dataframe view", total_rows=0, bins=[])
+            df = safe_reset_index(df)
+            n = len(df)
+            if column not in df.columns:
+                return pb2.HistogramResponse(
+                    success=False, message=f"column '{column}' not in view",
+                    total_rows=n, bins=[])
+
+            bars = max(1, min(n, max_bins))
+            vals = pd.to_numeric(df[column], errors="coerce").to_numpy()
+            origin = (df["origin"].astype(str).to_numpy() if "origin" in df.columns
+                      else np.full(n, ""))
+            disc = (df["discarded"].astype(bool).to_numpy() if "discarded" in df.columns
+                    else np.zeros(n, bool))
+            edges = (np.arange(bars + 1) * n) // bars
+            bin_of_row = np.searchsorted(edges, np.arange(n), side="right") - 1
+            fin = np.isfinite(vals)
+            gf = pd.DataFrame({"b": bin_of_row[fin], "v": vals[fin],
+                               "o": origin[fin], "d": disc[fin]})
+            stats = gf.groupby("b")["v"].agg(["min", "max", "mean", "count"])
+            sub_by_bin = {}
+            for (b, d, o), c in gf.groupby(["b", "d", "o"]).size().items():
+                sub_by_bin.setdefault(int(b), []).append(
+                    pb2.HistogramSubBar(origin=str(o), discarded=bool(d), count=int(c)))
+            have = stats.index.to_numpy()
+            mn, mx, av, cn = (stats["min"].to_numpy(), stats["max"].to_numpy(),
+                              stats["mean"].to_numpy(), stats["count"].to_numpy())
+            pos = {int(b): i for i, b in enumerate(have)}
+            _nan = float("nan")
+            bins = []
+            for b in range(bars):
+                i = pos.get(b)
+                if i is None:
+                    bins.append(pb2.HistogramBin(
+                        min=_nan, max=_nan, avg=_nan, count=0, sub_bars=[]))
+                else:
+                    bins.append(pb2.HistogramBin(
+                        min=float(mn[i]), max=float(mx[i]), avg=float(av[i]),
+                        count=int(cn[i]), sub_bars=sub_by_bin.get(b, [])))
+            logger.info("[HistBin] column=%s rows=%d bins=%d", column, n, len(bins))
+            return pb2.HistogramResponse(
+                success=True,
+                message=f"histogram {column}: {len(bins)} bins from {n} rows",
+                total_rows=n, bins=bins)
+        except Exception as e:
+            logger.error("Error in GetHistogram: %s", str(e), exc_info=True)
+            return pb2.HistogramResponse(
+                success=False, message=f"histogram failed: {str(e)}",
+                total_rows=0, bins=[])
+
+    # Streamed chunk size for GetPointCloud (raw float32 bytes per message),
+    # configurable via the WL_POINT_CLOUD_CHUNK_BYTES env var (default 1 MiB).
+    _POINT_CLOUD_CHUNK_BYTES = _point_cloud_chunk_bytes()
 
     def GetPointCloud(self, request, context):
         """Stream one sample's raw point cloud as binary float32 chunks.
@@ -3752,7 +3992,10 @@ class DataService:
                     if target_column in self._all_datasets_df.columns:
                         self._all_datasets_df = self._all_datasets_df.drop(columns=[target_column])
 
-                    self._slowUpdateInternals(force=True)
+                    # Kick a background view-refresh (non-blocking) — the in-memory view
+                    # is already consistent after the drop above, so blocking inline rebuild
+                    # is unnecessary and causes the gRPC response to stall for 5-10 s.
+                    self._slowUpdateInternals()
 
                     return pb2.DataEditsResponse(
                         success=True,
@@ -3765,10 +4008,66 @@ class DataService:
                         message=f"Failed to delete metadata column: {str(e)}",
                     )
 
+        if request.stat_name == "__discard_by_tag__":
+            tag_name = str(request.string_value or "").strip()
+            if not tag_name:
+                return pb2.DataEditsResponse(
+                    success=False,
+                    message="Missing tag name for discard-by-tag operation.",
+                )
+
+            with self._watched_lock("_lock[EditDataSample/__discard_by_tag__]"):
+                try:
+                    self._slowUpdateInternals()
+                    if self._all_datasets_df is None or self._all_datasets_df.empty:
+                        return pb2.DataEditsResponse(
+                            success=False,
+                            message="No dataframe available.",
+                        )
+
+                    tag_col = f"{SampleStatsEx.TAG.value}:{tag_name}"
+                    if tag_col not in self._all_datasets_df.columns:
+                        self._slowUpdateInternals()
+                    df = safe_reset_index(self._all_datasets_df)
+                    if tag_col not in df.columns:
+                        return pb2.DataEditsResponse(
+                            success=True,
+                            message=f"No samples found with tag '{tag_name}'.",
+                        )
+
+                    tagged = df[df[tag_col] == 1]
+                    if tagged.empty:
+                        return pb2.DataEditsResponse(
+                            success=True,
+                            message=f"No samples found with tag '{tag_name}'.",
+                        )
+
+                    for origin, origin_df in tagged.groupby(SampleStatsEx.ORIGIN.value, sort=False):
+                        sample_ids = origin_df.index.astype(str).tolist()
+                        rows = [
+                            {"sample_id": sid, SampleStatsEx.ORIGIN.value: origin, SampleStatsEx.DISCARDED.value: True}
+                            for sid in sample_ids
+                        ]
+                        df_update = pd.DataFrame(rows).set_index("sample_id")
+                        self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
+
+                    count = len(tagged)
+                    self._slowUpdateInternals(force=True)
+                    return pb2.DataEditsResponse(
+                        success=True,
+                        message=f"Discarded {count} samples with tag '{tag_name}'.",
+                    )
+                except Exception as e:
+                    logger.error(f"[EditDataSample] discard_by_tag failed: {e}", exc_info=True)
+                    return pb2.DataEditsResponse(
+                        success=False,
+                        message=f"Failed to discard by tag: {str(e)}",
+                    )
+
         if not request.stat_name or not request.stat_name.startswith(SampleStatsEx.TAG.value) and request.stat_name not in [SampleStatsEx.DISCARDED.value]:
             return pb2.DataEditsResponse(
                 success=False,
-                message="Only 'tags', 'discarded', '__copy_metadata__', '__delete_metadata__', '__save_data_state__', and '__force_h5_write_and_save__' edits are supported.",
+                message="Only 'tags', 'discarded', '__copy_metadata__', '__delete_metadata__', '__save_data_state__', '__force_h5_write_and_save__', and '__discard_by_tag__' edits are supported.",
             )
 
         # =====================================================================

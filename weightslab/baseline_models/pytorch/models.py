@@ -38,7 +38,7 @@ class FashionCNN(nn.Module):
         self.m1 = nn.MaxPool2d(2)
 
         # Block 2
-        self.c2 = nn.Conv2d(4, 4, 3)  # Default stride=1, no padding
+        self.c2 = nn.Conv2d(4, 4, 3) # Default stride=1, no padding
         self.b2 = nn.BatchNorm2d(4)
         self.r2 = nn.ReLU()
         self.m2 = nn.MaxPool2d(2)
@@ -154,21 +154,21 @@ class GraphMLP_res_test_A(nn.Module):
         self.input_shape = (1, 1, 28, 28)
 
         # Block 1 (Path A)
-        self.c1 = nn.Conv2d(1, 4, 3, padding=1)  # Id 0
+        self.c1 = nn.Conv2d(1, 4, 3, padding=1) # Id 0
 
         # Block 2 (Residual/Skip Path)
         # Note: c2 takes b1's output. c3 takes c2's output.
-        self.c2 = nn.Conv2d(4, 8, 3, padding=1)  # Id 2
-        self.c3 = nn.Conv2d(8, 4, 3, padding=1)  # Id 3
+        self.c2 = nn.Conv2d(4, 8, 3, padding=1) # Id 2
+        self.c3 = nn.Conv2d(8, 4, 3, padding=1) # Id 3
 
     def forward(self, x):
         # Path A
-        x1 = self.c1(x)  # [4, 28, 28]
-        x2 = self.c2(x1)  # [8, 28, 28]
-        x3 = self.c3(x2)  # [4, 28, 28]
+        x1 = self.c1(x) # [4, 28, 28]
+        x2 = self.c2(x1) # [8, 28, 28]
+        x3 = self.c3(x2) # [4, 28, 28]
 
         # Residual Connection (Add operation)
-        x_out = x1 + x3  # The output of b1 and c3 both flow into the add op
+        x_out = x1 + x3 # The output of b1 and c3 both flow into the add op
 
         return x_out
 
@@ -199,15 +199,15 @@ class GraphMLP_res_test_B(nn.Module):
 
         # Main Path (where the skip connection comes from)
         x2 = self.c2(x1)
-        x3 = self.c3(x2)  # [4, 28, 28]
+        x3 = self.c3(x2) # [4, 28, 28]
 
         # Residual connection path (Transform x1 to match x3)
         x4 = self.c4(x1)
-        x5 = self.c5(self.b1(x4))  # [4, 28, 28]
+        x5 = self.c5(self.b1(x4)) # [4, 28, 28]
 
         # Residual Connection (Add operation)
         # Now x3 and x5 have the same shape: B x 4 x 28 x 28
-        x_out = x3 + x5  # Assuming you intended to add x3 and x5/x4
+        x_out = x3 + x5 # Assuming you intended to add x3 and x5/x4
 
         return x_out
 
@@ -237,15 +237,15 @@ class GraphMLP_res_test_C(nn.Module):
 
         # Main Path (where the skip connection comes from)
         x2 = self.c2(x1)
-        x3 = self.c3(x2)  # [4, 28, 28]
+        x3 = self.c3(x2) # [4, 28, 28]
 
         # Residual connection path (Transform x1 to match x3)
         x4 = self.c4(x1)
-        x5 = self.b1(x4)  # [4, 28, 28]
+        x5 = self.b1(x4) # [4, 28, 28]
 
         # Residual Connection (Add operation)
         # Now x3 and x5 have the same shape: B x 4 x 28 x 28
-        x_out = x3 + x5  # Assuming you intended to add x3 and x5/x4
+        x_out = x3 + x5 # Assuming you intended to add x3 and x5/x4
 
         return x_out
 
@@ -259,7 +259,7 @@ class GraphMLP_res_test_D(nn.Module):
         self.input_shape = (1, 1, 28, 28)
 
         # Block 1 (Path A) - Stays the same
-        self.c1 = nn.Conv2d(1, 4, 3, padding=1)  # Input (1), Output (4)
+        self.c1 = nn.Conv2d(1, 4, 3, padding=1) # Input (1), Output (4)
 
         # Block 2 (Main Path) - Stays the same
         self.c2 = nn.Conv2d(4, 8, 3, padding=1)
@@ -279,19 +279,19 @@ class GraphMLP_res_test_D(nn.Module):
 
         # Main Path (where the skip connection comes from)
         x2 = self.c2(x1)
-        x3 = self.c3(x2)  # [4, 28, 28]
+        x3 = self.c3(x2) # [4, 28, 28]
 
         # Residual connection path (Transform x1 to match x3)
         x4 = self.c4(x1)
-        x5 = self.b1(x4)  # [4, 28, 28]
+        x5 = self.b1(x4) # [4, 28, 28]
 
         # Residual connection path (Transform x1 to match x3)
         x6 = self.c5(x1)
-        x7 = self.b2(x6)  # [4, 28, 28]
+        x7 = self.b2(x6) # [4, 28, 28]
 
         # Residual Connection (Add operation)
         # Now x3 and x5 have the same shape: B x 4 x 28 x 28
-        x_out = x3 + x5 - x7  # Assuming you intended to add x3 and x5/x4
+        x_out = x3 + x5 - x7 # Assuming you intended to add x3 and x5/x4
 
         return x_out
 
@@ -381,7 +381,7 @@ class SingleBlockResNetTruncated(nn.Module):
         # Main path
         out = self.block_conv1(x)
         out = self.block_bn1(out)
-        out = self.block_bn3(out)  # Second BN to match original code
+        out = self.block_bn3(out) # Second BN to match original code
         out = self.relu(out)
 
         out = self.block_conv2(out)
@@ -478,7 +478,7 @@ class TinyUNet_Straightforward(nn.Module):
             nn.BatchNorm2d(c[1]),
             nn.ReLU(inplace=True)
         )
-        self.pool1 = nn.MaxPool2d(2)  # Downsample 1
+        self.pool1 = nn.MaxPool2d(2) # Downsample 1
 
         # --- B. BOTTLENECK ---
         # 2. BOTTLENECK: Conv -> 16 canaux
@@ -516,7 +516,7 @@ class TinyUNet_Straightforward(nn.Module):
     def forward(self, x):
         # 1. ENCODER
         x1 = self.enc1(x)
-        p1 = self.pool1(x1)  # Skip x1
+        p1 = self.pool1(x1) # Skip x1
 
         # 2. BOTTLENECK
         bottleneck = self.bottleneck(p1)
@@ -613,7 +613,7 @@ class ResNet18(nn.Module):
         )
 
     def forward(self, input):
-        input = torch.cat([input,]*3, dim=1)  # Add channels dim
+        input = torch.cat([input,]*3, dim=1) # Add channels dim
         return self.model(input)
 
 
@@ -880,7 +880,7 @@ class DCGAN(nn.Module):
             # Final Conv: N x 64 x 32 x 32 -> N x 3 x 64 x 64
             nn.ConvTranspose2d(features_g, img_channels, kernel_size=4,
                                stride=2, padding=1),
-            nn.Tanh()  # Output range [-1, 1]
+            nn.Tanh() # Output range [-1, 1]
         )
 
     def _init_discriminator_sequential(self, img_channels, features_d):
@@ -888,7 +888,7 @@ class DCGAN(nn.Module):
         return nn.Sequential(
             # Input: N x C x 64 x 64
             nn.Conv2d(img_channels, features_d, kernel_size=4, stride=2,
-                      padding=1),  # Output: N x 64 x 32 x 32
+                      padding=1), # Output: N x 64 x 32 x 32
             nn.LeakyReLU(0.2, inplace=True),
 
             # Block 2: N x 64 x 32 x 32 -> N x 128 x 16 x 16
@@ -960,7 +960,7 @@ class SimpleVAE(nn.Module):
             nn.Linear(z_dim, h_dim),
             nn.ReLU(),
             nn.Linear(h_dim, image_size),
-            nn.Sigmoid()  # Sigmoid to output pixel values in the range [0, 1]
+            nn.Sigmoid() # Sigmoid to output pixel values in the range [0, 1]
         )
 
     def reparameterize(self, mu, log_var):
@@ -1041,7 +1041,7 @@ class TwoLayerUnflattenNet(torch.nn.Module):
         x = self.conv2(x)
 
         # Flatten layer
-        x = x.view(x.shape[0], -1)  # Flatten the tensor
+        x = x.view(x.shape[0], -1) # Flatten the tensor
 
         # Linear layers and ReLU activation function
         h_relu = self.linear1(x).clamp(min=0)
@@ -1150,7 +1150,7 @@ class TinyUNet(nn.Module):
         # ------------------ DECODER (Upsampling Path) ------------------
         # 4. Up 4
         self.up4_up = nn.ConvTranspose2d(128, 128, kernel_size=2, stride=1)
-        self.up4_conv = double_conv(192, 64)  # Input channels: 64 + 64 = 128
+        self.up4_conv = double_conv(192, 64) # Input channels: 64 + 64 = 128
 
         # ------------------ OUTPUT Layer ------------------
         # 1x1 convolution to map the final feature channels (64) to the number of classes
@@ -1165,7 +1165,7 @@ class TinyUNet(nn.Module):
 
         # ------------------ DECODER (Concatenate and Convolve) ------------------
         # Up 4
-        x = self.up4_up(x2)  # B3
+        x = self.up4_up(x2) # B3
         x = self._align_and_concat(x, x1)
         x = self.up4_conv(x)
 
@@ -1192,7 +1192,7 @@ class TinyUNet(nn.Module):
             upsampled,
             size=skip.shape[-2:],
             mode='bilinear',
-            align_corners=False  # Set to False for compatibility and best practice
+            align_corners=False # Set to False for compatibility and best practice
         )
 
         # Concatenate along the channel dimension (dim=1)
@@ -1246,19 +1246,19 @@ class UNet(nn.Module):
         # ------------------ DECODER (Upsampling Path) ------------------
         # 1. Up 1 (Upsample + Conv + Skip Connection)
         self.up1_up = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
-        self.up1_conv = double_conv(1024, 512)  # Input channels: 512 (from up) + 512 (from skip) = 1024
+        self.up1_conv = double_conv(1024, 512) # Input channels: 512 (from up) + 512 (from skip) = 1024
 
         # 2. Up 2
         self.up2_up = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
-        self.up2_conv = double_conv(512, 256)  # Input channels: 256 + 256 = 512
+        self.up2_conv = double_conv(512, 256) # Input channels: 256 + 256 = 512
 
         # 3. Up 3
         self.up3_up = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.up3_conv = double_conv(256, 128)  # Input channels: 128 + 128 = 256
+        self.up3_conv = double_conv(256, 128) # Input channels: 128 + 128 = 256
 
         # 4. Up 4
         self.up4_up = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.up4_conv = double_conv(128, 64)  # Input channels: 64 + 64 = 128
+        self.up4_conv = double_conv(128, 64) # Input channels: 64 + 64 = 128
 
         # ------------------ OUTPUT Layer ------------------
         # 1x1 convolution to map the final feature channels (64) to the number of classes
@@ -1278,11 +1278,11 @@ class UNet(nn.Module):
         x4 = self.down3_conv(x4)
 
         x5 = self.down4_pool(x4)
-        x5 = self.down4_conv(x5)  # This is the bottleneck feature map (lowest resolution)
+        x5 = self.down4_conv(x5) # This is the bottleneck feature map (lowest resolution)
 
         # ------------------ DECODER (Concatenate and Convolve) ------------------
         # Up 1
-        x = self.up1_up(x5)  # Upsample x5
+        x = self.up1_up(x5) # Upsample x5
         x = self._align_and_concat(x, x4)
         x = self.up1_conv(x)
 
@@ -1324,7 +1324,7 @@ class UNet(nn.Module):
             upsampled,
             size=skip.shape[-2:],
             mode='bilinear',
-            align_corners=False  # Set to False for compatibility and best practice
+            align_corners=False # Set to False for compatibility and best practice
         )
 
         # Concatenate along the channel dimension (dim=1)
@@ -1346,8 +1346,8 @@ class UNet3p(nn.Module):
         self.input_shape = (1, n_channels, 256, 256)
         self.n_channels = n_channels
         self.n_classes = n_classes
-        self.filters = filter_list  # [F1, F2, F3, F4, F5]
-        self.F_cat = self.filters[0] * 5  # Total channels in feature concatenation (e.g., 64 * 5 = 320)
+        self.filters = filter_list # [F1, F2, F3, F4, F5]
+        self.F_cat = self.filters[0] * 5 # Total channels in feature concatenation (e.g., 64 * 5 = 320)
 
         # ------------------- Internal Building Blocks -------------------
 
@@ -1537,7 +1537,7 @@ class UNet3p(nn.Module):
 
         # Concatenate and convolve
         d1 = torch.cat((h1_d1, h2_d1, h3_d1, h4_d1, h5_d1), dim=1)
-        d1 = self.up_conv1(d1)  # Output D1 (64 channels, Size H/1)
+        d1 = self.up_conv1(d1) # Output D1 (64 channels, Size H/1)
 
         # ------------------- OUTPUT -------------------
         logits = self.outc(d1)
@@ -1569,7 +1569,7 @@ class UNet3D(nn.Module):
         # --- ENCODER (Contracting Path) ---
 
         # Initial convolution and first block
-        self.inc = double_conv_3d(input_channels, base_channels)  # C -> 32
+        self.inc = double_conv_3d(input_channels, base_channels) # C -> 32
 
         # Down 1
         self.down1_pool = nn.MaxPool3d(kernel_size=2, stride=2)
@@ -1606,39 +1606,39 @@ class UNet3D(nn.Module):
         # x shape: (B, C, D, H, W)
 
         # --- ENCODER ---
-        x1 = self.inc(x)                 # B x 32 x D x H x W (Skip 1)
+        x1 = self.inc(x) # B x 32 x D x H x W (Skip 1)
 
         x2 = self.down1_pool(x1)
-        x2 = self.down1_conv(x2)         # B x 64 x D/2 x H/2 x W/2 (Skip 2)
+        x2 = self.down1_conv(x2) # B x 64 x D/2 x H/2 x W/2 (Skip 2)
 
         x3 = self.down2_pool(x2)
-        x3 = self.down2_conv(x3)         # B x 128 x D/4 x H/4 x W/4 (Skip 3)
+        x3 = self.down2_conv(x3) # B x 128 x D/4 x H/4 x W/4 (Skip 3)
 
         x4 = self.down3_pool(x3)
-        x4 = self.down3_conv(x4)         # B x 256 x D/8 x H/8 x W/8 (Bottleneck)
+        x4 = self.down3_conv(x4) # B x 256 x D/8 x H/8 x W/8 (Bottleneck)
 
         # --- DECODER ---
 
         # Up 3
-        up3 = self.up3_upsample(x4)      # B x 128 x D/4 x H/4 x W/4 (Upsampled)
+        up3 = self.up3_upsample(x4) # B x 128 x D/4 x H/4 x W/4 (Upsampled)
         # Skip connection: Concatenate with x3 (128 channels)
         cat3 = torch.cat([x3, up3], dim=1) # B x 256 x D/4 x H/4 x W/4
-        x = self.up3_conv(cat3)          # B x 128 x D/4 x H/4 x W/4
+        x = self.up3_conv(cat3) # B x 128 x D/4 x H/4 x W/4
 
         # Up 2
-        up2 = self.up2_upsample(x)       # B x 64 x D/2 x H/2 x W/2
+        up2 = self.up2_upsample(x) # B x 64 x D/2 x H/2 x W/2
         # Skip connection: Concatenate with x2 (64 channels)
         cat2 = torch.cat([x2, up2], dim=1) # B x 128 x D/2 x H/2 x W/2
-        x = self.up2_conv(cat2)          # B x 64 x D/2 x H/2 x W/2
+        x = self.up2_conv(cat2) # B x 64 x D/2 x H/2 x W/2
 
         # Up 1
-        up1 = self.up1_upsample(x)       # B x 32 x D x H x W
+        up1 = self.up1_upsample(x) # B x 32 x D x H x W
         # Skip connection: Concatenate with x1 (32 channels)
         cat1 = torch.cat([x1, up1], dim=1) # B x 64 x D x H x W
-        x = self.up1_conv(cat1)          # B x 32 x D x H x W
+        x = self.up1_conv(cat1) # B x 32 x D x H x W
 
         # Final Output
-        logits = self.out_conv(x)        # B x C_out x D x H x W
+        logits = self.out_conv(x) # B x C_out x D x H x W
 
         return logits
 
@@ -1694,7 +1694,7 @@ class TinyYOLO(nn.Module):
         self.preprocess = T.Compose([
             T.Resize((image_size, image_size)),
             T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406],  # ImageNet mean/std
+            T.Normalize(mean=[0.485, 0.456, 0.406], # ImageNet mean/std
                         std=[0.229, 0.224, 0.225]),
         ])
 
@@ -1734,12 +1734,12 @@ class TinyYOLO(nn.Module):
         grid_y = grid_y.float()
 
         for i in range(N):
-            img_pred = pred[i]  # S x S x (B*5 + C)
+            img_pred = pred[i] # S x S x (B*5 + C)
             img_boxes = []
 
             # class score per cell (for single class we use sigmoid)
             if self.C == 1:
-                cls_score = torch.sigmoid(img_pred[..., -1])  # (S, S)
+                cls_score = torch.sigmoid(img_pred[..., -1]) # (S, S)
             else:
                 cls_logits = img_pred[..., self.B * 5:]
                 cls_score_all = F.softmax(cls_logits, dim=-1)
@@ -1762,7 +1762,7 @@ class TinyYOLO(nn.Module):
                 w = tw / S
                 h = th / S
 
-                final_conf = conf * cls_score  # class-aware confidence
+                final_conf = conf * cls_score # class-aware confidence
 
                 mask = final_conf > conf_thresh
                 if mask.any():
@@ -1842,8 +1842,8 @@ class Yolov11(nn.Module):
     def __init__(self, variant: str = "yolo11n.pt", device=None, img_size: int = 640):
         super().__init__()
         try:
-            from ultralytics import YOLO  # type: ignore
-        except Exception as exc:  # pragma: no cover - optional dependency
+            from ultralytics import YOLO # type: ignore
+        except Exception as exc: # pragma: no cover - optional dependency
             raise ImportError(
                 "Ultralytics is required for Yolov11 baseline. Install with: pip install ultralytics"
             ) from exc
@@ -1871,13 +1871,13 @@ if __name__ == "__main__":
     model = Yolov11()
 
     # Predict with the model
-    results = model.yolo("https://ultralytics.com/images/bus.jpg")  # predict on an image
+    results = model.yolo("https://ultralytics.com/images/bus.jpg") # predict on an image
 
     # Access the results
     for result in results:
-        xywh = result.boxes.xywh  # center-x, center-y, width, height
-        xywhn = result.boxes.xywhn  # normalized
-        xyxy = result.boxes.xyxy  # top-left-x, top-left-y, bottom-right-x, bottom-right-y
-        xyxyn = result.boxes.xyxyn  # normalized
-        names = [result.names[cls.item()] for cls in result.boxes.cls.int()]  # class name of each box
-        confs = result.boxes.conf  # confidence score of each box
+        xywh = result.boxes.xywh # center-x, center-y, width, height
+        xywhn = result.boxes.xywhn # normalized
+        xyxy = result.boxes.xyxy # top-left-x, top-left-y, bottom-right-x, bottom-right-y
+        xyxyn = result.boxes.xyxyn # normalized
+        names = [result.names[cls.item()] for cls in result.boxes.cls.int()] # class name of each box
+        confs = result.boxes.conf # confidence score of each box

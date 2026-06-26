@@ -2,6 +2,7 @@
 device: auto
 experiment_name: lidar2d_detection_usecase
 training_steps_to_do: null  # null = infinite training until manually stopped
+# root_log_dir:  # Empty to write in tmp directory, or specify a path to store logs and checkpoints
 
 checkpoint_manager:
   load_config: false

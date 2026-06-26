@@ -3,7 +3,11 @@ import numpy as np
 
 import weightslab.proto.experiment_service_pb2 as pb2
 
-from weightslab.trainer.services.data_service import DataService
+from weightslab.trainer.services.data_service import (
+    DataService,
+    _DEFAULT_POINT_CLOUD_CHUNK_BYTES,
+    _point_cloud_chunk_bytes,
+)
 
 
 PC_RANGE = (0.0, -32.0, -3.0, 64.0, 32.0, 1.0)
@@ -82,6 +86,40 @@ def test_get_point_cloud_unknown_sample_fails_gracefully():
     assert len(chunks) == 1
     assert not chunks[0].success
     assert "not found" in chunks[0].message
+
+
+def test_point_cloud_chunk_bytes_default(monkeypatch):
+    monkeypatch.delenv("WL_POINT_CLOUD_CHUNK_BYTES", raising=False)
+    assert _point_cloud_chunk_bytes() == _DEFAULT_POINT_CLOUD_CHUNK_BYTES == (1 << 20)
+
+
+def test_point_cloud_chunk_bytes_env_override(monkeypatch):
+    monkeypatch.setenv("WL_POINT_CLOUD_CHUNK_BYTES", "4096")
+    assert _point_cloud_chunk_bytes() == 4096
+
+
+def test_point_cloud_chunk_bytes_invalid_falls_back(monkeypatch):
+    monkeypatch.setenv("WL_POINT_CLOUD_CHUNK_BYTES", "not-a-number")
+    assert _point_cloud_chunk_bytes() == _DEFAULT_POINT_CLOUD_CHUNK_BYTES
+    monkeypatch.setenv("WL_POINT_CLOUD_CHUNK_BYTES", "0")
+    assert _point_cloud_chunk_bytes() == _DEFAULT_POINT_CLOUD_CHUNK_BYTES
+    monkeypatch.setenv("WL_POINT_CLOUD_CHUNK_BYTES", "-10")
+    assert _point_cloud_chunk_bytes() == _DEFAULT_POINT_CLOUD_CHUNK_BYTES
+
+
+def test_get_point_cloud_honours_configured_chunk_size():
+    """A smaller chunk size splits the same cloud into more (correct) messages."""
+    class _SmallChunkService(_StubService):
+        _POINT_CLOUD_CHUNK_BYTES = 4096 # bytes
+
+    stub = _SmallChunkService(_FakeLidarDataset())
+    chunks = _collect(stub, pb2.PointCloudRequest(sample_id="7", origin="train_loader"))
+
+    total_bytes = 50_000 * 4 * 4
+    assert len(chunks) > 1
+    assert all(len(c.data) <= 4096 for c in chunks)
+    assert chunks[0].total_chunks == len(chunks)
+    assert sum(len(c.data) for c in chunks) == total_bytes
 
 
 def test_get_point_cloud_non_pointcloud_sample_fails_gracefully():

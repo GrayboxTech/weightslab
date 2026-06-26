@@ -108,8 +108,8 @@ class TestH5DataFrameStore(unittest.TestCase):
         df = pd.DataFrame({
             'sample_id': [1, 2, 3],
             'brightness': [0.75, 0.82, 0.65],
-            'tag:quality': ['high', 'low', 'high'],  # String tag
-            'tag:outdoor': [True, False, True],       # Boolean tag
+            'tag:quality': ['high', 'low', 'high'], # String tag
+            'tag:outdoor': [True, False, True], # Boolean tag
         }).set_index('sample_id')
 
         # Write (should optimize to categorical)
@@ -194,7 +194,7 @@ class TestH5DataFrameStore(unittest.TestCase):
 
         # Update with new data for same sample but different annotation
         df2 = pd.DataFrame({
-            'brightness': [0.80],  # Update brightness for annotation 1
+            'brightness': [0.80], # Update brightness for annotation 1
             'iou': [0.60],
         })
         df2.index = pd.MultiIndex.from_arrays(

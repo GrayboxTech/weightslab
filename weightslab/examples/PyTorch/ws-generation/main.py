@@ -40,22 +40,22 @@ class UNetMulti(nn.Module):
 
         # ---- Encoder ----
         self.enc1_conv = nn.Conv2d(in_ch, C1, kernel_size=3, padding=1)
-        self.enc1_bn   = nn.BatchNorm2d(C1)
+        self.enc1_bn = nn.BatchNorm2d(C1)
         self.enc1_pool = nn.MaxPool2d(2)
 
         self.enc2_conv = nn.Conv2d(C1, C2, kernel_size=3, padding=1)
-        self.enc2_bn   = nn.BatchNorm2d(C2)
+        self.enc2_bn = nn.BatchNorm2d(C2)
         self.enc2_pool = nn.MaxPool2d(2)
 
         self.enc3_conv = nn.Conv2d(C2, C3, kernel_size=3, padding=1)
-        self.enc3_bn   = nn.BatchNorm2d(C3)
+        self.enc3_bn = nn.BatchNorm2d(C3)
         self.enc3_pool = nn.MaxPool2d(2)
 
         # ---- Mid / Bottleneck ----
-        self.mid_conv3  = nn.Conv2d(C3, C3, kernel_size=3, padding=1)
-        self.mid_conv5  = nn.Conv2d(C3, C3, kernel_size=5, padding=2)
-        self.mid_conv7  = nn.Conv2d(C3, C3, kernel_size=7, padding=3)
-        self.mid_bn     = nn.BatchNorm2d(C3 * 3)
+        self.mid_conv3 = nn.Conv2d(C3, C3, kernel_size=3, padding=1)
+        self.mid_conv5 = nn.Conv2d(C3, C3, kernel_size=5, padding=2)
+        self.mid_conv7 = nn.Conv2d(C3, C3, kernel_size=7, padding=3)
+        self.mid_bn = nn.BatchNorm2d(C3 * 3)
 
         # NEW: Spatial path for reconstruction (preserves 2D structure)
         self.spatial_bottleneck = nn.Conv2d(C3 * 3, C3, kernel_size=1)
@@ -66,15 +66,15 @@ class UNetMulti(nn.Module):
 
         # ---- Decoder ----
         self.up1_conv = nn.Conv2d(C3, C2, kernel_size=3, padding=1)
-        self.up1_bn   = nn.BatchNorm2d(C2)
+        self.up1_bn = nn.BatchNorm2d(C2)
 
         self.up2_conv = nn.Conv2d(C2, C1, kernel_size=3, padding=1)
-        self.up2_bn   = nn.BatchNorm2d(C1)
+        self.up2_bn = nn.BatchNorm2d(C1)
 
         # ---- Heads ----
-        self.cls_head    = nn.Linear(bottleneck, 1) # anomaly classification
-        self.recon_head  = nn.Conv2d(C1, in_ch, kernel_size=1)  # reconstruction
-        self.embed_head  = nn.Linear(bottleneck, 64) # contrastive embedding
+        self.cls_head = nn.Linear(bottleneck, 1) # anomaly classification
+        self.recon_head = nn.Conv2d(C1, in_ch, kernel_size=1) # reconstruction
+        self.embed_head = nn.Linear(bottleneck, 64) # contrastive embedding
 
     def forward(self, x):
         # Encoder
@@ -139,11 +139,11 @@ class VADDataset(Dataset):
              print(f"Warning: split directory {split_dir} not found.")
              return
 
-        for folder in sorted(os.listdir(split_dir)):  # sorted for determinism
+        for folder in sorted(os.listdir(split_dir)): # sorted for determinism
             folder_path = os.path.join(split_dir, folder)
             if not os.path.isdir(folder_path): continue
 
-            for fname in sorted(os.listdir(folder_path)):  # sorted for determinism
+            for fname in sorted(os.listdir(folder_path)): # sorted for determinism
                 if fname.lower().endswith(('.png', '.jpg', '.jpeg')):
                     full_path = os.path.join(folder_path, fname)
                     if folder == 'good':
@@ -176,9 +176,9 @@ class VADDataset(Dataset):
             # Fully Balanced Pairing Strategy (50/50 Pairs, 50/50 Labels)
             # Cycle through 4 types of pairs based on idx % 4:
             # 0: Good + Good (Positive Contrastive, 100% Good Labels)
-            # 1: Bad + Bad   (Positive Contrastive, 100% Bad Labels)
-            # 2: Good + Bad  (Negative Contrastive, 50/50 Labels)
-            # 3: Bad + Good  (Negative Contrastive, 50/50 Labels)
+            # 1: Bad + Bad (Positive Contrastive, 100% Bad Labels)
+            # 2: Good + Bad (Negative Contrastive, 50/50 Labels)
+            # 3: Bad + Good (Negative Contrastive, 50/50 Labels)
 
             p_type = idx % 4
             if p_type == 0:
@@ -220,10 +220,10 @@ class VADDataset(Dataset):
 
         group_id = f"{self.split}_pair_{uid1}_{uid2}"
         return (
-            [img1_t, img2_t],     # The pair of inputs
-            [idx1, idx2],         # Relative indices
-            [label1, label2],     # Individual labels
-            {                     # Metadata — "uids" causes 2 ledger rows per pair
+            [img1_t, img2_t], # The pair of inputs
+            [idx1, idx2], # Relative indices
+            [label1, label2], # Individual labels
+            { # Metadata — "uids" causes 2 ledger rows per pair
                 "group_id": group_id,
                 "uids": [uid1, uid2],
             }
@@ -443,7 +443,7 @@ if __name__ == "__main__":
     ])
 
     _train_ds = VADDataset(data_root, split="train", transform=transform)
-    _test_ds  = VADDataset(data_root, split="test", transform=transform)
+    _test_ds = VADDataset(data_root, split="test", transform=transform)
 
     train_loader = wl.watch_or_edit(
         _train_ds, flag="data", loader_name="train_loader",
@@ -486,7 +486,7 @@ if __name__ == "__main__":
 
     # ================
     # Training Loop
-    wl.start_training(timeout=3)  # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+    wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     pbar = tqdm(range(training_steps), desc="Training")
     for step in pbar:

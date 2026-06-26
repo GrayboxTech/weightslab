@@ -7,8 +7,8 @@ This is a scaffold we keep expanding — NOT production-shippable. Add scenarios
 measure time/processes, and later extract the reusable bits into the SDK.
 
 Layout:
-  * _train_worker(rank, world, ...)  -- the distributed SERVER (spawned, rank 0 serves).
-  * Client + scenarios               -- run in the PARENT process, talk gRPC to rank 0.
+  * _train_worker(rank, world, ...) -- the distributed SERVER (spawned, rank 0 serves).
+  * Client + scenarios -- run in the PARENT process, talk gRPC to rank 0.
 
 First scenario (scenario_epoch_then_pause):
   1. spawn `world` ranks (rank 0 serves gRPC plaintext); parent = client.
@@ -19,13 +19,13 @@ First scenario (scenario_epoch_then_pause):
   5. wait ~50% of the epoch's wall time (training is paused) and assert the
      last_seen map is byte-identical => pause truly froze training.
 
-Run:  python ddp_test_suite.py        (WL_DDP_WORLD_SIZE=2, imgsz 96, num_workers 0)
+Run: python ddp_test_suite.py (WL_DDP_WORLD_SIZE=2, imgsz 96, num_workers 0)
 """
 import os
 # --- test-mode env (must be set before importing weightslab) ---------------
-os.environ["WEIGHTSLAB_SKIP_SECURE_INIT"] = "true"   # plaintext gRPC for the client
+os.environ["WEIGHTSLAB_SKIP_SECURE_INIT"] = "true" # plaintext gRPC for the client
 os.environ["GRPC_TLS_ENABLED"] = "0"
-os.environ.setdefault("WL_DDP_IMGSZ", "96")          # small images for speed
+os.environ.setdefault("WL_DDP_IMGSZ", "96") # small images for speed
 os.environ.setdefault("WL_DDP_COLLECTIVE_LOG", "/tmp/wl_collective_log.txt")
 os.environ.setdefault("WL_PRELOAD_IMAGE_OVERVIEW", "0")
 os.environ.setdefault("WEIGHTSLAB_LOG_LEVEL", "WARNING")
@@ -44,7 +44,7 @@ import sys
 # usecase modules (yolo_pipeline, utils.*) and its config/data/ddp_run resolve.
 sys.path.insert(0, os.path.abspath(os.path.join(
     os.path.dirname(__file__), "../../../../examples/PyTorch/ws-detection/src")))
-import yolo_pipeline  # reuse _build_pipeline / _decode_preds_to_6col / _HERE / _LOSS_PARTS
+import yolo_pipeline # reuse _build_pipeline / _decode_preds_to_6col / _HERE / _LOSS_PARTS
 
 import weightslab.proto.experiment_service_pb2 as pb2
 import weightslab.proto.experiment_service_pb2_grpc as pb2_grpc
@@ -54,7 +54,7 @@ _HOST = "127.0.0.1"
 
 
 # ===========================================================================
-# SERVER  (spawned ranks; rank 0 serves gRPC)
+# SERVER (spawned ranks; rank 0 serves gRPC)
 # ===========================================================================
 def _train_worker(rank, world, master_port, grpc_port):
     """Spawned per rank. Delegates to main_ddp.train_worker — the clean
@@ -80,11 +80,11 @@ def _train_worker(rank, world, master_port, grpc_port):
 
 
 # ===========================================================================
-# CLIENT  (parent process)
+# CLIENT (parent process)
 # ===========================================================================
 class Client:
     def __init__(self, port):
-        self._port = int(port)             # exposed for topology-style scenarios
+        self._port = int(port) # exposed for topology-style scenarios
         self.channel = grpc.insecure_channel(
             f"{_HOST}:{port}",
             options=[("grpc.max_receive_message_length", 256 * 1024 * 1024)],
@@ -298,7 +298,7 @@ def _wait_until_paused(client, n, min_step, timeout=600.0, poll=5.0):
     server is paused, not just mid-step). drop_last means the per-rank epoch is
     floor(shard/batch), so we don't require an exact step count."""
     _t0 = time.time()
-    _last_change = _t0          # wall-time of the most recent last_seen-max change
+    _last_change = _t0 # wall-time of the most recent last_seen-max change
     deadline = time.time() + timeout
     prev = None
     stable = 0
@@ -310,9 +310,9 @@ def _wait_until_paused(client, n, min_step, timeout=600.0, poll=5.0):
         if cur >= min_step and stable >= 2:
             if _SCN_TIMING:
                 tot = time.time() - _t0
-                active = _last_change - _t0     # last_seen advancing = training/observed work
-                settle = time.time() - _last_change  # stable-confirm + snapshot-lag = observability
-                print(f"[scn_timing] wait_until_paused  total={tot:6.1f}s "
+                active = _last_change - _t0 # last_seen advancing = training/observed work
+                settle = time.time() - _last_change # stable-confirm + snapshot-lag = observability
+                print(f"[scn_timing] wait_until_paused total={tot:6.1f}s "
                       f"active(train)={active:6.1f}s settle(obs)={settle:6.1f}s", flush=True)
             return cur
         prev = cur
@@ -354,8 +354,8 @@ def scenario_epoch_then_pause(client, world, batch):
     # auto-pause (pause_at_step) fire at the epoch boundary WITHOUT crossing into
     # epoch 2 (which would force a sampler re-iteration mid-test).
     epoch_steps = (n // world) // batch
-    epoch_steps = int(os.environ.get("WL_DDP_TEST_STEPS", epoch_steps))  # fast-debug override
-    print(f"[client] universe N={n}  world={world}  batch={batch}  -> epoch_steps={epoch_steps}")
+    epoch_steps = int(os.environ.get("WL_DDP_TEST_STEPS", epoch_steps)) # fast-debug override
+    print(f"[client] universe N={n} world={world} batch={batch} -> epoch_steps={epoch_steps}")
 
     t0 = time.time()
     client.train_steps(epoch_steps)
@@ -366,7 +366,7 @@ def scenario_epoch_then_pause(client, world, batch):
     epoch_secs = time.time() - t0
     print(f"[client] epoch done: max last_seen={reached} in {epoch_secs:.1f}s")
 
-    s1 = _settled_last_seen(client, n)  # wait out the DataService snapshot throttle
+    s1 = _settled_last_seen(client, n) # wait out the DataService snapshot throttle
     populated = {k: v for k, v in s1.items() if v is not None and v >= 0}
     # With the children->rank0 gather (fired on pause), rank 0 sees what ALL ranks
     # trained: ~reached*batch*world distinct samples (capped at the universe N,
@@ -391,8 +391,8 @@ def scenario_epoch_then_pause(client, world, batch):
         print(f"[client] FROZEN CHECK FAILED, {len(diff)} changed e.g. {list(diff.items())[:5]}")
 
     ok = a1 and a1b and a2
-    print(f"[1] EPOCH COVERAGE  populated>0={a1} populated~=shard={a1b}  -> {'PASS' if (a1 and a1b) else 'FAIL'}")
-    print(f"[2] PAUSE FREEZES   last_seen identical after wait={a2}      -> {'PASS' if a2 else 'FAIL'}")
+    print(f"[1] EPOCH COVERAGE populated>0={a1} populated~=shard={a1b} -> {'PASS' if (a1 and a1b) else 'FAIL'}")
+    print(f"[2] PAUSE FREEZES last_seen identical after wait={a2} -> {'PASS' if a2 else 'FAIL'}")
     return ok
 
 
@@ -443,11 +443,11 @@ def scenario_discard_subset_freezes(client, world, batch, n_discard=5):
     most_advanced = advanced >= int(0.8 * non_discarded_pop1)
 
     ok = a0 and all_frozen and most_advanced and (m2 > m1)
-    print(f"[1] DISCARD REGISTERED  exactly {n_discard} added={a0}")
-    print(f"[2] SUBSET FROZEN       all {n_discard} unchanged={all_frozen}  values {L} -> {frozen}")
-    print(f"[3] MOST ADVANCED       {advanced}/{non_discarded_pop1} non-discarded advanced "
-          f"(>=80%)={most_advanced}  (epoch max {m1}->{m2})")
-    print(f"  -> {'PASS' if ok else 'FAIL'}")
+    print(f"[1] DISCARD REGISTERED exactly {n_discard} added={a0}")
+    print(f"[2] SUBSET FROZEN all {n_discard} unchanged={all_frozen} values {L} -> {frozen}")
+    print(f"[3] MOST ADVANCED {advanced}/{non_discarded_pop1} non-discarded advanced "
+          f"(>=80%)={most_advanced} (epoch max {m1}->{m2})")
+    print(f" -> {'PASS' if ok else 'FAIL'}")
     return ok
 
 
@@ -458,7 +458,7 @@ def scenario_break_by_slice(client, world, batch):
     epoch_steps = (n // world) // batch
     epoch_steps = int(os.environ.get("WL_DDP_TEST_STEPS", epoch_steps))
     origin = client.train_origin()
-    graph = "train/bbxs"  # a per-sample loss component logged by the criterions
+    graph = "train/bbxs" # a per-sample loss component logged by the criterions
 
     client.train_steps(epoch_steps)
     _wait_until_paused(client, n, min_step=max(1, epoch_steps - batch))
@@ -472,25 +472,25 @@ def scenario_break_by_slice(client, world, batch):
     # trained set. Measure it directly with a 'uni' slice over all trained samples
     # (this is the GLOBAL loss universe on rank 0 thanks to the per-sample gather),
     # then check the 'even' slice returns exactly the even members that have loss.
-    even = set(trained[::2])  # every other trained sample — spans both ranks' shards
+    even = set(trained[::2]) # every other trained sample — spans both ranks' shards
     client.tag(trained, "uni", origin)
     client.tag(even, "even", origin)
     print(f"[client] trained={len(trained)} tagged uni + even={len(even)} (origin={origin})")
 
     uni_sids = {p[0] for p in client.break_by_slice(graph, ["uni"])}
     even_sids = {p[0] for p in client.break_by_slice(graph, ["even"])}
-    expected_even = even & uni_sids  # even-tagged samples that actually have loss
+    expected_even = even & uni_sids # even-tagged samples that actually have loss
 
     a1 = len(even_sids) > 0
-    a2 = (even_sids == expected_even)            # break-by-slice slices correctly
+    a2 = (even_sids == expected_even) # break-by-slice slices correctly
     ok = a1 and a2
-    print(f"[1] BREAK-BY-SLICE  even returned {len(even_sids)} samples (graph={graph})={a1}")
-    print(f"[2] SLICE CORRECT   even == even-with-loss ({len(expected_even)})={a2}")
+    print(f"[1] BREAK-BY-SLICE even returned {len(even_sids)} samples (graph={graph})={a1}")
+    print(f"[2] SLICE CORRECT even == even-with-loss ({len(expected_even)})={a2}")
     # Cross-rank is evidenced by the server-side [siggather] log (rank 0 receives the
     # children's triples). It's not cleanly black-box-assertable without a per-rank
     # baseline, and becomes STRUCTURAL once writes go through sync_to_rank0 on rank 0.
     print(f"[i] loss universe on rank 0 = {len(uni_sids)} samples (spans both ranks via the gather)")
-    print(f"  -> {'PASS' if ok else 'FAIL'}")
+    print(f" -> {'PASS' if ok else 'FAIL'}")
     return ok
 
 
@@ -501,7 +501,7 @@ def scenario_lr_batch_propagate(client, world, batch):
     epoch_steps = (n // world) // batch
     epoch_steps = int(os.environ.get("WL_DDP_TEST_STEPS", epoch_steps))
     new_batch = batch * 2
-    phase2 = 4  # short, so trained-count doesn't wrap the universe
+    phase2 = 4 # short, so trained-count doesn't wrap the universe
 
     # phase 1 at the original batch
     client.train_steps(epoch_steps)
@@ -521,8 +521,8 @@ def scenario_lr_batch_propagate(client, world, batch):
     steps2 = a1 - a0
     trained2 = sum(1 for v in s1.values() if v is not None and v > a0)
     rate = trained2 / steps2 if steps2 > 0 else 0.0
-    expected = new_batch * world          # both ranks switched
-    rank0_only = new_batch + batch        # only rank 0 switched (the bug we fixed)
+    expected = new_batch * world # both ranks switched
+    rank0_only = new_batch + batch # only rank 0 switched (the bug we fixed)
     # Threshold: must be clearly ABOVE the rank0-only failure mode. We don't
     # require hitting the full `expected` because under drop_last=False the
     # DistributedSampler pads the per-rank shard with re-yields of samples
@@ -531,10 +531,10 @@ def scenario_lr_batch_propagate(client, world, batch):
     # rank0_only + 1 cleanly distinguishes "both ranks doubled" (rate ≈ 13–16)
     # from "only rank-0 doubled" (rate ≈ 12).
     a1ok = steps2 > 0 and rate >= rank0_only + 1
-    print(f"[1] BATCH PROPAGATED  {trained2} samples / {steps2} steps = {rate:.1f}/step "
+    print(f"[1] BATCH PROPAGATED {trained2} samples / {steps2} steps = {rate:.1f}/step "
           f"(expect ~{expected} all-ranks vs ~{rank0_only} rank0-only)={a1ok}")
     print(f"[i] lr=0.05 rode the same hparam broadcast that carried batch (proven above)")
-    print(f"  -> {'PASS' if a1ok else 'FAIL'}")
+    print(f" -> {'PASS' if a1ok else 'FAIL'}")
     return a1ok
 
 
@@ -556,11 +556,11 @@ def scenario_checkpoint_data_roundtrip(client, world, batch):
     client.discard([A], origin)
 
     # 2) short resume -> save_pending_changes writes a FULL checkpoint (model+config+
-    #    data{A}) with non-null weights; then read its combined hash from the manifest.
+    # data{A}) with non-null weights; then read its combined hash from the manifest.
     client.train_steps(2)
     _wait_until_paused(client, n, min_step=a0 + 1)
     saved_hash = client.latest_full_checkpoint_hash()
-    time.sleep(12)  # clear the DataService snapshot throttle before reading
+    time.sleep(12) # clear the DataService snapshot throttle before reading
     disc_save = client.discarded_set(n)
     print(f"[client] discarded A={A}; full-ckpt hash={saved_hash}; discarded@save={sorted(disc_save)}")
 
@@ -580,13 +580,13 @@ def scenario_checkpoint_data_roundtrip(client, world, batch):
           f"msg={getattr(resp, 'message', '')[:70]}; discarded@post={sorted(disc_post)}")
 
     restore_ok = bool(getattr(resp, "success", False))
-    a0c = (C in disc_change)                 # the divergent discard registered
-    a1 = (C not in disc_post)                # restore undid it
-    a2 = (A in disc_post)                    # the saved discard survived the roundtrip
+    a0c = (C in disc_change) # the divergent discard registered
+    a1 = (C not in disc_post) # restore undid it
+    a2 = (A in disc_post) # the saved discard survived the roundtrip
     ok = restore_ok and a0c and a1 and a2
-    print(f"[1] DATA ROUNDTRIP  restore_ok={restore_ok} C-registered={a0c} "
+    print(f"[1] DATA ROUNDTRIP restore_ok={restore_ok} C-registered={a0c} "
           f"C-reverted={a1} A-intact={a2}")
-    print(f"  -> {'PASS' if ok else 'FAIL'}")
+    print(f" -> {'PASS' if ok else 'FAIL'}")
     return ok
 
 
@@ -618,7 +618,7 @@ def scenario_signal_coverage_all_graphs(client, world, batch):
     if len(trained) < 10:
         print(f"[client] too few trained ({len(trained)})"); return False
     client.tag(trained, "uni", origin)
-    print(f"[client] trained={len(trained)} tagged 'uni'  steps={epoch_steps}")
+    print(f"[client] trained={len(trained)} tagged 'uni' steps={epoch_steps}")
 
     graphs = ["train/bbxs", "train/clsf", "train/dfl", "miou/train"]
     per_sample_min = max(1, int(0.3 * len(trained)))
@@ -631,10 +631,10 @@ def scenario_signal_coverage_all_graphs(client, world, batch):
         plot_ok = len(plot_points) >= plot_min
         ok = ps_ok and plot_ok
         all_ok &= ok
-        print(f"[1] {g:<18s}  per-sample={len(per_sample_sids)}/{len(trained)} "
-              f"≥{per_sample_min}={ps_ok}   plot={len(plot_points)} "
-              f"≥{plot_min}={plot_ok}   both={ok}")
-    print(f"  -> {'PASS' if all_ok else 'FAIL'}")
+        print(f"[1] {g:<18s} per-sample={len(per_sample_sids)}/{len(trained)} "
+              f"≥{per_sample_min}={ps_ok} plot={len(plot_points)} "
+              f"≥{plot_min}={plot_ok} both={ok}")
+    print(f" -> {'PASS' if all_ok else 'FAIL'}")
     return all_ok
 
 
@@ -693,12 +693,12 @@ def scenario_resume_continues_curve(client, world, batch):
     _wait_until_paused(client, n, min_step=age_diverged + 1)
     post_train_plot = client.scalar_plot("train/bbxs")
     a3 = len(post_train_plot) > len(pre_restore_plot)
-    print(f"[3] PLOT GROWS    pre={len(pre_restore_plot)} post={len(post_train_plot)} → {a3}")
+    print(f"[3] PLOT GROWS pre={len(pre_restore_plot)} post={len(post_train_plot)} → {a3}")
 
     ok = a1 and a2 and a3
-    print(f"[1] RESTORE OK    success={a1}")
-    print(f"[2] SERVER ALIVE  universe={n_after}/{n} → {a2}")
-    print(f"  -> {'PASS' if ok else 'FAIL'}")
+    print(f"[1] RESTORE OK success={a1}")
+    print(f"[2] SERVER ALIVE universe={n_after}/{n} → {a2}")
+    print(f" -> {'PASS' if ok else 'FAIL'}")
     return ok
 
 
@@ -711,7 +711,7 @@ def scenario_process_topology(client, world, batch):
     import re
     import subprocess
 
-    _ = client.universe_size()  # confirm we're connected; ranks are alive
+    _ = client.universe_size() # confirm we're connected; ranks are alive
     grpc_port = getattr(client, "_port", None)
 
     # Walk the descendant tree of the suite process to find spawned ranks.
@@ -770,9 +770,9 @@ def scenario_process_topology(client, world, batch):
     # Sanity: at least one PID does listen (otherwise the gRPC server is dead).
     a2 = len(listening) >= 1
     ok = a1 and a2
-    print(f"[1] gRPC OWNER     PIDs owning port {grpc_port}: {grpc_owners} (==1) → {a1}")
-    print(f"[2] HAS LISTENERS  {len(listening)} PID(s) with TCP sockets (≥1) → {a2}")
-    print(f"  -> {'PASS' if ok else 'FAIL'}")
+    print(f"[1] gRPC OWNER PIDs owning port {grpc_port}: {grpc_owners} (==1) → {a1}")
+    print(f"[2] HAS LISTENERS {len(listening)} PID(s) with TCP sockets (≥1) → {a2}")
+    print(f" -> {'PASS' if ok else 'FAIL'}")
     return ok
 
 
@@ -807,17 +807,17 @@ def scenario_multi_epoch_stability(client, world, batch):
     # Per-graph: no duplicate (sid, age) entries
     dedup_ok = True
     for g in ["train/bbxs", "train/clsf", "train/dfl", "miou/train"]:
-        entries = client.break_by_slice(g, ["uni"])  # [(sid, age, val), ...]
+        entries = client.break_by_slice(g, ["uni"]) # [(sid, age, val), ...]
         keys = [(sid, age) for sid, age, _ in entries]
         unique, total = len(set(keys)), len(keys)
         ok = (unique == total)
         dedup_ok &= ok
-        print(f"[1] {g:<18s} {total} entries, {unique} unique (sid,age)  → {ok}")
+        print(f"[1] {g:<18s} {total} entries, {unique} unique (sid,age) → {ok}")
 
     age_mono = ages[0] < ages[1] < ages[2]
-    print(f"[2] AGE MONOTONIC    ages={ages} (strictly increasing) → {age_mono}")
+    print(f"[2] AGE MONOTONIC ages={ages} (strictly increasing) → {age_mono}")
     ok = dedup_ok and age_mono
-    print(f"  -> {'PASS' if ok else 'FAIL'}")
+    print(f" -> {'PASS' if ok else 'FAIL'}")
     return ok
 
 
@@ -825,17 +825,17 @@ def scenario_curate_lifecycle(client, world, batch):
     """End-to-end UI curation workflow under DDP — multiple composing edits and
     the loss trajectory tells the story:
 
-       epoch 1  (warm up: all populated samples accumulate train/bbxs entries)
+       epoch 1 (warm up: all populated samples accumulate train/bbxs entries)
        → tag 3 samples 'suspect'
        → discard those 3
-       epoch 2  (the 3 suspects must produce NO new train/bbxs entries —
+       epoch 2 (the 3 suspects must produce NO new train/bbxs entries —
                  their slot in the loss trajectory has a gap)
        → un-discard the 3
-       → tag them additionally 'verified'   (so each carries BOTH tags)
-       epoch 3  (the 3 resume; new entries appear beyond the discard age)
+       → tag them additionally 'verified' (so each carries BOTH tags)
+       epoch 3 (the 3 resume; new entries appear beyond the discard age)
 
     Assertions:
-      [1] LIFECYCLE  — for each suspect: pre-discard entries exist AND
+      [1] LIFECYCLE — for each suspect: pre-discard entries exist AND
                        no entries in the (discard_age, undiscard_age] window
                        AND post-resume entries exist. The gap is the proof
                        that discard reached the worker fast-path (the shm
@@ -895,15 +895,15 @@ def scenario_curate_lifecycle(client, world, batch):
         ages_by_sid.setdefault(sid, []).append(age)
 
     # Per-suspect trajectory:
-    #   pre  — every suspect must have ≥1 entry before discard (proves we're
-    #          tracking a sample that was actually trained on);
-    #   gap  — NO suspect may have an entry in (discard, undiscard] (proves the
-    #          discard reached the sampler/worker fast-path);
-    #   post — AT LEAST ONE suspect must have a post-undiscard entry (proves
-    #          un-discard reaches the sampler). The shuffled sampler in a
-    #          short 20-step epoch won't yield every sample, so requiring ALL
-    #          suspects to resume would be a shuffle-luck check, not a
-    #          correctness check.
+    # pre — every suspect must have ≥1 entry before discard (proves we're
+    # tracking a sample that was actually trained on);
+    # gap — NO suspect may have an entry in (discard, undiscard] (proves the
+    # discard reached the sampler/worker fast-path);
+    # post — AT LEAST ONE suspect must have a post-undiscard entry (proves
+    # un-discard reaches the sampler). The shuffled sampler in a
+    # short 20-step epoch won't yield every sample, so requiring ALL
+    # suspects to resume would be a shuffle-luck check, not a
+    # correctness check.
     pre_ok, gap_ok = True, True
     any_post = False
     for sid in suspects:
@@ -912,26 +912,26 @@ def scenario_curate_lifecycle(client, world, batch):
         gap = [a for a in ages if age_at_discard < a <= age_at_undiscard]
         post = [a for a in ages if a > age_at_undiscard]
         if not pre: pre_ok = False
-        if gap:     gap_ok = False
-        if post:    any_post = True
-        print(f"    sid={sid}: pre={pre[-3:]}  gap={gap}  post={post[:3]}")
+        if gap: gap_ok = False
+        if post: any_post = True
+        print(f" sid={sid}: pre={pre[-3:]} gap={gap} post={post[:3]}")
     post_ok = any_post
 
     verified_sids = {p[0] for p in client.break_by_slice("train/bbxs", ["verified"])}
     tag_compose = set(suspects).issubset(verified_sids)
 
     plot = client.scalar_plot("train/bbxs")
-    plot_ok = len(plot) >= 3 * 1  # at least one point per epoch (loose)
+    plot_ok = len(plot) >= 3 * 1 # at least one point per epoch (loose)
 
     a1ok = pre_ok and gap_ok and post_ok
     a2ok = tag_compose
     a3ok = plot_ok
-    print(f"[1] LIFECYCLE     pre={pre_ok} gap-empty={gap_ok} any-post={post_ok} → {a1ok}")
-    print(f"[2] TAG COMPOSE   verified⊇suspects ({len(verified_sids)} verified, "
+    print(f"[1] LIFECYCLE pre={pre_ok} gap-empty={gap_ok} any-post={post_ok} → {a1ok}")
+    print(f"[2] TAG COMPOSE verified⊇suspects ({len(verified_sids)} verified, "
           f"{len(set(suspects) & verified_sids)}/3 suspects tagged) → {a2ok}")
-    print(f"[3] PLOT METRICS  scalar_plot has {len(plot)} entries → {a3ok}")
+    print(f"[3] PLOT METRICS scalar_plot has {len(plot)} entries → {a3ok}")
     ok = a1ok and a2ok and a3ok
-    print(f"  -> {'PASS' if ok else 'FAIL'}")
+    print(f" -> {'PASS' if ok else 'FAIL'}")
     return ok
 
 
@@ -948,7 +948,7 @@ def scenario_collective_budget(client, world, batch):
     log_path = os.environ.get("WL_DDP_COLLECTIVE_LOG")
     if not log_path:
         print(f"[client] WL_DDP_COLLECTIVE_LOG not set; skipping"); return False
-    open(log_path, "w").close()  # truncate before this scenario's window
+    open(log_path, "w").close() # truncate before this scenario's window
 
     n = client.universe_size()
     epoch_steps = (n // world) // batch
@@ -966,19 +966,19 @@ def scenario_collective_budget(client, world, batch):
     # First few entries can include pause-spin reconciles (many per "step" while
     # the trainer is waiting for the resume signal). Take a slice from the tail
     # corresponding to clearly-in-the-body steps.
-    body = [c for c in counts if c <= 5]   # drop the spin-inflated outliers
+    body = [c for c in counts if c <= 5] # drop the spin-inflated outliers
     spin = [c for c in counts if c > 5]
     avg_body = (sum(body) / len(body)) if body else float("inf")
     max_body = max(body) if body else 0
 
     a1 = max_body <= 2
     a2 = avg_body <= 2.0
-    print(f"[1] BUDGET PER STEP  body samples={len(body)}, max={max_body}, "
+    print(f"[1] BUDGET PER STEP body samples={len(body)}, max={max_body}, "
           f"avg={avg_body:.2f}, spin samples={len(spin)} (excluded) "
           f"max-over-budget→{a1}")
-    print(f"[2] AVG ≤ 2          {avg_body:.2f} → {a2}")
+    print(f"[2] AVG ≤ 2 {avg_body:.2f} → {a2}")
     ok = a1 and a2
-    print(f"  -> {'PASS' if ok else 'FAIL'}")
+    print(f" -> {'PASS' if ok else 'FAIL'}")
     return ok
 
 
@@ -1013,13 +1013,13 @@ def scenario_seed_determinism(client, world, batch):
 
     a1 = len(pull1) > 0 and len(pull1) == len(pull2)
     a2 = all(p1 == p2 for p1, p2 in zip(pull1, pull2))
-    print(f"[1] STABLE LEN       pull1={len(pull1)} == pull2={len(pull2)} → {a1}")
-    print(f"[2] BIT-IDENTICAL    every (sid, age, val) matches → {a2}")
+    print(f"[1] STABLE LEN pull1={len(pull1)} == pull2={len(pull2)} → {a1}")
+    print(f"[2] BIT-IDENTICAL every (sid, age, val) matches → {a2}")
     # Spot-check first 3 entries
     for i in range(min(3, len(pull1))):
-        print(f"    p1[{i}]={pull1[i]}  p2[{i}]={pull2[i]}")
+        print(f" p1[{i}]={pull1[i]} p2[{i}]={pull2[i]}")
     ok = a1 and a2
-    print(f"  -> {'PASS' if ok else 'FAIL'}")
+    print(f" -> {'PASS' if ok else 'FAIL'}")
     return ok
 
 
@@ -1060,7 +1060,7 @@ def scenario_empty_shard_starvation(client, world, batch):
     else:
         to_discard = populated[:-keep]
     client.discard(to_discard, origin)
-    print(f"[client] discarded {len(to_discard)}  (keep={keep}, force={bool(_force)})")
+    print(f"[client] discarded {len(to_discard)} (keep={keep}, force={bool(_force)})")
 
     # Short post-discard train. Bounded timeout: if it hangs, assertion fires.
     K = min(epoch_steps, 8)
@@ -1072,13 +1072,13 @@ def scenario_empty_shard_starvation(client, world, batch):
                                 timeout=180.0, poll=3.0)
     except TimeoutError:
         elapsed = time.time() - t0
-        print(f"[client] HUNG  no model_age advance in {elapsed:.0f}s (a0={a0})")
-        print(f"  -> FAIL")
+        print(f"[client] HUNG no model_age advance in {elapsed:.0f}s (a0={a0})")
+        print(f" -> FAIL")
         return False
     elapsed = time.time() - t0
     advanced = a1 > a0
-    print(f"[1] NO HANG          age advanced {a0}→{a1} in {elapsed:.1f}s → {advanced}")
-    print(f"  -> {'PASS' if advanced else 'FAIL'}")
+    print(f"[1] NO HANG age advanced {a0}→{a1} in {elapsed:.1f}s → {advanced}")
+    print(f" -> {'PASS' if advanced else 'FAIL'}")
     return advanced
 
 
@@ -1098,7 +1098,7 @@ def scenario_progressive_resample(client, world, batch):
     def _epoch_steps(live):
         return max(1, (live // world) // batch)
 
-    def _ls(d, sid):                       # None-safe last_seen ( -1 == never seen )
+    def _ls(d, sid): # None-safe last_seen ( -1 == never seen )
         v = d.get(sid)
         return v if v is not None else -1
 
@@ -1114,8 +1114,8 @@ def scenario_progressive_resample(client, world, batch):
                                    timeout=180.0, poll=3.0)
         dt = time.perf_counter() - t0
         total = n_ep * steps_each
-        print(f"[time] {label:24s} {n_ep}ep x {steps_each:>3}st = {total:>4} steps  "
-              f"{dt:6.1f}s  ({dt/max(1,total):.2f}s/step)")
+        print(f"[time] {label:24s} {n_ep}ep x {steps_each:>3}st = {total:>4} steps "
+              f"{dt:6.1f}s ({dt/max(1,total):.2f}s/step)")
         return m, dt
 
     # --- warm-up: 1 full epoch (100% live) ---
@@ -1124,7 +1124,7 @@ def scenario_progressive_resample(client, world, batch):
     m0 = _wait_until_paused(client, n, min_step=max(1, full_epoch_steps - batch))
     t_warm = time.perf_counter() - t0
     print(f"[time] {'warmup (1 x 100%)':24s} 1ep x {full_epoch_steps:>3}st = {full_epoch_steps:>4} "
-          f"steps  {t_warm:6.1f}s  ({t_warm/full_epoch_steps:.2f}s/step)")
+          f"steps {t_warm:6.1f}s ({t_warm/full_epoch_steps:.2f}s/step)")
     s0 = _settled_last_seen(client, n)
     all_ids = sorted(s0.keys(), key=lambda k: int(k))
     if sum(1 for k in all_ids if _ls(s0, k) >= 0) < 40:
@@ -1146,7 +1146,7 @@ def scenario_progressive_resample(client, world, batch):
     disc_frozen = sum(1 for sid in discard_ids if _ls(s1, sid) == _ls(s0, sid))
     a1 = (kept_adv >= int(0.8 * len(keep)) and
           disc_frozen >= int(0.95 * len(discard_ids)))
-    print(f"[1] DISCARD SHIFT   kept advanced {kept_adv}/{len(keep)} (>=80%), "
+    print(f"[1] DISCARD SHIFT kept advanced {kept_adv}/{len(keep)} (>=80%), "
           f"discarded frozen {disc_frozen}/{len(discard_ids)} (>=95%) -> {a1}")
 
     # --- grow: un-discard up to ~50% live ---
@@ -1165,14 +1165,14 @@ def scenario_progressive_resample(client, world, batch):
     still_frozen = sum(1 for sid in still_disc if _ls(s2, sid) == _ls(s1, sid))
     a2 = ((not re_add or readd_adv >= int(0.8 * len(re_add))) and
           (not still_disc or still_frozen >= int(0.95 * len(still_disc))))
-    print(f"[2] GROWTH HANDLED  re-added advanced {readd_adv}/{len(re_add)} (>=80%), "
+    print(f"[2] GROWTH HANDLED re-added advanced {readd_adv}/{len(re_add)} (>=80%), "
           f"still-discarded frozen {still_frozen}/{len(still_disc)} (>=95%) -> {a2}")
 
-    print(f"[time] SUMMARY  warmup={t_warm:.0f}s  post-discard(2x10%)={t_lo:.0f}s  "
-          f"post-readd(2x50%)={t_hi:.0f}s   (warmup/post-discard ~= "
+    print(f"[time] SUMMARY warmup={t_warm:.0f}s post-discard(2x10%)={t_lo:.0f}s "
+          f"post-readd(2x50%)={t_hi:.0f}s (warmup/post-discard ~= "
           f"{t_warm/max(0.1,t_lo):.1f}x, expect ~5x if per-step cost is flat)")
     ok = a1 and a2
-    print(f"  -> {'PASS' if ok else 'FAIL'}")
+    print(f" -> {'PASS' if ok else 'FAIL'}")
     return ok
 
 
@@ -1203,7 +1203,7 @@ def _free_port():
 def _run_one(scn, batch):
     """Spawn a FRESH server (isolation), run one scenario, tear the server down."""
     master_port, grpc_port = _free_port(), _free_port()
-    print(f"\n[suite] === {scn.__name__} ===  spawning {_WORLD} ranks, gRPC :{grpc_port}, "
+    print(f"\n[suite] === {scn.__name__} === spawning {_WORLD} ranks, gRPC :{grpc_port}, "
           f"imgsz={os.environ['WL_DDP_IMGSZ']}")
     ctx = mp.spawn(_train_worker, args=(_WORLD, master_port, grpc_port), nprocs=_WORLD, join=False)
     client = Client(grpc_port)
@@ -1235,7 +1235,7 @@ def main():
     _cfg_batch = yaml.safe_load(open(os.path.join(yolo_pipeline._HERE, "config.yaml"))
                                 )["data"]["train_loader"]["batch_size"]
     batch = int(os.environ.get("WL_DDP_BATCH", _cfg_batch))
-    only = os.environ.get("WL_DDP_ONLY")  # substring filter to run a single scenario
+    only = os.environ.get("WL_DDP_ONLY") # substring filter to run a single scenario
     # WL_DDP_SKIP: comma-separated substrings to EXCLUDE — lets a killed run resume
     # by skipping the scenarios that already passed (the suite has no checkpoint).
     skip = [s.strip() for s in os.environ.get("WL_DDP_SKIP", "").split(",") if s.strip()]
@@ -1246,9 +1246,9 @@ def main():
 
     print("\n" + "=" * 64)
     for name, ok in results.items():
-        print(f"  {name:42s} -> {'PASS' if ok else 'FAIL'}")
+        print(f" {name:42s} -> {'PASS' if ok else 'FAIL'}")
     allok = bool(results) and all(results.values())
-    print(f"  RESULT: {'ALL PASS' if allok else 'FAILURES ABOVE'}")
+    print(f" RESULT: {'ALL PASS' if allok else 'FAILURES ABOVE'}")
     print("=" * 64)
     raise SystemExit(0 if allok else 1)
 

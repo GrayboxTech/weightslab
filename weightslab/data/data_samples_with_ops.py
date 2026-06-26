@@ -59,7 +59,7 @@ def _match_column_patterns(col: str, patterns: list) -> bool:
                 if re.search(pattern, col):
                     return True
             except re.error:
-                pass  # Invalid regex, skip
+                pass # Invalid regex, skip
     return False
 
 
@@ -109,18 +109,18 @@ class DataSampleTrackingWrapper(Dataset):
     Examples:
         Binary classification based on tags:
         >>> dataset = DataSampleTrackingWrapper(
-        ...     mnist_train,
-        ...     root_log_dir="./logs",
-        ...     use_tags=True,
-        ...     tags_mapping={'huge': 1}  # Images tagged 'huge' → label 1, others → 0
+        ... mnist_train,
+        ... root_log_dir="./logs",
+        ... use_tags=True,
+        ... tags_mapping={'huge': 1} # Images tagged 'huge' → label 1, others → 0
         ... )
 
         Multiclass classification based on tags:
         >>> dataset = DataSampleTrackingWrapper(
-        ...     mnist_train,
-        ...     root_log_dir="./logs",
-        ...     use_tags=True,
-        ...     tags_mapping={'small': 0, 'medium': 1, 'large': 2}
+        ... mnist_train,
+        ... root_log_dir="./logs",
+        ... use_tags=True,
+        ... tags_mapping={'small': 0, 'medium': 1, 'large': 2}
         ... )
     """
     def __init__(
@@ -167,7 +167,7 @@ class DataSampleTrackingWrapper(Dataset):
         # Setup H5 persistence path
         self._root_log_dir = Path(root_log_dir) if root_log_dir else self._resolve_root_log_dir()
         self._h5_path = None
-        self._h5_pending_uids = set()  # Track UIDs with pending H5 saves
+        self._h5_pending_uids = set() # Track UIDs with pending H5 saves
         self._stats_store = stats_store
         self._enable_h5_persistence = enable_h5_persistence
 
@@ -281,7 +281,7 @@ class DataSampleTrackingWrapper(Dataset):
         self._map_updates_hook_fns = []
         self._df_lock = threading.RLock()
         self.is_training = is_training
-        self._dataset_split = split  # Store for H5 filename (can be train, test, val, validation, eval, etc.)
+        self._dataset_split = split # Store for H5 filename (can be train, test, val, validation, eval, etc.)
 
         # Initialize DataFrame as single source of truth
         # Start with defaults for all UIDs (single dict build per row to trim overhead)
@@ -315,10 +315,10 @@ class DataSampleTrackingWrapper(Dataset):
                     # to get_items() which may load images and run heavy transforms.
                     raw_item = wrapped_dataset.fast_get_label(p_idx)
                 elif hasattr(wrapped_dataset, 'get_items'):
-                    raw_item = wrapped_dataset.get_items(p_idx, include_metadata=preload_metadata, include_labels=preload_labels, include_images=False)  # Try to get metadata if supported
+                    raw_item = wrapped_dataset.get_items(p_idx, include_metadata=preload_metadata, include_labels=preload_labels, include_images=False) # Try to get metadata if supported
                 else:
                     # logger.warning(f"Wrapped dataset for split '{split}' does not have get_items method. Falling back to __getitem__, which may cause issues if the dataset is not designed for it. Consider implementing get_items for better performance and compatibility.")
-                    raw_item = wrapped_dataset[p_idx]  # By default load everything
+                    raw_item = wrapped_dataset[p_idx] # By default load everything
             except Exception as e:
                 logger.error(f"Failed to load physical index {p_idx} during initialization: {e}")
                 continue
@@ -363,7 +363,7 @@ class DataSampleTrackingWrapper(Dataset):
                 row = SampleStats.DEFAULTS.copy()
                 row.update({
                     SampleStatsEx.SAMPLE_ID.value: sid,
-                    # SampleStatsEx.INSTANCE_ID.value: str(0),  # Added later in the preprocessing during df registration
+                    # SampleStatsEx.INSTANCE_ID.value: str(0), # Added later in the preprocessing during df registration
                     SampleStatsEx.ORIGIN.value: split,
                     SampleStatsEx.GROUP_ID.value: str(group_id),
                     SampleStatsEx.MEMBER_RANK.value: rank
@@ -540,7 +540,7 @@ class DataSampleTrackingWrapper(Dataset):
                         target = self._tags_mapping[tag]
                         break
                 else:
-                    target = 0  # Default to 0 if no tags match the mapping
+                    target = 0 # Default to 0 if no tags match the mapping
             else:
                 # No mapping provided but use_tags=True: keep original target
                 logger.warning(f"use_tags=True but no tags_mapping provided for sample {id}")
@@ -658,7 +658,7 @@ class DataSampleTrackingWrapper(Dataset):
         dataset = self.wrapped_dataset if dataset is None else dataset
 
         n_samples = len(dataset)
-        unique_ids = [i for i in range(n_samples)]  # Initialize with indices as fallback IDs
+        unique_ids = [i for i in range(n_samples)] # Initialize with indices as fallback IDs
         unique_id_to_index = {}
 
         def compute_id(idx):
@@ -681,11 +681,11 @@ class DataSampleTrackingWrapper(Dataset):
 
                 # Generate the ID
                 uid = array_id_2bytes(data_array, return_hex=False, tronc_1byte=True)
-                uid = str(uid)  # Convert to string for consistent handling
+                uid = str(uid) # Convert to string for consistent handling
                 return idx, uid
             except Exception as e:
                 logger.warning(f"Failed to generate ID for sample {idx}: {e}")
-                return idx, str(idx)  # Fallback to index as ID
+                return idx, str(idx) # Fallback to index as ID
 
         # Use ThreadPoolExecutor; track progress on completed tasks.
         with ThreadPoolExecutor(thread_name_prefix="unique_id_generator") as executor:
@@ -695,10 +695,10 @@ class DataSampleTrackingWrapper(Dataset):
             # Collect results as they complete
             for future in tqdm(as_completed(futures), total=n_samples, desc="Generating unique IDs", unit="sample"):
                 idx, uid = future.result()
-                uid = str(uid)  # Ensure UID is a string for consistent handling
+                uid = str(uid) # Ensure UID is a string for consistent handling
                 unique_ids[idx] = uid
                 unique_id_to_index[uid] = idx if uid not in unique_id_to_index else unique_id_to_index[uid]
-        unique_ids = np.asanyarray(unique_ids, dtype=object)  # Use object dtype for string UIDs
+        unique_ids = np.asanyarray(unique_ids, dtype=object) # Use object dtype for string UIDs
         return unique_ids, unique_id_to_index
 
     def _get_df_view(self, limit: int = -1, column: str = None, value: str = None) -> pd.DataFrame:

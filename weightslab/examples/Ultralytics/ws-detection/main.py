@@ -41,8 +41,11 @@ def main():
     os.makedirs(cfg["root_log_dir"], exist_ok=True)
     wl.watch_or_edit(cfg, flag="hyperparameters", defaults=cfg, poll_interval=1.0)
 
-    # Read raw config values BEFORE wrapping so YOLO.train kwargs are plain
-    # Python (avoids ProxyValue.__gt__ during max()/comparisons).
+    # After watch_or_edit, `cfg` is the live hyperparameter proxy, so these reads
+    # return ledger handles (e.g. image_size is a ValueProxy) that stay in sync
+    # with studio edits. They are passed straight to YOLO.train(...): ValueProxy
+    # supports int/compare ops for YOLO's imgsz handling, and the ledger registers
+    # a YAML representer (see ledgers.py) so Ultralytics can dump its run args.
     model_name = cfg["model"]["name"]
     data_root = str(cfg["data_root"])
     image_size = cfg.get("image_size")
@@ -52,21 +55,20 @@ def main():
     serving_cli = cfg.get("serving_cli", False)
     project = cfg["root_log_dir"]
     name = cfg["experiment_name"]
-    signals_cfg = cfg.get('signals_cfg', {})
 
     wl.serve(serving_grpc=serving_grpc, serving_cli=serving_cli)
 
     # ================
     # Training Loop
-    wl.start_training(timeout=3)  # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+    wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     YOLO(model_name).train(
         trainer=WLAwareTrainer,
         data=data_root,
         imgsz=image_size,
-        epochs=1000 if max_steps is None else max(1, int(max_steps)),
+        epochs=1000 if max_steps == None else max(1, int(max_steps)),
         device=device,
-        project=project, name=name,  # → UL save_dir → WL logger log_dir/name
+        project=project, name=name, # → UL save_dir → WL logger log_dir/name
         resume=False,
         cache=False,
         optimizer="SGD",
@@ -78,11 +80,13 @@ def main():
         degrees=0.0, translate=0.0, scale=0.0, shear=0.0, perspective=0.0,
         flipud=0.0, fliplr=0.0, erasing=0.0,
         auto_augment=None,
-        # Signals cfg
-        **signals_cfg
+        # NOTE: signals_cfg (e.g. train_nms) is NOT passed here — it is read by
+        # WLAwareTrainer from the registered hyperparameters
+        # (ledgers.get_hyperparams()['signals_cfg']). Spreading it into .train()
+        # would make Ultralytics reject keys like `train_nms` as invalid YOLO args.
     )
 
-    wl.keep_serving()  # Keep main thread alive to analyze training results directly
+    wl.keep_serving() # Keep main thread alive to analyze training results directly
 
 
 if __name__ == "__main__":

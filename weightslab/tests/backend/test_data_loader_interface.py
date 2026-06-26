@@ -265,17 +265,17 @@ class TestDataLoaderInterface(unittest.TestCase):
         Pattern:
         step = 0
         while step < max_steps:
-            data = next(loader)  # Manual iteration with auto-reset after epoch
+            data = next(loader) # Manual iteration with auto-reset after epoch
             if step % 5 == 0:
-                for batches in loader:  # For-loop continues from current position
-                    process(batches)    # Gets remaining batches, ends with StopIteration
+                for batches in loader: # For-loop continues from current position
+                    process(batches) # Gets remaining batches, ends with StopIteration
             step += 1
         """
         iface = DataLoaderInterface(self.train_ds, batch_size=self.batch_size, is_training=False, compute_hash=True)
         loader = ledgers.get_dataloader()
         batches_per_epoch = len(iface.dataloader)
         step = 0
-        max_steps = 30  # Run for multiple epochs
+        max_steps = 30 # Run for multiple epochs
         manual_batches_collected = 0
         for_loop_batches_collected = 0
 
@@ -368,10 +368,10 @@ class TestDataLoaderReproducibility(unittest.TestCase):
 
         # Auto register
         hp = ledgers.get_hyperparams()
-        hp['ledger_flush_interval'] = 10  # Disable flushing threads for tests
-        hp['ledger_flush_max_rows'] = 15  # Disable flushing threads for tests
-        hp['ledger_enable_h5_persistence'] = False  # Disable flushing threads for tests
-        hp['ledger_enable_flushing_threads'] = False  # Disable flushing threads for tests
+        hp['ledger_flush_interval'] = 10 # Disable flushing threads for tests
+        hp['ledger_flush_max_rows'] = 15 # Disable flushing threads for tests
+        hp['ledger_enable_h5_persistence'] = False # Disable flushing threads for tests
+        hp['ledger_enable_flushing_threads'] = False # Disable flushing threads for tests
 
         # Set controller to resumed state
         pause_controller._resume()
@@ -429,7 +429,7 @@ class TestDataLoaderReproducibility(unittest.TestCase):
         # 2. Capture RNG state
         print("\n2. Capturing RNG state...")
         rng_state = capture_rng_state()
-        dataloader.reset_iterator()  # Reset to use captured RNG
+        dataloader.reset_iterator() # Reset to use captured RNG
         print(f"[OK] RNG state captured and iterator reset")
 
         # 3. Generate batches with current RNG
@@ -455,65 +455,65 @@ class TestDataLoaderReproducibility(unittest.TestCase):
         b2_check = np.array_equal(bids_2, bids_2_repeat)
         print(f"\n{'='*60}")
         print("Verification:")
-        print(f"  Batch 1 match: {b1_check}")
-        print(f"  Batch 2 match: {b2_check}")
+        print(f" Batch 1 match: {b1_check}")
+        print(f" Batch 2 match: {b2_check}")
         self.assertTrue(b1_check, "First batches should be identical")
         self.assertTrue(b2_check, "Second batches should be identical")
         print(f"[OK] RNG reproducibility verified!\n")
 
     # TODO (GP): Re-enable once OffsetSampler is implemented and tested
     # def test_iteration_state_reproducibility_without_shuffle(self):
-    #     """Test dataloader reproducibility without shuffle: capture iteration state → resume identically.
+    # """Test dataloader reproducibility without shuffle: capture iteration state → resume identically.
 
-    #     With shuffle disabled, RNG is irrelevant. We capture the iteration position
-    #     (number of batches yielded) and restore that position efficiently using
-    #     OffsetSampler to skip samples at the index level without data reprocessing.
-    #     """
-    #     print(f"\n{'='*60}")
-    #     print("Iteration State Reproducibility - No Shuffle")
-    #     print(f"{'='*60}\n")
+    # With shuffle disabled, RNG is irrelevant. We capture the iteration position
+    # (number of batches yielded) and restore that position efficiently using
+    # OffsetSampler to skip samples at the index level without data reprocessing.
+    # """
+    # print(f"\n{'='*60}")
+    # print("Iteration State Reproducibility - No Shuffle")
+    # print(f"{'='*60}\n")
 
-    #     print("1. Creating dataloader (shuffle=False)...")
-    #     dataloader = DataLoaderInterface(
-    #         self.dataset,
+    # print("1. Creating dataloader (shuffle=False)...")
+    # dataloader = DataLoaderInterface(
+    # self.dataset,
 
-    #         batch_size=2,
-    #         shuffle=False,
-    #         num_workers=0
-    #     )
-    #     print(f"[OK] DataLoader created (batch_size=2, shuffle=False)")
+    # batch_size=2,
+    # shuffle=False,
+    # num_workers=0
+    # )
+    # print(f"[OK] DataLoader created (batch_size=2, shuffle=False)")
 
-    #     # 2. Consume two batches, then capture state
-    #     print("\n2. Consuming first 2 batches...")
-    #     _, bids_1, _ = next(dataloader)
-    #     _, bids_2, _ = next(dataloader)
-    #     print(f"Batches 1-2: {bids_1}, {bids_2}")
+    # # 2. Consume two batches, then capture state
+    # print("\n2. Consuming first 2 batches...")
+    # _, bids_1, _ = next(dataloader)
+    # _, bids_2, _ = next(dataloader)
+    # print(f"Batches 1-2: {bids_1}, {bids_2}")
 
-    #     iter_state = dataloader.capture_iteration_state()
-    #     print(f"[OK] Iteration state captured: {iter_state}")
+    # iter_state = dataloader.capture_iteration_state()
+    # print(f"[OK] Iteration state captured: {iter_state}")
 
-    #     # 3. Consume next two batches
-    #     print("\n3. Consuming batches 3-4...")
-    #     _, bids_3, _ = next(dataloader)
-    #     _, bids_4, _ = next(dataloader)
-    #     print(f"Batches 3-4: {bids_3}, {bids_4}")
+    # # 3. Consume next two batches
+    # print("\n3. Consuming batches 3-4...")
+    # _, bids_3, _ = next(dataloader)
+    # _, bids_4, _ = next(dataloader)
+    # print(f"Batches 3-4: {bids_3}, {bids_4}")
 
-    #     # 4. Restore iteration state
-    #     print(f"\n4. Restoring to position after batch 2...")
-    #     dataloader.restore_iteration_state(iter_state)
-    #     print(f"[OK] Iteration state restored (skipped first 2 batches efficiently)")
+    # # 4. Restore iteration state
+    # print(f"\n4. Restoring to position after batch 2...")
+    # dataloader.restore_iteration_state(iter_state)
+    # print(f"[OK] Iteration state restored (skipped first 2 batches efficiently)")
 
-    #     # 5. Generate batches again - should match 3 and 4
-    #     print("\n5. Generating next batches (should match 3-4)...")
-    #     _, bids_3_repeat, _ = next(dataloader)
-    #     _, bids_4_repeat, _ = next(dataloader)
-    #     print(f"Repeated batches: {bids_3_repeat}, {bids_4_repeat}")
+    # # 5. Generate batches again - should match 3 and 4
+    # print("\n5. Generating next batches (should match 3-4)...")
+    # _, bids_3_repeat, _ = next(dataloader)
+    # _, bids_4_repeat, _ = next(dataloader)
+    # print(f"Repeated batches: {bids_3_repeat}, {bids_4_repeat}")
 
-    #     # Verify
-    #     print(f"\n{'='*60}")
-    #     print("Verification:")
-    #     print(f"  Batch 3 match: {torch.equal(bids_3, bids_3_repeat)}")
-    #     print(f"  Batch 4 match: {torch.equal(bids_4, bids_4_repeat)}")
-    #     self.assertTrue(torch.equal(bids_3, bids_3_repeat), "Batch 3 should be identical")
-    #     self.assertTrue(torch.equal(bids_4, bids_4_repeat), "Batch 4 should be identical")
-    #     print(f"[OK] Iteration state reproducibility verified!\n")
+    # # Verify
+    # print(f"\n{'='*60}")
+    # print("Verification:")
+    # print(f" Batch 3 match: {torch.equal(bids_3, bids_3_repeat)}")
+    # print(f" Batch 4 match: {torch.equal(bids_4, bids_4_repeat)}")
+    # self.assertTrue(torch.equal(bids_3, bids_3_repeat), "Batch 3 should be identical")
+    # self.assertTrue(torch.equal(bids_4, bids_4_repeat), "Batch 4 should be identical")
+    # print(f"[OK] Iteration state reproducibility verified!\n")

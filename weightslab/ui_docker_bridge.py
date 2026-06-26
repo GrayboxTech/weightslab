@@ -56,7 +56,7 @@ _DERIVED_DEPLOY_ENV_VARS = (
 def _persist_certs_dir(certs_dir_str: str) -> None:
     """Persist WEIGHTSLAB_CERTS_DIR so future terminals and the training backend find it.
 
-    Windows  — runs `setx` (permanent user env) and prints the PS one-liner for
+    Windows — runs `setx` (permanent user env) and prints the PS one-liner for
                the current session.
     Linux/macOS — appends an export line to ~/.bashrc (idempotent) and prints the
                source command for the current session.
@@ -68,10 +68,10 @@ def _persist_certs_dir(certs_dir_str: str) -> None:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         if result.returncode == 0:
-            logger.info("✓ WEIGHTSLAB_CERTS_DIR saved permanently via setx (new terminals will have it)")
+            logger.info(" WEIGHTSLAB_CERTS_DIR saved permanently via setx (new terminals will have it)")
         else:
             logger.warning(f"setx failed — set it manually: setx WEIGHTSLAB_CERTS_DIR \"{certs_dir_str}\"")
-        logger.info(f"  Current terminal (PowerShell): $env:WEIGHTSLAB_CERTS_DIR = \"{certs_dir_str}\"")
+        logger.info(f" Current terminal (PowerShell): $env:WEIGHTSLAB_CERTS_DIR = \"{certs_dir_str}\"")
     else:
         bashrc = Path.home() / ".bashrc"
         try:
@@ -79,13 +79,13 @@ def _persist_certs_dir(certs_dir_str: str) -> None:
             if export_line not in existing:
                 with open(bashrc, "a", encoding="utf-8") as f:
                     f.write(f"\n# Added by weightslab\n{export_line}\n")
-                logger.info(f"✓ WEIGHTSLAB_CERTS_DIR appended to {bashrc} (new terminals will have it)")
+                logger.info(f" WEIGHTSLAB_CERTS_DIR appended to {bashrc} (new terminals will have it)")
             else:
-                logger.info(f"✓ WEIGHTSLAB_CERTS_DIR already in {bashrc}")
+                logger.info(f" WEIGHTSLAB_CERTS_DIR already in {bashrc}")
         except OSError as e:
             logger.warning(f"Could not write to {bashrc}: {e}")
-            logger.info(f"  Add manually: {export_line}")
-        logger.info(f"  Current terminal: source ~/.bashrc  (or open a new terminal)")
+            logger.info(f" Add manually: {export_line}")
+        logger.info(f" Current terminal: source ~/.bashrc (or open a new terminal)")
 
 
 def _strip_derived_deploy_env() -> None:
@@ -113,40 +113,40 @@ _DESCRIPTION = (
 
 _EPILOG = """\
 commands:
-  se                       Set up the secure environment: generate TLS
+  se Set up the secure environment: generate TLS
                            certificates + a gRPC auth token in
                            ~/.weightslab-certs. Then set WEIGHTSLAB_CERTS_DIR
                            (the single source of truth) so the backend + new
                            shells find them.
-                             --force-certs   regenerate even if certs exist
+                             --force-certs regenerate even if certs exist
 
-  ui launch                Purge stale weightslab/weights_studio Docker
+  ui launch Purge stale weightslab/weights_studio Docker
                            resources, then build & start the UI stack.
                            UNSECURED (HTTP) by default — no certs generated.
-                             --certs         generate (if missing) + use TLS
+                             --certs generate (if missing) + use TLS
                                              certs + gRPC auth (HTTPS)
 
-  start example            Run a bundled PyTorch example (foreground; stop with
+  start example Run a bundled PyTorch example (foreground; stop with
                            Ctrl+C). Installs the example's requirements first,
                            without prompting. Defaults to classification:
-                             --cls     classification example (default)
-                             --seg     segmentation example
-                             --det     detection example
-                             --clus    clustering example
-                             --gen     generation example
-                             --3d_det  3D LiDAR point-cloud detection example
-                             --2d_det  2D LiDAR point-cloud detection example
+                             --cls classification example (default)
+                             --seg segmentation example
+                             --det detection example
+                             --clus clustering example
+                             --gen generation example
+                             --3d_det 3D LiDAR point-cloud detection example
+                             --2d_det 2D LiDAR point-cloud detection example
 
 examples:
-  weightslab se                       # one-time secure setup (then export WEIGHTSLAB_CERTS_DIR)
-  weightslab se --force-certs         # regenerate the certs
-  weightslab ui launch                # clean + launch (unsecured HTTP, default)
-  weightslab ui launch --certs        # secured launch (HTTPS + gRPC auth)
-  weightslab start example            # run the classification demo (default)
-  weightslab start example --seg      # run the segmentation demo
-  weightslab start example --det      # run the detection demo
-  weightslab start example --3d_det   # run the 3D LiDAR detection demo
-  weightslab start example --2d_det   # run the 2D LiDAR detection demo
+  weightslab se # one-time secure setup (then export WEIGHTSLAB_CERTS_DIR)
+  weightslab se --force-certs # regenerate the certs
+  weightslab ui launch # clean + launch (unsecured HTTP, default)
+  weightslab ui launch --certs # secured launch (HTTPS + gRPC auth)
+  weightslab start example # run the classification demo (default)
+  weightslab start example --seg # run the segmentation demo
+  weightslab start example --det # run the detection demo
+  weightslab start example --3d_det # run the 3D LiDAR detection demo
+  weightslab start example --2d_det # run the 2D LiDAR detection demo
 """
 
 
@@ -329,7 +329,7 @@ def _compose_cmd(compose_file, envoy_config, action):
     # locally), then `up` without the flag. v2 supports it inline, so leave it.
     if base == ["docker-compose"] and action and action[0] == "up" and "--pull" in action:
         i = action.index("--pull")
-        del action[i:i + 2]  # drop '--pull' and its policy value (e.g. 'always')
+        del action[i:i + 2] # drop '--pull' and its policy value (e.g. 'always')
         logger.info("Docker Compose v1 detected — pulling images before 'up'...")
         pull_result = subprocess.run(
             base + ["-f", str(compose_file), "pull"],
@@ -452,7 +452,7 @@ def _run_shell_script(script_path: str, args: list = None, env_vars: dict = None
         # Build bash command - pass Windows path directly, script will handle conversion
         # # Process path to ensure it's compatible with bash, especially on Windows
         if _is_windows() and '\\' in script_path:
-            script_path = script_path.replace("\\", "/")  # Ensure path is Unix-style for bash
+            script_path = script_path.replace("\\", "/") # Ensure path is Unix-style for bash
             script_path = _convert_to_git_bash_path(script_path)
             logger.info(f"Converted script path for bash: {script_path}")
         logger.info(f"Running shell script: {script_path} with args: {args} and env_vars: {env_vars}")
@@ -550,8 +550,8 @@ def _install_ca_trust(ca_file: Path) -> None:
     Idempotent and safe to call on every launch. Platform behavior:
       * Windows — adds to the CurrentUser\\Root store via the .NET X509Store API
         (silent, no prompt).
-      * macOS   — adds to the login keychain (may show a one-time auth prompt).
-      * Linux   — installs into the system trust store via sudo (one-time prompt)
+      * macOS — adds to the login keychain (may show a one-time auth prompt).
+      * Linux — installs into the system trust store via sudo (one-time prompt)
         and, best-effort, the user's NSS DB so Chrome/Firefox trust it too.
 
     A failure here is non-fatal: TLS still works, the browser just shows a
@@ -584,7 +584,7 @@ def _install_ca_trust(ca_file: Path) -> None:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         if result.returncode == 0:
-            logger.info("✓ Dev CA trusted in Windows CurrentUser\\Root store (restart browser to apply)")
+            logger.info(" Dev CA trusted in Windows CurrentUser\\Root store (restart browser to apply)")
         else:
             logger.warning(f"Could not auto-trust dev CA: {result.stderr.strip()}")
         return
@@ -595,7 +595,7 @@ def _install_ca_trust(ca_file: Path) -> None:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         if check.returncode == 0:
-            logger.info("✓ Dev CA already trusted (macOS keychain)")
+            logger.info(" Dev CA already trusted (macOS keychain)")
             return
         logger.info("Installing dev CA into macOS login keychain (may prompt)...")
         subprocess.run(
@@ -615,7 +615,7 @@ def _install_ca_trust(ca_file: Path) -> None:
         subprocess.run(["sudo", "cp", str(ca_file), str(system_ca)])
         subprocess.run(["sudo", "update-ca-certificates"])
     else:
-        logger.info("✓ Dev CA already in Linux system trust store")
+        logger.info(" Dev CA already in Linux system trust store")
 
     # Browsers use their own NSS DB; add it there too if certutil is available.
     if shutil.which("certutil"):
@@ -636,7 +636,7 @@ def _ensure_certificates(manager: CertAuthManager, force_certs: bool = False) ->
     truth). Returns True if certs are present afterwards, False otherwise.
     """
     if manager.has_any_credentials() and not force_certs:
-        logger.info(f"✓ Using existing credentials in {manager.certs_dir}")
+        logger.info(f" Using existing credentials in {manager.certs_dir}")
         manager.get_or_create_auth_token()
         # Ensure the CA is trusted even when reusing certs from a prior run that
         # was generated via bash (which does not install OS trust).
@@ -656,7 +656,7 @@ def _ensure_certificates(manager: CertAuthManager, force_certs: bool = False) ->
 
     manager.get_or_create_auth_token()
     _install_ca_trust(manager.ca_file)
-    logger.info(f"✓ Certificates ready in {manager.certs_dir}")
+    logger.info(f" Certificates ready in {manager.certs_dir}")
     return manager.has_valid_certs()
 
 
@@ -724,11 +724,17 @@ def ui_launch(args):
     (file presence is the single source of truth) and are never deleted here.
 
     Flags (all optional, read defensively so legacy callers still work):
-      --certs        generate (if missing) and use TLS certs + gRPC auth (HTTPS)
-      --force-certs  with --certs, regenerate certificates even if they exist
-      --no-clean     skip the stale Docker resource cleanup step
-      --dev          use the dev compose overlay
+      --certs generate (if missing) and use TLS certs + gRPC auth (HTTPS)
+      --force-certs with --certs, regenerate certificates even if they exist
+      --no-clean skip the stale Docker resource cleanup step
+      --dev use the dev compose overlay
     """
+    try:
+        from weightslab.utils.telemetry import ping_ui_launch
+        from weightslab import __version__ as _wl_version
+        ping_ui_launch(_wl_version)
+    except Exception:
+        pass
     _check_docker()
     # pip installs the bundled .sh scripts without the execute bit; make them
     # runnable so the user never has to `chmod +x` before `weightslab ui launch`.
@@ -869,10 +875,10 @@ def ui_launch(args):
         # The backend and any new shell must point at the same certs dir, or
         # they'll mismatch the UI's TLS/auth. Keep this the last thing printed.
         logger.warning("")
-        logger.warning("⚠ ACTION REQUIRED — TLS is ON. Set WEIGHTSLAB_CERTS_DIR so the "
+        logger.warning(" ACTION REQUIRED — TLS is ON. Set WEIGHTSLAB_CERTS_DIR so the "
                        "training backend and new terminals use the same certificates:")
-        logger.warning(f"   (bash)    export WEIGHTSLAB_CERTS_DIR=\"{certs_dir_str}\"")
-        logger.warning(f"   (Windows) setx WEIGHTSLAB_CERTS_DIR \"{certs_dir_str}\"")
+        logger.warning(f" (bash) export WEIGHTSLAB_CERTS_DIR=\"{certs_dir_str}\"")
+        logger.warning(f" (Windows) setx WEIGHTSLAB_CERTS_DIR \"{certs_dir_str}\"")
     else:
         logger.info("UI is running UNSECURED (HTTP, no gRPC auth). "
                     "Re-run with `weightslab ui launch --certs` for TLS.")
@@ -913,17 +919,17 @@ def ui_secure_environment(args):
     # Export ONLY the single source of truth for this process.
     os.environ["WEIGHTSLAB_CERTS_DIR"] = str(manager.certs_dir)
 
-    logger.info("✓ Certificates generated successfully")
-    logger.info("✓ gRPC auth token created")
-    logger.info(f"✓ Certs and token stored in: {manager.certs_dir}")
-    logger.info(f"✓ WEIGHTSLAB_CERTS_DIR exported for this process: {manager.certs_dir}")
+    logger.info(" Certificates generated successfully")
+    logger.info(" gRPC auth token created")
+    logger.info(f" Certs and token stored in: {manager.certs_dir}")
+    logger.info(f" WEIGHTSLAB_CERTS_DIR exported for this process: {manager.certs_dir}")
     logger.info("Then launch the secured UI with: weightslab ui launch --certs")
     # Keep this the FINAL output so the user can't miss the action they must take.
     logger.warning("")
-    logger.warning("⚠ ACTION REQUIRED — set WEIGHTSLAB_CERTS_DIR globally so new shells "
+    logger.warning(" ACTION REQUIRED — set WEIGHTSLAB_CERTS_DIR globally so new shells "
                    "and the training backend find these certs (single source of truth):")
-    logger.warning(f"   (bash)    echo 'export WEIGHTSLAB_CERTS_DIR=\"{manager.certs_dir}\"' >> ~/.bashrc && source ~/.bashrc")
-    logger.warning(f"   (Windows) setx WEIGHTSLAB_CERTS_DIR \"{manager.certs_dir}\"")
+    logger.warning(f" (bash) echo 'export WEIGHTSLAB_CERTS_DIR=\"{manager.certs_dir}\"' >> ~/.bashrc && source ~/.bashrc")
+    logger.warning(f" (Windows) setx WEIGHTSLAB_CERTS_DIR \"{manager.certs_dir}\"")
 
 
 # Bundled PyTorch examples, keyed by the CLI flag (e.g. --cls -> ws-classification).
@@ -970,7 +976,7 @@ def _install_example_requirements(example_dir: Path) -> None:
                 f"Failed to install requirements ({req}): {exc}. "
                 "Continuing — the example may still run if deps are already installed."
             )
-        return  # only the first matching requirements file is used
+        return # only the first matching requirements file is used
 
 
 def example_start(args):
@@ -994,7 +1000,7 @@ def example_start(args):
     _install_example_requirements(example_dir)
 
     logger.info(f"Starting the WeightsLab {label} ({kind}) example...")
-    logger.info(f"   {main_py}")
+    logger.info(f" {main_py}")
     logger.info("In another terminal, launch the UI with: weightslab ui launch")
     logger.info(f"Then open http://localhost:5173 — stop the example with Ctrl+C.")
     if not _CERTS_DIR_IN_ORIGINAL_ENV:

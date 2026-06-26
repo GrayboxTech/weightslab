@@ -6,9 +6,9 @@ Toy example using a pretrained ResNet-18 backbone + lightweight embedding head,
 trained with online batch-hard triplet loss on the Olivetti Faces dataset.
 
 Dataset options (set in config.yaml -> data.dataset_type):
-  "olivetti"  - sklearn Olivetti (40 ids, 400 imgs) - works offline, default
-  "lfw"       - LFW People via torchvision (download required)
-  "folder"    - any ImageFolder-style directory
+  "olivetti" - sklearn Olivetti (40 ids, 400 imgs) - works offline, default
+  "lfw" - LFW People via torchvision (download required)
+  "folder" - any ImageFolder-style directory
 
 Training flow
 -------------
@@ -62,7 +62,7 @@ def evaluate(
     all_uids: List[str] = []
 
     for images, uids, labels, _metadata in loader:
-        emb = model.get_embeddings(images)  # (B, D)
+        emb = model.get_embeddings(images) # (B, D)
         all_embeddings.append(emb.numpy())
         if isinstance(labels, torch.Tensor):
             all_labels.append(labels.numpy())
@@ -80,15 +80,15 @@ def evaluate(
         name=name,
     )
 
-    print(f"  verification_accuracy : {metrics.get('verification_accuracy', float('nan')):.4f}")
-    print(f"  rank1_accuracy        : {metrics.get('rank1_accuracy', float('nan')):.4f}")
-    print(f"  FAR                   : {metrics.get('far', float('nan')):.4f}")
-    print(f"  FRR                   : {metrics.get('frr', float('nan')):.4f}")
-    print(f"  best_threshold        : {metrics.get('best_threshold', float('nan')):.4f}")
+    print(f" verification_accuracy : {metrics.get('verification_accuracy', float('nan')):.4f}")
+    print(f" rank1_accuracy : {metrics.get('rank1_accuracy', float('nan')):.4f}")
+    print(f" FAR : {metrics.get('far', float('nan')):.4f}")
+    print(f" FRR : {metrics.get('frr', float('nan')):.4f}")
+    print(f" best_threshold : {metrics.get('best_threshold', float('nan')):.4f}")
     if "num_clusters" in metrics:
-        print(f"  num_clusters          : {metrics['num_clusters']:.0f}")
-        print(f"  noise_ratio           : {metrics['noise_ratio']:.4f}")
-        print(f"  mean_nn1_distance     : {metrics['mean_nn1_distance']:.4f}")
+        print(f" num_clusters : {metrics['num_clusters']:.0f}")
+        print(f" noise_ratio : {metrics['noise_ratio']:.4f}")
+        print(f" mean_nn1_distance : {metrics['mean_nn1_distance']:.4f}")
 
     return metrics
 
@@ -111,10 +111,10 @@ def train(
     performed every eval_full_to_train_steps_ratio steps when test_loader is provided.
     """
     print("\n" + "=" * 60)
-    print("Face Recognition Training  (open-ended while loop)")
-    print(f"  Loss       : {loss_name}")
-    print(f"  Eval every : {eval_full_to_train_steps_ratio} steps")
-    print("  Max steps  : infinite (stop with Ctrl+C)")
+    print("Face Recognition Training (open-ended while loop)")
+    print(f" Loss : {loss_name}")
+    print(f" Eval every : {eval_full_to_train_steps_ratio} steps")
+    print(" Max steps : infinite (stop with Ctrl+C)")
     print("=" * 60)
 
     data_iter = iter(train_loader)
@@ -183,7 +183,7 @@ def train(
 
     print("\nTraining summary:")
     for k, v in summary.items():
-        print(f"  {k}: {v}")
+        print(f" {k}: {v}")
 
     return summary
 
@@ -313,16 +313,16 @@ if __name__ == "__main__":
 
     print("\n" + "=" * 60)
     print("STARTING FACE RECOGNITION TRAINING")
-    print(f"  Experiment   : {parameters['experiment_name']}")
-    print(f"  Device       : {device}")
-    print(f"  Steps        : infinite  |  eval_full_to_train_steps_ratio={eval_full_to_train_steps_ratio}")
-    print(f"  Loss         : {model_cfg.get('loss', 'triplet')}")
-    print(f"  Logs         : {parameters['root_log_dir']}")
+    print(f" Experiment : {parameters['experiment_name']}")
+    print(f" Device : {device}")
+    print(f" Steps : infinite | eval_full_to_train_steps_ratio={eval_full_to_train_steps_ratio}")
+    print(f" Loss : {model_cfg.get('loss', 'triplet')}")
+    print(f" Logs : {parameters['root_log_dir']}")
     print("=" * 60)
 
     # ================
     # Training Loop
-    wl.start_training(timeout=3)  # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+    wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     train(
         model=model,

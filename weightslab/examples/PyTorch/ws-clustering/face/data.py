@@ -3,17 +3,17 @@ FaceDataset — toy face recognition dataset.
 
 Supported back-ends
 -------------------
-"olivetti"  Olivetti Faces from sklearn (40 identities, 400 images, 64×64 grey).
-            Self-contained; requires only scikit-learn.  Good default toy set.
-"lfw"       Labeled Faces in the Wild (LFW) via torchvision.  Downloaded on
-            first use to *root*.  Much larger but realistic.
-"folder"    Generic ImageFolder layout:  root/{split}/{class_name}/*.jpg
+"olivetti" Olivetti Faces from sklearn (40 identities, 400 images, 64×64 grey).
+            Self-contained; requires only scikit-learn. Good default toy set.
+"lfw" Labeled Faces in the Wild (LFW) via torchvision. Downloaded on
+            first use to *root*. Much larger but realistic.
+"folder" Generic ImageFolder layout: root/{split}/{class_name}/*.jpg
 
 Every sample is returned as:
     (image_tensor: Tensor[C,H,W],
-     uid:          str,
-     label:        int,
-     metadata:     dict)
+     uid: str,
+     label: int,
+     metadata: dict)
 
 These map directly onto the (data, uid, target, metadata) convention used
 throughout the WeightsLAB kitchen examples so the same training loop works
@@ -41,16 +41,16 @@ class FaceDataset(Dataset):
     """Unified face recognition dataset wrapper.
 
     Args:
-        root:                  Download / data root (only used for lfw / folder).
-        dataset_type:          One of "olivetti", "lfw", "folder".
-        split:                 "train" or "test" (ignored for pre-split sources).
-        image_size:            Spatial size; images are resized to (image_size, image_size).
-        train_ratio:           Fraction of per-class samples used for training
+        root: Download / data root (only used for lfw / folder).
+        dataset_type: One of "olivetti", "lfw", "folder".
+        split: "train" or "test" (ignored for pre-split sources).
+        image_size: Spatial size; images are resized to (image_size, image_size).
+        train_ratio: Fraction of per-class samples used for training
                                (Olivetti only).
-        min_images_per_class:  Classes with fewer samples are discarded.
-        transform:             Optional torchvision transform; defaults to
+        min_images_per_class: Classes with fewer samples are discarded.
+        transform: Optional torchvision transform; defaults to
                                Resize → ToTensor → Normalize([0.5], [0.5]).
-        seed:                  RNG seed for reproducible train/test splits.
+        seed: RNG seed for reproducible train/test splits.
     """
 
     def __init__(
@@ -65,12 +65,12 @@ class FaceDataset(Dataset):
         seed: int = 42,
     ):
         self.dataset_type = dataset_type
-        self.split        = split
-        self.image_size   = image_size
-        self.transform    = transform or self._default_transform(image_size)
+        self.split = split
+        self.image_size = image_size
+        self.transform = transform or self._default_transform(image_size)
 
         # These are populated by each loader
-        self.images: Optional[np.ndarray] = None   # (N, H, W) float [0,1] — Olivetti only
+        self.images: Optional[np.ndarray] = None # (N, H, W) float [0,1] — Olivetti only
         self.img_paths: Optional[np.ndarray] = None
         self.labels: np.ndarray = np.array([], dtype=np.int64)
         self.num_classes: int = 0
@@ -108,67 +108,67 @@ class FaceDataset(Dataset):
         """Load and split the Olivetti Faces dataset (sklearn)."""
         from sklearn.datasets import fetch_olivetti_faces
 
-        data   = fetch_olivetti_faces(shuffle=True, random_state=seed)
-        images = data.images                           # (400, 64, 64) float [0,1]
+        data = fetch_olivetti_faces(shuffle=True, random_state=seed)
+        images = data.images # (400, 64, 64) float [0,1]
         labels = data.target.astype(np.int64)
 
         # Drop classes with insufficient samples
         unique, counts = np.unique(labels, return_counts=True)
-        valid_classes  = unique[counts >= min_images]
-        mask           = np.isin(labels, valid_classes)
+        valid_classes = unique[counts >= min_images]
+        mask = np.isin(labels, valid_classes)
         images, labels = images[mask], labels[mask]
 
         # Remap labels to a contiguous 0…N-1 range
         mapping = {int(c): i for i, c in enumerate(sorted(valid_classes.tolist()))}
-        labels  = np.array([mapping[int(l)] for l in labels], dtype=np.int64)
+        labels = np.array([mapping[int(l)] for l in labels], dtype=np.int64)
 
         # Per-class stratified train/test split
         rng = np.random.RandomState(seed)
         train_idx, test_idx = [], []
         for cls in np.unique(labels):
-            idx    = np.where(labels == cls)[0]
+            idx = np.where(labels == cls)[0]
             n_train = max(1, int(len(idx) * train_ratio))
-            perm   = rng.permutation(len(idx))
+            perm = rng.permutation(len(idx))
             train_idx.extend(idx[perm[:n_train]].tolist())
             test_idx.extend(idx[perm[n_train:]].tolist())
 
-        indices      = train_idx if self.split == "train" else test_idx
-        self.images  = images[indices]
-        self.labels  = labels[indices]
+        indices = train_idx if self.split == "train" else test_idx
+        self.images = images[indices]
+        self.labels = labels[indices]
         self.num_classes = len(mapping)
 
     def _load_lfw(self, root: str, min_images: int, split: str):
         """Load LFW People via torchvision (downloads on first call)."""
         from torchvision.datasets import LFWPeople
 
-        split_map  = {"train": "train", "test": "test", "val": "10fold"}
-        lfw_split  = split_map.get(split, "train")
-        ds         = LFWPeople(root=root, split=lfw_split, download=True, transform=None)
+        split_map = {"train": "train", "test": "test", "val": "10fold"}
+        lfw_split = split_map.get(split, "train")
+        ds = LFWPeople(root=root, split=lfw_split, download=True, transform=None)
 
         paths, lbls = zip(*ds.imgs)
-        lbls        = np.array(lbls, dtype=np.int64)
+        lbls = np.array(lbls, dtype=np.int64)
 
         # Filter low-shot identities
         unique, counts = np.unique(lbls, return_counts=True)
-        valid          = set(unique[counts >= min_images].tolist())
-        mask           = np.array([int(l) in valid for l in lbls])
+        valid = set(unique[counts >= min_images].tolist())
+        mask = np.array([int(l) in valid for l in lbls])
 
         self.img_paths = np.array(paths)[mask]
-        lbls           = lbls[mask]
+        lbls = lbls[mask]
 
-        mapping        = {int(c): i for i, c in enumerate(sorted(valid))}
-        self.labels    = np.array([mapping[int(l)] for l in lbls], dtype=np.int64)
+        mapping = {int(c): i for i, c in enumerate(sorted(valid))}
+        self.labels = np.array([mapping[int(l)] for l in lbls], dtype=np.int64)
         self.num_classes = len(mapping)
 
     def _load_folder(self, root: str, split: str):
         """Load from a torchvision ImageFolder directory."""
         from torchvision.datasets import ImageFolder
 
-        split_dir      = os.path.join(root, split)
-        ds             = ImageFolder(split_dir)
-        paths, lbls    = zip(*ds.imgs)
+        split_dir = os.path.join(root, split)
+        ds = ImageFolder(split_dir)
+        paths, lbls = zip(*ds.imgs)
         self.img_paths = list(paths)
-        self.labels    = np.array(lbls, dtype=np.int64)
+        self.labels = np.array(lbls, dtype=np.int64)
         self.num_classes = len(ds.classes)
 
     # ----------------------------------------------------------
@@ -188,7 +188,7 @@ class FaceDataset(Dataset):
 
         if self.dataset_type == "olivetti":
             from PIL import Image as PILImage
-            img_np  = self.images[idx]              # (H, W) float [0,1]
+            img_np = self.images[idx] # (H, W) float [0,1]
             img_pil = PILImage.fromarray(
                 (img_np * 255).astype(np.uint8), mode="L"
             ).convert("RGB")
@@ -200,9 +200,9 @@ class FaceDataset(Dataset):
 
         uid = f"{self.split}_cls{label:04d}_idx{idx:06d}"
         metadata = {
-            "split":        self.split,
-            "label_id":     label,
-            "idx":          idx,
+            "split": self.split,
+            "label_id": label,
+            "idx": idx,
             "dataset_type": self.dataset_type,
         }
         return image_tensor, uid, label, metadata

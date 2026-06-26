@@ -58,7 +58,7 @@ class SimpleDetectionModel(nn.Module):
         super().__init__()
         self.conv = nn.Conv2d(1, 32, 3, padding=1)
         self.pool = nn.AdaptiveAvgPool2d((8, 8))
-        self.fc = nn.Linear(32 * 8 * 8, 100)  # 100 outputs for bbox/conf
+        self.fc = nn.Linear(32 * 8 * 8, 100) # 100 outputs for bbox/conf
         self.task_type = "detection"
 
     def forward(self, x):
@@ -270,9 +270,9 @@ class TestSignalWrappingWithDetection(unittest.TestCase):
 
             # Variable boxes
             preds = [
-                torch.tensor([[10, 20, 100, 150], [200, 250, 400, 450]]),  # 2 boxes
-                torch.tensor([[15, 25, 110, 160]]),  # 1 box
-                torch.tensor([[30, 40, 130, 140], [70, 80, 170, 180], [250, 260, 350, 360]])  # 3 boxes
+                torch.tensor([[10, 20, 100, 150], [200, 250, 400, 450]]), # 2 boxes
+                torch.tensor([[15, 25, 110, 160]]), # 1 box
+                torch.tensor([[30, 40, 130, 140], [70, 80, 170, 180], [250, 260, 350, 360]]) # 3 boxes
             ]
 
             targets = [

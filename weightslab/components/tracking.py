@@ -211,13 +211,13 @@ class TriggersTracker(Tracker):
         # Shape is expected to be in the form [batch_size x neuron_count]
         if len(tensor.shape) > 2:
             # raise ValueError(
-            #     f"Neuron stats are updated on a per neuron level, hence only "
-            #     f"two dims are expected [batch_size x neuron_count] but "
-            #     f"activation map has shape: {str(tensor.shape)}")
+            # f"Neuron stats are updated on a per neuron level, hence only "
+            # f"two dims are expected [batch_size x neuron_count] but "
+            # f"activation map has shape: {str(tensor.shape)}")
             tensor = tensor.view(-1, self.number_of_neurons)
         try:
             if tensor.shape == th.Size([]):
-                tensor = tensor[None, None]  # Add one dim
+                tensor = tensor[None, None] # Add one dim
             bs = tensor.shape[0]
             self.triggrs_by_neuron += th.sum(
                 tensor, dim=(0, )).view(-1).long()
@@ -286,9 +286,9 @@ class TriggersTracker(Tracker):
         return self.updates_by_neuron[neuron_id].item()
 
     # def get_neuron_stats(self, neuron_id: int):
-    #     """ Get how often did this neuron trigger on average. """
-    #     return self.get_neuron_triggers(neuron_id) / \
-    #         max(self.get_neuron_age(neuron_id), 1)
+    # """ Get how often did this neuron trigger on average. """
+    # return self.get_neuron_triggers(neuron_id) / \
+    # max(self.get_neuron_age(neuron_id), 1)
 
     def get_neuron_stats(self, neuron_id: int):
         """ Get how often did this neuron trigger on average. """
@@ -409,9 +409,9 @@ class TriggersTrackerClazzAndSampleID(TriggersTracker):
         super().update(tensor)
         # Update trackers with class and sample ids. The shapes are expected
         # to be in the following form:
-        #  * tensor:             [batch_size x neuron_count]
-        #  * tensor.in_id_batch: [batch_size]
-        #  * tensor.label_batch: [batch_size]
+        # * tensor: [batch_size x neuron_count]
+        # * tensor.in_id_batch: [batch_size]
+        # * tensor.label_batch: [batch_size]
 
         if not hasattr(tensor, 'in_id_batch') or \
                 not hasattr(tensor, 'label_batch'):

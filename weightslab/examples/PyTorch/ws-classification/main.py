@@ -24,7 +24,6 @@ from torchvision import datasets, transforms
 from torch.utils.data import Dataset
 
 import weightslab as wl
-from weightslab.backend import ledgers
 from weightslab.baseline_models.pytorch.models import FashionCNN as CNN
 from weightslab.components.global_monitoring import (
     guard_training_context,
@@ -63,7 +62,7 @@ class MNISTCustomDataset(Dataset):
                 root=root,
                 train=train,
                 download=download,
-                transform=None  # We'll apply transform manually to track filepath
+                transform=None # We'll apply transform manually to track filepath
             )
         except RuntimeError as e:
             logger.error(f"Error loading MNIST dataset: {e}")
@@ -71,7 +70,7 @@ class MNISTCustomDataset(Dataset):
                 root=root,
                 train=train,
                 download=True,
-                transform=None  # We'll apply transform manually to track filepath
+                transform=None # We'll apply transform manually to track filepath
             )
         self.transform = transform
         self.train = train
@@ -89,7 +88,7 @@ class MNISTCustomDataset(Dataset):
         # For each index, construct a meaningful filepath
         # MNIST doesn't have original individual files, so we create virtual paths
         for idx in range(len(self.mnist)):
-            if self.max_samples is not None and idx >= self.max_samples:
+            if self.max_samples != None and idx >= self.max_samples:
                 break
             label = self.mnist.targets[idx].item() if hasattr(self.mnist.targets[idx], 'item') else self.mnist.targets[idx]
             split = 'train' if self.train else 'test'
@@ -105,7 +104,7 @@ class MNISTCustomDataset(Dataset):
             self.filepaths[idx] = virtual_path
 
     def __len__(self):
-        if self.max_samples is not None:
+        if self.max_samples != None:
             return min(len(self.mnist), self.max_samples)
         return len(self.mnist)
 
@@ -152,7 +151,7 @@ def train(loader, model, optimizer, criterion_mlt, device):
             batch_ids=ids,
             preds=preds
         )
-        total_loss = loss_batch_mlt.mean()  # Final scalar loss
+        total_loss = loss_batch_mlt.mean() # Final scalar loss
 
         # Model
         total_loss.backward()
@@ -261,6 +260,7 @@ if __name__ == "__main__":
     log_dir = parameters["root_log_dir"]
     tqdm_display = parameters.get("tqdm_display", True)
     eval_full_to_train_steps_ratio = parameters.get("eval_full_to_train_steps_ratio", 50)
+    write_export_ratio = parameters.get("write_export_ratio", 100)
     enable_h5_persistence = parameters.get("enable_h5_persistence", True)
     training_steps_to_do = parameters.get("training_steps_to_do", 1000)
 
@@ -362,16 +362,16 @@ if __name__ == "__main__":
     )
 
     print("=" * 60)
-    print("🚀 STARTING TRAINING")
-    print(f"🔄 Evaluation every {eval_full_to_train_steps_ratio} steps")
+    print(" STARTING TRAINING")
+    print(f" Evaluation every {eval_full_to_train_steps_ratio} steps")
     print(f"� Dataset splits: train={len(_train_dataset)}, test={len(_test_dataset)}")
-    print(f"💾 Logs will be saved to: {log_dir}")
+    print(f" Logs will be saved to: {log_dir}")
     print("=" * 60 + "\n")
 
     # Setup clean progress bar with custom format
     if tqdm_display:
         train_range = tqdm.tqdm(
-            range(training_steps_to_do) if training_steps_to_do is not None else itertools.count(),
+            range(training_steps_to_do) if training_steps_to_do != None else itertools.count(),
             desc="Training",
             bar_format="{desc}: {n}/{total} [{elapsed}<{remaining}, {rate_fmt}] {bar} | {postfix}",
             ncols=140,
@@ -379,17 +379,17 @@ if __name__ == "__main__":
             leave=True
         )
     else:
-        train_range = range(training_steps_to_do) if training_steps_to_do is not None else itertools.count()
+        train_range = range(training_steps_to_do) if training_steps_to_do != None else itertools.count()
 
     # ================
     # Training Loop
-    wl.start_training(timeout=3)  # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+    wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     train_loss = None
     test_loss, test_metric = None, None
-    test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
+    test_loader_len = len(test_loader) # Store length before wrapping with tqdm
     for train_step in train_range:
-        age = model.get_age() if hasattr(model, "get_age") else train_step  # Get model age in steps (not necessarily equal to train_step if model was reloaded or has seen more data than training steps)
+        age = model.get_age() if hasattr(model, "get_age") else train_step # Get model age in steps (not necessarily equal to train_step if model was reloaded or has seen more data than training steps)
 
         # Train one step
         train_loss = train(train_loader, model, optimizer, train_criterion, device)
@@ -405,6 +405,11 @@ if __name__ == "__main__":
                 device,
                 test_loader_len
             )
+
+        # Periodic history + dataframe export (JSON/CSV snapshots to root_log_dir)
+        if age > 0 and age % write_export_ratio == 0:
+            wl.write_history()
+            wl.write_dataframe()
 
         # Verbose
         if verbose and not tqdm_display:
@@ -428,9 +433,13 @@ if __name__ == "__main__":
             train_range.set_postfix_str(" | ".join(postfix_parts))
 
     print("\n" + "=" * 60)
-    print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")
-    print(f"💾 Logs saved to: {log_dir}")
+    print(f" Training completed in {time.time() - start_time:.2f} seconds")
+    print(f" Logs saved to: {log_dir}")
     print("=" * 60)
+
+    # Final export of signal history and data grid to root_log_dir
+    wl.write_history()
+    wl.write_dataframe()
 
     # Keep the main thread alive to allow background serving threads to run
     wl.keep_serving()

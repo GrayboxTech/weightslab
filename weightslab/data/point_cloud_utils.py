@@ -5,7 +5,7 @@ covers both 2D and 3D point clouds; box-row column count decides the
 dimensionality) cannot be PIL-encoded directly, so the studio pipeline
 previews them as a server-rendered BEV (bird's-eye-view) image:
 
-  * thumbnails / preview cache / modal image  -> ``point_cloud_to_bev_image``
+  * thumbnails / preview cache / modal image -> ``point_cloud_to_bev_image``
   * GT / prediction boxes overlaid on the BEV -> ``project_boxes_to_bev``
     (3D boxes [cx, cy, cz, dx, dy, dz, yaw, cls?, conf?] or 2D metric boxes
     [cx, cy, dx, dy, cls?, conf?] -> normalized [x1, y1, x2, y2, cls, conf]
@@ -78,9 +78,9 @@ def _default_feature_names(num_features: int) -> list:
     extra = num_features - len(base)
     if extra == 1:
         base = base + ["intensity"]
-    elif extra == 4:  # intensity + normals
+    elif extra == 4: # intensity + normals
         base = base + ["intensity", "nx", "ny", "nz"]
-    elif extra == 3:  # normals OR rgb — ambiguous, label generically
+    elif extra == 3: # normals OR rgb — ambiguous, label generically
         base = base + ["c0", "c1", "c2"]
     elif extra > 0:
         base = base + [f"c{i}" for i in range(extra)]
@@ -140,11 +140,11 @@ def compute_point_normals(points: np.ndarray, k: int = 16) -> np.ndarray:
     k = int(max(3, min(k, n)))
     tree = cKDTree(xyz)
     _, idx = tree.query(xyz, k=k)
-    neigh = xyz[idx]                              # [M, k, 3]
+    neigh = xyz[idx] # [M, k, 3]
     centered = neigh - neigh.mean(axis=1, keepdims=True)
     cov = np.einsum("mki,mkj->mij", centered, centered) / k
     # Smallest-eigenvector of each 3x3 covariance is the surface normal.
-    eigvals, eigvecs = np.linalg.eigh(cov)        # ascending eigenvalues
+    eigvals, eigvecs = np.linalg.eigh(cov) # ascending eigenvalues
     normals = eigvecs[:, :, 0]
     # Orient toward the sensor (origin) so shading is consistent.
     flip = np.einsum("mi,mi->m", normals, -xyz) < 0
@@ -175,7 +175,7 @@ def colorize_from_image(points_xyz, image, project_fn):
 
     Args:
         points_xyz: [M, 3] points in the LiDAR frame.
-        image:      [H, W, 3] uint8 camera image (e.g. KITTI image_2).
+        image: [H, W, 3] uint8 camera image (e.g. KITTI image_2).
         project_fn: callable(points_xyz) -> ([M, 2] pixel uv, [M] bool valid)
                     mapping LiDAR points to image pixels (dataset-specific, uses
                     the calibration). Points that fall outside the image / behind
@@ -213,7 +213,7 @@ _BEV_CMAP = np.array(
     dtype=np.float32,
 )
 
-_BEV_BACKGROUND = (13, 17, 23)  # dark slate, matches the studio dark theme
+_BEV_BACKGROUND = (13, 17, 23) # dark slate, matches the studio dark theme
 
 
 def default_bev_image_size() -> int:
@@ -340,8 +340,8 @@ def point_cloud_to_bev_image(
     brightness grows with point density. +x is right, +y is up.
 
     Args:
-        points:     [M, 2..4] (x, y, (z), (intensity)) metric coordinates.
-        pc_range:   (x_min, y_min, z_min, x_max, y_max, z_max) crop; derived
+        points: [M, 2..4] (x, y, (z), (intensity)) metric coordinates.
+        pc_range: (x_min, y_min, z_min, x_max, y_max, z_max) crop; derived
                     from the points when None.
         image_size: output resolution (default: WL_BEV_IMAGE_SIZE env or 640).
     """
@@ -408,12 +408,12 @@ def point_cloud_to_range_image(
     - Pixel value: distance (and optionally intensity)
 
     Args:
-        points:        [M, 2..4] (x, y, (z), (intensity)) metric coordinates.
-        image_height:  vertical resolution (elevation bins).
-        image_width:   horizontal resolution (azimuth bins, default 512 like KITTI).
-        fov_up:        max elevation angle in degrees (default 3.0°).
-        fov_down:      min elevation angle in degrees (default -25.0°, typical LiDAR).
-        mode:          "distance" (grayscale distance), "intensity" (intensity with hue),
+        points: [M, 2..4] (x, y, (z), (intensity)) metric coordinates.
+        image_height: vertical resolution (elevation bins).
+        image_width: horizontal resolution (azimuth bins, default 512 like KITTI).
+        fov_up: max elevation angle in degrees (default 3.0°).
+        fov_down: min elevation angle in degrees (default -25.0°, typical LiDAR).
+        mode: "distance" (grayscale distance), "intensity" (intensity with hue),
                        or "distance+intensity" (default: distance as brightness, z/intensity as hue).
 
     Returns:
@@ -433,8 +433,8 @@ def point_cloud_to_range_image(
     distance = np.sqrt(x**2 + y**2 + z**2)
     distance = np.maximum(distance, 1e-6)
 
-    azimuth = np.arctan2(y, x)  # [-pi, pi]
-    elevation = np.arcsin(np.clip(z / distance, -1.0, 1.0))  # [-pi/2, pi/2] in radians
+    azimuth = np.arctan2(y, x) # [-pi, pi]
+    elevation = np.arcsin(np.clip(z / distance, -1.0, 1.0)) # [-pi/2, pi/2] in radians
     elevation_deg = np.degrees(elevation)
 
     # Map to image coordinates
@@ -462,7 +462,7 @@ def point_cloud_to_range_image(
         intensity_norm = np.clip(intensity / (intensity.max() + 1e-6), 0.3, 1.0)
         colors = np.clip(colors * intensity_norm[:, None], 0, 255).astype(np.uint8)
         canvas[v, u] = colors
-    else:  # "distance+intensity" (default)
+    else: # "distance+intensity" (default)
         # Distance as brightness (grayscale), height/intensity for hue
         dist_norm = distance / (distance.max() + 1e-6)
         z_norm = np.clip((z - np.percentile(z, 5)) / (np.percentile(z, 95) - np.percentile(z, 5) + 1e-6), 0.0, 1.0)
@@ -494,10 +494,10 @@ def project_boxes_to_bev(
     """Project metric 3D/2D point-cloud boxes into the BEV image frame.
 
     Args:
-        boxes:         [N, C] rows; C >= 7 -> 3D (cx, cy, cz, dx, dy, dz, yaw,
+        boxes: [N, C] rows; C >= 7 -> 3D (cx, cy, cz, dx, dy, dz, yaw,
                        cls?, conf?), C <= 6 -> 2D metric (cx, cy, dx, dy,
                        cls?, conf?).
-        pc_range:      (x_min, y_min, z_min, x_max, y_max, z_max) of the
+        pc_range: (x_min, y_min, z_min, x_max, y_max, z_max) of the
                        rendered BEV image.
         min_norm_size: minimum normalized box width/height (~2 px at 256) so
                        distant pedestrians stay clickable in thumbnails.
@@ -716,7 +716,7 @@ def pack_point_cloud(points: np.ndarray, max_points: int = 0, seed: int = 0):
     if max_points and pts.shape[0] > max_points:
         rng = np.random.default_rng(seed)
         keep = rng.choice(pts.shape[0], int(max_points), replace=False)
-        keep.sort()  # preserve original ordering for cache-friendly decode
+        keep.sort() # preserve original ordering for cache-friendly decode
         pts = pts[keep]
     pts = np.ascontiguousarray(pts, dtype="<f4")
     return pts.tobytes(), int(pts.shape[0]), int(pts.shape[1] if pts.ndim == 2 else 0)

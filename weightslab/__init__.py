@@ -63,11 +63,19 @@ if _IS_MAIN_PROCESS and grpc_tls_enabled and os.environ.get('WEIGHTSLAB_SKIP_SEC
 # Get Package Metadata
 try:
     # setuptools_scm will write weightslab/_version.py during build
-    from ._version import __version__  # type: ignore
+    from ._version import __version__ # type: ignore
 except Exception:
     # Fallback when developing locally or before build; keeps behavior stable.
 	from datetime import datetime
 	__version__ = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+
+if _IS_MAIN_PROCESS:
+    try:
+        from weightslab.utils.telemetry import ping_import
+        ping_import(__version__)
+    except Exception as e:
+        logger.debug("Telemetry ping failed: %s", e)
+
 __author__ = 'Alexandru-Andrei ROTARY'
 __maintainer__ = 'Guillaume PELLUET'
 __credits__ = 'GrayBx'
@@ -102,8 +110,10 @@ __all__ = [
     "query_signal_history",
     "query_sample_history",
     "query_instance_history",
+
     "write_history",
     "write_dataframe",
+
     "pointcloud_thumbnail",
     "pointcloud_boxes",
 

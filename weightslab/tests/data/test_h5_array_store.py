@@ -1,6 +1,5 @@
 import shutil
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
@@ -210,7 +209,7 @@ class TestH5ArrayStoreCrashSafety(unittest.TestCase):
     def test_recover_safe_on_empty_directory(self):
         """recover() must not raise when arrays.h5 does not exist yet."""
         store = self._make_store()
-        store.recover()  # Should complete without error
+        store.recover() # Should complete without error
 
 
 if __name__ == "__main__":

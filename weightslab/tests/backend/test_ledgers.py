@@ -32,13 +32,13 @@ class LedgerTests(unittest.TestCase):
         # Register without providing name - should use DEFAULT_NAME
         GLOBAL_LEDGER.register_model(model=d)
         self.assertIn(DEFAULT_NAME, GLOBAL_LEDGER.list_models())
-        got = GLOBAL_LEDGER.get_model()  # Should get 'main' by default
+        got = GLOBAL_LEDGER.get_model() # Should get 'main' by default
         self.assertIs(got, d)
 
     def test_proxy_initialization_pattern(self):
         """Test that get before register returns Proxy(None), then updates on register."""
         # Get before register - should return Proxy(None)
-        hp = GLOBAL_LEDGER.get_hyperparams()  # Uses DEFAULT_NAME
+        hp = GLOBAL_LEDGER.get_hyperparams() # Uses DEFAULT_NAME
 
         # Proxy should exist but not have underlying object yet
         self.assertEqual(hp.get(), {})
@@ -107,7 +107,7 @@ class LedgerTests(unittest.TestCase):
         self.assertNotIn("w", names)
 
     def test_optimizer_live_update_through_proxy(self):
-        GLOBAL_LEDGER.get_optimizer('opt_live')  # Init opt with a proxy entry
+        GLOBAL_LEDGER.get_optimizer('opt_live') # Init opt with a proxy entry
 
         # define a simple optimizer-like object
         class DummyOpt:
@@ -197,6 +197,29 @@ class LedgerTests(unittest.TestCase):
         hp_handle["lr"] = 0.02
         self.assertEqual(lr.get(), 0.02)
 
+    def test_dict_value_returned_raw_not_proxied(self):
+        """Dict (and list / callable) values come back RAW, not wrapped in a live
+        proxy (see Proxy.get's list/dict/callable exclusion), so subscripting just
+        reads the plain mapping."""
+        hp_handle = GLOBAL_LEDGER.get_hyperparams()
+        GLOBAL_LEDGER.register_hyperparams(
+            params={"dataset": {"batch_size": 32, "splits": {"train": 0.8}}}
+        )
+
+        dataset = hp_handle.get("dataset")
+        # A dict value is handed back raw, not as a live ValueProxy.
+        self.assertIsInstance(dataset, dict)
+        self.assertFalse(hasattr(dataset, "set"))
+
+        # Plain mapping access (and nesting) works.
+        self.assertEqual(dataset["batch_size"], dataset.get("batch_size"))
+        self.assertEqual(dataset["batch_size"], 32)
+        self.assertEqual(dataset["splits"]["train"], 0.8)
+
+        # Missing keys raise KeyError, matching standard dict subscript semantics.
+        with self.assertRaises(KeyError):
+            dataset["missing"]
+
     def test_proxy_pickles_and_restores(self):
         proxy = Proxy({"flag": True, "count": 3})
 
@@ -230,6 +253,37 @@ class LedgerTests(unittest.TestCase):
 
         hp_handle["data_root"] = "C:/data/v2"
         self.assertEqual(data_root, "C:/data/v1")
+
+    def test_proxy_yaml_and_json_serialization(self):
+        """Ledger proxies serialize to their underlying value for both YAML and
+        JSON, so libraries that dump their config (e.g. Ultralytics' args.yaml,
+        or JSON audit/config dumps) don't choke on a live hyperparameter proxy."""
+        import json
+        import yaml
+
+        hp = GLOBAL_LEDGER.get_hyperparams()
+        GLOBAL_LEDGER.register_hyperparams(params={"image_size": 320, "lr": 0.01})
+
+        img = hp.get("image_size") # a live ValueProxy, not a plain int
+        self.assertEqual(type(img).__name__, "_ValueProxy")
+
+        # YAML: cover every dumper variant — Ultralytics dumps with CSafeDumper
+        # (the libyaml C dumper), which keeps its own representer table.
+        for dumper_name in ("Dumper", "SafeDumper", "CDumper", "CSafeDumper"):
+            dumper = getattr(yaml, dumper_name, None)
+            if dumper is None:
+                continue
+            self.assertEqual(
+                yaml.dump({"imgsz": img}, Dumper=dumper).strip(), "imgsz: 320",
+                f"{dumper_name} did not serialize the proxy",
+            )
+        self.assertEqual(
+            yaml.safe_load(yaml.safe_dump(hp)), {"image_size": 320, "lr": 0.01}
+        )
+
+        # JSON: json.dumps of a scalar proxy and of the whole HP proxy.
+        self.assertEqual(json.loads(json.dumps({"imgsz": img})), {"imgsz": 320})
+        self.assertEqual(json.loads(json.dumps(hp)), {"image_size": 320, "lr": 0.01})
 
     def test_value_proxy_numeric_comparisons(self):
         """ValueProxy supports all standard numeric and string comparison operators."""

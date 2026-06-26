@@ -21,8 +21,8 @@ Minimal user surface:
     YOLO(cfg["model"]).train(
         trainer=WLAwareTrainer,
         data=cfg["data_root"], imgsz=640, epochs=1000, batch=4,
-        project="./logs", name="exp",  # → WL log_dir/name
-        workers=0,                     # WL invariant (parent-process uid counter)
+        project="./logs", name="exp", # → WL log_dir/name
+        workers=0, # WL invariant (parent-process uid counter)
     )
     wl.keep_serving()
 

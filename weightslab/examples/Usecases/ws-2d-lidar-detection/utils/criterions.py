@@ -11,9 +11,9 @@ from .model import decode_grid_2d
 # Targets are [N, 6] rows [cx, cy, dx, dy, class_id, confidence] (metric). Each
 # GT box is assigned to the grid cell containing its (cx, cy) centre.
 #
-#   * PerSampleDetection2DLoss -> one differentiable scalar per sample ([B]).
-#   * PerSampleIoU2D           -> mean axis-aligned IoU over a sample's boxes.
-#   * PerInstanceIoU2D         -> one IoU per GT box (sample-major order).
+# * PerSampleDetection2DLoss -> one differentiable scalar per sample ([B]).
+# * PerSampleIoU2D -> mean axis-aligned IoU over a sample's boxes.
+# * PerInstanceIoU2D -> one IoU per GT box (sample-major order).
 
 _EPS = 1e-6
 _LAMBDA_COORD = 2.0
@@ -95,7 +95,7 @@ def _per_box_iou(outputs, targets, grid_size, pc_range):
         if tgt.ndim == 1:
             tgt = tgt.view(-1, 6)
         rows, cols, _, _ = _responsible_cells(tgt, S, pc_range)
-        pred = boxes_grid[s, rows, cols]                     # [N, 4] (cx,cy,w,h)
+        pred = boxes_grid[s, rows, cols] # [N, 4] (cx,cy,w,h)
         gt = torch.stack([tgt[:, 0], tgt[:, 1], tgt[:, 2], tgt[:, 3]], dim=1)
         per_sample.append(iou_2d_axis_aligned(pred, gt).detach())
     return per_sample

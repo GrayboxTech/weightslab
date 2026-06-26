@@ -3,13 +3,13 @@
 # =============================================================================
 # The 2D analogue of the 3D PointPillars-lite, with z and yaw dropped:
 #
-#   1. Point Feature Net: points are binned into grid cells on the (x, y) plane;
-#      each point gets 6 features (x, y, offsets to the cell's point mean,
-#      offsets to the cell center), runs a shared Linear+BN+ReLU, and is
-#      max-pooled per cell -> a [C, H, W] feature image.
-#   2. A tiny 2D CNN backbone.
-#   3. A YOLO-style grid head: each S x S cell predicts ONE 2D box
-#      (objectness, tx, ty, log w, log h, class_logits...).
+# 1. Point Feature Net: points are binned into grid cells on the (x, y) plane;
+# each point gets 6 features (x, y, offsets to the cell's point mean,
+# offsets to the cell center), runs a shared Linear+BN+ReLU, and is
+# max-pooled per cell -> a [C, H, W] feature image.
+# 2. A tiny 2D CNN backbone.
+# 3. A YOLO-style grid head: each S x S cell predicts ONE 2D box
+# (objectness, tx, ty, log w, log h, class_logits...).
 #
 # decode_grid_2d turns logits into metric (cx, cy, w, h) boxes.
 import math
@@ -24,8 +24,8 @@ def decode_grid_2d(outputs, grid_size, pc_range):
     """Decode raw grid logits -> per-cell 2D boxes, objectness, class probs.
 
     Returns:
-        boxes:     [B, S, S, 4]  (cx, cy, w, h) in meters
-        obj:       [B, S, S]     objectness probability
+        boxes: [B, S, S, 4] (cx, cy, w, h) in meters
+        obj: [B, S, S] objectness probability
         cls_probs: [B, S, S, num_classes]
     """
     B, S = outputs.shape[0], grid_size
@@ -35,7 +35,7 @@ def decode_grid_2d(outputs, grid_size, pc_range):
     obj = torch.sigmoid(outputs[..., 0])
     tx = torch.sigmoid(outputs[..., 1])
     ty = torch.sigmoid(outputs[..., 2])
-    dims = torch.exp(outputs[..., 3:5].clamp(-4.0, 4.0))   # (w_x, w_y), meters
+    dims = torch.exp(outputs[..., 3:5].clamp(-4.0, 4.0)) # (w_x, w_y), meters
     cls_probs = torch.softmax(outputs[..., 5:], dim=-1)
 
     cols = torch.arange(S, device=device).view(1, 1, S).expand(B, S, S)
@@ -62,7 +62,7 @@ class Pillars2DLite(nn.Module):
         x_min, y_min, _, x_max, y_max, _ = self.pc_range
         self.nx = int(round((x_max - x_min) / voxel_size))
         self.ny = int(round((y_max - y_min) / voxel_size))
-        self.preds_per_cell = 5 + num_classes  # obj + (tx,ty,log w,log h) + classes
+        self.preds_per_cell = 5 + num_classes # obj + (tx,ty,log w,log h) + classes
         self.pfn_channels = pfn_channels
 
         self.pfn = nn.Sequential(
@@ -109,7 +109,7 @@ class Pillars2DLite(nn.Module):
         cy = y_min + (iy.to(pts.dtype) + 0.5) * self.voxel_size
         f_center = torch.stack([pts[:, 0] - cx, pts[:, 1] - cy], dim=1)
 
-        feats = torch.cat([pts[:, :2], f_cluster, f_center], dim=1)  # [M, 6]
+        feats = torch.cat([pts[:, :2], f_cluster, f_center], dim=1) # [M, 6]
         return feats, flat
 
     def _scatter_to_canvas(self, point_feats, flat):

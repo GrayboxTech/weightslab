@@ -2,7 +2,7 @@
 data_image_utils — Image encoding, mask compression, and proto helpers for gRPC data serving.
 
 Extracted from data_service.py to keep image-specific logic separate from the
-DataService orchestration class.  All functions here are pure (stateless) and
+DataService orchestration class. All functions here are pure (stateless) and
 safe to call from any thread.
 """
 
@@ -47,8 +47,8 @@ def rle_encode_mask(mask_flat: np.ndarray) -> bytes:
     ends = np.empty_like(starts)
     ends[:-1] = starts[1:]
     ends[-1] = mask_flat.size
-    lengths = ends - starts  # numpy int array
-    values = mask_flat[starts]  # numpy uint8 array
+    lengths = ends - starts # numpy int array
+    values = mask_flat[starts] # numpy uint8 array
 
     # Split any runs > 65535 into multiple segments
     out_vals: list[int] = []

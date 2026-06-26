@@ -4,24 +4,24 @@
 # Three stages, following the PointPillars recipe (Lang et al., CVPR 2019) but
 # heavily slimmed down:
 #
-#   1. Pillar Feature Net: points are grouped into vertical columns ("pillars")
-#      on a BEV grid; each point gets 9 features (x, y, z, intensity, offsets
-#      to the pillar's point mean, offsets to the pillar center), runs through
-#      a shared Linear+BN+ReLU, and is max-pooled per pillar -> a sparse
-#      [C, H, W] BEV pseudo-image.
-#   2. A tiny 2D CNN backbone over the BEV pseudo-image (2 stride-2 blocks).
-#   3. A YOLO-v1-style grid head: each S x S BEV cell predicts ONE 3D box:
-#      (objectness, tx, ty, tz, log l, log w, log h, sin yaw, cos yaw,
-#       class_logits...).
+# 1. Pillar Feature Net: points are grouped into vertical columns ("pillars")
+# on a BEV grid; each point gets 9 features (x, y, z, intensity, offsets
+# to the pillar's point mean, offsets to the pillar center), runs through
+# a shared Linear+BN+ReLU, and is max-pooled per pillar -> a sparse
+# [C, H, W] BEV pseudo-image.
+# 2. A tiny 2D CNN backbone over the BEV pseudo-image (2 stride-2 blocks).
+# 3. A YOLO-v1-style grid head: each S x S BEV cell predicts ONE 3D box:
+# (objectness, tx, ty, tz, log l, log w, log h, sin yaw, cos yaw,
+# class_logits...).
 #
 # Encoding (BEV cell-relative, mirrors the 2D ws-detection example):
-#   * objectness = sigmoid(t_obj)                 -> P(box centered in cell)
-#   * cx = x_min + (col + sigmoid(tx)) / S * range_x
-#   * cy = y_min + (row + sigmoid(ty)) / S * range_y
-#   * cz = z_min + sigmoid(tz) * range_z
-#   * (l, w, h) = exp(t_l, t_w, t_h)              -> size in meters
-#   * yaw = atan2(t_sin, t_cos)
-#   * class = softmax(class_logits)
+# * objectness = sigmoid(t_obj) -> P(box centered in cell)
+# * cx = x_min + (col + sigmoid(tx)) / S * range_x
+# * cy = y_min + (row + sigmoid(ty)) / S * range_y
+# * cz = z_min + sigmoid(tz) * range_z
+# * (l, w, h) = exp(t_l, t_w, t_h) -> size in meters
+# * yaw = atan2(t_sin, t_cos)
+# * class = softmax(class_logits)
 #
 # Raw forward output keeps logits (the loss applies activations); `decode_grid_3d`
 # turns logits into metric 3D boxes for metrics and prediction dumps.
@@ -39,13 +39,13 @@ def decode_grid_3d(outputs, grid_size, pc_range):
     Shared by the model and the criterions so the encoding lives in one place.
 
     Args:
-        outputs:   [B, S, S, 9 + num_classes] raw logits.
+        outputs: [B, S, S, 9 + num_classes] raw logits.
         grid_size: S.
-        pc_range:  (x_min, y_min, z_min, x_max, y_max, z_max).
+        pc_range: (x_min, y_min, z_min, x_max, y_max, z_max).
 
     Returns:
-        boxes:     [B, S, S, 7]  (cx, cy, cz, l, w, h, yaw) in meters
-        obj:       [B, S, S]     objectness probability
+        boxes: [B, S, S, 7] (cx, cy, cz, l, w, h, yaw) in meters
+        obj: [B, S, S] objectness probability
         cls_probs: [B, S, S, num_classes] class probabilities
     """
     B, S = outputs.shape[0], grid_size
@@ -56,7 +56,7 @@ def decode_grid_3d(outputs, grid_size, pc_range):
     tx = torch.sigmoid(outputs[..., 1])
     ty = torch.sigmoid(outputs[..., 2])
     tz = torch.sigmoid(outputs[..., 3])
-    dims = torch.exp(outputs[..., 4:7].clamp(-4.0, 4.0))   # (l, w, h), meters
+    dims = torch.exp(outputs[..., 4:7].clamp(-4.0, 4.0)) # (l, w, h), meters
     yaw = torch.atan2(outputs[..., 7], outputs[..., 8])
     cls_probs = torch.softmax(outputs[..., 9:], dim=-1)
 
@@ -94,11 +94,11 @@ class PointPillarsLite(nn.Module):
         self.pc_range = tuple(pc_range)
         self.voxel_size = float(voxel_size)
         self.pad_value = float(pad_value)
-        self.input_shape = (1, 4096, 4)  # padded cloud [B, M, 4] for summaries
+        self.input_shape = (1, 4096, 4) # padded cloud [B, M, 4] for summaries
 
         x_min, y_min, _, x_max, y_max, _ = self.pc_range
-        self.nx = int(round((x_max - x_min) / voxel_size))   # BEV canvas cols
-        self.ny = int(round((y_max - y_min) / voxel_size))   # BEV canvas rows
+        self.nx = int(round((x_max - x_min) / voxel_size)) # BEV canvas cols
+        self.ny = int(round((y_max - y_min) / voxel_size)) # BEV canvas rows
 
         # Channels per head cell: obj(1) + box(8: tx ty tz, log lwh, sin cos)
         # + class logits(num_classes)
@@ -176,7 +176,7 @@ class PointPillarsLite(nn.Module):
         cy = y_min + (iy.to(pts.dtype) + 0.5) * self.voxel_size
         f_center = torch.stack([pts[:, 0] - cx, pts[:, 1] - cy], dim=1)
 
-        feats = torch.cat([pts, f_cluster, f_center], dim=1)  # [M, 9]
+        feats = torch.cat([pts, f_cluster, f_center], dim=1) # [M, 9]
         return feats, flat
 
     def _scatter_to_canvas(self, point_feats, pillar_idx):
@@ -217,9 +217,9 @@ class PointPillarsLite(nn.Module):
             else:
                 canvases.append(self._scatter_to_canvas(chunks.pop(0), flat))
 
-        x = torch.stack(canvases, dim=0)        # [B, C, ny, nx]
-        x = self.backbone(x)                    # [B, 128, ny/4, nx/4]
-        out = self.head(x)                      # [B, preds_per_cell, S', S']
+        x = torch.stack(canvases, dim=0) # [B, C, ny, nx]
+        x = self.backbone(x) # [B, 128, ny/4, nx/4]
+        out = self.head(x) # [B, preds_per_cell, S', S']
 
         # Resize the feature grid to the configured head grid_size.
         if out.shape[-1] != self.grid_size or out.shape[-2] != self.grid_size:

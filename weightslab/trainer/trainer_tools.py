@@ -59,7 +59,7 @@ def execute_df_operation(df, operation_str):
     except Exception as e:
         error_msg = f"Error executing DataFrame operation '{operation_str}': {e}"
         logger.error(error_msg, exc_info=True)
-        return df, error_msg  # Return original df on error
+        return df, error_msg # Return original df on error
 
 
 def get_hyper_parameters_pb(
@@ -82,7 +82,7 @@ def get_hyper_parameters_pb(
             # For numerical values, ensure we pass a float to gRPC to avoid "must be real number" errors
             try:
                 if hasattr(value, "get"):
-                    value = value.get()  # unwrap if it's a wrapper object
+                    value = value.get() # unwrap if it's a wrapper object
                 if value is None or value == None:
                     num_val = 'null'
                     type_ = 'string'
@@ -241,7 +241,7 @@ def _labels_from_mask_path_histogram(path, num_classes=None, ignore_index=255):
     with Image.open(path) as im:
         if im.mode not in ("P", "L"):
             im = im.convert("L")
-        hist = im.histogram()  # length 256
+        hist = im.histogram() # length 256
     ub = 256 if num_classes is None else int(num_classes)
     ids = [i for i, cnt in enumerate(hist[:ub]) if cnt > 0]
     if ignore_index is not None:
@@ -313,7 +313,7 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
     sample_stats.task_type = task_type
 
     ignore_index = getattr(dataset, "ignore_index", 255)
-    num_classes  = getattr(dataset, "num_classes", getattr(experiment, "num_classes", None))
+    num_classes = getattr(dataset, "num_classes", getattr(experiment, "num_classes", None))
 
     # Safely iterate dataset records; if as_records isn't available or dataset is a placeholder
     # fall back to an empty iterator.
@@ -343,9 +343,9 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
             pred_list = _class_ids(row.get("prediction_raw"), num_classes, ignore_index)
         else:
             target = row.get("label", row.get("target", -1))
-            pred   = row.get("prediction_raw", -1)
+            pred = row.get("prediction_raw", -1)
             target_list = [int(target)] if not isinstance(target, (list, np.ndarray)) else [int(np.array(target).item())]
-            pred_list   = [int(pred)]   if not isinstance(pred, (list, np.ndarray))   else [int(np.array(pred).item())]
+            pred_list = [int(pred)] if not isinstance(pred, (list, np.ndarray)) else [int(np.array(pred).item())]
         record.sample_label.extend(target_list)
         record.sample_prediction.extend(pred_list)
 
@@ -526,18 +526,18 @@ def encode_image_to_raw_bytes(
     - All other cases (thumbnails, 2D): PIL image compressed to WebP (JPEG fallback).
 
     Args:
-        np_img:            Numpy array of the image (required for the volumetric path).
-        middle_pil:        PIL Image (required for the 2D / thumbnail path).
-        original_shape:    Original tensor shape, used to derive [Z, H, W, C] for volumetric.
-        is_volumetric:     True when the image has a depth (Z) dimension.
+        np_img: Numpy array of the image (required for the volumetric path).
+        middle_pil: PIL Image (required for the 2D / thumbnail path).
+        original_shape: Original tensor shape, used to derive [Z, H, W, C] for volumetric.
+        is_volumetric: True when the image has a depth (Z) dimension.
         is_full_resolution: True when sending the full modal view, False for grid thumbnails.
-        target_width:      Width of the (possibly resized) output image.
-        target_height:     Height of the (possibly resized) output image.
+        target_width: Width of the (possibly resized) output image.
+        target_height: Height of the (possibly resized) output image.
 
     Returns:
         raw_data_bytes: Encoded bytes ready for gRPC transfer.
-        raw_shape:      [Z, H, W, C] or [H, W, C] shape of the encoded data.
-        encode_time_s:  Seconds spent encoding (0.0 for the raw float32 path).
+        raw_shape: [Z, H, W, C] or [H, W, C] shape of the encoded data.
+        encode_time_s: Seconds spent encoding (0.0 for the raw float32 path).
     """
     raw_data_bytes: bytes = b""
     raw_shape: list = []
@@ -549,16 +549,16 @@ def encode_image_to_raw_bytes(
         if not np_img_f32.flags['C_CONTIGUOUS']:
             np_img_f32 = np.ascontiguousarray(np_img_f32)
         raw_data_bytes = np_img_f32.tobytes()
-        del np_img_f32  # release float32 copy immediately
+        del np_img_f32 # release float32 copy immediately
 
         # Normalise shape to [Z, H, W, C] from the original 4-D tensor.
         if len(original_shape) == 4:
             if original_shape[1] > original_shape[-1]:
-                raw_shape = list(original_shape)                                               # already [Z, H, W, C]
+                raw_shape = list(original_shape) # already [Z, H, W, C]
             elif original_shape[1] < original_shape[-1]:
-                raw_shape = [original_shape[0], original_shape[2], original_shape[3], original_shape[1]]  # [Z, C, H, W] -> [Z, H, W, C]
+                raw_shape = [original_shape[0], original_shape[2], original_shape[3], original_shape[1]] # [Z, C, H, W] -> [Z, H, W, C]
             else:
-                raw_shape = [original_shape[0], original_shape[1], original_shape[2], 1]      # ambiguous: assume single channel
+                raw_shape = [original_shape[0], original_shape[1], original_shape[2], 1] # ambiguous: assume single channel
         logger.info(
             "[Volumetric] Sending full res: np_img.shape=%s, original_shape=%s, raw_shape=%s, bytes=%d",
             np_img.shape, original_shape, raw_shape, len(raw_data_bytes),
@@ -567,7 +567,7 @@ def encode_image_to_raw_bytes(
         # Thumbnail (grid) or non-volumetric: compress with WebP, fall back to JPEG.
         # WebP is ~40-50 % smaller than JPEG at equivalent visual quality.
         _quality = 80 if is_full_resolution else 65
-        _webp_method = 4 if is_full_resolution else 2  # 0 = fastest … 6 = smallest
+        _webp_method = 4 if is_full_resolution else 2 # 0 = fastest … 6 = smallest
         raw_buf = io.BytesIO()
         t0_enc = time.time()
         try:

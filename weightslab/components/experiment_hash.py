@@ -72,15 +72,15 @@ class ExperimentHashGenerator:
         if config != -1:
             hp_hash = self._hash_config(config) if config is not None else "00000000"
         else:
-            hp_hash = self._last_hp_hash or "00000000"  # If config is -1, keep previous HP hash to avoid marking as changed
+            hp_hash = self._last_hp_hash or "00000000" # If config is -1, keep previous HP hash to avoid marking as changed
         if model != -1:
             model_hash = self._hash_model(model, model_init_step=model_init_step, _last_time_loaded=_last_time_loaded) if model is not None else "00000000"
         else:
-            model_hash = self._last_model_hash or "00000000"  # If model is -1, keep previous model hash to avoid marking as changed
+            model_hash = self._last_model_hash or "00000000" # If model is -1, keep previous model hash to avoid marking as changed
         if data_state != -1:
             data_hash = self._hash_data_state(data_state) if data_state is not None else "00000000"
         else:
-            data_hash = self._last_data_hash or "00000000"  # If data_state is -1, keep previous data hash to avoid marking as changed
+            data_hash = self._last_data_hash or "00000000" # If data_state is -1, keep previous data hash to avoid marking as changed
 
         # Combine into 24-byte hash: HP (8) + MODEL (8) + DATA (8)
         final_hash = f"{hp_hash}{model_hash}{data_hash}"
@@ -92,9 +92,9 @@ class ExperimentHashGenerator:
         self._last_data_hash = data_hash
 
         logger.info(f"Generated experiment hash: {final_hash}- (HP: {hp_hash}, Model: {model_hash}, Data: {data_hash})")
-        logger.debug(f"  HP hash: {hp_hash}")
-        logger.debug(f"  Model hash: {model_hash}")
-        logger.debug(f"  Data hash: {data_hash}")
+        logger.debug(f" HP hash: {hp_hash}")
+        logger.debug(f" Model hash: {model_hash}")
+        logger.debug(f" Data hash: {data_hash}")
 
         return final_hash
 
@@ -187,7 +187,7 @@ class ExperimentHashGenerator:
             arch_info = []
 
             # Model class name
-            arch_info.append(f"previously_loaded:{_last_time_loaded}")  # Add a unique timestamp to ensure different hash for each load, even if architecture is the same
+            arch_info.append(f"previously_loaded:{_last_time_loaded}") # Add a unique timestamp to ensure different hash for each load, even if architecture is the same
             arch_info.append(f"class:{model.__class__.__name__}")
             arch_info.append(f"init_step:{int(model_init_step)}")
 
@@ -197,7 +197,7 @@ class ExperimentHashGenerator:
                 # Remove these trackers from hash
                 if 'train_dataset_tracker' in name or 'eval_dataset_tracker' in name:
                     continue
-                if name:  # Skip root module
+                if name: # Skip root module
                     module_info = f"{name}:{module.__class__.__name__}"
 
                     # Add key parameters for common layer types
@@ -236,7 +236,7 @@ class ExperimentHashGenerator:
         config_cp.pop('root_log_dir', None)
         config_cp.pop('is_training', None)
         config_cp.pop('pause_at_step', None)
-        # config_cp.pop('auditor_mode', None)  # Audit should be another state
+        # config_cp.pop('auditor_mode', None) # Audit should be another state
         if 'auditor_mode' not in config_cp:
             config_cp['auditor_mode'] = False
 

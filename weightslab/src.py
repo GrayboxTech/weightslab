@@ -43,11 +43,11 @@ def _rebind_caller_local(original_obj: Any, new_obj: Any) -> None:
 
     This lets ``wl.watch_or_edit(parameters, ...)`` (without capturing the return
     value) transparently replace ``parameters`` with the returned Proxy in the
-    calling scope.  Silently does nothing on non-CPython runtimes.
+    calling scope. Silently does nothing on non-CPython runtimes.
     """
     try:
         # frame 0 = _rebind_caller_local
-        # frame 1 = watch_or_edit  (or whatever internal caller)
+        # frame 1 = watch_or_edit (or whatever internal caller)
         # frame 2 = user code
         frame = sys._getframe(2)
         changed = False
@@ -217,26 +217,26 @@ def _get_step(step: int | None = None) -> int:
     if m is not None:
         # Safe attribute access (handle Proxy returning None for missing attr)
         if hasattr(m, 'get_age'):
-            val = m.get_age() -1  # At this point, model already saw one batch, except if we started by evaluation
+            val = m.get_age() -1 # At this point, model already saw one batch, except if we started by evaluation
             if val is not None:
-                step = max([int(val), 0])  # Use age-1 as step to reflect completed step; ensure non-negative
+                step = max([int(val), 0]) # Use age-1 as step to reflect completed step; ensure non-negative
 
         elif hasattr(m, 'current_step'):
             val = m.current_step
 
             if val is not None:
-                step = max([int(val), 0])  # Use current_step-1 as step to reflect completed step; ensure non-negative
+                step = max([int(val), 0]) # Use current_step-1 as step to reflect completed step; ensure non-negative
 
             elif step is not None:
                 # step = step # fallback to provided step
-                m.current_step = step  # add current_step attribute to model for future tracking
+                m.current_step = step # add current_step attribute to model for future tracking
 
-            m.get_age = types.MethodType(_get_age, m)  # To make a proper bound method so `self` is passed correctly, we use types.MethodType
+            m.get_age = types.MethodType(_get_age, m) # To make a proper bound method so `self` is passed correctly, we use types.MethodType
 
         elif step is not None:
             # If model doesn't have current_step, force it to 0 or try to infer from checkpoint manager
-            m.current_step = step  # add current_step attribute to model for future tracking
-            m.get_age = types.MethodType(_get_age, m)  # To make a proper bound method so `self` is passed correctly, we use types.MethodType
+            m.current_step = step # add current_step attribute to model for future tracking
+            m.get_age = types.MethodType(_get_age, m) # To make a proper bound method so `self` is passed correctly, we use types.MethodType
 
     return step
 
@@ -334,7 +334,7 @@ def _log_signal(scalar: float, signal_per_sample: dict, reg_name: str, step: int
                     {reg_name: scalar},
                     global_step=step,
                     signal_per_sample=signal_per_sample,
-                    aggregate_by_step=kwargs.get('per_sample', True)  # Aggregate per-sample signals by step for logging if per_sample is True,
+                    aggregate_by_step=kwargs.get('per_sample', True) # Aggregate per-sample signals by step for logging if per_sample is True,
                 )
         except Exception:
             traceback.print_exc()
@@ -516,9 +516,9 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
         if instance_batch_idx is None and 'batch_idx' in kw:
             instance_batch_idx = kw['batch_idx']
         elif instance_batch_idx is None and targets is not None and isinstance(targets, list):
-            instance_batch_idx = [i for i, tars in enumerate(targets) for _ in tars]  # Auto determine batch_idx from targets if not explicitly provided (assumes targets is list of lists of annotations)
+            instance_batch_idx = [i for i, tars in enumerate(targets) for _ in tars] # Auto determine batch_idx from targets if not explicitly provided (assumes targets is list of lists of annotations)
         else:
-            instance_batch_idx = ledgers.get_dataframe()._df.loc[batch_ids].index.get_level_values(1).tolist()  # Query directly instance_ids related and ordered to the samples_ids in the batch
+            instance_batch_idx = ledgers.get_dataframe()._df.loc[batch_ids].index.get_level_values(1).tolist() # Query directly instance_ids related and ordered to the samples_ids in the batch
             batch_ids = ledgers.get_dataframe()._df.loc[batch_ids].index.get_level_values(0).tolist()
 
     # If output is a dict (from PerInstanceDetectionLoss), pick 'sample'
@@ -533,7 +533,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
     if kwargs.get('per_sample', False) and not isinstance(out, dict):
         if hasattr(out, 'ndim') and out.ndim > 1:
-            out = out.mean(dim=tuple(range(1, out.ndim)))  # Reduce to [B,]0
+            out = out.mean(dim=tuple(range(1, out.ndim))) # Reduce to [B,]0
 
     # Extract scalar from tensor
     scalar, batch_scalar = _extract_scalar_from_tensor(batch_scalar, out, batch_ids)
@@ -550,7 +550,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                 batch_idx=instance_batch_idx,
                 targets=targets,
                 step=step,
-                log=False,  # already logged sample-level above
+                log=False, # already logged sample-level above
             )
         except Exception as e:
             traceback.print_exc() if os.environ.get('WEIGHTSLAB_LOG_LEVEL') == 'DEBUG' else None
@@ -640,7 +640,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                                  origin=kwargs.get('origin', 'train')
                              )
                              try:
-                                 res = func(ctx)  # Compute per sample result with unified context
+                                 res = func(ctx) # Compute per sample result with unified context
                              except TypeError:
                                  # Fallback for legacy subscriber functions
                                  res = func(sample_id=int(uid), value=val, dataframe=df_proxy)
@@ -650,10 +650,10 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                          dynamic_updates[name] = signal_value
                          if dynamic_updates and meta.get('log', True):
                              logger.debug(f"Dynamic updates computed for signal '{reg_name}': {list(dynamic_updates.keys())}")
-                             _log_signal(sum(signal_value)/len(signal_value), signal_value, name, step=step, **kwargs)  # Log custom subscribed signals
+                             _log_signal(sum(signal_value)/len(signal_value), signal_value, name, step=step, **kwargs) # Log custom subscribed signals
                      except Exception as e:
                          logger.debug(f"Dynamic signal {name} failed: {e}")
-                         pass  # User function error, skip
+                         pass # User function error, skip
 
     # Save statistics if requested and applicable.
     # Skip the per-sample save path when per_instance=True — instance values
@@ -676,7 +676,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
             preds_raw=preds_raw,
             preds=preds,
             targets=targets,
-            log=False  # Already logged above, no need to log again in save_signals; set to False to avoid duplicate logging if save_signals is called separately without logging
+            log=False # Already logged above, no need to log again in save_signals; set to False to avoid duplicate logging if save_signals is called separately without logging
         )
 
     # Return the original output (dict for per-instance losses so caller can
@@ -748,7 +748,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         forced_model_wrapping = kwargs.pop('forced_model_wrapping', False)
 
         # Now construct the wrapper and let it register into the ledger.
-        wrapper = ModelInterface(obj, **kwargs)  if forced_model_wrapping or _model == None else _model
+        wrapper = ModelInterface(obj, **kwargs) if forced_model_wrapping or _model == None else _model
 
         # No rebind here since the model wrapper is designed to be a drop-in replacement for the original model
 
@@ -791,11 +791,11 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                     if 'loader_name' not in kwargs and 'name' in kwargs:
                         kwargs['loader_name'] = kwargs['name']
             except Exception:
-                pass  # If we can't get hyperparameters, continue without root_log_dir
+                pass # If we can't get hyperparameters, continue without root_log_dir
 
         # Now construct the wrapper and let it register into the ledger.
         wrapper = DataLoaderInterface(obj, **kwargs)
-        _dataloader.__pl_saved_kwargs = kwargs  # Force pytorch lightning compatibility
+        _dataloader.__pl_saved_kwargs = kwargs # Force pytorch lightning compatibility
 
         # There is not rebind here because obj can be a dataloader or a dataset
 
@@ -932,7 +932,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             # If obj is a string, treat as a file path and start watcher
             try:
                 # Initialize CheckpointManager if we have a root dir (fallback to default root)
-                root_log_dir = obj.get('root_log_dir') or tempfile.mkdtemp()
+                obj['root_log_dir'] = obj.get('root_log_dir') or tempfile.mkdtemp()
                 try:
                     # Check if a checkpoint manager is already registered in ledger
                     try:
@@ -981,7 +981,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                                 logger.info(f"Loaded hyperparameters from checkpoint {latest_hash[:16]}")
                                 checkpoint_hp_loaded = True
                 except Exception:
-                    pass  # If checkpoint loading fails, proceed with normal registration
+                    pass # If checkpoint loading fails, proceed with normal registration
 
                 defaults = kwargs.get('defaults', None)
                 if not checkpoint_hp_loaded:
@@ -1071,7 +1071,7 @@ def start_training(timeout: int = None) -> None:
     if timeout is not None and isinstance(timeout, int) and timeout > 0:
         logger.info(f"Starting WeightsLab training mode with a timeout of {timeout} seconds.")
         time.sleep(timeout)
-    pause_ctrl.resume()  # Ensure we're not paused if start_training is called after serve
+    pause_ctrl.resume() # Ensure we're not paused if start_training is called after serve
 
 def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
     """Start WeightsLab services.
@@ -1632,14 +1632,14 @@ def save_signals(
     Examples:
         Classification — one loss scalar per image::
 
-            for inputs, targets, ids in train_loader:   # ids: sample IDs, len B
-                logits = model(inputs)                   # (B, num_classes)
-                loss = loss_fn(logits, targets)          # (B,) per-sample loss
+            for inputs, targets, ids in train_loader: # ids: sample IDs, len B
+                logits = model(inputs) # (B, num_classes)
+                loss = loss_fn(logits, targets) # (B,) per-sample loss
                 wl.save_signals(
-                    signals={"train_loss": loss},        # (B,) -> signals//train_loss
+                    signals={"train_loss": loss}, # (B,) -> signals//train_loss
                     batch_ids=ids,
-                    preds_raw=logits,                    # (B, num_classes)
-                    targets=targets,                     # (B,)
+                    preds_raw=logits, # (B, num_classes)
+                    targets=targets, # (B,)
                     step=current_step,
                     log=True,
                 )
@@ -1647,7 +1647,7 @@ def save_signals(
         Several named per-sample metrics at once::
 
             wl.save_signals(
-                signals={"iou": iou_per_image, "dice": dice_per_image},  # each (B,)
+                signals={"iou": iou_per_image, "dice": dice_per_image}, # each (B,)
                 batch_ids=ids,
             )
     """
@@ -1704,9 +1704,9 @@ def save_signals(
             return x[:, np.newaxis]
         return x
 
-    preds_np     = normalize(preds)
+    preds_np = normalize(preds)
     preds_raw_np = normalize(preds_raw)
-    target_np    = normalize(targets)
+    target_np = normalize(targets)
 
     # Processing signals
     if isinstance(signals, dict):
@@ -1726,8 +1726,8 @@ def save_signals(
         losses_data = None
 
     # Expand dims for 1D arrays (skipped for lists)
-    target_np    = expand_dim(target_np)
-    preds_np     = expand_dim(preds_np)
+    target_np = expand_dim(target_np)
+    preds_np = expand_dim(preds_np)
     preds_raw_np = expand_dim(preds_raw_np)
 
     # Enqueue to dataframe manager buffer for efficiency
@@ -1780,29 +1780,29 @@ def save_instance_signals(
 
     Worked example — ``batch_ids = ["img7", "img3"]`` (B = 2), 5 boxes total::
 
-        # box:        0      1      2      3      4
-        batch_idx = [ 0,     0,     1,     1,     1 ]   # boxes 0-1 -> img7, 2-4 -> img3
-        ious      = [0.91,  0.62,  0.50,  0.74,  0.30]  # one IoU per box
+        # box: 0 1 2 3 4
+        batch_idx = [ 0, 0, 1, 1, 1 ] # boxes 0-1 -> img7, 2-4 -> img3
+        ious = [0.91, 0.62, 0.50, 0.74, 0.30] # one IoU per box
 
         wl.save_instance_signals(
-            signals={"iou_instance": ious},   # -> signals//iou_instance
+            signals={"iou_instance": ious}, # -> signals//iou_instance
             batch_ids=["img7", "img3"],
             batch_idx=batch_idx,
             origin="train",
         )
         # writes:
-        #   ("img7", 1)=0.91  ("img7", 2)=0.62
-        #   ("img3", 1)=0.50  ("img3", 2)=0.74  ("img3", 3)=0.30
+        # ("img7", 1)=0.91 ("img7", 2)=0.62
+        # ("img3", 1)=0.50 ("img3", 2)=0.74 ("img3", 3)=0.30
 
     Typical detection loop using the Ultralytics batch dict directly::
 
         image, batch_ids, batch = inputs[0], inputs[1], inputs[3]["batch"]
         raw_preds = model(image)
-        iou_per_box = compute_iou(raw_preds, batch)            # flat [total_instances]
+        iou_per_box = compute_iou(raw_preds, batch) # flat [total_instances]
         wl.save_instance_signals(
             signals={"iou_instance": iou_per_box},
             batch_ids=batch_ids,
-            batch_idx=batch["batch_idx"],                      # Ultralytics flat index
+            batch_idx=batch["batch_idx"], # Ultralytics flat index
             step=current_step,
         )
 
@@ -1811,9 +1811,9 @@ def save_instance_signals(
     in the same per-sample order ``batch_idx`` implies. It is flattened
     sample-major to align with the instances::
 
-        targets = [                       # batch_ids = ["img7", "img3"]
-            [box7_0, box7_1],             # img7's two boxes  -> annotation_id 1, 2
-            [box3_0, box3_1, box3_2],     # img3's three boxes -> annotation_id 1, 2, 3
+        targets = [ # batch_ids = ["img7", "img3"]
+            [box7_0, box7_1], # img7's two boxes -> annotation_id 1, 2
+            [box3_0, box3_1, box3_2], # img3's three boxes -> annotation_id 1, 2, 3
         ]
         wl.save_instance_signals(signals={"iou_instance": ious},
                                  batch_ids=["img7", "img3"],
@@ -1986,7 +1986,7 @@ def get_active_group_mask(
     Example::
 
         # Cosine embedding loss — one value per pair in the batch
-        loss_embed = loss_cosine(e1, e2, y)            # shape: (B/2,)
+        loss_embed = loss_cosine(e1, e2, y) # shape: (B/2,)
         group_mask = wl.get_active_group_mask(group_ids, origin="train_loader")
         # Zero out tainted pairs so they don't update weights
         n_active = group_mask.sum().clamp(min=1)
@@ -2009,7 +2009,7 @@ def get_active_group_mask(
                 if gid in tainted:
                     mask[i] = 0.0
     except Exception:
-        pass  # Fail-safe: if check fails, treat all groups as active
+        pass # Fail-safe: if check fails, treat all groups as active
 
     return mask
 
@@ -2127,14 +2127,14 @@ def save_group_signals(
         try:
             tainted_group_ids = DATAFRAME_M.get_tainted_group_ids(group_ids, origin)
         except Exception:
-            pass  # Never block training on best-effort discard check
+            pass # Never block training on best-effort discard check
 
     # Broadcast to all members in ledger (skip tainted groups)
     all_updates = []
     active_group_ids = []
     for i, gid in enumerate(group_ids):
         if gid in tainted_group_ids:
-            continue  # Skip: at least one member was discarded; group loss is undefined
+            continue # Skip: at least one member was discarded; group loss is undefined
 
         # We also record the last seen step for all members
         updates = scalar_signals.copy()
@@ -2148,7 +2148,7 @@ def save_group_signals(
         active_group_ids.append(gid)
 
     if not active_group_ids:
-        return  # All groups were tainted; nothing to write
+        return # All groups were tainted; nothing to write
 
     # Bulk update for performance (avoids repeated dataframe scans)
     DATAFRAME_M.update_by_groups_bulk(origin=origin, group_ids=active_group_ids, updates_list=all_updates)
@@ -2221,7 +2221,7 @@ def _unpack_batch(batch, device=None):
 def _make_default_eval_fn(model):
     """Return a default evaluation callable that uses all registered ledger signals.
 
-    This is used when no ``@wl.eval_fn`` decorator was applied.  For every
+    This is used when no ``@wl.eval_fn`` decorator was applied. For every
     batch it:
 
     1. Unpacks ``(inputs, targets, ids)`` using a heuristic (tuple/list/dict).
@@ -2232,7 +2232,7 @@ def _make_default_eval_fn(model):
        evaluation-mode buffer.
 
     Loss-style signals (wrapped ``forward``) and metric-style signals
-    (wrapped ``compute``) are both handled.  Per-signal errors are silently
+    (wrapped ``compute``) are both handled. Per-signal errors are silently
     skipped so a missing target or shape mismatch does not abort the whole
     evaluation.
     """
@@ -2283,7 +2283,7 @@ def _make_default_eval_fn(model):
                         except Exception:
                             pass
 
-                    preds = model(inputs)  # infer predictions
+                    preds = model(inputs) # infer predictions
 
                     # Call each registered signal so its wrapped forward/compute
                     # fires and feeds into the evaluation-mode logger buffer.
@@ -2347,8 +2347,8 @@ def eval_fn(func):
 
     The decorated function receives a single *loader* argument — a
     ``_EvalManagedLoader`` wrapping the requested split's
-    ``DataLoaderInterface``.  It should iterate that loader and compute
-    the watched criteria / metrics exactly as in a normal test pass.  All
+    ``DataLoaderInterface``. It should iterate that loader and compute
+    the watched criteria / metrics exactly as in a normal test pass. All
     ``add_scalars`` calls are intercepted by the logger's evaluation-mode
     buffer.
 
@@ -2377,8 +2377,8 @@ def pointcloud_thumbnail(func):
     own function, e.g. a range/spherical projection:
 
         @wl.pointcloud_thumbnail
-        def to_range_image(points):           # points: [M, 2..F] float
-            return my_range_projection(points)  # -> (H, W, 3) uint8 or PIL.Image
+        def to_range_image(points): # points: [M, 2..F] float
+            return my_range_projection(points) # -> (H, W, 3) uint8 or PIL.Image
 
     (Note: ``@wl.3d_pc_thumb`` isn't valid Python — identifiers can't start
     with a digit — so the verb is spelled out.) A ``render_thumbnail_2d``
@@ -2398,7 +2398,7 @@ def pointcloud_boxes(func):
 
         @wl.pointcloud_boxes
         def boxes_to_range(boxes):
-            return my_boxes_in_range_frame(boxes)  # -> [N, 6] normalized
+            return my_boxes_in_range_frame(boxes) # -> [N, 6] normalized
 
     A ``project_boxes_2d`` method on the dataset takes precedence.
     """
@@ -2477,19 +2477,19 @@ def run_pending_evaluation(
     Can still be called from the training loop with explicit arguments for
     backwards-compatibility::
 
-        if wl.run_pending_evaluation():  # ledger mode — no args needed
+        if wl.run_pending_evaluation(): # ledger mode — no args needed
             continue
 
     Args:
-        loaders:  Optional mapping of *loader_name* → ``DataLoaderInterface``.
+        loaders: Optional mapping of *loader_name* → ``DataLoaderInterface``.
                   When ``None``, the loader is looked up by split name from
                   the ledger.
-        model:    Optional tracked model instance (used to read ``get_age()``).
+        model: Optional tracked model instance (used to read ``get_age()``).
                   When ``None``, resolved from the ledger.
-        eval_fn:  Optional callable with signature ``eval_fn(loader) -> None``.
+        eval_fn: Optional callable with signature ``eval_fn(loader) -> None``.
                   When ``None``, the function registered via ``@wl.eval_fn``
                   is used.
-        device:   Unused; kept for API symmetry.
+        device: Unused; kept for API symmetry.
 
     Returns:
         ``True`` if an evaluation was executed (caller should ``continue``
@@ -2730,7 +2730,7 @@ def run_pending_evaluation(
 
     model_age = 0
     try:
-        model_age = _model.get_age() - 1 if _model is not None and hasattr(_model, "get_age") else 0  # Model anticipates a step after eval, so subtract 1 to report the age corresponding to the just-evaluated checkpoint.
+        model_age = _model.get_age() - 1 if _model is not None and hasattr(_model, "get_age") else 0 # Model anticipates a step after eval, so subtract 1 to report the age corresponding to the just-evaluated checkpoint.
     except Exception:
         pass
 
@@ -2799,42 +2799,42 @@ def run_pending_evaluation(
     logger.info(f"\n{'='*70}")
     logger.info(f"[WeightsLab] Evaluation Results")
     logger.info(f"{'='*70}")
-    logger.info(f"  Split:        {split_name}")
-    logger.info(f"  Model Step:   {model_age}")
-    logger.info(f"  Tags:         {tags}")
-    logger.info(f"  Total Samples: {filtered_count if filtered_count is not None else 'unknown'}")
-    logger.info(f"  Total Batches: {total_batches}")
-    logger.info(f"  Eval Hash:    {eval_hash}")
+    logger.info(f" Split: {split_name}")
+    logger.info(f" Model Step: {model_age}")
+    logger.info(f" Tags: {tags}")
+    logger.info(f" Total Samples: {filtered_count if filtered_count is not None else 'unknown'}")
+    logger.info(f" Total Batches: {total_batches}")
+    logger.info(f" Eval Hash: {eval_hash}")
 
     if result:
-        logger.info(f"  Metrics:\n")
+        logger.info(f" Metrics:\n")
         for k, v in result.items():
             if isinstance(v, float):
-                logger.info(f"    {k:30s} = {v:.6f}")
+                logger.info(f" {k:30s} = {v:.6f}")
             else:
-                logger.info(f"    {k:30s} = {v}")
+                logger.info(f" {k:30s} = {v}")
     else:
-        logger.info(f"  Status:       No metrics recorded")
+        logger.info(f" Status: No metrics recorded")
         error_msg = (
             f"Evaluation did not produce any metrics.\n"
-            f"  Possible causes:\n"
-            f"    • Evaluation function is not compatible with the experiment setup\n"
-            f"    • No signals were computed during evaluation\n"
-            f"    • Model or data loader not registered in the ledger\n\n"
-            f"  Solution: Create a custom evaluation function decorated with @wl.eval_fn.\n"
-            f"  This function should:\n"
-            f"    1. Accept only one parameter: loader\n"
-            f"    2. Be fully based on the WeightsLab ledger\n"
-            f"    3. Retrieve model, device, and metrics from wl.ledger.*\n"
-            f"    4. Register loss/metric functions with wl.watch_or_edit(..., flag='loss/metric')\n\n"
-            f"  Example from detection use case:\n"
-            f"    @wl.eval_fn\n"
-            f"    def validate(loader):\n"
-            f"        model = wl.ledger.get_model()\n"
-            f"        device = wl.ledger.get_device()\n"
-            f"        for batch in loader:\n"
-            f"            ...\n\n"
-            f"  See documentation: https://grayboxtech.github.io/weightslab/latest/index.html"
+            f" Possible causes:\n"
+            f" • Evaluation function is not compatible with the experiment setup\n"
+            f" • No signals were computed during evaluation\n"
+            f" • Model or data loader not registered in the ledger\n\n"
+            f" Solution: Create a custom evaluation function decorated with @wl.eval_fn.\n"
+            f" This function should:\n"
+            f" 1. Accept only one parameter: loader\n"
+            f" 2. Be fully based on the WeightsLab ledger\n"
+            f" 3. Retrieve model, device, and metrics from wl.ledger.*\n"
+            f" 4. Register loss/metric functions with wl.watch_or_edit(..., flag='loss/metric')\n\n"
+            f" Example from detection use case:\n"
+            f" @wl.eval_fn\n"
+            f" def validate(loader):\n"
+            f" model = wl.ledger.get_model()\n"
+            f" device = wl.ledger.get_device()\n"
+            f" for batch in loader:\n"
+            f" ...\n\n"
+            f" See documentation: https://grayboxtech.github.io/weightslab/latest/index.html"
         )
         logger.warning(error_msg)
 
@@ -2875,7 +2875,7 @@ def _build_eval_allow_list(loader_if, tags: list, split_name: str) -> set:
         for tag in tags:
             col = f"{SampleStatsEx.TAG.value}:{tag}"
             if col in df.columns:
-                col_mask = df[col] == True  # noqa: E712
+                col_mask = df[col] == True # noqa: E712
                 mask = col_mask if mask is None else (mask & col_mask)
 
         if mask is None:
@@ -3006,22 +3006,9 @@ class _EvalManagedLoader:
         if self._controller.is_cancel_requested():
             raise _EvalCanceled(f"Evaluation on '{self._split_name}' canceled by user")
 
-        elapsed = time.monotonic() - self._start_time
-        if self._absolute_timeout > 0 and elapsed > self._absolute_timeout:
-            raise _EvalTimeout(
-                f"Evaluation timeout on '{self._split_name}' after {elapsed:.1f}s (configured {self._absolute_timeout:.1f}s)"
-            )
-
         if self._total_batches <= 0 or self._processed_batches <= 0 or self._avg_batch_seconds <= 0:
             return
 
-        projected = self._avg_batch_seconds * self._total_batches
-        timeout_seconds = max(self._min_seconds, projected * self._multiplier)
-        if elapsed > timeout_seconds:
-            raise _EvalTimeout(
-                f"Evaluation timeout on '{self._split_name}' after {elapsed:.1f}s "
-                f"(projected={projected:.1f}s, limit={timeout_seconds:.1f}s, multiplier={self._multiplier:.2f})"
-            )
     def __len__(self):
         return len(self._loader)
 
@@ -3062,7 +3049,7 @@ class _EvalManagedLoader:
 def get_current_experiment_hash() -> str | None:
     """Return the hash of the currently active experiment run.
 
-    Reads the hash from the registered checkpoint manager.  Returns ``None``
+    Reads the hash from the registered checkpoint manager. Returns ``None``
     when no experiment is active or no checkpoint manager has been registered.
 
     Example::
@@ -3123,7 +3110,7 @@ def query_sample_history(
     names = (
         [signal_name]
         if signal_name
-        else list(_lg._signal_history_per_sample.keys())
+        else _lg.list_sample_signal_names()
     )
     results = []
     for name in names:
@@ -3156,7 +3143,7 @@ def query_instance_history(
     names = (
         [signal_name]
         if signal_name
-        else list(_lg._signal_history_per_instance.keys())
+        else _lg.list_instance_signal_names()
     )
     results = []
     for name in names:
@@ -3181,7 +3168,7 @@ def write_history(
     Parameters
     ----------
     path : str, optional
-        Output file path **or** directory.  When omitted (``None``), the
+        Output file path **or** directory. When omitted (``None``), the
         ``root_log_dir`` from the active checkpoint manager is used as the
         output directory.
 
@@ -3191,14 +3178,14 @@ def write_history(
           is auto-generated as ``<hash>_history.<format>`` inside that
           directory, where ``<hash>`` is an 8-character hex MD5 of the
           normalized call parameters (*type_of_history*, *graph_name*,
-          *experiment_hash*, *sample_id*, *instance_id*).  The same filter
+          *experiment_hash*, *sample_id*, *instance_id*). The same filter
           combination always produces the same filename; different filters
           produce different filenames.
         - The directory is created automatically if it does not exist.
     format : {"json", "csv"}
         Output format (default ``"json"``).
     type_of_history : {None, "all", "global", "sample", "instance", "instances"}
-        Which history to include.  ``None`` or ``"all"`` writes every type.
+        Which history to include. ``None`` or ``"all"`` writes every type.
         ``"global"`` writes the aggregated training-curve history.
         ``"sample"`` writes per-sample history.
         ``"instance"`` / ``"instances"`` writes per-instance history.
@@ -3206,7 +3193,7 @@ def write_history(
         Restrict to one or more signal / metric names.
     experiment_hash : str, optional
         ``None`` (default) — use the current experiment hash from the
-        checkpoint manager.  ``"all"`` — include every hash.
+        checkpoint manager. ``"all"`` — include every hash.
         Any other string — restrict to that specific experiment run.
     sample_id : str or list of str, optional
         Restrict per-sample and per-instance rows to one or more sample IDs.
@@ -3279,9 +3266,9 @@ def write_history(
     # --- Normalize all parameters first (needed for the auto-filename hash) ---
 
     # Resolve experiment_hash:
-    #   None      → use the current hash from the checkpoint manager (default)
-    #   "all"     → no filter, include every hash
-    #   any str   → filter to that specific hash
+    # None → use the current hash from the checkpoint manager (default)
+    # "all" → no filter, include every hash
+    # any str → filter to that specific hash
     if experiment_hash is None or experiment_hash == 'last':
         try:
             _current = (
@@ -3293,7 +3280,7 @@ def write_history(
         except Exception:
             experiment_hash = None
     elif experiment_hash == "all":
-        experiment_hash = None  # sentinel: skip hash filtering below
+        experiment_hash = None # sentinel: skip hash filtering below
 
     # Normalize graph_name → set or None
     _gn_filter = None
@@ -3352,7 +3339,7 @@ def write_history(
     instance_rows: list = []
 
     if write_global:
-        for gn, hashes in _lg._signal_history.items():
+        for gn, hashes in _lg.get_signal_history().items():
             if _gn_filter is not None and gn not in _gn_filter:
                 continue
             for h, steps in hashes.items():
@@ -3378,7 +3365,7 @@ def write_history(
         graphs_s = (
             list(_gn_filter)
             if _gn_filter is not None
-            else list(_lg._signal_history_per_sample.keys())
+            else _lg.list_sample_signal_names()
         )
         for gn in graphs_s:
             for sid, step, val, h in _lg.query_per_sample(
@@ -3400,7 +3387,7 @@ def write_history(
         graphs_i = (
             list(_gn_filter)
             if _gn_filter is not None
-            else list(_lg._signal_history_per_instance.keys())
+            else _lg.list_instance_signal_names()
         )
         # query_per_instance filters by a single (sample_id, annotation_id); iterate when multiple given
         _sid_iter = _sid_filter if _sid_filter is not None else [None]
@@ -3488,19 +3475,19 @@ def write_dataframe(
     Parameters
     ----------
     path : str, optional
-        Output file path **or** directory.  When omitted (``None``), the
+        Output file path **or** directory. When omitted (``None``), the
         ``root_log_dir`` from the active checkpoint manager is used.
 
         - If *path* has a file extension the file is written directly.
         - If *path* has no extension or is an existing directory, a filename is
           auto-generated as ``<hash>_dataframe.<format>`` inside that directory.
           ``<hash>`` is an 8-character MD5 hex digest of the normalized call
-          parameters (*columns*, *sample_id*, *instance_id*).  Same filters →
+          parameters (*columns*, *sample_id*, *instance_id*). Same filters →
           same filename (idempotent overwrite); different filters → different
           file.
         - The directory is created automatically if it does not exist.
     format : {"json", "csv"}
-        Output format.  Default ``"json"``.
+        Output format. Default ``"json"``.
     columns : str or list of str, optional
         Which columns to include (index levels ``sample_id`` / ``annotation_id``
         are always written).
@@ -3513,10 +3500,10 @@ def write_dataframe(
         - ``"discarded"`` — only the boolean ``discarded`` column.
         - A list of any mix of the above group names and/or exact column names.
     sample_id : str or list of str, optional
-        Restrict to one or more sample IDs (index level 0).  ``None`` keeps all.
+        Restrict to one or more sample IDs (index level 0). ``None`` keeps all.
     instance_id : int or list of int, optional
         Restrict to one or more annotation IDs (index level 1, 0 = sample row,
-        ≥ 1 = per-instance rows).  ``None`` keeps all.
+        ≥ 1 = per-instance rows). ``None`` keeps all.
 
     Returns
     -------
@@ -3526,7 +3513,7 @@ def write_dataframe(
     Notes
     -----
     The function calls ``flush()`` on the dataframe manager before reading so
-    that any in-flight writes are included in the output.  Pass
+    that any in-flight writes are included in the output. Pass
     ``instance_id=0`` to keep only sample-level rows; pass ``instance_id=[1,2]``
     to keep specific annotation rows.
 
@@ -3655,7 +3642,7 @@ def write_dataframe(
             mask = df_out.index.get_level_values(1).astype(int).isin(_iid_set)
             df_out = df_out.loc[mask]
         except Exception:
-            pass  # non-integer annotation_ids — skip this filter
+            pass # non-integer annotation_ids — skip this filter
         logger.debug("write_dataframe: after instance_id filter → %d row(s).", len(df_out))
 
     # Filter columns by group or exact name
@@ -3679,7 +3666,7 @@ def write_dataframe(
             else:
                 if _item in df_out.columns:
                     _selected.append(_item)
-        _selected = list(dict.fromkeys(_selected))  # deduplicate, preserve order
+        _selected = list(dict.fromkeys(_selected)) # deduplicate, preserve order
         df_out = df_out[_selected] if _selected else df_out[[]]
         logger.debug("write_dataframe: column filter → %d column(s): %s",
                      len(_selected), _selected)

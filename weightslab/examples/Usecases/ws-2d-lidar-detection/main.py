@@ -34,7 +34,7 @@ def train(loader, model, optimizer, sig, device, grid_size, pc_range, conf_thres
         points = points.to(device)
         targets = [t.to(device) for t in targets]
         optimizer.zero_grad()
-        outputs = model(points)  # [B, S, S, 5 + num_classes]
+        outputs = model(points) # [B, S, S, 5 + num_classes]
         preds = decode_predictions(outputs.detach(), grid_size, pc_range, conf_thresh=conf_thresh)
         loss_per_sample = sig["loss"](outputs, targets, batch_ids=ids, preds=preds)
         sig["iou_sample"](outputs, targets, batch_ids=ids)
@@ -162,15 +162,15 @@ if __name__ == "__main__":
              serving_cli=parameters.get("serving_cli", True))
 
     print("=" * 60)
-    print("🚀 STARTING 2D LiDAR DETECTION TRAINING (Pillars2D-lite)")
-    print(f"📡 {len(_train_dataset)} train / {len(_val_dataset)} val scans")
-    print(f"💾 Logs: {log_dir}")
+    print(" STARTING 2D LiDAR DETECTION TRAINING (Pillars2D-lite)")
+    print(f" {len(_train_dataset)} train / {len(_val_dataset)} val scans")
+    print(f" Logs: {log_dir}")
     print("=" * 60 + "\n")
 
 
     # ================
     # Training Loop
-    wl.start_training(timeout=3)  # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+    wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
     test_loss, test_metric = None, None
@@ -193,5 +193,5 @@ if __name__ == "__main__":
                   + (f" test_loss={test_loss:.4f}" if test_loss is not None else "")
                   + (f" IoU={test_metric:.2f}%" if test_metric is not None else ""))
 
-    print(f"\n✅ Done in {time.time() - start_time:.1f}s; logs at {log_dir}")
+    print(f"\n Done in {time.time() - start_time:.1f}s; logs at {log_dir}")
     wl.keep_serving()

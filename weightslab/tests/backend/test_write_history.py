@@ -24,7 +24,7 @@ def _make_logger():
     """Return a fresh LoggerQueue with data under two hashes.
 
     h1: loss (steps 1+2), acc (step 1), iou instances (annotation_ids 1,2)
-    h2: loss (step 1), acc (step 1), iou instance (annotation_id 3)  ← current hash
+    h2: loss (step 1), acc (step 1), iou instance (annotation_id 3) ← current hash
     """
     lg = LoggerQueue(register=False)
     ckpt = _mock_chkpt("h1")
@@ -33,7 +33,7 @@ def _make_logger():
     # h1 data
     lg.add_scalars("loss", {"loss": 1.0}, 1, signal_per_sample={"s1": 1.0}, aggregate_by_step=False)
     lg.add_scalars("loss", {"loss": 2.0}, 2, signal_per_sample={"s2": 2.0}, aggregate_by_step=False)
-    lg.add_scalars("acc",  {"acc":  0.9}, 1, signal_per_sample={"s1": 0.9}, aggregate_by_step=False)
+    lg.add_scalars("acc", {"acc": 0.9}, 1, signal_per_sample={"s1": 0.9}, aggregate_by_step=False)
     lg.add_instance_scalars("iou", sample_ids=["s1"], annotation_ids=[1],
                              values=[0.8], global_step=1, exp_hash="h1")
     lg.add_instance_scalars("iou", sample_ids=["s2"], annotation_ids=[2],
@@ -42,7 +42,7 @@ def _make_logger():
     # h2 data — left as the "current" hash after setup
     ckpt.get_current_experiment_hash.return_value = "h2"
     lg.add_scalars("loss", {"loss": 3.0}, 1, signal_per_sample={"s1": 3.0}, aggregate_by_step=False)
-    lg.add_scalars("acc",  {"acc":  0.7}, 1, signal_per_sample={"s2": 0.7}, aggregate_by_step=False)
+    lg.add_scalars("acc", {"acc": 0.7}, 1, signal_per_sample={"s2": 0.7}, aggregate_by_step=False)
     lg.add_instance_scalars("iou", sample_ids=["s1"], annotation_ids=[3],
                              values=[0.7], global_step=1, exp_hash="h2")
 
@@ -117,7 +117,7 @@ class TestWriteHistoryJsonStructure:
 
     def test_file_is_valid_json(self, lg, tmp_json):
         _call(tmp_json, lg)
-        json.loads(open(tmp_json).read())  # must not raise
+        json.loads(open(tmp_json).read()) # must not raise
 
     def test_output_file_created(self, lg, tmp_json):
         _call(tmp_json, lg)
@@ -395,7 +395,7 @@ class TestWriteHistoryEdgeCases:
             write_history(tmp_csv, format="csv", experiment_hash="all")
         with open(tmp_csv, newline="", encoding="utf-8") as fh:
             rows = list(csv.reader(fh))
-        assert len(rows) == 1  # header only
+        assert len(rows) == 1 # header only
 
     def test_case_insensitive_type(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="SAMPLE")

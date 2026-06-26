@@ -20,9 +20,9 @@ class NetworkWithOps(nn.Module):
 
         # Initialize variables
         self.current_step = 0
-        self.visited_nodes = set()  # Memory trace of explored nodes
-        self.visited_incoming_nodes = set()  # Memory trace of explored nodes
-        self.name = self._get_name()  # Name of the model
+        self.visited_nodes = set() # Memory trace of explored nodes
+        self.visited_incoming_nodes = set() # Memory trace of explored nodes
+        self.name = self._get_name() # Name of the model
         self.linearized_layers = []
         self._architecture_change_hook_fns = []
         self.tracking_mode = TrackingMode.DISABLED
@@ -450,7 +450,7 @@ class NetworkWithOps(nn.Module):
         elif current_child_name is not None and current_child_name in module.src_to_dst_mapping_tnsrs:
             kwargs['current_child_name'] = current_child_name
         else:
-            kwargs['current_child_name'] = None  # Its child is an Orphan node
+            kwargs['current_child_name'] = None # Its child is an Orphan node
         # # Operate
         module.operate(
                 neuron_indices,

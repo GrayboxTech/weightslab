@@ -89,7 +89,7 @@ class WLAwareTrainer(DetectionTrainer):
                 except Exception as e:
                     raised_exc = e
                 finally:
-                    trainer.validator.dataloader = val_loader  # Reset val loader
+                    trainer.validator.dataloader = val_loader # Reset val loader
 
                 # Finally raise exc.
                 if raised_exc is not None:
@@ -120,20 +120,20 @@ class WLAwareTrainer(DetectionTrainer):
                 return
             for ul_key, wl_key in (
                 ("metrics/precision(B)", "val/precision"),
-                ("metrics/recall(B)",    "val/recall"),
-                ("metrics/mAP50(B)",     "val/mAP50"),
-                ("metrics/mAP50-95(B)",  "val/mAP50-95"),
-                ("fitness",              "val/fitness"),
+                ("metrics/recall(B)", "val/recall"),
+                ("metrics/mAP50(B)", "val/mAP50"),
+                ("metrics/mAP50-95(B)", "val/mAP50-95"),
+                ("fitness", "val/fitness"),
             ):
                 if ul_key in rd and wl_key in ch:
                     ch[wl_key](torch.tensor([float(rd[ul_key])]))
 
-        self.add_callback("on_train_start",       _on_train_start)
+        self.add_callback("on_train_start", _on_train_start)
         self.add_callback("on_train_batch_start", _on_train_batch_start)
-        self.add_callback("on_train_batch_end",   _on_train_batch_end)
-        self.add_callback("on_val_batch_start",   _on_val_batch_start)
-        self.add_callback("on_val_batch_end",     _on_val_batch_end)
-        self.add_callback("on_val_end",           _on_val_end)
+        self.add_callback("on_train_batch_end", _on_train_batch_end)
+        self.add_callback("on_val_batch_start", _on_val_batch_start)
+        self.add_callback("on_val_batch_end", _on_val_batch_end)
+        self.add_callback("on_val_end", _on_val_end)
 
     def validate(self):
         # UL's metrics.process does np.concatenate([]) → ValueError when val

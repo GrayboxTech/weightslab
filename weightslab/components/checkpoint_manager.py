@@ -6,12 +6,12 @@ This module implements checkpoint management with separated component directorie
 
 Directory Structure:
     root_log_dir/
-        data/           # Data-related files (global)
-        logs/           # Training logs (global)
+        data/ # Data-related files (global)
+        logs/ # Training logs (global)
         checkpoints/
-            manifest.yaml   # Tracks all hashes with timestamps
+            manifest.yaml # Tracks all hashes with timestamps
             models/
-                {hash}/     # 24-byte hash: HP_MODEL_DATA
+                {hash}/ # 24-byte hash: HP_MODEL_DATA
                     {hash}_step_000100.pt
                     {hash}_architecture.pkl
             HP/
@@ -120,12 +120,12 @@ class CheckpointManager:
         self.hash_generator = ExperimentHashGenerator()
         self.current_exp_hash: Optional[str] = None
         self.previous_exp_hash: Optional[str] = None
-        self.hash_by_module: list = [None, None, None]  # HP, MODEL, DATA
+        self.hash_by_module: list = [None, None, None] # HP, MODEL, DATA
 
         # Step tracking
         self._step_counter = None
         self._model_init_step = 0
-        self._last_time_loaded: Optional[float] = time.time()  # Track last load time for model hash uniqueness
+        self._last_time_loaded: Optional[float] = time.time() # Track last load time for model hash uniqueness
 
         # First time only
         self.first_time = True
@@ -151,9 +151,9 @@ class CheckpointManager:
     def __repr__(self) -> str:
         return (
             f"CheckpointManager(\n"
-            f"  root_log_dir={self.root_log_dir}\n"
-            f"  current_exp_hash={self.current_exp_hash}\n"
-            f"  step_counter={self._step_counter}\n"
+            f" root_log_dir={self.root_log_dir}\n"
+            f" current_exp_hash={self.current_exp_hash}\n"
+            f" step_counter={self._step_counter}\n"
             f")"
         )
 
@@ -805,7 +805,7 @@ class CheckpointManager:
         # Get checkpoint manager hp
         manager_hp = config.get('checkpoint_manager', {}) if config else {}
         enable_checkpoints = manager_hp.get('enable_checkpoints', True)
-        dump_model_architecture = manager_hp.get('dump_model_architecture', False)  # Set to false by default
+        dump_model_architecture = manager_hp.get('dump_model_architecture', False) # Set to false by default
         dump_model_state = manager_hp.get('dump_model_state', True)
         dump_optimizer_state = manager_hp.get('dump_optimizer_state', True)
         dump_data_state = manager_hp.get('dump_data_state', True)
@@ -925,7 +925,7 @@ class CheckpointManager:
             'model_state_dict': model.state_dict(),
             'timestamp': datetime.now().isoformat(),
             'exp_hash': self.current_exp_hash,
-            'rng_state': capture_rng_state(),  # Capture RNG state for reproducible training
+            'rng_state': capture_rng_state(), # Capture RNG state for reproducible training
         }
 
         # Capture dataloader iteration state(s) for reproducible resume (support multiple loaders)
@@ -976,7 +976,7 @@ class CheckpointManager:
 
             # If model architecture doesn't exist in this hash directory, save a reference to where it is
             if self.config.get('checkpoint_manager', {}).get('dump_model_architecture', False):
-                self._save_architecture_reference_if_needed()  # TODO (GP): Disable for now because it adds complexity for big models, and we want to ensure architecture is always saved with weights for simplicity
+                self._save_architecture_reference_if_needed() # TODO (GP): Disable for now because it adds complexity for big models, and we want to ensure architecture is always saved with weights for simplicity
 
             # Persist logger queues alongside weight checkpoints
             try:
@@ -1379,7 +1379,7 @@ class CheckpointManager:
                     break
                 sleep_time = base_delay * (2 ** (attempt - 1))
                 logger.warning(
-                    f"  [WARN] Architecture load locked (attempt {attempt}/{max_retries}). "
+                    f" [WARN] Architecture load locked (attempt {attempt}/{max_retries}). "
                     f"Retrying in {sleep_time:.2f}s..."
                 )
                 time.sleep(sleep_time)
@@ -1388,7 +1388,7 @@ class CheckpointManager:
                 if isinstance(e, EOFError):
                     sleep_time = base_delay * (2 ** (attempt - 1))
                     logger.warning(
-                        f"  [WARN] Architecture load incomplete (attempt {attempt}/{max_retries}). "
+                        f" [WARN] Architecture load incomplete (attempt {attempt}/{max_retries}). "
                         f"Retrying in {sleep_time:.2f}s..."
                     )
                     time.sleep(sleep_time)
@@ -1635,8 +1635,8 @@ class CheckpointManager:
 
         # Logger
         logger.info(f"Loading checkpoint {exp_hash[:16]}...")
-        logger.info(f"  Target: HP={target_hp_hash} MODEL={target_model_hash} DATA={target_data_hash}")
-        logger.info(f"  Current: HP={current_hp_hash} MODEL={current_model_hash} DATA={current_data_hash}")
+        logger.info(f" Target: HP={target_hp_hash} MODEL={target_model_hash} DATA={target_data_hash}")
+        logger.info(f" Current: HP={current_hp_hash} MODEL={current_model_hash} DATA={current_data_hash}")
 
         # Load model architecture if different, or load only RNG state for reproducibility if model hash is unchanged
         model_rng_loaded = False
@@ -1651,7 +1651,7 @@ class CheckpointManager:
                     with open(arch_ref_file, 'r') as f:
                         ref_data = json.load(f)
                     actual_arch_hash = ref_data.get('architecture_hash', exp_hash[8:-8])
-                    logger.debug(f"  Architecture reference found: pointing to hash {actual_arch_hash}")
+                    logger.debug(f" Architecture reference found: pointing to hash {actual_arch_hash}")
                 except Exception as e:
                     logger.warning(f"Failed to load architecture reference: {e}")
 
@@ -1669,12 +1669,12 @@ class CheckpointManager:
                         result['model'].guard_testing_context = guard_testing_context
 
                     result['loaded_components'].add('model')
-                    logger.info(f"  [OK] Loaded model architecture from hash {actual_arch_hash[:16]}")
-                    self._last_time_loaded = time.time()  # Update last loaded time after successful load
+                    logger.info(f" [OK] Loaded model architecture from hash {actual_arch_hash[:16]}")
+                    self._last_time_loaded = time.time() # Update last loaded time after successful load
                 except Exception as e:
-                    logger.error(f"  [ERROR] Failed to load model architecture: {e}")
+                    logger.error(f" [ERROR] Failed to load model architecture: {e}")
             else:
-                logger.warning(f"  [WARNING] Model architecture file not found: {actual_arch_file}")
+                logger.warning(f" [WARNING] Model architecture file not found: {actual_arch_file}")
 
         elif load_model and (target_model_hash == current_model_hash and not force):
             # Try to load only the RNG state from the latest model checkpoint for reproducibility
@@ -1690,14 +1690,14 @@ class CheckpointManager:
                     if rng_state:
                         result['rng_state'] = rng_state
                         model_rng_loaded = True
-                        logger.info(f"  [OK] Loaded model RNG state for reproducibility (model unchanged)")
-                    self._last_time_loaded = time.time()  # Update last loaded time after successful load
+                        logger.info(f" [OK] Loaded model RNG state for reproducibility (model unchanged)")
+                    self._last_time_loaded = time.time() # Update last loaded time after successful load
                 except Exception as e:
-                    logger.debug(f"  [WARNING] Could not load model RNG state: {e}")
+                    logger.debug(f" [WARNING] Could not load model RNG state: {e}")
             if not model_rng_loaded:
-                logger.info(f"  [-] Model architecture unchanged, using current model")
+                logger.info(f" [-] Model architecture unchanged, using current model")
         else:
-            logger.info(f"  [-] Model architecture unchanged, using current model")
+            logger.info(f" [-] Model architecture unchanged, using current model")
 
         # Load model weights (always if requested)
         if load_weights:
@@ -1712,16 +1712,16 @@ class CheckpointManager:
                 checkpoint_path = model_dir / manifest_weight_checkpoint
                 if checkpoint_path.exists():
                     checkpoint_file_to_load = checkpoint_path
-                    logger.debug(f"  Using weight checkpoint from manifest: {manifest_weight_checkpoint}")
+                    logger.debug(f" Using weight checkpoint from manifest: {manifest_weight_checkpoint}")
 
             # Fallback: scan for weight files (old behavior for backward compatibility)
             if checkpoint_file_to_load is None:
                 checkpoint_file_to_load = self._select_weight_checkpoint_file(exp_hash, target_step=target_step)
                 if checkpoint_file_to_load is not None:
                     if target_step is None:
-                        logger.debug(f"  Using latest weight checkpoint from directory scan: {checkpoint_file_to_load.name}")
+                        logger.debug(f" Using latest weight checkpoint from directory scan: {checkpoint_file_to_load.name}")
                     else:
-                        logger.debug(f"  Using closest weight checkpoint for target step {target_step}: {checkpoint_file_to_load.name}")
+                        logger.debug(f" Using closest weight checkpoint for target step {target_step}: {checkpoint_file_to_load.name}")
 
             if checkpoint_file_to_load:
                 try:
@@ -1733,9 +1733,9 @@ class CheckpointManager:
                     checkpoint_rng_state = result['weights'].get('rng_state')
                     if checkpoint_rng_state:
                         result['rng_state'] = checkpoint_rng_state
-                        logger.info(f"  [OK] Loaded weights from step {step} with RNG state")
+                        logger.info(f" [OK] Loaded weights from step {step} with RNG state")
                     else:
-                        logger.info(f"  [OK] Loaded weights from step {step}")
+                        logger.info(f" [OK] Loaded weights from step {step}")
 
                     # Extract dataloader iteration state if available
                     dataloader_iter_state = result['weights'].get('dataloader_iteration_state')
@@ -1749,12 +1749,12 @@ class CheckpointManager:
                             iter_state_map = {'default': dataloader_iter_state}
 
                         result['dataloader_iteration_state'] = iter_state_map
-                        logger.debug(f"  [OK] Found dataloader iteration state(s): {iter_state_map}")
+                        logger.debug(f" [OK] Found dataloader iteration state(s): {iter_state_map}")
                 except Exception as e:
-                    logger.error(f"  [ERROR] Failed to load weights: {e}")
+                    logger.error(f" [ERROR] Failed to load weights: {e}")
                 self._last_time_loaded = time.time()
             else:
-                logger.warning(f"  [WARNING] No weight files found for {exp_hash[8:-8]}")
+                logger.warning(f" [WARNING] No weight files found for {exp_hash[8:-8]}")
 
         # Load config if different
         if load_config and (target_hp_hash != current_hp_hash or force):
@@ -1767,13 +1767,13 @@ class CheckpointManager:
                         config_data = yaml.safe_load(f)
                     result['config'] = config_data.get('hyperparameters', config_data)
                     result['loaded_components'].add('config')
-                    logger.info(f"  [OK] Loaded config (hash changed)")
+                    logger.info(f" [OK] Loaded config (hash changed)")
                 except Exception as e:
-                    logger.error(f"  [ERROR] Failed to load config: {e}")
+                    logger.error(f" [ERROR] Failed to load config: {e}")
             else:
-                logger.warning(f"  [WARNING] Config file not found: {config_file}")
+                logger.warning(f" [WARNING] Config file not found: {config_file}")
         else:
-            logger.info(f"  [-] Config unchanged, using current config")
+            logger.info(f" [-] Config unchanged, using current config")
 
         # Load data snapshot if different, or if only RNG state changed (for reproducibility)
         if load_data:
@@ -1798,19 +1798,19 @@ class CheckpointManager:
                             result['loaded_components'].add('data')
                             if rng_state:
                                 result['rng_state'] = rng_state
-                                logger.info(f"  [OK] Loaded data snapshot ({len(snapshot_df)} rows) with RNG state")
+                                logger.info(f" [OK] Loaded data snapshot ({len(snapshot_df)} rows) with RNG state")
                             else:
-                                logger.info(f"  [OK] Loaded data snapshot ({len(snapshot_df)} rows)")
+                                logger.info(f" [OK] Loaded data snapshot ({len(snapshot_df)} rows)")
                     elif load_rng_only and rng_state:
                         # Only RNG state is needed for reproducibility
                         result['rng_state'] = rng_state
-                        logger.info(f"  [OK] Loaded RNG state for reproducibility (data unchanged)")
+                        logger.info(f" [OK] Loaded RNG state for reproducibility (data unchanged)")
                     else:
-                        logger.info(f"  [-] Data state unchanged, using current data")
+                        logger.info(f" [-] Data state unchanged, using current data")
                 except Exception as e:
-                    logger.error(f"  [ERROR] Failed to load data snapshot: {e}")
+                    logger.error(f" [ERROR] Failed to load data snapshot: {e}")
             else:
-                logger.warning(f"  [WARNING] Data snapshot file not found: {json_file}")
+                logger.warning(f" [WARNING] Data snapshot file not found: {json_file}")
 
         logger.info(f"Loaded components: {result['loaded_components']}")
         return result
@@ -1863,8 +1863,8 @@ class CheckpointManager:
         # Apply model (architecture + weights)
         if 'model' in checkpoint_data['loaded_components']:
             try:
-                model = checkpoint_data['model']  # Include model architecture, weights, and optimizer state at this level
-                # model.update_optimizer()  # Update optimizer with new model parameters if needed
+                model = checkpoint_data['model'] # Include model architecture, weights, and optimizer state at this level
+                # model.update_optimizer() # Update optimizer with new model parameters if needed
 
                 # Remove existing locks
                 if hasattr(model, 'guard_testing_context'):
@@ -1876,8 +1876,8 @@ class CheckpointManager:
                 ledgers.register_model(model)
 
                 # Set Model Training Guard
-                guard_training_context.model = model  # Train
-                guard_testing_context.model = model  # Eval
+                guard_training_context.model = model # Train
+                guard_testing_context.model = model # Eval
 
                 loaded_step = None
                 if checkpoint_data.get('weights') is not None:
@@ -1923,8 +1923,8 @@ class CheckpointManager:
                             logger.warning(f"Could not load optimizer state: {e}")
 
                 # Set Model Training Guard
-                guard_training_context.model = model  # Train
-                guard_testing_context.model = model  # Eval
+                guard_training_context.model = model # Train
+                guard_testing_context.model = model # Eval
 
             except Exception:
                 if 'model' not in checkpoint_data['loaded_components']:
@@ -1956,14 +1956,14 @@ class CheckpointManager:
                             setattr(model, 'current_step', step)
                         except Exception:
                             pass
-                        # model.update_optimizer()  # Update optimizer with new model parameters if needed
+                        # model.update_optimizer() # Update optimizer with new model parameters if needed
                         logger.info(f"[OK] Applied weights to reloaded model (step {step})")
                         self._model_init_step = step
                         logger.info("Successfully recovered by reloading full checkpoint with architecture and weights")
 
                     # Set Model Training Guard
-                    guard_training_context.model = model  # Train
-                    guard_testing_context.model = model  # Eval
+                    guard_training_context.model = model # Train
+                    guard_testing_context.model = model # Eval
 
                     self.error_loading_checkpoint.remove('weights') if 'weights' in self.error_loading_checkpoint else None
                 except Exception as e:
@@ -1979,7 +1979,7 @@ class CheckpointManager:
                 self.error_loading_checkpoint.remove('config') if 'config' in self.error_loading_checkpoint else None
             except Exception as e:
                 logger.error(f"[ERROR] Failed to apply config: {e}")
-                self.error_loading_checkpoint.append('config') if 'config' not in self.error_loading_checkpoint else None  # Reset first_time to allow future auto-resume attempts if config application failed
+                self.error_loading_checkpoint.append('config') if 'config' not in self.error_loading_checkpoint else None # Reset first_time to allow future auto-resume attempts if config application failed
 
         # Apply data (merge snapshot columns into current dataframe)
         if 'data' in checkpoint_data['loaded_components']:
@@ -2001,7 +2001,7 @@ class CheckpointManager:
                 self.error_loading_checkpoint.remove('data') if 'data' in self.error_loading_checkpoint else None
             except Exception as e:
                 logger.error(f"[ERROR] Failed to apply data: {e}")
-                self.error_loading_checkpoint.append('data') if 'data' not in self.error_loading_checkpoint else None  # Reset first_time to allow future auto-resume attempts if data application failed
+                self.error_loading_checkpoint.append('data') if 'data' not in self.error_loading_checkpoint else None # Reset first_time to allow future auto-resume attempts if data application failed
 
         # Restore RNG state if provided and not already restored
         if checkpoint_data.get('rng_state'):
@@ -2013,13 +2013,13 @@ class CheckpointManager:
                 # # We should re-enable this in the future once we have a more robust solution for managing dataloader iteration state across different types of dataloaders and shuffling state or not.
                 # # Reset dataloaders iterators to ensure reproducibility
                 # for loader_name in ledgers.get_dataloaders():
-                #     loader = ledgers.get_dataloader(loader_name)
+                # loader = ledgers.get_dataloader(loader_name)
 
-                #     if loader is not None:
-                #         # Resume loader state
-                #         if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
-                #             loader.reset_iterator()
-                #             logger.debug(f"Reset iterator for dataloader: {loader}")
+                # if loader is not None:
+                # # Resume loader state
+                # if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
+                # loader.reset_iterator()
+                # logger.debug(f"Reset iterator for dataloader: {loader}")
 
                 # # Restore RNG state again after resetting dataloaders
                 # restore_rng_state(checkpoint_data['rng_state'])
@@ -2034,46 +2034,46 @@ class CheckpointManager:
         # # We should re-enable this in the future once we have a more robust solution for managing dataloader iteration state across different types of dataloaders and shuffling state or not.
         # # Restore dataloader iteration state if provided
         # if checkpoint_data.get('dataloader_iteration_state'):
-        #     try:
-        #         iter_state_raw = checkpoint_data['dataloader_iteration_state']
+        # try:
+        # iter_state_raw = checkpoint_data['dataloader_iteration_state']
 
-        #         # Normalize to mapping loader_name -> state for backward compatibility
-        #         if isinstance(iter_state_raw, dict) and 'samples_yielded' in iter_state_raw:
-        #             state_map = {'default': iter_state_raw}
-        #         elif isinstance(iter_state_raw, dict):
-        #             state_map = iter_state_raw
-        #         else:
-        #             state_map = {'default': iter_state_raw}
+        # # Normalize to mapping loader_name -> state for backward compatibility
+        # if isinstance(iter_state_raw, dict) and 'samples_yielded' in iter_state_raw:
+        # state_map = {'default': iter_state_raw}
+        # elif isinstance(iter_state_raw, dict):
+        # state_map = iter_state_raw
+        # else:
+        # state_map = {'default': iter_state_raw}
 
-        #         restored_any = False
-        #         for loader_name in ledgers.get_dataloaders():
-        #             loader = ledgers.get_dataloader(loader_name)
-        #             if loader is None or not hasattr(loader, 'restore_iteration_state'):
-        #                 continue
+        # restored_any = False
+        # for loader_name in ledgers.get_dataloaders():
+        # loader = ledgers.get_dataloader(loader_name)
+        # if loader is None or not hasattr(loader, 'restore_iteration_state'):
+        # continue
 
-        #             state_for_loader = state_map.get(loader_name) or state_map.get('default')
-        #             if state_for_loader:
-        #                 try:
-        #                     loader.restore_iteration_state(state_for_loader)
-        #                     # Resume loader state
-        #                     if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
-        #                         loader.reset_iterator()
-        #                         logger.debug(f"Reset iterator for dataloader: {loader}")
-        #                     logger.info(f"[OK] Restored dataloader iteration state for {loader_name}: {state_for_loader}")
-        #                     restored_any = True
-        #                 except Exception as inner_e:
-        #                     logger.warning(f"[WARNING] Failed to restore iteration state for {loader_name}: {inner_e}")
+        # state_for_loader = state_map.get(loader_name) or state_map.get('default')
+        # if state_for_loader:
+        # try:
+        # loader.restore_iteration_state(state_for_loader)
+        # # Resume loader state
+        # if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
+        # loader.reset_iterator()
+        # logger.debug(f"Reset iterator for dataloader: {loader}")
+        # logger.info(f"[OK] Restored dataloader iteration state for {loader_name}: {state_for_loader}")
+        # restored_any = True
+        # except Exception as inner_e:
+        # logger.warning(f"[WARNING] Failed to restore iteration state for {loader_name}: {inner_e}")
 
-        #         if not restored_any:
-        #             logger.warning("No dataloader iteration state could be applied to registered loaders")
-        #         self.error_loading_checkpoint.remove('dataloader_iteration') if 'dataloader_iteration' in self.error_loading_checkpoint else None
-        #     except Exception as e:
-        #         logger.error(f"[ERROR] Failed to restore dataloader iteration state: {e}")
-        #         self.error_loading_checkpoint.append('dataloader_iteration') if 'dataloader_iteration' not in self.error_loading_checkpoint else None
+        # if not restored_any:
+        # logger.warning("No dataloader iteration state could be applied to registered loaders")
+        # self.error_loading_checkpoint.remove('dataloader_iteration') if 'dataloader_iteration' in self.error_loading_checkpoint else None
+        # except Exception as e:
+        # logger.error(f"[ERROR] Failed to restore dataloader iteration state: {e}")
+        # self.error_loading_checkpoint.append('dataloader_iteration') if 'dataloader_iteration' not in self.error_loading_checkpoint else None
 
         # Restore logger snapshot for this experiment if available
         logger_len = self.get_logger_length()
-        if load_logger and logger_len == 0:  # Load logger if requested and logger is currently empty (e.g. on fresh start)
+        if load_logger and logger_len == 0: # Load logger if requested and logger is currently empty (e.g. on fresh start)
             try:
                 self.load_logger_snapshot()
                 self.error_loading_checkpoint.remove('logger') if 'logger' in self.error_loading_checkpoint else None

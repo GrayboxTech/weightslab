@@ -3,7 +3,7 @@ services/utils/tools.py
 =======================
 Shared utility helpers for the trainer service layer.
 
-Keep this file free of heavy domain logic.  It is the right place for:
+Keep this file free of heavy domain logic. It is the right place for:
   - Small, stateless helper functions used by two or more services.
   - Shared constants / lookup tables (e.g. provider maps).
   - Thin wrappers that reduce boilerplate inside service methods.

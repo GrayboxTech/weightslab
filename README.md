@@ -174,7 +174,34 @@ def main():
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
-        print(f"Epoch {epoch+1} — Loss: {total_loss / len(loader):.4f}")
+
+            # Write the history of these samples every x steps
+            if model.get_age() % 100 == 0:
+                print(f'Dump signals history and dataframe at age {model.get_age()}')
+                wl.write_history(
+                    # path=None,  # Use root_log_dir by default, filename generated from parameters md5 hash
+                    type_of_history="all",
+                    graph_name=[
+                        'train/clsf_instance',
+                        'val/clsf_instance'
+                    ],
+                    # experiment_hash=None,  Default is 'last', i.e., current experiment hash
+                    sample_id=['11', '29', '28', '27', '22'],
+                    instance_id=[1, 2, 3]
+                )
+
+                # Dump the sample dataframe: all signals plus the loss_shape categorical tag,
+                wl.write_dataframe(
+                    columns=["signals", "tag:loss_shape"],
+                    format='csv'
+                    # sample_id=['0', '28']
+                    # instance_id=[1, 2],
+                )
+
+        avg_loss = total_loss / len(dataloader)
+        print(f"Epoch {epoch+1}/5 - Loss: {avg_loss:.4f}")
+
+    print("✅ Training complete!")
 
 
 if __name__ == "__main__":

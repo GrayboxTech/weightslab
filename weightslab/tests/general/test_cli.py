@@ -112,7 +112,7 @@ class TestCLICommands(unittest.TestCase):
         """Test that empty command returns ok."""
         result = _handle_command('')
         self.assertTrue(result['ok'])
-        result = _handle_command('   ')
+        result = _handle_command(' ')
         self.assertTrue(result['ok'])
 
     def test_unknown_command(self):
@@ -183,7 +183,7 @@ class TestCLICommands(unittest.TestCase):
         """Test plot_model with registered model."""
         # Create a mock model with __str__ method
         mock_model = MagicMock()
-        mock_model.__str__ = MagicMock(return_value="Model(\n  Layer1\n  Layer2\n)")
+        mock_model.__str__ = MagicMock(return_value="Model(\n Layer1\n Layer2\n)")
 
         GLOBAL_LEDGER.register_model(mock_model, name='test_model')
 
@@ -339,90 +339,90 @@ class TestCLIServer(unittest.TestCase):
 # TODO (GP): Fix CLI initialization takes too long for integration tests - need to ensure server is fully ready before client tests run, and possibly optimize server startup time for testing purposes
 # Not working yet - needs check first initialization and teardown of server between tests, and some tweaks to client connection logic to ensure it waits for server to be ready before connecting
 # class TestCLIIntegration(unittest.TestCase):
-#     """Integration tests for CLI server-client communication."""
+# """Integration tests for CLI server-client communication."""
 
-#     @classmethod
-#     def setUpClass(cls):
-#         """Start CLI server for integration tests."""
-#         cls.server_info = cli_serve(cli_host='127.0.0.1', cli_port=0, spawn_client=False)
-#         if not cls.server_info['ok']:
-#             raise RuntimeError("Failed to start CLI server for integration tests")
-#         time.sleep(0.2)  # Give server time to fully start
+# @classmethod
+# def setUpClass(cls):
+# """Start CLI server for integration tests."""
+# cls.server_info = cli_serve(cli_host='127.0.0.1', cli_port=0, spawn_client=False)
+# if not cls.server_info['ok']:
+# raise RuntimeError("Failed to start CLI server for integration tests")
+# time.sleep(0.2) # Give server time to fully start
 
-#     @classmethod
-#     def tearDownClass(cls):
-#         """Stop CLI server after integration tests."""
-#         global _server_sock
-#         if _server_sock:
-#             try:
-#                 _server_sock.close()
-#             except Exception:
-#                 pass
+# @classmethod
+# def tearDownClass(cls):
+# """Stop CLI server after integration tests."""
+# global _server_sock
+# if _server_sock:
+# try:
+# _server_sock.close()
+# except Exception:
+# pass
 
-#     def _send_command(self, cmd: str) -> dict:
-#         """Helper to send command to server and get response."""
-#         sock = socket.create_connection(
-#             (self.server_info['host'], self.server_info['port']),
-#             timeout=5
-#         )
-#         f = sock.makefile('rwb')
+# def _send_command(self, cmd: str) -> dict:
+# """Helper to send command to server and get response."""
+# sock = socket.create_connection(
+# (self.server_info['host'], self.server_info['port']),
+# timeout=5
+# )
+# f = sock.makefile('rwb')
 
-#         # Send command
-#         f.write((cmd + '\n').encode('utf8'))
-#         f.flush()
+# # Send command
+# f.write((cmd + '\n').encode('utf8'))
+# f.flush()
 
-#         # Read response
-#         response_line = f.readline()
-#         response = json.loads(response_line.decode('utf8'))
+# # Read response
+# response_line = f.readline()
+# response = json.loads(response_line.decode('utf8'))
 
-#         f.close()
-#         sock.close()
+# f.close()
+# sock.close()
 
-#         return response
+# return response
 
-#     def test_integration_help(self):
-#         """Test help command through server."""
-#         response = self._send_command('help')
-#         self.assertTrue(response['ok'])
-#         self.assertIn('commands', response)
+# def test_integration_help(self):
+# """Test help command through server."""
+# response = self._send_command('help')
+# self.assertTrue(response['ok'])
+# self.assertIn('commands', response)
 
-#     def test_integration_status(self):
-#         """Test status command through server."""
-#         response = self._send_command('status')
-#         self.assertTrue(response['ok'])
-#         self.assertIn('snapshot', response)
+# def test_integration_status(self):
+# """Test status command through server."""
+# response = self._send_command('status')
+# self.assertTrue(response['ok'])
+# self.assertIn('snapshot', response)
 
-#     def test_integration_list_models(self):
-#         """Test list_models through server."""
-#         response = self._send_command('list_models')
-#         self.assertTrue(response['ok'])
-#         self.assertIn('models', response)
+# def test_integration_list_models(self):
+# """Test list_models through server."""
+# response = self._send_command('list_models')
+# self.assertTrue(response['ok'])
+# self.assertIn('models', response)
 
-#     def test_integration_unknown_command(self):
-#         """Test unknown command through server."""
-#         response = self._send_command('invalid_command_xyz')
-#         self.assertFalse(response['ok'])
-#         self.assertIn('error', response)
+# def test_integration_unknown_command(self):
+# """Test unknown command through server."""
+# response = self._send_command('invalid_command_xyz')
+# self.assertFalse(response['ok'])
+# self.assertIn('error', response)
 
-#     def test_integration_quit(self):
-#         """Test quit command closes connection."""
-#         sock = socket.create_connection(
-#             (self.server_info['host'], self.server_info['port']),
-#             timeout=5
-#         )
-#         f = sock.makefile('rwb')
+# def test_integration_quit(self):
+# """Test quit command closes connection."""
+# sock = socket.create_connection(
+# (self.server_info['host'], self.server_info['port']),
+# timeout=5
+# )
+# f = sock.makefile('rwb')
 
-#         # Send quit
-#         f.write(b'quit\n')
-#         f.flush()
+# # Send quit
+# f.write(b'quit\n')
+# f.flush()
 
-#         # Read goodbye
-#         response = json.loads(f.readline().decode('utf8'))
-#         self.assertTrue(response['ok'])
-#         self.assertTrue(response.get('bye'))
+# # Read goodbye
+# response = json.loads(f.readline().decode('utf8'))
+# self.assertTrue(response['ok'])
+# self.assertTrue(response.get('bye'))
 
-#         f.close()
-#         sock.close()
+# f.close()
+# sock.close()
 
 
 def run_tests():

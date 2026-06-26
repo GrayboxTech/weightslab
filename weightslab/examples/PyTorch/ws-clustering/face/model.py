@@ -3,20 +3,20 @@ Face embedding model.
 
 Architecture
 ------------
-Pretrained backbone  (ResNet-18 / ResNet-50 / MobileNet-V3-Small)
+Pretrained backbone (ResNet-18 / ResNet-50 / MobileNet-V3-Small)
     ?
-EmbeddingHead  Linear ? BN ? ReLU ? Linear
+EmbeddingHead Linear ? BN ? ReLU ? Linear
     ?
 L2-normalised D-dimensional embedding
 
 The backbone is optionally frozen so that only the lightweight head is trained
-(recommended toy-example setup).  The combined graph is registered with
+(recommended toy-example setup). The combined graph is registered with
 WeightsLAB for model tracking.
 
 Public interface
 ----------------
-FaceEmbeddingModel.get_embeddings(images)          ? normalised embeddings (B, D)
-FaceEmbeddingModel.train_step(images, labels, ...)  ? scalar loss float
+FaceEmbeddingModel.get_embeddings(images) ? normalised embeddings (B, D)
+FaceEmbeddingModel.train_step(images, labels, ...) ? scalar loss float
 """
 
 import logging
@@ -64,8 +64,8 @@ class FaceEmbeddingNet(nn.Module):
         self.head = head
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        features = self.backbone(x)      # (B, feature_dim)
-        embeddings = self.head(features)   # (B, embedding_dim), L2-normalised
+        features = self.backbone(x) # (B, feature_dim)
+        embeddings = self.head(features) # (B, embedding_dim), L2-normalised
         return embeddings
 
 
@@ -126,16 +126,16 @@ class FaceEmbeddingModel:
     """Wrapper that manages the backbone + head, optimiser, and WeightsLAB tracking.
 
     Args:
-        backbone_name:   "resnet18" | "resnet50" | "mobilenet_v3_small"
-        embedding_dim:   Output embedding dimensionality (default 128).
+        backbone_name: "resnet18" | "resnet50" | "mobilenet_v3_small"
+        embedding_dim: Output embedding dimensionality (default 128).
         head_hidden_dim: Hidden size of the projection MLP (default 256).
-        lr:              Learning rate for AdamW (default 1e-3).
-        weight_decay:    AdamW weight decay (default 1e-4).
+        lr: Learning rate for AdamW (default 1e-3).
+        weight_decay: AdamW weight decay (default 1e-4).
         freeze_backbone: When True, only the head's parameters receive
                          gradients ? recommended for quick toy runs.
-        device:          "cpu", "cuda", or "cuda:N".
-        pretrained:      Load ImageNet-pretrained weights for the backbone.
-        margin:          Triplet margin (default 0.3).
+        device: "cpu", "cuda", or "cuda:N".
+        pretrained: Load ImageNet-pretrained weights for the backbone.
+        margin: Triplet margin (default 0.3).
     """
 
     def __init__(
@@ -203,11 +203,11 @@ class FaceEmbeddingModel:
             f"trainable_params={n_trainable:,}"
         )
         print(
-            f"  Backbone  : {backbone_name}  (pretrained={pretrained}, frozen={freeze_backbone})\n"
-            f"  Emb dim   : {embedding_dim}\n"
-            f"  Head dim  : {head_hidden_dim}\n"
-            f"  Trainable : {n_trainable:,} params\n"
-            f"  Device    : {self.device}"
+            f" Backbone : {backbone_name} (pretrained={pretrained}, frozen={freeze_backbone})\n"
+            f" Emb dim : {embedding_dim}\n"
+            f" Head dim : {head_hidden_dim}\n"
+            f" Trainable : {n_trainable:,} params\n"
+            f" Device : {self.device}"
         )
 
     def _build_backbone(
@@ -278,8 +278,8 @@ class FaceEmbeddingModel:
         """One gradient update using online batch-hard triplet mining.
 
         Args:
-            images:    (B, C, H, W) float tensor
-            labels:    (B,) long tensor of identity ids
+            images: (B, C, H, W) float tensor
+            labels: (B,) long tensor of identity ids
             batch_ids: list of sample UIDs for WeightsLAB signal logging
             loss_name: "triplet" (contrastive support planned)
 
@@ -292,7 +292,7 @@ class FaceEmbeddingModel:
         images = images.to(self.device)
         labels = labels.to(self.device)
 
-        embeddings = self.net(images)                           # (B, D)
+        embeddings = self.net(images) # (B, D)
 
         # Mine hardest triplets in the batch
         anc_idx, pos_idx, neg_idx = mine_batch_hard(embeddings, labels)

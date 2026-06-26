@@ -194,9 +194,9 @@ class AnalysisHandler(IntentHandler):
         pattern = r"(\[\s*['\"])(.*?)(['\"]\s*\])"
 
         def replace_col(match):
-            prefix = match.group(1)  # e.g. ['
+            prefix = match.group(1) # e.g. ['
             content = match.group(2) # e.g. signals//train_loss
-            suffix = match.group(3)  # e.g. ']
+            suffix = match.group(3) # e.g. ']
 
             resolved = self.agent._resolve_column(content) # Try to resolve the content to a real column
 
@@ -373,7 +373,7 @@ class DataManipulationAgent:
         self._build_column_index()
 
     def _load_config(self):
-        self.preferred_provider = os.environ.get("PREFERRED_PROVIDER", "openrouter")  # Default to OpenRouter if API key is provided, otherwise fallback to local Ollama. This can be overridden by config file or env variable.
+        self.preferred_provider = os.environ.get("PREFERRED_PROVIDER", "openrouter") # Default to OpenRouter if API key is provided, otherwise fallback to local Ollama. This can be overridden by config file or env variable.
 
         # Cloud provider settings with sensible defaults. OpenRouter is the default cloud provider if API key is provided.
         self.openrouter_model = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct")
@@ -382,12 +382,12 @@ class DataManipulationAgent:
         self.openrouter_request_timeout = float(os.environ.get("OPENROUTER_REQUEST_TIMEOUT", "15.0"))
 
         # Local fallback if no cloud (OpenRouter) is available or if the user prefers it. Ollama is the default local provider.
-        self.fallback_to_local = True  # Default to allowing fallback to local Ollama if OpenRouter fails
+        self.fallback_to_local = True # Default to allowing fallback to local Ollama if OpenRouter fails
         self.ollama_host = "localhost"
         self.ollama_port = "11435"
         self.ollama_model = "llama3.2:3b"
 
-        repo_root = Path(__file__).resolve().parents[4]  # weightslab/ root
+        repo_root = Path(__file__).resolve().parents[4] # weightslab/ root
         inner_pkg = Path(__file__).resolve().parents[3]
 
         env_paths = [repo_root / ".env", inner_pkg / ".env"]
@@ -574,9 +574,9 @@ class DataManipulationAgent:
         Initialize (or reinitialize) the OpenRouter cloud provider.
 
         Args:
-            api_key:  The API key obtained from the provider's website.
+            api_key: The API key obtained from the provider's website.
             provider: Must be ``"openrouter"``.
-            model:    OpenRouter model identifier chosen by the user.
+            model: OpenRouter model identifier chosen by the user.
 
         Returns:
             ``(True, success_message)`` or ``(False, error_message)``.
@@ -688,7 +688,7 @@ class DataManipulationAgent:
 
         # Normalize Input: lowercase, replace spaces AND SLASHES with underscores
         user_lower = user_name.strip().lower()
-        user_clean = re.sub(r"[ /_]+", "_", user_lower)  # "signals//train_loss" -> "signals_train_loss"
+        user_clean = re.sub(r"[ /_]+", "_", user_lower) # "signals//train_loss" -> "signals_train_loss"
 
         # 1. Exact Match (Fast path)
         if user_name in self._cols: return user_name
@@ -735,7 +735,7 @@ class DataManipulationAgent:
 
             # 2. Normalize Operator
             op = cond.op.lower()
-            if op == "=" or op == "equals": op = "=="  # Fix "equals"
+            if op == "=" or op == "equals": op = "==" # Fix "equals"
 
             val = cond.value
 
