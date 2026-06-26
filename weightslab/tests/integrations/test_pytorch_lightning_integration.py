@@ -154,127 +154,127 @@ class TestPyTorchLightningIntegration(unittest.TestCase):
 
     # These 3 next tests were removed as they are covering disabled feature. We can re-enable them once the feature is re-enabled.
     # def test_proxy_hashable_in_lightning(self):
-    #     """Test that Proxy objects are hashable and work with Lightning's module system."""
-    #     model = SimpleCNN()
-    #     print(wl.__file__)
-    #     model_wl = wl.watch_or_edit(model, flag="model", device=self.device)
+    # """Test that Proxy objects are hashable and work with Lightning's module system."""
+    # model = SimpleCNN()
+    # print(wl.__file__)
+    # model_wl = wl.watch_or_edit(model, flag="model", device=self.device)
 
-    #     # Test that proxy can be used in sets (requires __hash__)
-    #     proxy_set = {model_wl}
-    #     self.assertIn(model_wl, proxy_set)
+    # # Test that proxy can be used in sets (requires __hash__)
+    # proxy_set = {model_wl}
+    # self.assertIn(model_wl, proxy_set)
 
-    #     # Test that proxy can be used as dict key
-    #     proxy_dict = {model_wl: "test_value"}
-    #     self.assertEqual(proxy_dict[model_wl], "test_value")
+    # # Test that proxy can be used as dict key
+    # proxy_dict = {model_wl: "test_value"}
+    # self.assertEqual(proxy_dict[model_wl], "test_value")
 
     # def test_lightning_module_with_weightslab_tracking(self):
-    #     """Test that Lightning module can be created with WeightsLab tracked objects."""
-    #     pause_controller.resume(force=True)  # Ensure not pausedv
-    #     # Create model and wrap with WeightsLab
-    #     _model = SimpleCNN().to(self.device)
-    #     model_wl = wl.watch_or_edit(_model, flag="model", device=self.device)
+    # """Test that Lightning module can be created with WeightsLab tracked objects."""
+    # pause_controller.resume(force=True) # Ensure not pausedv
+    # # Create model and wrap with WeightsLab
+    # _model = SimpleCNN().to(self.device)
+    # model_wl = wl.watch_or_edit(_model, flag="model", device=self.device)
 
-    #     # Create tracked loss and metrics
-    #     criterion = wl.watch_or_edit(
-    #         nn.CrossEntropyLoss(reduction="none"),
-    #         flag="loss", signal_name="loss-CE", log=True
-    #     )
+    # # Create tracked loss and metrics
+    # criterion = wl.watch_or_edit(
+    # nn.CrossEntropyLoss(reduction="none"),
+    # flag="loss", signal_name="loss-CE", log=True
+    # )
 
-    #     metric = wl.watch_or_edit(
-    #         Accuracy(task="multiclass", num_classes=self.n_classes).to(self.device),
-    #         flag="metric", signal_name="metric-ACC", log=True
-    #     )
+    # metric = wl.watch_or_edit(
+    # Accuracy(task="multiclass", num_classes=self.n_classes).to(self.device),
+    # flag="metric", signal_name="metric-ACC", log=True
+    # )
 
-    #     # Create optimizer
-    #     optimizer = torch.optim.Adam(model_wl.parameters(), lr=0.001)
-    #     optimizer_wl = wl.watch_or_edit(optimizer, flag="optimizer")
+    # # Create optimizer
+    # optimizer = torch.optim.Adam(model_wl.parameters(), lr=0.001)
+    # optimizer_wl = wl.watch_or_edit(optimizer, flag="optimizer")
 
-    #     # Create Lightning module with tracked objects
-    #     lit_model = LitTestModel(
-    #         model=model_wl,
-    #         optimizer=optimizer_wl,
-    #         criterion_wl=criterion,
-    #         metric_wl=metric
-    #     )
+    # # Create Lightning module with tracked objects
+    # lit_model = LitTestModel(
+    # model=model_wl,
+    # optimizer=optimizer_wl,
+    # criterion_wl=criterion,
+    # metric_wl=metric
+    # )
 
-    #     # Verify Lightning module was created successfully
-    #     self.assertIsInstance(lit_model, pl.LightningModule)
-    #     self.assertIsInstance(lit_model.model, Proxy)
+    # # Verify Lightning module was created successfully
+    # self.assertIsInstance(lit_model, pl.LightningModule)
+    # self.assertIsInstance(lit_model.model, Proxy)
 
     # def test_lightning_training_with_weightslab_loaders(self):
-    #     """Test full training loop with WeightsLab tracked data loaders."""
-    #     pause_controller.resume(force=True)  # Ensure not paused
+    # """Test full training loop with WeightsLab tracked data loaders."""
+    # pause_controller.resume(force=True) # Ensure not paused
 
-    #     # Create tracked loaders
-    #     train_loader = wl.watch_or_edit(
-    #         self.train_dataset,
-    #         flag="data",
-    #         loader_name="train_loader",
-    #         batch_size=16,
-    #         shuffle=True,
-    #         is_training=True,
-    #         compute_hash=False,
-    #         enable_h5_persistence=False
-    #     )
+    # # Create tracked loaders
+    # train_loader = wl.watch_or_edit(
+    # self.train_dataset,
+    # flag="data",
+    # loader_name="train_loader",
+    # batch_size=16,
+    # shuffle=True,
+    # is_training=True,
+    # compute_hash=False,
+    # enable_h5_persistence=False
+    # )
 
-    #     val_loader = wl.watch_or_edit(
-    #         self.val_dataset,
-    #         flag="data",
-    #         loader_name="val_loader",
-    #         batch_size=16,
-    #         shuffle=False,
-    #         is_training=False,
-    #         compute_hash=False,
-    #         enable_h5_persistence=False
-    #     )
+    # val_loader = wl.watch_or_edit(
+    # self.val_dataset,
+    # flag="data",
+    # loader_name="val_loader",
+    # batch_size=16,
+    # shuffle=False,
+    # is_training=False,
+    # compute_hash=False,
+    # enable_h5_persistence=False
+    # )
 
-    #     # Create model with tracked components
-    #     _model = SimpleCNN().to(self.device)
-    #     model_wl = wl.watch_or_edit(_model, flag="model", device=self.device)
+    # # Create model with tracked components
+    # _model = SimpleCNN().to(self.device)
+    # model_wl = wl.watch_or_edit(_model, flag="model", device=self.device)
 
-    #     criterion = wl.watch_or_edit(
-    #         nn.CrossEntropyLoss(reduction="none"),
-    #         flag="loss", signal_name="loss-CE", log=True
-    #     )
+    # criterion = wl.watch_or_edit(
+    # nn.CrossEntropyLoss(reduction="none"),
+    # flag="loss", signal_name="loss-CE", log=True
+    # )
 
-    #     metric = wl.watch_or_edit(
-    #         Accuracy(task="multiclass", num_classes=self.n_classes).to(self.device),
-    #         flag="metric", signal_name="metric-ACC", log=True
-    #     )
+    # metric = wl.watch_or_edit(
+    # Accuracy(task="multiclass", num_classes=self.n_classes).to(self.device),
+    # flag="metric", signal_name="metric-ACC", log=True
+    # )
 
-    #     optimizer = torch.optim.Adam(model_wl.parameters(), lr=0.001)
-    #     optimizer_wl = wl.watch_or_edit(optimizer, flag="optimizer")
+    # optimizer = torch.optim.Adam(model_wl.parameters(), lr=0.001)
+    # optimizer_wl = wl.watch_or_edit(optimizer, flag="optimizer")
 
-    #     lit_model = LitTestModel(
-    #         model=model_wl,
-    #         optimizer=optimizer_wl,
-    #         criterion_wl=criterion,
-    #         metric_wl=metric
-    #     )
+    # lit_model = LitTestModel(
+    # model=model_wl,
+    # optimizer=optimizer_wl,
+    # criterion_wl=criterion,
+    # metric_wl=metric
+    # )
 
-    #     # Create Lightning trainer with minimal configuration
-    #     trainer = pl.Trainer(
-    #         max_epochs=2,
-    #         accelerator=self.device if self.device in ["cpu", "cuda"] else "auto",
-    #         devices=1,
-    #         enable_checkpointing=False,
-    #         logger=False,
-    #         enable_progress_bar=False,
-    #     )
+    # # Create Lightning trainer with minimal configuration
+    # trainer = pl.Trainer(
+    # max_epochs=2,
+    # accelerator=self.device if self.device in ["cpu", "cuda"] else "auto",
+    # devices=1,
+    # enable_checkpointing=False,
+    # logger=False,
+    # enable_progress_bar=False,
+    # )
 
-    #     # Train the model - this should complete without errors
-    #     try:
-    #         trainer.fit(lit_model, train_loader, val_loader)
-    #         training_succeeded = True
-    #     except Exception as e:
-    #         training_succeeded = False
-    #         self.fail(f"Training failed with error: {e}")
+    # # Train the model - this should complete without errors
+    # try:
+    # trainer.fit(lit_model, train_loader, val_loader)
+    # training_succeeded = True
+    # except Exception as e:
+    # training_succeeded = False
+    # self.fail(f"Training failed with error: {e}")
 
-    #     self.assertTrue(training_succeeded, "Training should complete successfully")
+    # self.assertTrue(training_succeeded, "Training should complete successfully")
 
     def test_weightslab_context_guards_in_lightning(self):
         """Test that WeightsLab context guards work correctly in Lightning steps."""
-        pause_controller.resume(force=True)  # Ensure not paused
+        pause_controller.resume(force=True) # Ensure not paused
         context_log = []
 
         class ContextTestModule(pl.LightningModule):

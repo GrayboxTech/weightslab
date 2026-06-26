@@ -8,8 +8,9 @@ training_steps_to_do: null  # Set to null for infinite training until manually s
 compute_natural_sort: false
 
 # Experiment parameters
-eval_full_to_train_steps_ratio: 100
-experiment_dump_to_train_steps_ratio: 25
+eval_full_to_train_steps_ratio: 500   # was 100 — full 10k eval was the dominant wall-clock cost
+experiment_dump_to_train_steps_ratio: 250  # was 25 — frequent checkpoint dumps stalled training
+write_export_ratio: 100  # Export signal history + data grid to JSON/CSV every N steps
 skip_checkpoint_load: false  # If true restart the experiment from last state
 tqdm_display: true  # Whether to use tqdm progress bars during training/evaluation
 is_training: false  # Start training immediately or not
@@ -35,5 +36,5 @@ data:
     batch_size: 16
   test_loader:
     shuffle: false
-    batch_size: 16
+    batch_size: 128   # was 16 — bigger eval batches => ~8x fewer eval steps per pass
     drop_last: false

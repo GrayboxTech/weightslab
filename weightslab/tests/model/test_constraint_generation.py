@@ -42,7 +42,7 @@ class GroupedConvModel(nn.Module):
         self.grouped_conv = nn.Conv2d(8, 16, kernel_size=3, padding=1, groups=2)
         self.bn = nn.BatchNorm2d(16)
         self.relu = nn.ReLU()
-        self.regular_conv = nn.Conv2d(16, 32, kernel_size=3, padding=1)  # No groups
+        self.regular_conv = nn.Conv2d(16, 32, kernel_size=3, padding=1) # No groups
 
     def forward(self, x):
         x = self.grouped_conv(x)
@@ -62,8 +62,8 @@ class DepthwisePointwiseModel(nn.Module):
     """
     def __init__(self):
         super().__init__()
-        self.dw = nn.Conv2d(16, 16, kernel_size=3, padding=1, groups=16)  # Depthwise
-        self.pw = nn.Conv2d(16, 32, kernel_size=1)  # Pointwise
+        self.dw = nn.Conv2d(16, 16, kernel_size=3, padding=1, groups=16) # Depthwise
+        self.pw = nn.Conv2d(16, 32, kernel_size=1) # Pointwise
 
     def forward(self, x):
         x = self.dw(x)
@@ -227,7 +227,7 @@ class TestConstraintReporting(unittest.TestCase):
         """Constraints are detected via introspection, not hardcoding on names"""
         # Create a custom conv with groups but no special name
         conv_with_groups = nn.Conv2d(4, 8, 3, padding=1, groups=2)
-        conv_with_groups.__class__.__name__ = "CustomConv"  # Change class name
+        conv_with_groups.__class__.__name__ = "CustomConv" # Change class name
 
         constraints = _detect_layer_constraints(conv_with_groups)
 

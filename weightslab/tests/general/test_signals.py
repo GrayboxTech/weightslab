@@ -57,7 +57,7 @@ class TestSignals(unittest.TestCase):
             mock_gm.return_value = mock_model
 
             with patch("weightslab.src.DATAFRAME_M", mock_df):
-                batch_ids = [20, 21, 22]  # list instead of tensor
+                batch_ids = [20, 21, 22] # list instead of tensor
                 signals = {"loss": 0.3}
 
                 wl.save_signals(
@@ -84,7 +84,7 @@ class TestSignals(unittest.TestCase):
             with patch("weightslab.src.DATAFRAME_M", mock_df):
                 batch_ids = torch.tensor([30, 31])
                 signals = {
-                    "loss": 0.25,  # scalar float
+                    "loss": 0.25, # scalar float
                     "accuracy": 0.95,
                     "f1": np.float32(0.92)
                 }
@@ -462,8 +462,8 @@ class TestSignals(unittest.TestCase):
             wl.save_signals(
                 signals={"det_loss": torch.tensor(0.2)},
                 batch_ids=torch.tensor([6, 7]),
-                preds=torch.rand((2, 5, 4)),  # 5 boxes, 4 coords
-                targets=torch.rand((2, 4, 4)),  # 4 boxes, 4 coords
+                preds=torch.rand((2, 5, 4)), # 5 boxes, 4 coords
+                targets=torch.rand((2, 4, 4)), # 4 boxes, 4 coords
                 log=True
             )
 
@@ -514,7 +514,7 @@ class TestSignals(unittest.TestCase):
                 wl.save_signals(
                     signals=signals,
                     batch_ids=None,
-                    log=False  # Don't log without IDs
+                    log=False # Don't log without IDs
                 )
 
     def test_signal_with_mixed_data_types(self):
@@ -680,11 +680,11 @@ class TestSignals(unittest.TestCase):
 
             # Variable number of boxes: img1 has 3, img2 has 1, img3 has 5, img4 has 2
             preds = [
-                torch.tensor([[10, 20, 110, 120], [50, 60, 150, 160], [200, 210, 300, 310]]),  # 3 boxes
-                torch.tensor([[15, 25, 115, 125]]),  # 1 box
+                torch.tensor([[10, 20, 110, 120], [50, 60, 150, 160], [200, 210, 300, 310]]), # 3 boxes
+                torch.tensor([[15, 25, 115, 125]]), # 1 box
                 torch.tensor([[30, 40, 130, 140], [70, 80, 170, 180], [250, 260, 350, 360],
-                             [100, 110, 200, 210], [180, 190, 280, 290]]),  # 5 boxes
-                torch.tensor([[45, 55, 145, 155], [220, 230, 320, 330]])  # 2 boxes
+                             [100, 110, 200, 210], [180, 190, 280, 290]]), # 5 boxes
+                torch.tensor([[45, 55, 145, 155], [220, 230, 320, 330]]) # 2 boxes
             ]
 
             targets = [
@@ -800,7 +800,7 @@ class TestSignals(unittest.TestCase):
             self.assertTrue(mock_df.enqueue_batch.called)
             call_kwargs = mock_df.enqueue_batch.call_args[1]
             losses = call_kwargs['losses']
-            self.assertEqual(len(losses), 5)  # All signals should be saved
+            self.assertEqual(len(losses), 5) # All signals should be saved
 
 if __name__ == "__main__":
     unittest.main()

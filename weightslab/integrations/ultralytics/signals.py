@@ -47,12 +47,12 @@ from ._utils import normalize_post_nms_preds
 # fallbacks kick in only if `model.args.{conf,iou}` is `None` — which
 # happens for training because UL only auto-populates those for predict.
 #
-#   OVERLAY_CONF_FALLBACK — tiny so early-epoch overlays aren't empty.
-#                           UL's predict default of 0.25 would hide the
-#                           model entirely while it's still learning.
-#   OVERLAY_IOU_FALLBACK  — matches UL's default inference IoU.
-#   OVERLAY_MAX_DETS      — readability cap; UL's NMS otherwise produces
-#                           up to 300 boxes per image, flooding the studio.
+# OVERLAY_CONF_FALLBACK — tiny so early-epoch overlays aren't empty.
+# UL's predict default of 0.25 would hide the
+# model entirely while it's still learning.
+# OVERLAY_IOU_FALLBACK — matches UL's default inference IoU.
+# OVERLAY_MAX_DETS — readability cap; UL's NMS otherwise produces
+# up to 300 boxes per image, flooding the studio.
 OVERLAY_CONF_FALLBACK = 1e-4
 OVERLAY_IOU_FALLBACK = 0.45
 OVERLAY_MAX_DETS = 50
@@ -157,7 +157,7 @@ class Signal:
         `preds=` kwarg.
     """
     name: str
-    flag: str  # "loss" | "metric"
+    flag: str # "loss" | "metric"
     reduce: Callable[[dict], Optional[th.Tensor]]
     preds: Optional[Callable[[dict], Optional[dict]]] = None
 
@@ -211,8 +211,8 @@ def install_val_pipeline(validator, signals: list[Signal]):
     channels = _make_channels(signals)
     _orig = validator.update_metrics
     def _ship(preds, batch):
-        validator._wl_preds = preds   # exposed to signal reducers/predsers
-        res = _orig(preds, batch)     # runs first — fills _process_batch buf
+        validator._wl_preds = preds # exposed to signal reducers/predsers
+        res = _orig(preds, batch) # runs first — fills _process_batch buf
         _ship_round(signals, channels, batch)
         return res
     validator.update_metrics = _ship
@@ -255,9 +255,9 @@ def default_train_signals(model, signals_cfg: dict = {}) -> list[Signal]:
     bl = crit.bbox_loss
     detect_head = next((m for m in model.modules() if isinstance(m, Detect)), None)
 
-    get_bce = fwd_hook(crit.bce)                # bce is a plain nn.Module
-    get_iou = fn_tap(ul_loss, "bbox_iou")       # bbox_iou is a plain function
-    get_dfl = method_call_tap(bl, "dfl_loss")   # DFLoss overrides __call__
+    get_bce = fwd_hook(crit.bce) # bce is a plain nn.Module
+    get_iou = fn_tap(ul_loss, "bbox_iou") # bbox_iou is a plain function
+    get_dfl = method_call_tap(bl, "dfl_loss") # DFLoss overrides __call__
     get_bl_args = pre_hook(bl)
 
     def _fg_state():

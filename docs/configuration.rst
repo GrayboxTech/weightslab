@@ -245,6 +245,14 @@ Data and Cache
        uniformly downsampled — keeping the first and last point and an evenly-spaced
        subset in between (no values are interpolated/invented). Set to ``0`` to
        disable the cap and return every step of the mean curve.
+   * - ``WL_POINT_CLOUD_CHUNK_BYTES``
+     - ``1048576``
+     - Size, in bytes, of each chunk streamed by the ``GetPointCloud`` RPC
+       (raw ``float32`` point-cloud data is sent as a sequence of binary
+       messages). Defaults to ``1048576`` (1 MiB). Larger chunks mean fewer
+       gRPC messages but more memory held per message; smaller chunks lower
+       peak memory at the cost of more round-trips. Must be a positive integer
+       — non-positive or non-numeric values fall back to the 1 MiB default.
 
 
 Evaluation Mode
@@ -538,12 +546,209 @@ These variables are injected into the browser bundle at build / dev time.
      - ``512``
      - Maximum number of metadata histogram bars shown above the sample slider.
        Values above ``512`` are clamped to ``512`` to keep rendering responsive.
+   * - ``VITE_GRID_WINDOW_SIZE``
+     - ``6``
+     - Total batches held in the sliding prefetch window (current + look-back +
+       look-ahead). Increasing this prefetches more aggressively at the cost of
+       memory. ``VITE_MAX_PREFETCH_BATCHES`` is derived from this value
+       (``window − 1``). **Runtime override (no rebuild):** ``GRID_WINDOW_SIZE``
+       (nginx env) or ``window.WS_GRID_WINDOW_SIZE``.
    * - ``VITE_WS_MAX_IMAGE_CACHE_SIZE``
-     - *(prefetch + 4)*
-     - Maximum number of images held in the WebSocket image cache.
+     - *(window + 2)*
+     - Maximum number of image entries held in the in-browser image cache.
+       Defaults to ``VITE_GRID_WINDOW_SIZE + 2``. **Runtime override:**
+       ``GRID_MAX_IMAGE_CACHE_SIZE`` (nginx env) or ``window.WS_MAX_IMAGE_CACHE_SIZE``.
    * - ``VITE_WS_GRID_CACHE_MAX_MB``
      - ``128``
      - Maximum memory (MB) for the grid-view image tile cache.
+       **Runtime override:** ``GRID_CACHE_MAX_MB`` (nginx env) or
+       ``window.WS_GRID_CACHE_MAX_MB``.
    * - ``VITE_WS_MODAL_CACHE_MAX_MB``
      - ``64``
      - Maximum memory (MB) for the full-resolution modal image cache.
+       **Runtime override:** ``MODAL_CACHE_MAX_MB`` (nginx env) or
+       ``window.WS_MODAL_CACHE_MAX_MB``.
+
+
+Point cloud
+~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Variable
+     - Default
+     - Description
+   * - ``VITE_WL_PC_MAX_POINTS``
+     - *(unset — no cap)*
+     - Maximum number of 3-D points rendered per point-cloud sample in the
+       modal viewer. Leave unset for no cap. Useful on low-end GPUs.
+       **Runtime override:** ``PC_MAX_POINTS`` (nginx env) or
+       ``window.WS_WL_PC_MAX_POINTS``.
+   * - ``VITE_WL_DISABLE_GPU_RENDERING``
+     - ``0``
+     - Set to ``1`` to force CPU-side (canvas 2-D) rendering for point clouds,
+       bypassing the three.js WebGL renderer. Useful when GPU drivers are absent
+       or broken inside a headless container. **Runtime override:**
+       ``DISABLE_GPU_RENDERING`` (nginx env) or ``window.WS_WL_DISABLE_GPU_RENDERING``.
+
+
+Bounding-box render limits
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Detection samples can carry many bounding boxes per image (dense scenes,
+high-recall predictions). Drawing them all slows rendering and turns the
+overlay into noise, so the number of boxes drawn per image is capped. The cap
+is applied **separately** to ground-truth (GT) and predictions (PRED) — a value
+of ``10`` allows up to 10 GT boxes *and* 10 PRED boxes per image. Boxes beyond
+the cap are simply not drawn (predictions are typically score-ordered, so the
+most confident ones are kept).
+
+These are set on the Weights Studio frontend container (for example in
+``../weights_studio/docker/docker-compose.yml``) and injected into the page at
+startup by the nginx entrypoint — changing them needs no rebuild, just a
+container restart. For a local ``vite`` dev server, use the ``VITE_`` fallbacks
+shown below. Values are clamped to a hard ceiling of ``10000``.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 12 58
+
+   * - Variable
+     - Default
+     - Description
+   * - ``BB_THUMB_RENDER``
+     - ``10``
+     - Maximum bounding boxes drawn per image in the grid **thumbnails**, per
+       overlay (up to N ground-truth and N predictions). Dev-server fallback:
+       ``VITE_BB_THUMB_RENDER``.
+   * - ``BB_MODAL_RENDER``
+     - ``100``
+     - Maximum bounding boxes drawn per image in the **modal** detail view, per
+       overlay (up to N ground-truth and N predictions). A ``?`` button in the
+       top-right of the modal image surfaces the active limit on hover.
+       Dev-server fallback: ``VITE_BB_MODAL_RENDER``.
+
+.. note::
+
+   These caps only affect *rendering* — no sample data is dropped. They apply to
+   detection bounding-box overlays; segmentation masks are unaffected.
+
+
+Feature toggles
+~~~~~~~~~~~~~~~
+
+Whole areas of the Studio UI can be turned off for a given deployment — for
+example a read-only demo that only shows plots, or a labelling-only view with no
+agent. Each toggle **removes the area from the UI** (the elements are hidden)
+**and stops its background work** (auto-refresh timers and gRPC polls are never
+started), so a disabled area costs nothing at runtime.
+
+Like the bounding-box render limits, these are set on the Weights Studio frontend
+container (for example in ``../weights_studio/docker/docker-compose.yml``) and
+injected into the page at startup by the nginx entrypoint — changing them needs
+no rebuild, just a container restart + browser reload. For a local ``vite`` dev
+server, use the ``VITE_`` fallbacks shown below. Every toggle **defaults to
+enabled**; set it to ``0`` / ``false`` / ``no`` / ``off`` (any case) to disable.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 38 10 52
+
+   * - Variable
+     - Default
+     - Description
+   * - ``ENABLE_PLOTS``
+     - ``1``
+     - When disabled, removes the plots board and the left-panel Signals/metrics
+       card, and stops the plot-data auto-refresh (the ``GetLatestLoggerData``
+       poll and the chart redraw loop). Dev-server fallback:
+       ``VITE_ENABLE_PLOTS``.
+   * - ``ENABLE_DATA_EXPLORATION``
+     - ``1``
+     - When disabled, removes the data sample grid and the metadata / details
+       left panel, and stops the data auto-refresh (the ``GetDataSamples`` /
+       ``GetMetaData`` timers and the slider-histogram poll). Dev-server
+       fallback: ``VITE_ENABLE_DATA_EXPLORATION``.
+   * - ``ENABLE_HYPERPARAMETERS_OPTIMIZATION``
+     - ``1``
+     - When disabled, removes the Hyperparameters section from the left panel,
+       makes the hyperparameter inputs read-only (no user edits are sent to the
+       backend), and stops the hyperparameter sync poll. Dev-server fallback:
+       ``VITE_ENABLE_HYPERPARAMETERS_OPTIMIZATION``.
+   * - ``ENABLE_AGENT``
+     - ``1``
+     - When disabled, removes the agent chat input bar (and its send button) and
+       the chat-history panel, and stops the agent health-check poll. Dev-server
+       fallback: ``VITE_ENABLE_AGENT``.
+
+.. note::
+
+   Each variable maps to a ``window.WS_ENABLE_*`` global injected into
+   ``config.js`` at container start (the same mechanism as the bounding-box
+   limits), with a build-time ``VITE_ENABLE_*`` fallback for the dev server.
+   Because ``config.js`` is served ``no-store``, a container restart + normal
+   reload is enough to pick up a change.
+
+
+Deploying with ``build-and-deploy.sh``
+---------------------------------------
+
+The helper script ``weightslab/ui/docker/utils/build-and-deploy.sh`` (and its
+mirror in ``weights_studio/docker/utils/``) writes all runtime configuration
+into the ``docker/.env`` file before starting the containers.  Any UI variable
+can be passed directly as a ``KEY=VALUE`` positional argument — no need to set
+environment variables beforehand:
+
+.. code-block:: bash
+
+   # From the docker/ directory
+   bash utils/build-and-deploy.sh ENABLE_AGENT=0 BB_THUMB_RENDER=50
+
+   # Dev mode
+   bash utils/build-and-deploy.sh --dev ENABLE_PLOTS=0 ENABLE_AGENT=0
+
+   # Multiple overrides
+   bash utils/build-and-deploy.sh --dev \
+       ENABLE_PLOTS=0 \
+       ENABLE_DATA_EXPLORATION=0 \
+       BB_THUMB_RENDER=20 \
+       BB_MODAL_RENDER=200 \
+       WS_HISTOGRAM_MAX_BINS=256
+
+The following ``KEY=VALUE`` arguments are recognised:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Argument
+     - Effect
+   * - ``ENABLE_PLOTS=0``
+     - Disable the plots board and Signals card.
+   * - ``ENABLE_DATA_EXPLORATION=0``
+     - Disable the data grid and metadata panel.
+   * - ``ENABLE_HYPERPARAMETERS_OPTIMIZATION=0``
+     - Disable the Hyperparameters section.
+   * - ``ENABLE_AGENT=0``
+     - Disable the agent chat panel.
+   * - ``BB_THUMB_RENDER=N``
+     - Set the thumbnail bounding-box cap to N.
+   * - ``BB_MODAL_RENDER=N``
+     - Set the modal bounding-box cap to N.
+   * - ``WS_HISTOGRAM_MAX_BINS=N``
+     - Set the histogram bar cap to N (max 512).
+   * - ``GRID_WINDOW_SIZE=N``
+     - Set the prefetch sliding-window size (default 6).
+   * - ``GRID_CACHE_MAX_MB=N``
+     - Set the grid-view image cache memory budget in MB (default 128).
+   * - ``MODAL_CACHE_MAX_MB=N``
+     - Set the modal image cache memory budget in MB (default 64).
+   * - ``PC_MAX_POINTS=N``
+     - Cap the number of rendered point-cloud points (default: no cap).
+   * - ``DISABLE_GPU_RENDERING=1``
+     - Force CPU-side canvas rendering for point clouds (disables WebGL).
+
+Unrecognised arguments are silently ignored.  Any variable not supplied
+defaults to the value shown in the tables above.

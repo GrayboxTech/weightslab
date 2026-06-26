@@ -40,8 +40,8 @@ class SampleStats:
             return list(map(lambda c: c.value, cls))
 
     DEFAULTS_TYPES: Dict[str, Any] = {
-        Ex.SAMPLE_ID.value: str or int,  # Accept both str and int for sample_id
-        Ex.INSTANCE_ID.value: str or int,  # Accept both str and int for instance_id
+        Ex.SAMPLE_ID.value: str or int, # Accept both str and int for sample_id
+        Ex.INSTANCE_ID.value: str or int, # Accept both str and int for instance_id
 
         Ex.PREDICTION.value: list,
         Ex.PREDICTION_RAW.value: list,
@@ -85,10 +85,10 @@ class SampleStats:
     def get_to_save_to_h5_list(cls) -> List[str]:
         """Return list of stats to save to H5, conditionally including predictions and targets."""
         base_list = [
-            "signals.*",  # Prefix for dynamic signals
-            "SIGNALS.*",  # Prefix for dynamic signals
-            "tag.*",  # Prefix for dynamic TAG
-            "TAG.*",  # Prefix for dynamic TAG
+            "signals.*", # Prefix for dynamic signals
+            "SIGNALS.*", # Prefix for dynamic signals
+            "tag.*", # Prefix for dynamic TAG
+            "TAG.*", # Prefix for dynamic TAG
 
             cls.Ex.DISCARDED.value,
             cls.Ex.TAG.value,

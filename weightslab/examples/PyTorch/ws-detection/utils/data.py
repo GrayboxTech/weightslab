@@ -21,9 +21,9 @@ from PIL import Image
 # box per pedestrian from each mask. Downloaded + extracted on first use.
 #
 # On-disk layout after extraction:
-#   <root>/PennFudanPed/
-#     PNGImages/FudanPed00001.png ...
-#     PedMasks/FudanPed00001_mask.png ...   # pixel value k = k-th pedestrian, 0 = bg
+# <root>/PennFudanPed/
+# PNGImages/FudanPed00001.png ...
+# PedMasks/FudanPed00001_mask.png ... # pixel value k = k-th pedestrian, 0 = bg
 #
 # WL renders detection targets/predictions from a per-sample [N, 6] array
 # ``[x1, y1, x2, y2, class_id, confidence]`` normalized to [0, 1] (GT conf = 1.0)
@@ -73,7 +73,7 @@ def _boxes_from_mask(mask_path):
     mask = np.array(Image.open(mask_path))
     h, w = mask.shape[:2]
     obj_ids = np.unique(mask)
-    obj_ids = obj_ids[obj_ids != 0]  # drop background
+    obj_ids = obj_ids[obj_ids != 0] # drop background
 
     boxes = []
     for oid in obj_ids:
@@ -91,9 +91,9 @@ class PennFudanDetectionDataset(Dataset):
     """Pedestrian bounding-box detection over the Penn-Fudan images.
 
     Args:
-        root:        directory to download/extract the dataset into.
-        split:       "train" or "val" (deterministic split of the 170 images).
-        image_size:  square resize fed to the model.
+        root: directory to download/extract the dataset into.
+        split: "train" or "val" (deterministic split of the 170 images).
+        image_size: square resize fed to the model.
         val_fraction: fraction of images held out for validation.
         max_samples: optional cap on the split size (for quick runs).
     """
@@ -131,7 +131,7 @@ class PennFudanDetectionDataset(Dataset):
             val_set = set(all_imgs[::k])
             selected = [f for f in all_imgs if f not in val_set]
 
-        selected = selected[:max_samples] if max_samples is not None else selected
+        selected = selected[:max_samples] if max_samples != None else selected
 
         self.images = []
         self.masks = []
@@ -165,16 +165,16 @@ class PennFudanDetectionDataset(Dataset):
         norm[:, [0, 2]] /= float(w)
         norm[:, [1, 3]] /= float(h)
         n = norm.shape[0]
-        cls = np.zeros((n, 1), dtype=np.float32)   # single class: person
+        cls = np.zeros((n, 1), dtype=np.float32) # single class: person
         conf = np.ones((n, 1), dtype=np.float32)
         return np.concatenate([norm, cls, conf], axis=1).astype(np.float32)
 
     def __getitem__(self, idx):
         """Returns (item, uid, target, metadata).
 
-        - item:     normalized image tensor [C, H, W]
-        - uid:      unique sample id (string)
-        - target:   [N, 6] float32 = [x1, y1, x2, y2, class_id, confidence]
+        - item: normalized image tensor [C, H, W]
+        - uid: unique sample id (string)
+        - target: [N, 6] float32 = [x1, y1, x2, y2, class_id, confidence]
         - metadata: dict with source paths
         """
         return self.get_items(idx, include_metadata=True, include_labels=True, include_images=True)
@@ -210,10 +210,10 @@ def det_collate(batch):
     sample's boxes in annotation order).
 
     Returns:
-        images:  FloatTensor [B, C, H, W]
-        ids:     list[str] of length B
+        images: FloatTensor [B, C, H, W]
+        ids: list[str] of length B
         targets: list[B] of [N_i, 6] float tensors ([x1, y1, x2, y2, cls, conf])
-        metas:   list[B] of metadata dicts
+        metas: list[B] of metadata dicts
     """
     images = torch.stack([b[0] for b in batch], dim=0)
     ids = [b[1] for b in batch]

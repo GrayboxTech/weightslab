@@ -1,14 +1,14 @@
 """WeighlabsWatchdog — unified watchdog for locks and gRPC threads.
 
 Combines:
-  1. Lock monitoring  — polls MonitoredRLock instances, raises _WatchdogInterrupt
+  1. Lock monitoring — polls MonitoredRLock instances, raises _WatchdogInterrupt
                         in the holder thread when the lock is held too long.
-  2. gRPC monitoring  — detects stuck in-flight RPCs via RpcWatchdogState and
+  2. gRPC monitoring — detects stuck in-flight RPCs via RpcWatchdogState and
                         requests a server restart when the threshold is exceeded.
   3. Eval thread monitoring — checks that the evaluation worker thread is still
                         alive whenever eval_controller reports is_running() or
-                        is_pending().  If the thread is dead the controller is
-                        transitioned to error state automatically.  No timeout is
+                        is_pending(). If the thread is dead the controller is
+                        transitioned to error state automatically. No timeout is
                         applied — evaluation may run for an arbitrarily long time.
 
 Typical usage (inside grpc_serve):
@@ -25,7 +25,7 @@ Typical usage (inside grpc_serve):
         get_thread=lambda: _EVAL_WORKER_THREAD,
     )
     watchdog.start()
-    # watchdog.rpc_state  → pass to RpcTimingAndWatchdogInterceptor
+    # watchdog.rpc_state → pass to RpcTimingAndWatchdogInterceptor
     # watchdog.server_manager → used by serving_thread_callback
 """
 
@@ -34,7 +34,7 @@ import logging
 import threading
 from typing import Callable, Dict, List, Optional, Tuple
 
-from weightslab.watchdog.log_level import WATCHDOG  # noqa: F401 — registers level
+from weightslab.watchdog.log_level import WATCHDOG # noqa: F401 — registers level
 from weightslab.watchdog.lock_monitor import MonitoredRLock, raise_in_thread
 from weightslab.watchdog.grpc_watchdog import RpcWatchdogState, GrpcServerManager
 
@@ -91,12 +91,12 @@ class WeighlabsWatchdog:
 
         The watchdog will call ``mark_error()`` on the controller when it reports
         ``is_running()`` or ``is_pending()`` but the worker thread is no longer
-        alive.  **No timeout is applied** — evaluation is allowed to run for as
+        alive. **No timeout is applied** — evaluation is allowed to run for as
         long as needed.
 
         Args:
             get_controller: Zero-arg callable that returns the EvaluationController.
-            get_thread:      Zero-arg callable that returns the current worker
+            get_thread: Zero-arg callable that returns the current worker
                              ``threading.Thread`` (or ``None`` if not started yet).
         """
         self._eval_monitors.append((get_controller, get_thread))
@@ -114,7 +114,7 @@ class WeighlabsWatchdog:
             daemon=True,
         )
         self._thread.start()
-        logger.watchdog(  # type: ignore[attr-defined]
+        logger.watchdog( # type: ignore[attr-defined]
             "[Watchdog] Started (threshold=%.1fs poll=%.1fs restart_after=%d exit_on_stuck=%s locks=%s)",
             self._stuck_threshold_s,
             self._poll_interval_s,
@@ -152,7 +152,7 @@ class WeighlabsWatchdog:
     # Lock monitoring
     # ------------------------------------------------------------------
 
-    def _check_locks(self) -> None:  # noqa: C901
+    def _check_locks(self) -> None: # noqa: C901
         # Import here to avoid circular imports
         try:
             from weightslab.components.global_monitoring import is_in_evaluation
@@ -185,19 +185,19 @@ class WeighlabsWatchdog:
                 continue
 
             if duration >= effective_threshold:
-                logger.watchdog(  # type: ignore[attr-defined]
+                logger.watchdog( # type: ignore[attr-defined]
                     "[Watchdog] Lock '%s' held for %.1fs by tid=%s — sending interrupt",
                     name, duration, tid,
                 )
                 if tid is not None:
                     killed = raise_in_thread(tid)
                     if killed:
-                        logger.watchdog(  # type: ignore[attr-defined]
+                        logger.watchdog( # type: ignore[attr-defined]
                             "[Watchdog] Interrupt delivered to tid=%s (lock '%s' will be released by finally/with)",
                             tid, name,
                         )
                     else:
-                        logger.watchdog(  # type: ignore[attr-defined]
+                        logger.watchdog( # type: ignore[attr-defined]
                             "[Watchdog] Could not deliver interrupt to tid=%s — thread may have already exited",
                             tid,
                         )
@@ -217,14 +217,14 @@ class WeighlabsWatchdog:
                 continue
 
             if not (controller.is_running() or controller.is_pending()):
-                continue  # nothing active — nothing to check
+                continue # nothing active — nothing to check
 
             if thread is not None and thread.is_alive():
-                continue  # worker is alive — all good
+                continue # worker is alive — all good
 
             # Controller believes eval is active but the thread is dead or missing.
             status = controller.get_status() if hasattr(controller, "get_status") else "unknown"
-            logger.watchdog(  # type: ignore[attr-defined]
+            logger.watchdog( # type: ignore[attr-defined]
                 "[Watchdog] Eval controller is '%s' but worker thread is dead — marking error",
                 status,
             )
@@ -253,7 +253,7 @@ class WeighlabsWatchdog:
             self._unhealthy_count += 1
             self.rpc_state.record_unhealthy()
 
-            logger.watchdog(  # type: ignore[attr-defined]
+            logger.watchdog( # type: ignore[attr-defined]
                 "[Watchdog] gRPC unhealthy #%d: in_flight=%d oldest=%.1fs method=%s threshold=%.1fs | %s",
                 self._unhealthy_count,
                 snap["in_flight"],
@@ -264,13 +264,13 @@ class WeighlabsWatchdog:
             )
 
             if self._exit_on_stuck:
-                logger.watchdog(  # type: ignore[attr-defined]
+                logger.watchdog( # type: ignore[attr-defined]
                     "[Watchdog] GRPC_WATCHDOG_EXIT_ON_STUCK=1 — calling os._exit(1)"
                 )
                 os._exit(1)
 
             if self._unhealthy_count >= self._restart_threshold:
-                logger.watchdog(  # type: ignore[attr-defined]
+                logger.watchdog( # type: ignore[attr-defined]
                     "[Watchdog] Restart threshold reached (%d/%d) — requesting server restart",
                     self._unhealthy_count, self._restart_threshold,
                 )
@@ -278,7 +278,7 @@ class WeighlabsWatchdog:
 
         else:
             if self._unhealthy_count > 0:
-                logger.watchdog(  # type: ignore[attr-defined]
+                logger.watchdog( # type: ignore[attr-defined]
                     "[Watchdog] gRPC recovered after %d unhealthy checks", self._unhealthy_count
                 )
             self._unhealthy_count = 0

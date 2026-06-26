@@ -101,7 +101,7 @@ class WeightsLabDataSampler(Sampler):
         loader = DataLoader(dataset, batch_sampler=sampler)
 
         # Toggle shuffle at runtime
-        sampler.shuffle = False  # Switch to sequential
+        sampler.shuffle = False # Switch to sequential
     """
 
     def __init__(
@@ -132,7 +132,7 @@ class WeightsLabDataSampler(Sampler):
         self._deny_listed_uids_cache: set[str] = set()
         self._deny_list_revision: Optional[tuple[str, int]] = None
         # Evaluation-mode allow-list: when set, only samples whose uid is in
-        # this set are yielded.  None = no filter (normal behaviour).
+        # this set are yielded. None = no filter (normal behaviour).
         self._eval_allow_list: Optional[set] = None
 
     def _get_deny_listed_uids(self, origin: str = None) -> set:
@@ -143,7 +143,7 @@ class WeightsLabDataSampler(Sampler):
                 if origin is not None:
                     df_view = self.tracked_dataset._get_df_view(column='origin', value=origin)
                 else:
-                    df_view = self.tracked_dataset._get_df_view()  # get all by default
+                    df_view = self.tracked_dataset._get_df_view() # get all by default
 
                 if not df_view.empty and SampleStatsEx.DISCARDED.value in df_view.columns:
                     discarded_rows = df_view[df_view[SampleStatsEx.DISCARDED.value] == True]
@@ -360,7 +360,7 @@ class DataLoaderInterface:
     from where manual next() left off, and after epoch exhaustion, both patterns
     automatically reset on the next iteration.
 
-    ✅ CORRECT usage - for-loops continue from manual next() position:
+     CORRECT usage - for-loops continue from manual next() position:
 
         loader = DataLoaderInterface(dataset, batch_size=32)
 
@@ -779,12 +779,12 @@ class DataLoaderInterface:
         reset if we're already mid-epoch, which allows for-loops to continue from where
         manual next() calls left off.
 
-        ✅ CORRECT usage:
+         CORRECT usage:
             while step < max_steps:
-                data = next(loader)           # Manual next (mid-epoch)
+                data = next(loader) # Manual next (mid-epoch)
                 if step % 5 == 0:
-                    for batch in loader:      # For-loop continues from batch position
-                        process(batch)        # Gets remaining batches until epoch end
+                    for batch in loader: # For-loop continues from batch position
+                        process(batch) # Gets remaining batches until epoch end
                 step += 1
 
         How it works:
@@ -828,7 +828,7 @@ class DataLoaderInterface:
             try:
                 data = next(loader)
             except StopIteration:
-                data = next(loader)  # Auto-resets, returns first batch of next epoch
+                data = next(loader) # Auto-resets, returns first batch of next epoch
 
         2. For-loop with proper termination:
             for batch in loader:
@@ -837,9 +837,9 @@ class DataLoaderInterface:
 
         3. Mixed usage:
             while training:
-                data = next(loader)  # Auto-resets as needed
+                data = next(loader) # Auto-resets as needed
                 if should_eval():
-                    for batch in loader:  # Gets remaining epoch, exits on StopIteration
+                    for batch in loader: # Gets remaining epoch, exits on StopIteration
                         eval(batch)
         """
         self._sync_batch_size_from_ledger()
@@ -921,7 +921,7 @@ class DataLoaderInterface:
             batch = next(self._iterator)
         except StopIteration:
             if hasattr(self, 'is_a_loop') and self.is_a_loop:
-                raise  # Re-raise so __next__() can handle epoch exhaustion
+                raise # Re-raise so __next__() can handle epoch exhaustion
             else:
                 self._reset_iterator()
                 batch = next(self._iterator)
@@ -931,30 +931,30 @@ class DataLoaderInterface:
         return batch
 
     # def _execute_offset(self) -> None:
-    #     """
-    #         Execute sample offset if set, skipping samples as needed.
-    #         This is a fallback mechanism for user-supplied dataloaders where
-    #         we cannot use an OffsetSampler.
+    # """
+    # Execute sample offset if set, skipping samples as needed.
+    # This is a fallback mechanism for user-supplied dataloaders where
+    # we cannot use an OffsetSampler.
 
-    #         TODO (GP):
-    #         We can reproduce the random generation of samples by restoring RNG state, if during the previous checkpoints, batchsize changed dynamically and shuffle is True.
-    #     """
-    #     if self._sample_offset > 0:
-    #         current_bs = self.get_batch_size()
-    #         # Fast-forward the iterator by the offset amount
-    #         while len(self._skipped) < self._sample_offset:
-    #             try:
-    #                 bs = 4 if self._sample_offset - len(self._skipped) >= 4 else self._sample_offset - len(self._skipped)  # Autoscale bs to sample offset
-    #                 self.set_batch_size(bs)
-    #                 self._skipped.extend(next(self._iterator)[1].detach().cpu().tolist())
-    #                 logger.debug(f"Offset sampler: skipped {len(self._skipped)}/{self._sample_offset}")
-    #             except StopIteration as e:
-    #                 logger.debug(f"Offset sampler: reached end of iterator while skipping: {e}")
-    #                 self._reset_iterator()  # Reset iterator and try again
+    # TODO (GP):
+    # We can reproduce the random generation of samples by restoring RNG state, if during the previous checkpoints, batchsize changed dynamically and shuffle is True.
+    # """
+    # if self._sample_offset > 0:
+    # current_bs = self.get_batch_size()
+    # # Fast-forward the iterator by the offset amount
+    # while len(self._skipped) < self._sample_offset:
+    # try:
+    # bs = 4 if self._sample_offset - len(self._skipped) >= 4 else self._sample_offset - len(self._skipped) # Autoscale bs to sample offset
+    # self.set_batch_size(bs)
+    # self._skipped.extend(next(self._iterator)[1].detach().cpu().tolist())
+    # logger.debug(f"Offset sampler: skipped {len(self._skipped)}/{self._sample_offset}")
+    # except StopIteration as e:
+    # logger.debug(f"Offset sampler: reached end of iterator while skipping: {e}")
+    # self._reset_iterator() # Reset iterator and try again
 
-    #         self.set_batch_size(current_bs)
-    #         self._skipped = []
-    #         self._sample_offset = 0
+    # self.set_batch_size(current_bs)
+    # self._skipped = []
+    # self._sample_offset = 0
 
     def _should_persist_workers(self, num_workers: int) -> bool:
         """Whether to keep DataLoader workers alive across iterator resets.
@@ -1025,7 +1025,7 @@ class DataLoaderInterface:
         # Only relevant when workers are actually respawning; persistent workers
         # stay alive, so no settle-delay is needed.
         if respawning:
-            time.sleep(0.01)  # 10ms delay for worker cleanup
+            time.sleep(0.01) # 10ms delay for worker cleanup
 
         # Create new iterator
         self._iterator = iter(self.dataloader)
@@ -1040,8 +1040,8 @@ class DataLoaderInterface:
             rng_state = capture_rng_state()
             batch1 = next(dataloader_interface)
             restore_rng_state(rng_state)
-            dataloader_interface.reset_iterator()  # Create new iterator with restored RNG
-            batch1_repeat = next(dataloader_interface)  # Same batches!
+            dataloader_interface.reset_iterator() # Create new iterator with restored RNG
+            batch1_repeat = next(dataloader_interface) # Same batches!
         """
         self._reset_iterator()
 

@@ -155,11 +155,18 @@ ones when debugging:
 | `WS_HISTOGRAM_MAX_BINS` | `512` | Cap on metadata histogram bars. |
 | `BB_THUMB_RENDER` | `10` | Max bounding boxes drawn per **thumbnail**, per overlay (GT and PRED capped independently). |
 | `BB_MODAL_RENDER` | `100` | Max bounding boxes drawn per **modal** image, per overlay. A `?` button in the modal shows the active limit. |
+| `ENABLE_PLOTS` | `1` | `0`/`false` removes the plots board + Signals card and stops plot auto-refresh. |
+| `ENABLE_DATA_EXPLORATION` | `1` | `0`/`false` removes the data grid + metadata/details panel and stops the data/metadata auto-refresh. |
+| `ENABLE_HYPERPARAMETERS_OPTIMIZATION` | `1` | `0`/`false` removes the Hyperparameters section, makes HP inputs read-only, and stops the HP poll. |
+| `ENABLE_AGENT` | `1` | `0`/`false` removes the agent chat bar + history panel and stops the agent health poll. |
 
-> **VITE_ vs WS_/BB_:** `VITE_*` variables are baked at **build time** (changing
-> them needs a rebuild). `WS_*` / `BB_*` are injected at **container start** into
-> `config.js` and read as `window.*` globals — changing them needs only a
-> container restart + browser reload (see the caching note in §5).
+> **VITE_ vs WS_/BB_/ENABLE_:** `VITE_*` variables are baked at **build time**
+> (changing them needs a rebuild). `WS_*` / `BB_*` / `ENABLE_*` are injected at
+> **container start** into `config.js` and read as `window.*` globals (the
+> toggles as `window.WS_ENABLE_*`) — changing them needs only a container restart
+> + browser reload (see the caching note in §5). Each `ENABLE_*` defaults to on;
+> set it to `0`/`false`/`no`/`off` to disable. Full reference:
+> `weightslab/docs/configuration.rst` (“Feature toggles”).
 
 ---
 

@@ -138,9 +138,9 @@ class ArrayAccessor:
     Pandas DataFrame accessor for automatic array loading.
 
     Usage:
-        df.arrays.load('prediction')  # Load all prediction arrays
-        df.arrays.load_sample(sample_id, 'prediction')  # Load specific array
-        df.arrays.set_store(array_store)  # Configure array store
+        df.arrays.load('prediction') # Load all prediction arrays
+        df.arrays.load_sample(sample_id, 'prediction') # Load specific array
+        df.arrays.set_store(array_store) # Configure array store
     """
 
     def __init__(self, pandas_obj):

@@ -9,11 +9,11 @@ import torch.nn.functional as F
 # The segmentation dataset yields, per sample, a LIST of instance masks
 # (each [H, W] with pixel value = class id). These criterions compute Dice and
 # BCE for every instance against the model's per-class probability map, then:
-#   * PerInstance* returns a flat tensor (one value per instance, ordered
-#     sample-major) — wrapped with `per_instance=True` so WL auto-saves it at
-#     (sample_id, annotation_id).
-#   * PerSample*   aggregates instances to one value per sample (mean) — wrapped
-#     with `per_sample=True` for the per-sample dashboards.
+# * PerInstance* returns a flat tensor (one value per instance, ordered
+# sample-major) — wrapped with `per_instance=True` so WL auto-saves it at
+# (sample_id, annotation_id).
+# * PerSample* aggregates instances to one value per sample (mean) — wrapped
+# with `per_sample=True` for the per-sample dashboards.
 # The instance ordering matches the `batch_idx` passed by the training loop
 # (built from the same per-sample instance lists), so WL maps each value to the
 # correct annotation.
@@ -26,14 +26,14 @@ def _instance_dice_bce(outputs, labels, **kwargs):
 
     Args:
         outputs: logits [B, C, H, W].
-        labels:  list[B]; labels[s] is a list of instance masks ([H, W], value = class id).
+        labels: list[B]; labels[s] is a list of instance masks ([H, W], value = class id).
 
     Returns:
         (dice_per_sample, bce_per_sample) where each is a list[B] of 1-D tensors
         holding one value per instance for that sample (empty tensor if none).
         Values are kept on the outputs' device; BCE retains grad, Dice is a metric.
     """
-    probs = torch.softmax(outputs, dim=1)         # [B, C, H, W], differentiable
+    probs = torch.softmax(outputs, dim=1) # [B, C, H, W], differentiable
     B, C = probs.shape[0], probs.shape[1]
     device = outputs.device
 
@@ -58,12 +58,12 @@ def _instance_dice_bce(outputs, labels, **kwargs):
             cls = int(m.max().item())
             ch = cls if 0 <= cls < C else 0
             gt = (m > 0).float()
-            p = probs[s, ch].clamp(_EPS, 1.0 - _EPS)   # [H, W]
+            p = probs[s, ch].clamp(_EPS, 1.0 - _EPS) # [H, W]
             inter = (p * gt).sum()
             dice = (2.0 * inter + _EPS) / (p.sum() + gt.sum() + _EPS)
             bce = F.binary_cross_entropy(p, gt)
             if weights is not None:
-                bce = bce * weights[ch]                # scalar class weight for this instance
+                bce = bce * weights[ch] # scalar class weight for this instance
             dices.append(dice)
             bces.append(bce)
 

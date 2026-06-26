@@ -209,7 +209,7 @@ class TestGrpcChaosMonkeyRobustness(_TimeoutMixin, unittest.TestCase):
             def _invoke():
                 try:
                     result_holder["value"] = wrapped.unary_unary(request={}, context=SimpleNamespace())
-                except Exception as exc:  # expected on first attempt
+                except Exception as exc: # expected on first attempt
                     error_holder["error"] = exc
 
             worker = threading.Thread(target=_invoke, name="WL-Test-gRPC-Worker", daemon=True)

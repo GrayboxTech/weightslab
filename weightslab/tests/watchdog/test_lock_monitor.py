@@ -90,7 +90,7 @@ class TestMonitoredRLockReentrant(unittest.TestCase):
     def test_same_thread_can_reacquire(self):
         lock = MonitoredRLock()
         lock.acquire()
-        lock.acquire()  # reentrant — must not deadlock
+        lock.acquire() # reentrant — must not deadlock
         try:
             self.assertTrue(lock.is_held())
         finally:

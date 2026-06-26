@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import weightslab.trainer.trainer_services as trainer_services
 
-# Default per-test timeout in seconds.  Override with WL_TEST_TIMEOUT env var.
+# Default per-test timeout in seconds. Override with WL_TEST_TIMEOUT env var.
 import os
 _TEST_TIMEOUT = int(os.getenv("WL_TEST_TIMEOUT", "30"))
 

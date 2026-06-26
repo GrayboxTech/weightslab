@@ -29,15 +29,17 @@ def safe_reset_index(df: "pd.DataFrame") -> "pd.DataFrame":
     Plain ``df.reset_index()`` raises ``ValueError: cannot insert X, already
     exists`` when a MultiIndex level name (e.g. ``sample_id`` or
     ``annotation_id``) has already been materialised as a column — which
-    happens after ``_normalize_for_read`` in the H5 store.  This helper only
+    happens after ``_normalize_for_read`` in the H5 store. This helper only
     promotes the levels that are actually missing from the column namespace.
     """
     import pandas as _pd
     if not isinstance(df, _pd.DataFrame) or not isinstance(df.index, _pd.MultiIndex):
-        # Single-level index: only reset if the name isn't already a column.
-        if df.index.name and df.index.name in df.columns:
-            return df
-        return df.reset_index()
+        # Single-level index: only promote if the name is meaningful and missing.
+        # Unnamed index (None) has nothing to promote; drop it to avoid inserting
+        # a spurious 'index' / 'level_0' column when one already exists.
+        if df.index.name and df.index.name not in df.columns:
+            return df.reset_index()
+        return df.reset_index(drop=True)
     missing = [n for n in df.index.names if n and n not in df.columns]
     if not missing:
         # All levels already present as columns — nothing to promote.
@@ -89,7 +91,7 @@ def normalize_config(obj: Any) -> Any:
     elif isinstance(obj, list):
         return [normalize_config(v) for v in obj]
     elif isinstance(obj, torch.device):
-        return str(obj)  # e.g. "cuda" or "cuda:0"
+        return str(obj) # e.g. "cuda" or "cuda:0"
     elif isinstance(obj, pathlib.Path):
         return obj.as_posix()
     elif isinstance(obj, (bool, int, float, str)) or obj is None:
@@ -176,7 +178,7 @@ def restore_rng_state(rng_state):
         # Restore Python random state
         if 'python_random' in rng_state:
             try:
-                random.setstate(tuple(tuple(i) if i is not None and not isinstance(i, (int, float)) else i for i in rng_state['python_random']))  # Conver to tuple of tuples
+                random.setstate(tuple(tuple(i) if i is not None and not isinstance(i, (int, float)) else i for i in rng_state['python_random'])) # Conver to tuple of tuples
                 logger.debug("Restored Python random state")
             except Exception as e:
                 logger.warning(f"Failed to restore Python random state: {e}")
@@ -402,7 +404,7 @@ def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=False
         Test function to iteratively update neurons for each layer,
         then test inference. Everything match ?
     """
-    seed_everything(42) if rand else None  # Set seed for reproducibility
+    seed_everything(42) if rand else None # Set seed for reproducibility
     n_layers = len(model.layers)
     for n in range(n_layers-1, 0, -1):
         if rand and th.rand(1) > 0.5 and layer_id is None and dummy_input is None:
@@ -412,7 +414,7 @@ def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=False
                 if n != layer_id:
                     continue
             else:
-                if n != n_layers + layer_id:  # - -layer_id != + -layer_id
+                if n != n_layers + layer_id: # - -layer_id != + -layer_id
                     continue
         logger.debug(f'\nOperate on neurons at layer {n}')
         if op is None:
@@ -631,7 +633,7 @@ def array_id_2bytes(
 
     h = xxhash.xxh64()
     h.update(data)
-    digest8 = h.digest()  # 8 bytes
+    digest8 = h.digest() # 8 bytes
 
     if return_hex:
         hexs = digest8.hex()
@@ -648,10 +650,10 @@ def detach_to_cpu(obj: Any) -> Any:
     """Recursively detach tensors from the compute graph and move them to CPU.
 
     Handles:
-      - ``torch.Tensor``        → ``.detach().cpu()``
-      - ``dict``                → recurse into values, preserve keys
-      - ``list`` / ``tuple``    → recurse element-wise, preserve type
-      - anything else           → returned as-is
+      - ``torch.Tensor`` → ``.detach().cpu()``
+      - ``dict`` → recurse into values, preserve keys
+      - ``list`` / ``tuple`` → recurse element-wise, preserve type
+      - anything else → returned as-is
     """
     if isinstance(obj, th.Tensor):
         return obj.detach().cpu()
@@ -681,7 +683,7 @@ def filter_kwargs_for_callable(func, kwargs):
 
     Examples:
         >>> def my_func(a, b, c=10):
-        ...     return a + b + c
+        ... return a + b + c
         >>> all_kwargs = {'a': 1, 'b': 2, 'c': 3, 'd': 4, 'e': 5}
         >>> filtered = filter_kwargs_for_callable(my_func, all_kwargs)
         >>> filtered
@@ -743,7 +745,7 @@ def safe_call_with_kwargs(func, *args, **kwargs):
 
     Examples:
         >>> def my_func(a, b, c=10):
-        ...     return a + b + c
+        ... return a + b + c
         >>> safe_call_with_kwargs(my_func, 1, 2, c=3, d=4, e=5)
         6
     """

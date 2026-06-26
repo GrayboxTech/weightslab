@@ -74,6 +74,16 @@ class ExperimentServiceStub(object):
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesRequest.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesResponse.FromString,
                 _registered_method=True)
+        self.GetHistogram = channel.unary_unary(
+                '/ExperimentService/GetHistogram',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.HistogramRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.HistogramResponse.FromString,
+                _registered_method=True)
+        self.GetMetaData = channel.unary_unary(
+                '/ExperimentService/GetMetaData',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetMetaDataRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetMetaDataResponse.FromString,
+                _registered_method=True)
         self.GetPointCloud = channel.unary_stream(
                 '/ExperimentService/GetPointCloud',
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.PointCloudRequest.SerializeToString,
@@ -184,6 +194,23 @@ class ExperimentServiceServicer(object):
 
     def GetDataSamples(self, request, context):
         """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetHistogram(self, request, context):
+        """Server-side histogram binning of one metadata/signal column.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetMetaData(self, request, context):
+        """Metadata-only retrieval (dataframe columns). Returns every metadata column
+        name for the WHOLE dataset, the current grid slice's per-sample metadata, and
+        the open modal sample's metadata. Separated from GetDataSamples, which now
+        returns only image / label / prediction data.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -306,6 +333,16 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     servicer.GetDataSamples,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesRequest.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesResponse.SerializeToString,
+            ),
+            'GetHistogram': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetHistogram,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.HistogramRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.HistogramResponse.SerializeToString,
+            ),
+            'GetMetaData': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetMetaData,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetMetaDataRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetMetaDataResponse.SerializeToString,
             ),
             'GetPointCloud': grpc.unary_stream_rpc_method_handler(
                     servicer.GetPointCloud,
@@ -584,6 +621,60 @@ class ExperimentService(object):
             '/ExperimentService/GetDataSamples',
             weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesRequest.SerializeToString,
             weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetHistogram(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetHistogram',
+            weightslab_dot_proto_dot_experiment__service__pb2.HistogramRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.HistogramResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetMetaData(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetMetaData',
+            weightslab_dot_proto_dot_experiment__service__pb2.GetMetaDataRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.GetMetaDataResponse.FromString,
             options,
             channel_credentials,
             insecure,

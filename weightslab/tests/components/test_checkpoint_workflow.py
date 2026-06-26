@@ -102,7 +102,7 @@ class SimpleCNN(nn.Module):
 
     def __init__(self, conv1_out=8, conv2_out=16):
         super(SimpleCNN, self).__init__()
-        self.input_shape = (1, 1, 28, 28)  # MNIST input shape
+        self.input_shape = (1, 1, 28, 28) # MNIST input shape
         self.conv1 = nn.Conv2d(1, conv1_out, kernel_size=3, padding=1)
         self.pool1 = nn.MaxPool2d(2, 2)
         self.conv2 = nn.Conv2d(conv1_out, conv2_out, kernel_size=3, padding=1)
@@ -272,27 +272,27 @@ class CheckpointSystemTests(unittest.TestCase):
     def check_reproducibility(self, original_loss, reloaded_loss, original_uids=None, reloaded_uids=None, loss_tol=0.1, uids_msg=None):
         """Common reproducibility check for losses and UIDs"""
         return
-        # #   Check reproducibility of losses and UIDs
+        # # Check reproducibility of losses and UIDs
         # if isinstance(original_loss, (list, tuple)):
-        #     original_loss_sum = sum(original_loss)/len(original_loss)
+        # original_loss_sum = sum(original_loss)/len(original_loss)
         # else:
-        #     original_loss_sum = original_loss
+        # original_loss_sum = original_loss
         # if isinstance(reloaded_loss, (list, tuple)):
-        #     reloaded_loss_sum = sum(reloaded_loss)/len(reloaded_loss)
+        # reloaded_loss_sum = sum(reloaded_loss)/len(reloaded_loss)
         # else:
-        #     reloaded_loss_sum = reloaded_loss
+        # reloaded_loss_sum = reloaded_loss
         # loss_diff = abs(original_loss_sum - reloaded_loss_sum)
         # loss_relative_diff = loss_diff / original_loss_sum if original_loss_sum != 0 else 0
         # print(f"[OK] Loss comparison:")
-        # print(f"  Original: {original_loss_sum:.6f}")
-        # print(f"  Reloaded: {reloaded_loss_sum:.6f}")
-        # print(f"  Relative difference: {loss_relative_diff*100:.3f}%")
+        # print(f" Original: {original_loss_sum:.6f}")
+        # print(f" Reloaded: {reloaded_loss_sum:.6f}")
+        # print(f" Relative difference: {loss_relative_diff*100:.3f}%")
         # self.assertLess(loss_relative_diff, loss_tol, msg=f"Training should be reproducible within {loss_tol*100:.1f}%")
         # if original_uids is not None and reloaded_uids is not None:
-        #     print(f"[OK] UIDs comparison:")
-        #     print(f"  Original: {original_uids}")
-        #     print(f"  Reloaded: {reloaded_uids}")
-        #     self.assertListEqual(reloaded_uids, original_uids, msg=uids_msg or "Sample UIDs should match for reproducibility")
+        # print(f"[OK] UIDs comparison:")
+        # print(f" Original: {original_uids}")
+        # print(f" Reloaded: {reloaded_uids}")
+        # self.assertListEqual(reloaded_uids, original_uids, msg=uids_msg or "Sample UIDs should match for reproducibility")
 
     @classmethod
     def setUpClass(cls):
@@ -365,8 +365,8 @@ class CheckpointSystemTests(unittest.TestCase):
             download=True,
             transform=transform
         )
-        mnist_subset = Subset(full_dataset, list(range(10)))  # Create subset with 10 samples
-        cls.dataset = TaggableDataset(mnist_subset)  # Wrap in taggable dataset
+        mnist_subset = Subset(full_dataset, list(range(10))) # Create subset with 10 samples
+        cls.dataset = TaggableDataset(mnist_subset) # Wrap in taggable dataset
 
         # =================
         # Initialize Logger
@@ -383,7 +383,7 @@ class CheckpointSystemTests(unittest.TestCase):
         # Initialize Model
         # ================
         model = SimpleCNN(conv1_out=8, conv2_out=16)
-        model = register_in_ledger(model, flag="model", device=DEVICE, skip_previous_auto_load=True, compute_dependencies=False)  # Compute dependencies is disabled
+        model = register_in_ledger(model, flag="model", device=DEVICE, skip_previous_auto_load=True, compute_dependencies=False) # Compute dependencies is disabled
 
         # =====================
         # Initialize DataLoader
@@ -518,7 +518,7 @@ class CheckpointSystemTests(unittest.TestCase):
         self.state['uids_a'] = uids_A
 
         # Final verbose
-        print(f"  Final model_age (i.e., how many epochs lived by the model): {model.get_age()}")
+        print(f" Final model_age (i.e., how many epochs lived by the model): {model.get_age()}")
         print(f"\n[OK] TEST A PASSED - Initial training completed")
 
     # =============================
@@ -546,15 +546,15 @@ class CheckpointSystemTests(unittest.TestCase):
         # Modify model architecture
         # TODO (GP): Still have the pb btw model archi. and torch cache
         # 11/05/2026-11:20:11.207 DEBUG:weightslab.components.global_monitoring:__exit__: Suppressing exception: Function ConvolutionBackward0 returned an invalid gradient at index 2 - got [15] but expected shape compatible with [16] in GuardContext.__exit__
-        # model.operate(0, {-1, -2, -3, -4}, 1)  # Increase conv1 out channels by 2
-        # model.operate(2, {-1}, 2)  # Freeze fc1 layer
-        # model.operate(-2, {}, 3)  # Freeze fc1 layer
-        # # model.operate(-1, {1}, 4)  # Reset fc2 layer
+        # model.operate(0, {-1, -2, -3, -4}, 1) # Increase conv1 out channels by 2
+        # model.operate(2, {-1}, 2) # Freeze fc1 layer
+        # model.operate(-2, {}, 3) # Freeze fc1 layer
+        # # model.operate(-1, {1}, 4) # Reset fc2 layer
 
-        # print(f"  Conv1: 8 -> 12 channels")
-        # print(f"  Conv2: 16 -> 15 channels")
-        # print(f"  FC1: Frozen")
-        # print(f"  FC2: Reset")
+        # print(f" Conv1: 8 -> 12 channels")
+        # print(f" Conv2: 16 -> 15 channels")
+        # print(f" FC1: Frozen")
+        # print(f" FC2: Reset")
 
         # Update hash here to get hash
         exp_hash_b, _, changed = self.chkpt_manager.update_experiment_hash(force=True)
@@ -587,7 +587,7 @@ class CheckpointSystemTests(unittest.TestCase):
 
         # Final verbose
         print(f"\n[OK] TEST B PASSED - Model architecture updated")
-        print(f"  Final model_age: {model.get_age()}")
+        print(f" Final model_age: {model.get_age()}")
 
     # ========================================================================
     # Test: 03_train_C_hyperparams_change
@@ -614,7 +614,7 @@ class CheckpointSystemTests(unittest.TestCase):
         # Change batch size
         new_bs = 3
         self.config['data']['train_loader']['batch_size'] = new_bs
-        print(f"  Batch size: 2 -> 4")
+        print(f" Batch size: 2 -> 4")
 
         # Update hash
         exp_hash_c, _, _ = self.chkpt_manager.update_experiment_hash()
@@ -651,7 +651,7 @@ class CheckpointSystemTests(unittest.TestCase):
 
         # Final verbose
         print(f"\n[OK] TEST C PASSED - Hyperparameters updated")
-        print(f"  Final model_age (i.e., how many epochs lived by the model): {model.get_age()}")
+        print(f" Final model_age (i.e., how many epochs lived by the model): {model.get_age()}")
 
     # ========================================================================
     # Test: 04_train_D_data_change
@@ -666,8 +666,8 @@ class CheckpointSystemTests(unittest.TestCase):
         model = ledgers.get_model()
 
         # Data
-        dataloader = ledgers.get_dataloader()  # Get dataloader
-        dfm = ledgers.get_dataframe()  # Get dataframe manager
+        dataloader = ledgers.get_dataloader() # Get dataloader
+        dfm = ledgers.get_dataframe() # Get dataframe manager
 
         # Optimizer and criterion
         optimizer = ledgers.get_optimizer()
@@ -686,8 +686,8 @@ class CheckpointSystemTests(unittest.TestCase):
             rows.append(
                 {
                     SampleStatsEx.SAMPLE_ID.value: uid,
-                    SampleStatsEx.INSTANCE_ID.value: in_uid,  # For simplicity, use same UID for annotation
-                    f"{SampleStatsEx.TAG.value}:ugly": True,  # Random tag with 'ugly'
+                    SampleStatsEx.INSTANCE_ID.value: in_uid, # For simplicity, use same UID for annotation
+                    f"{SampleStatsEx.TAG.value}:ugly": True, # Random tag with 'ugly'
                     SampleStatsEx.DISCARDED.value: bool(1 - dfm.get_df_view()[SampleStatsEx.DISCARDED.value].iloc[idx])
                 }
             )
@@ -698,8 +698,8 @@ class CheckpointSystemTests(unittest.TestCase):
         dfm.upsert_df(df_update, origin='train_loader', force_flush=True)
 
         # Changes will be pending
-        print(f"  Added 'ugly' tag to 20 samples")
-        print(f"  Discarded 20 samples")
+        print(f" Added 'ugly' tag to 20 samples")
+        print(f" Discarded 20 samples")
 
         # Update hash
         exp_hash_d, _, changed = self.chkpt_manager.update_experiment_hash()
@@ -710,7 +710,7 @@ class CheckpointSystemTests(unittest.TestCase):
         self.assertNotEqual(self.state['exp_hash_c'], exp_hash_d, "Hash should be different")
 
         print("\nResuming training for 11 epochs...")
-        pause_controller.resume()  # Pending changes to dump: data state
+        pause_controller.resume() # Pending changes to dump: data state
         loss_D, uids_D = self.train_epochs(
             model, dataloader, optimizer, criterion,
             num_epochs=self.config['training']['num_epochs'],
@@ -739,7 +739,7 @@ class CheckpointSystemTests(unittest.TestCase):
 
         # Final verbose
         print(f"\n[OK] TEST D PASSED - Data state updated")
-        print(f"  Final model_age (i.e., how many epochs lived by the model): {model.get_age()}")
+        print(f" Final model_age (i.e., how many epochs lived by the model): {model.get_age()}")
 
     # ========================================================================
     # Test: 05_train_E_reload_and_branch
@@ -759,7 +759,7 @@ class CheckpointSystemTests(unittest.TestCase):
         all_hashes = self.chkpt_manager.get_all_hashes(sort_by='created')
         print(f"\n[OK] Found {len(all_hashes)} experiment states:")
         for i, entry in enumerate(all_hashes):
-            print(f"  {i+1}. {entry['hash'][:16]}... (created: {entry['created'][:19]})")
+            print(f" {i+1}. {entry['hash'][:16]}... (created: {entry['created'][:19]})")
 
         # Reload state B (second state created)
         hash_a_from_manifest = self.state['exp_hash_a']
@@ -784,19 +784,19 @@ class CheckpointSystemTests(unittest.TestCase):
         if 'data' in hp_reloaded and 'train_loader' in hp_reloaded['data']:
             hp_reloaded['data']['train_loader']['batch_size'] = 1
             old_batch_size = hp_original.get('data', {}).get('train_loader', {}).get('batch_size', 2)
-            print(f"  Batch size: {old_batch_size} -> 1")
+            print(f" Batch size: {old_batch_size} -> 1")
 
         # Discard more data
         # Add 20 random tags with 'ugly'
         tagged_samples = random.sample(range(10), 1)
         rows = []
-        dfm = ledgers.get_dataframe()  # Get dataframe manager
+        dfm = ledgers.get_dataframe() # Get dataframe manager
         for idx in tagged_samples:
             uid, in_uid = dfm.get_df_view().index[idx]
             rows.append(
                 {
                     SampleStatsEx.SAMPLE_ID.value: uid,
-                    SampleStatsEx.INSTANCE_ID.value: in_uid,  # For simplicity, use same UID for annotation
+                    SampleStatsEx.INSTANCE_ID.value: in_uid, # For simplicity, use same UID for annotation
                     f"{SampleStatsEx.TAG.value}:ugly": True,
                     SampleStatsEx.DISCARDED.value: bool(1 - dfm.get_df_view(SampleStatsEx.DISCARDED.value).iloc[idx])
                 }
@@ -846,7 +846,7 @@ class CheckpointSystemTests(unittest.TestCase):
         self.state['uids_e'] = uids_E
 
         print(f"\n[OK] TEST E PASSED - Reloaded and generate a new train branch successfully")
-        print(f"  Final model_age: {model.get_age()}")
+        print(f" Final model_age: {model.get_age()}")
 
     # ========================================================================
     # Test: 06_reload_before_model_change
@@ -857,9 +857,9 @@ class CheckpointSystemTests(unittest.TestCase):
         print("TEST 06: Reload Before Model Change - Fix Conv Size with RNG State")
         print(f"{'='*80}\n")
 
-        hash_A_original = self.state['exp_hash_a']  # Before model change
-        loss_A_original = self.state['losses_a']  # Before model change
-        uids_A_original = self.state['uids_a']  # Before model change
+        hash_A_original = self.state['exp_hash_a'] # Before model change
+        loss_A_original = self.state['losses_a'] # Before model change
+        uids_A_original = self.state['uids_a'] # Before model change
 
         print(f"Reloading state A (before model change) for verification: {hash_A_original[:16]}...")
         success = self.chkpt_manager.load_state(exp_hash=hash_A_original)
@@ -901,7 +901,7 @@ class CheckpointSystemTests(unittest.TestCase):
         # Fix model conv size - create new model with different architecture
         print("\nFixing model architecture...")
         model = ledgers.get_model()
-        # model.operate(0, {-1}, 1)  # Commented; see test 2 - still have the pb btw model archi. and torch cache
+        # model.operate(0, {-1}, 1) # Commented; see test 2 - still have the pb btw model archi. and torch cache
         # model.operate(2, {-1}, 2)
         # model.operate(-2, {}, 3)
         # model.operate(-1, {-1 }, 4)
@@ -929,9 +929,9 @@ class CheckpointSystemTests(unittest.TestCase):
 
         # Compare: First batch should be same, but losses differ due to different model
         print(f"\n[OK] Reproducibility verified:")
-        print(f"  Original model first batch loss: {loss_A_reloaded}")
-        print(f"  Fixed model first batch loss: {loss_H}")
-        print(f"  (Same RNG = same batches, different losses due to model change)")
+        print(f" Original model first batch loss: {loss_A_reloaded}")
+        print(f" Fixed model first batch loss: {loss_H}")
+        print(f" (Same RNG = same batches, different losses due to model change)")
 
         # Store state
         self.state['losses_h'] = loss_H
@@ -949,7 +949,7 @@ class CheckpointSystemTests(unittest.TestCase):
         print("TEST 07: Change Data from Test 06 - Discard More Data")
         print(f"{'='*80}\n")
 
-        hash_H = self.state['exp_hash_h']  # From test 06
+        hash_H = self.state['exp_hash_h'] # From test 06
 
         print(f"Starting from state H: {hash_H[:16]}...")
 
@@ -962,7 +962,7 @@ class CheckpointSystemTests(unittest.TestCase):
             uid, in_uid = dfm.get_df_view().index[idx]
             rows.append({
                 SampleStatsEx.SAMPLE_ID.value: uid,
-                SampleStatsEx.INSTANCE_ID.value: in_uid,  # For simplicity, use same UID for annotation
+                SampleStatsEx.INSTANCE_ID.value: in_uid, # For simplicity, use same UID for annotation
                 f"{SampleStatsEx.TAG.value}:discard_25pct": True,
                 SampleStatsEx.DISCARDED.value: True
             })
@@ -1004,7 +1004,7 @@ class CheckpointSystemTests(unittest.TestCase):
         print("TEST 08: Reload Before Data Change - Verify and Modify Model")
         print(f"{'='*80}\n")
 
-        hash_c = self.state['exp_hash_c']  # Before data change (after HP change)
+        hash_c = self.state['exp_hash_c'] # Before data change (after HP change)
 
         print(f"Part A: Reloading state C and verifying training reproducibility...")
         print(f"Reloading state C: {hash_c[:16]}...")
@@ -1068,7 +1068,7 @@ class CheckpointSystemTests(unittest.TestCase):
         print("TEST 09: Reload Before HP Change - Verify and Fix Everything")
         print(f"{'='*80}\n")
 
-        hash_b = self.state['exp_hash_b']  # Before HP change (after model change)
+        hash_b = self.state['exp_hash_b'] # Before HP change (after model change)
         loss_b = self.state['losses_b']
 
         print(f"Part A: Reloading state B and verifying training reproducibility...")
@@ -1100,11 +1100,11 @@ class CheckpointSystemTests(unittest.TestCase):
 
         # Fix HP
         hp = ledgers.get_hyperparams()
-        hp['data']['train_loader']['batch_size'] = 7  # Change batch size
+        hp['data']['train_loader']['batch_size'] = 7 # Change batch size
 
         # Fix model
         model = ledgers.get_model()
-        # # model.operate(0, {-3}, 1)  # Further modify conv1
+        # # model.operate(0, {-3}, 1) # Further modify conv1
         # model.operate(-1, {-1 }, 4)
 
         # Fix data - discard 5 samples
@@ -1115,7 +1115,7 @@ class CheckpointSystemTests(unittest.TestCase):
             uid, in_uid = dfm.get_df_view().index[idx]
             rows.append({
                 SampleStatsEx.SAMPLE_ID.value: uid,
-                SampleStatsEx.INSTANCE_ID.value: in_uid,  # For simplicity, use same UID for annotation
+                SampleStatsEx.INSTANCE_ID.value: in_uid, # For simplicity, use same UID for annotation
                 f"{SampleStatsEx.TAG.value}:discard_fix": True,
                 SampleStatsEx.DISCARDED.value: True
             })
@@ -1156,7 +1156,7 @@ class CheckpointSystemTests(unittest.TestCase):
         print("TEST 10: Reload Branch J - Verify Training Reproducibility")
         print(f"{'='*80}\n")
 
-        hash_j = self.state['exp_hash_j']  # From test 08.b
+        hash_j = self.state['exp_hash_j'] # From test 08.b
 
         print(f"Reloading branch J: {hash_j[:16]}...")
 
@@ -1191,7 +1191,7 @@ class CheckpointSystemTests(unittest.TestCase):
         print(f"{'='*80}\n")
 
         # Reference variables
-        target_hash = self.state['exp_hash_d']  # Target is branch_d
+        target_hash = self.state['exp_hash_d'] # Target is branch_d
 
         print(f"Simulating fresh restart: loading everything from config...")
         print(f"Target state: {target_hash[:16]} (branch_d)")
@@ -1215,7 +1215,7 @@ class CheckpointSystemTests(unittest.TestCase):
         print("[OK] Hyperparameters re-registered")
 
         # Create fresh model
-        model_restarted = SimpleCNN(conv1_out=8, conv2_out=16)  # Match branch_d architecture
+        model_restarted = SimpleCNN(conv1_out=8, conv2_out=16) # Match branch_d architecture
         # # Model arch. and weights are updated at the init of model interface
         model_restarted = register_in_ledger(model_restarted, flag="model", device=DEVICE)
 
@@ -1257,7 +1257,7 @@ class CheckpointSystemTests(unittest.TestCase):
         all_hashes = self.chkpt_manager.get_all_hashes(sort_by='created')
         print(f"\n[OK] Found {len(all_hashes)} experiment states:")
         for i, entry in enumerate(all_hashes):
-            print(f"  {i+1}. {entry['hash'][:16]}... (created: {entry['created'][:19]})")
+            print(f" {i+1}. {entry['hash'][:16]}... (created: {entry['created'][:19]})")
 
         # Reload state B (second state created)
         hash_a_from_manifest = self.state['exp_hash_a']
@@ -1271,18 +1271,18 @@ class CheckpointSystemTests(unittest.TestCase):
         print(f"[OK] Checkpoint loaded to reach target state {target_hash[:16]}")
         print("\nTraining for 11 epochs to verify reproducibility...")
         pause_controller.resume()
-        model_restarted = ledgers.get_model()  # Get model after loading state
+        model_restarted = ledgers.get_model() # Get model after loading state
         _, _ = self.train_epochs(model_restarted, dataloader, optimizer_restarted, criterion, num_epochs=self.config['training']['num_epochs'],
             criterion_bin=criterion_bin)
         pause_controller.pause()
 
         # # Check reproducibility with original loss and UIDs
         # self.assertEqual(model_restarted.layers[-1].operation_age['FREEZE'], 1,
-        #                  "Model architecture should match state in D")
+        # "Model architecture should match state in D")
         # self.assertEqual(model_restarted.layers[-1].operation_age['RESET'], 1,
-        #                  "Model architecture should match state in D")
+        # "Model architecture should match state in D")
         # self.assertEqual(model_restarted.layers[0].out_neurons, 12,
-        #                  "Model architecture should match state in D")
+        # "Model architecture should match state in D")
 
         # Not possible as data are generated randomly without reproducibility now
         # self.check_reproducibility(loss_d_original, loss_d_verify, originals_uids, None, loss_tol=1e-1)

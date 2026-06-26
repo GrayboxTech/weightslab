@@ -6,12 +6,12 @@
 # (objectness, tx, ty, tw, th, class_logits...).
 #
 # Encoding (all coordinates normalized to the [0, 1] image frame):
-#   * objectness = sigmoid(t_obj)          -> P(box present in this cell)
-#   * cx = (col + sigmoid(tx)) / S         -> box center, x
-#   * cy = (row + sigmoid(ty)) / S         -> box center, y
-#   * w  = sigmoid(tw)                     -> box width  (fraction of image)
-#   * h  = sigmoid(th)                     -> box height (fraction of image)
-#   * class = softmax(class_logits)
+# * objectness = sigmoid(t_obj) -> P(box present in this cell)
+# * cx = (col + sigmoid(tx)) / S -> box center, x
+# * cy = (row + sigmoid(ty)) / S -> box center, y
+# * w = sigmoid(tw) -> box width (fraction of image)
+# * h = sigmoid(th) -> box height (fraction of image)
+# * class = softmax(class_logits)
 #
 # Raw forward output keeps logits (loss applies the activations); `decode`
 # turns logits into xyxy boxes for metrics and UI rendering.
@@ -28,12 +28,12 @@ def decode_grid(outputs, grid_size):
     encoding lives in exactly one place.
 
     Args:
-        outputs:   [B, S, S, 5 + num_classes] raw logits.
+        outputs: [B, S, S, 5 + num_classes] raw logits.
         grid_size: S.
 
     Returns:
-        boxes:     [B, S, S, 4]  xyxy in [0, 1]
-        obj:       [B, S, S]     objectness probability
+        boxes: [B, S, S, 4] xyxy in [0, 1]
+        obj: [B, S, S] objectness probability
         cls_probs: [B, S, S, num_classes] class probabilities
     """
     B, S, _, _ = outputs.shape
@@ -86,7 +86,7 @@ class SmallDetector(nn.Module):
         # --- Pretrained backbone (ImageNet) ---
         weights = MobileNet_V3_Small_Weights.IMAGENET1K_V1 if pretrained else None
         backbone = mobilenet_v3_small(weights=weights)
-        self.backbone = backbone.features  # [B, 576, H/32, W/32]
+        self.backbone = backbone.features # [B, 576, H/32, W/32]
         backbone_out_ch = 576
 
         self.freeze_backbone = freeze_backbone
@@ -121,7 +121,7 @@ class SmallDetector(nn.Module):
             feat = self.backbone(x)
 
         feat = self.neck(feat)
-        out = self.head(feat)            # [B, preds_per_cell, S', S']
+        out = self.head(feat) # [B, preds_per_cell, S', S']
 
         # Resize feature grid to the configured grid_size.
         if out.shape[-1] != self.grid_size or out.shape[-2] != self.grid_size:

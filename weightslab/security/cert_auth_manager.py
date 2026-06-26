@@ -193,7 +193,7 @@ class CertAuthManager:
             try:
                 os.chmod(self.token_file, 0o600)
             except Exception:
-                pass  # Windows doesn't support chmod
+                pass # Windows doesn't support chmod
             logger.info(f"Wrote gRPC auth token to {self.token_file}")
         except Exception as e:
             logger.error(f"Could not save token: {e}")

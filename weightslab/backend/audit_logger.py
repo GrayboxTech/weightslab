@@ -14,9 +14,9 @@ logger = logging.getLogger(__name__)
 @dataclass
 class AuditEvent:
     """Immutable audit event structure."""
-    timestamp: str  # ISO format string
+    timestamp: str # ISO format string
     action_type: str
-    status: str  # "success" or "failed"
+    status: str # "success" or "failed"
     details: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
 

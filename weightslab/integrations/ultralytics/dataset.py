@@ -60,9 +60,9 @@ class WLAwareDataset(YOLODataset):
         if shp is None:
             from PIL import Image as _PIL
             with _PIL.open(lab["im_file"]) as im:
-                w0, h0 = im.size  # PIL: (w, h)
+                w0, h0 = im.size # PIL: (w, h)
                 shp = (h0, w0)
-                lab["shape"] = shp  # memoize
+                lab["shape"] = shp # memoize
         h0, w0 = shp
         new = self.imgsz
         r = min(new / h0, new / w0)

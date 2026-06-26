@@ -13,13 +13,13 @@ from .model import decode_grid
 # is assigned to the grid cell containing its center; that cell is "responsible"
 # for predicting the box.
 #
-#   * PerSampleDetectionLoss -> one differentiable loss scalar per sample ([B]),
-#     wrapped with ``per_sample=True`` (the value WL backprops + dashboards).
-#   * PerSampleIoU           -> mean IoU over a sample's boxes ([B]), a metric.
-#   * PerInstanceIoU         -> flat tensor of one IoU per GT box (sample-major
-#     order), wrapped with ``per_instance=True`` so WL auto-saves it at
-#     (sample_id, annotation_id). The ordering matches the per-sample target
-#     iteration, so the wrapper's auto ``batch_idx`` maps each value correctly.
+# * PerSampleDetectionLoss -> one differentiable loss scalar per sample ([B]),
+# wrapped with ``per_sample=True`` (the value WL backprops + dashboards).
+# * PerSampleIoU -> mean IoU over a sample's boxes ([B]), a metric.
+# * PerInstanceIoU -> flat tensor of one IoU per GT box (sample-major
+# order), wrapped with ``per_instance=True`` so WL auto-saves it at
+# (sample_id, annotation_id). The ordering matches the per-sample target
+# iteration, so the wrapper's auto ``batch_idx`` maps each value correctly.
 
 _EPS = 1e-6
 _LAMBDA_COORD = 5.0
@@ -45,12 +45,12 @@ def _responsible_cells(boxes, S):
 
     Args:
         boxes: [N, 4] xyxy in [0, 1].
-        S:     grid size.
+        S: grid size.
 
     Returns:
-        rows, cols:        [N] long, the responsible cell indices.
-        off_x, off_y:      [N] center offset within the cell, in [0, 1).
-        w, h:              [N] box size as a fraction of the image.
+        rows, cols: [N] long, the responsible cell indices.
+        off_x, off_y: [N] center offset within the cell, in [0, 1).
+        w, h: [N] box size as a fraction of the image.
     """
     cx = (boxes[:, 0] + boxes[:, 2]) / 2
     cy = (boxes[:, 1] + boxes[:, 3]) / 2
@@ -69,12 +69,12 @@ def _per_sample_loss(outputs, targets, num_classes, weights=None):
     B, S = outputs.shape[0], outputs.shape[1]
     device = outputs.device
 
-    obj_logit = outputs[..., 0]                 # [B, S, S]
+    obj_logit = outputs[..., 0] # [B, S, S]
     tx = torch.sigmoid(outputs[..., 1])
     ty = torch.sigmoid(outputs[..., 2])
     w_pred = torch.sigmoid(outputs[..., 3])
     h_pred = torch.sigmoid(outputs[..., 4])
-    cls_logits = outputs[..., 5:]               # [B, S, S, C]
+    cls_logits = outputs[..., 5:] # [B, S, S, C]
 
     if weights is not None:
         weights = torch.as_tensor(weights, device=device, dtype=outputs.dtype)
@@ -138,7 +138,7 @@ def _per_box_iou(outputs, targets, grid_size):
     Returns a list[B] of 1-D tensors (one IoU per box for that sample, in
     annotation order). Detached — this is a metric, not a loss.
     """
-    boxes_grid, _, _ = decode_grid(outputs, grid_size)  # [B, S, S, 4]
+    boxes_grid, _, _ = decode_grid(outputs, grid_size) # [B, S, S, 4]
     B = outputs.shape[0]
     S = grid_size
     device = outputs.device
@@ -154,8 +154,8 @@ def _per_box_iou(outputs, targets, grid_size):
 
         gt_boxes = tgt[:, :4]
         rows, cols, _, _, _, _ = _responsible_cells(gt_boxes, S)
-        pred_boxes = boxes_grid[s, rows, cols]            # [N, 4]
-        ious = box_iou_xyxy(pred_boxes, gt_boxes)         # [N]
+        pred_boxes = boxes_grid[s, rows, cols] # [N, 4]
+        ious = box_iou_xyxy(pred_boxes, gt_boxes) # [N]
         per_sample.append(ious.detach())
 
     return per_sample
@@ -222,8 +222,8 @@ def decode_predictions(outputs, grid_size, conf_thresh=0.3, max_det=10):
     boxes_grid, obj, cls_probs = decode_grid(outputs, grid_size)
     B, S = outputs.shape[0], grid_size
 
-    cls_conf, cls_id = cls_probs.max(dim=-1)        # [B, S, S]
-    score = obj * cls_conf                           # combined confidence
+    cls_conf, cls_id = cls_probs.max(dim=-1) # [B, S, S]
+    score = obj * cls_conf # combined confidence
 
     flat_boxes = boxes_grid.view(B, S * S, 4)
     flat_score = score.view(B, S * S)
