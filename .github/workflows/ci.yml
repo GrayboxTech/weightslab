@@ -32,8 +32,8 @@ jobs:
             run_ci=true            # PRs and manual dispatch always run
           elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
             run_ci=false           # tag pushes are handled by the release workflow
-          elif [ "${{ github.ref }}" = "refs/heads/main" ] || [ "${{ github.ref }}" = "refs/heads/dev" ]; then
-            run_ci=true            # default branches always run
+          elif [ "${{ github.ref }}" = "refs/heads/main" ] || [ "${{ github.ref }}" = "refs/heads/dev" ] || [[ "${{ github.ref }}" == refs/heads/v* ]]; then
+            run_ci=true            # default branches and release branches (v*) always run
           elif [ "${FORCE_CI}" = "true" ]; then
             run_ci=true            # custom branch opted in via [force ci]
           else
