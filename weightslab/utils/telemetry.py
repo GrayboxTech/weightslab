@@ -19,7 +19,8 @@ _ENDPOINT = "https://sandbox.graybx.com/v1/ping"
 _STATE_DIR = Path.home() / ".weightslab"
 _UUID_FILE = _STATE_DIR / "telemetry_id"
 _LAST_IMPORT_PING_FILE = _STATE_DIR / "last_import_ping"
-_IMPORT_COOLDOWN_S = 86_400  # ping import at most once per 24 h
+_LAST_UI_PING_FILE = _STATE_DIR / "last_ui_ping"
+_COOLDOWN_S = 86_400  # ping at most once per 24 h per event type
 
 _CI_ENV_VARS = (
     "CI", "GITHUB_ACTIONS", "GITLAB_CI", "CIRCLECI", "TRAVIS",
@@ -54,22 +55,27 @@ def _get_or_create_uuid() -> str:
         return str(uuid.uuid4())
 
 
-def _import_ping_due() -> bool:
+def _ping_due(state_file: Path, version: str) -> bool:
+    """Return True if 24 h have elapsed since last ping OR the package version changed."""
     try:
         import time
-        if _LAST_IMPORT_PING_FILE.exists():
-            last = float(_LAST_IMPORT_PING_FILE.read_text().strip())
-            return (time.time() - last) >= _IMPORT_COOLDOWN_S
-        return True
+        if not state_file.exists():
+            return True
+        parts = state_file.read_text().strip().split(None, 1)
+        last_ts = float(parts[0])
+        last_version = parts[1] if len(parts) > 1 else ""
+        if last_version != version:
+            return True
+        return (time.time() - last_ts) >= _COOLDOWN_S
     except Exception:
         return True
 
 
-def _record_import_ping() -> None:
+def _record_ping(state_file: Path, version: str) -> None:
     try:
         import time
         _STATE_DIR.mkdir(parents=True, exist_ok=True)
-        _LAST_IMPORT_PING_FILE.write_text(str(time.time()))
+        state_file.write_text(f"{time.time()} {version}")
     except Exception:
         pass
 
@@ -115,20 +121,32 @@ def _fire(event: str, version: str) -> None:
 
 
 def ping_import(version: str) -> None:
-    """Async ping on package import — once per process AND at most once per 24 h. No-op in CI."""
+    """Async ping on package import — once per process AND at most once per 24 h or version change. No-op in CI."""
     global _import_pinged_this_process
     if _import_pinged_this_process or _disabled() or _is_ci():
         return
     _import_pinged_this_process = True
-    if not _import_ping_due():
+    if not _ping_due(_LAST_IMPORT_PING_FILE, version):
         logger.debug("Telemetry import ping skipped (24 h cooldown active)")
         return
-    _record_import_ping()
+    _record_ping(_LAST_IMPORT_PING_FILE, version)
+    logger.info(
+        "WeightsLab uses anonymous usage data (package version used, and OS name). "
+        "Set WL_NO_TELEMETRY=1 to disable."
+    )
     _fire("import", version)
 
 
 def ping_ui_launch(version: str) -> None:
-    """Async ping on `weightslab ui launch`. No-op in CI."""
+    """Async ping on `weightslab ui launch` — at most once per 24 h or version change. No-op in CI."""
     if _disabled() or _is_ci():
         return
+    if not _ping_due(_LAST_UI_PING_FILE, version):
+        logger.debug("Telemetry ui_launch ping skipped (24 h cooldown active)")
+        return
+    _record_ping(_LAST_UI_PING_FILE, version)
+    logger.info(
+        "WeightsLab uses anonymous usage data (package version used, and OS name). "
+        "Set WL_NO_TELEMETRY=1 to disable."
+    )
     _fire("ui_launch", version)
