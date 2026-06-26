@@ -103,36 +103,22 @@ def normalize_metadata_copy_source_name(source_name: str, experiment_hash: str =
 def build_metadata_copy_column_names(existing_columns, experiment_hash: str, source_name: str) -> str:
     """Build backend/ui copied metadata column names.
 
-    Naming rules:
-    - Cloning an original field (no '@'): first copy is ``{source}@{hash}``;
-      subsequent copies of the same source get ``{source}@{hash}_1``, ``_2``, ...
-    - Cloning an already-cloned field (contains '@'): strip any trailing ``_N``
-      suffix to find the base name, then append ``_1``, ``_2``, ... — no new hash.
+    All copies use ``{base}_{n}@{hash}`` starting from n=1. The base name is
+    derived by normalizing the source (stripping any hash prefix and trailing
+    numeric suffix) so cloning a clone produces a sibling, not a grandchild.
     """
     existing_iterable = [] if existing_columns is None else existing_columns
     existing = {str(col) for col in existing_iterable}
 
-    if "@" in source_name:
-        # Cloning a clone: reuse the same @hash suffix, just increment _{n}
-        base = re.sub(r"_\d+$", "", source_name)
-        n = 1
-        while True:
-            candidate = f"{base}_{n}"
-            if candidate not in existing:
-                return candidate
-            n += 1
-    else:
-        # Cloning an original field: first copy has no index, then _1, _2, ...
-        exp_hash = str(experiment_hash or "current_experiment_hash").strip() or "current_experiment_hash"
-        base = f"{source_name}@{exp_hash}"
-        if base not in existing:
-            return base
-        n = 1
-        while True:
-            candidate = f"{base}_{n}"
-            if candidate not in existing:
-                return candidate
-            n += 1
+    exp_hash = str(experiment_hash or "current_experiment_hash").strip() or "current_experiment_hash"
+    base = normalize_metadata_copy_source_name(source_name)
+
+    n = 1
+    while True:
+        candidate = f"{base}_{n}@{exp_hash}"
+        if candidate not in existing:
+            return candidate
+        n += 1
 
 
 def duplicate_metadata_column_in_dataframe(df: pd.DataFrame, source_column: str, experiment_hash: str):
@@ -147,9 +133,9 @@ def duplicate_metadata_column_in_dataframe(df: pd.DataFrame, source_column: str,
 
 def is_copy_metadata_column_name(column_name: str) -> bool:
     name = str(column_name or "").strip()
-    # Matches any column that was produced by a clone operation: contains '@'
-    # with at least one character on each side (e.g. "loss@abc123" or "loss@abc123_2").
-    return bool(re.match(r".+@.+", name))
+    # Copy columns always have the form {base}_{n}@{hash} — the numeric suffix
+    # before '@' is mandatory; bare "name@hash" is not a copy column.
+    return bool(re.match(r".+_\d+@.+", name))
 
 
 def detect_bbox_format(bboxes: np.ndarray) -> str:
