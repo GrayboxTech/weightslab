@@ -369,9 +369,16 @@ def default_val_signals(validator, signals_cfg: dict = {}) -> list[Signal]:
 
 # ─── top-level API (back-compat with the existing trainer.py calls) ────
 
+def _unwrap_ddp(model):
+    """Under UL native DDP the model is a DistributedDataParallel wrapper; signal
+    hooks need the underlying module (criterion/init_criterion/args/modules)."""
+    return model.module if isinstance(model, th.nn.parallel.DistributedDataParallel) else model
+
+
 def install_per_sample_signals(model, signals_cfg: dict = {}):
     """Default train pipeline. Equivalent to:
         install_train_pipeline(model, default_train_signals(model))"""
+    model = _unwrap_ddp(model)
     install_train_pipeline(model, default_train_signals(model, signals_cfg=signals_cfg))
 
 
