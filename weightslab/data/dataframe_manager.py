@@ -1010,7 +1010,14 @@ class LedgeredDataFrameManager:
         # Trigger flush outside lock
         if should_flush:
             self.first_init = False
-            self.flush_async()
+            # flush_async() waits up to 60s for a BACKGROUND drain thread to empty the
+            # buffer. When ledger_enable_flushing_threads=False no such thread exists, so
+            # it would busy-wait the full 60s deadline on every flush (catastrophic at
+            # small flush_max). Drain synchronously instead in that case.
+            if self._enable_flushing_threads:
+                self.flush_async()
+            else:
+                self.flush_if_needed_nonblocking(force=True)
 
     def enqueue_instance_batch(
         self,
@@ -1156,7 +1163,14 @@ class LedgeredDataFrameManager:
 
         if should_flush:
             self.first_init = False
-            self.flush_async()
+            # flush_async() waits up to 60s for a BACKGROUND drain thread to empty the
+            # buffer. When ledger_enable_flushing_threads=False no such thread exists, so
+            # it would busy-wait the full 60s deadline on every flush (catastrophic at
+            # small flush_max). Drain synchronously instead in that case.
+            if self._enable_flushing_threads:
+                self.flush_async()
+            else:
+                self.flush_if_needed_nonblocking(force=True)
 
     def update_values(self, origin: str, sample_id: int, updates: Dict[str, Any], annotation_id: int = 0):
         """Update values for a sample (or specific annotation if multi-index).
