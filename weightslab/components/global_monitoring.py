@@ -166,6 +166,12 @@ class PauseController:
     def is_paused(self):
         return not self._event.is_set()
 
+    def wait_for_resume(self, timeout=None):
+        """Block until resumed (the resume Event is set), waking the instant the
+        gRPC resume handler fires. Returns True if resumed, False on timeout. Lets
+        the DDP pause-anchor wait on the resume signal instead of busy-polling."""
+        return self._event.wait(timeout)
+
     def _get_checkpoint_manager(self):
         if self.checkpoint_manager is None:
             self.checkpoint_manager = get_checkpoint_manager()
@@ -218,11 +224,40 @@ class GuardContext:
         """
         Executed upon entering the 'with' block. Sets the model to training mode.
         """
-        self._maybe_pause_at_step()
-        if not is_in_evaluation():
-            if f:
-                pause_controller.resume(force=f)
-            pause_controller.wait_if_paused()
+        # Per-step anchor + pause control plane.
+        #   single-process: rank-0-only pause tick + eval-aware blocking wait
+        #     (1.2.3 behaviour preserved).
+        #   DDP (world > 1): rank-0 ticks pause state; every rank then enters
+        #     sync_step — ONE bundled broadcast of every consistent state
+        #     (hparams + deny-list + paused) followed by a collective spin if
+        #     paused. No rank ever blocks alone (that would deadlock the grad
+        #     all-reduce). Core states auto-register on first call so train.py
+        #     never sees the DDP plumbing.
+        in_ddp = False
+        if self.for_training:
+            try:
+                from weightslab.utils import ddp_info
+                in_ddp = ddp_info()[1] > 1
+                if in_ddp and ddp_info()[0] == 0:
+                    self._maybe_pause_at_step()    # rank 0 is the pause authority
+            except Exception as exc:
+                logger.debug("[GuardContext] ddp probe failed: %s", exc)
+
+        # __exit__ runs the UP outbox flush (END-of-step half of the anchor); record mode.
+        self._in_ddp = in_ddp
+        if in_ddp:
+            from weightslab.components.parallel_primitives import (
+                _ensure_core_ddp_registered, sync_step,
+            )
+            _ensure_core_ddp_registered()          # idempotent; no-op after first
+            sync_step()                            # DOWN reconcile (+ collective pause spin)
+        else:
+            # single-process: original eval-aware blocking pause
+            self._maybe_pause_at_step()
+            if not is_in_evaluation():
+                if f:
+                    pause_controller.resume(force=f)
+                pause_controller.wait_if_paused()
         self.architecture_guard.__enter__()
 
         # Set the current context for this execution
@@ -281,6 +316,16 @@ class GuardContext:
         Executed upon exiting the 'with' block (after user code runs).
         Reverts the model state.
         """
+        # UP half of the per-step anchor: gather this step's per-sample write
+        # deltas (rank-1+ → rank-0). UNCONDITIONAL even if the body raised — every
+        # rank runs __exit__, so all reach this collective the same number of times;
+        # skipping it on one rank would desync/hang the group. No-op outside DDP.
+        if getattr(self, "_in_ddp", False):
+            try:
+                from weightslab.components.parallel_primitives import flush_outbox
+                flush_outbox()                     # UP: 1 gather, all write deltas
+            except Exception as exc:
+                logger.debug("[GuardContext] outbox flush failed: %s", exc)
 
         if f:
             pause_controller.pause()

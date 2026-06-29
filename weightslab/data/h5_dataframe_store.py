@@ -671,6 +671,38 @@ class H5DataFrameStore:
         key = self._key(origin)
         self._ensure_parent()
 
+        # DELTA / append-only fast path (gated by WL_H5_APPEND_ONLY): write ONLY the
+        # changed rows instead of read-all -> merge -> rewrite-all. O(delta) per flush
+        # vs O(total). Appends when the table schema matches; on first write or schema
+        # change, falls through to the rewrite path. Duplicate indices accumulate and
+        # are resolved keep-last on read (serving/UI dedup is a follow-up).
+        if os.environ.get("WL_H5_APPEND_ONLY", "0").lower() in ("1", "true", "yes", "on"):
+            try:
+                with self._local_lock:
+                    with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout, poll_interval=self._poll_interval):
+                        with pd.HDFStore(str(self._path), mode="a") as store:
+                            if key in store:
+                                head = store.select(key, start=0, stop=0)
+                                ecols = list(head.columns)
+                                if set(ecols) == set(df_norm.columns):
+                                    df2 = df_norm[ecols].copy()
+                                    for col in ecols:
+                                        edt = head[col].dtype
+                                        if str(edt) == "category":
+                                            df2[col] = pd.Categorical(df2[col], categories=head[col].cat.categories)
+                                        else:
+                                            try:
+                                                df2[col] = df2[col].astype(edt)
+                                            except Exception:
+                                                pass
+                                    store.append(key, df2, format="table", data_columns=True)
+                                    store.flush()
+                                    return len(df_norm)
+            except Exception as exc:
+                import sys as _sys; print(f"[DELTA] fell back: {type(exc).__name__}: {exc}", file=_sys.stderr, flush=True)
+                logger.warning(f"[H5DataFrameStore] append-only fast path fell back: {exc}")
+            # else fall through to the read-merge-rewrite path below
+
         # Create backup BEFORE any writes
         backup_path = self._create_backup()
 

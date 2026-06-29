@@ -1,4 +1,5 @@
 import io
+import os
 import xxhash
 import types
 import logging
@@ -751,3 +752,59 @@ def safe_call_with_kwargs(func, *args, **kwargs):
     """
     filtered_kwargs = filter_kwargs_for_callable(func, kwargs)
     return func(*args, **filtered_kwargs)
+
+
+def ddp_info():
+    """Return ``(rank, world_size)`` for the current process.
+
+    Single source of truth for DDP rank detection across WeightsLab. Resolves,
+    in order: an initialized ``torch.distributed`` process group, then the
+    ``RANK`` / ``WORLD_SIZE`` env vars (torchrun convention, before init), then
+    ``(0, 1)`` for the ordinary single-process case.
+    """
+    try:
+        import torch.distributed as dist
+        if dist.is_available() and dist.is_initialized():
+            return dist.get_rank(), dist.get_world_size()
+    except Exception:
+        pass
+    try:
+        return int(os.environ.get("RANK", "0")), max(1, int(os.environ.get("WORLD_SIZE", "1")))
+    except Exception:
+        return 0, 1
+
+
+def is_main_process():
+    """True on rank 0 (or single-process). Gate rank-0-only work (e.g. serve) on this."""
+    return ddp_info()[0] == 0
+
+
+def all_reduce_scalar(value, reduction="sum"):
+    """Reduce a scalar ``value`` across all ranks (identity in single-process).
+
+    ``reduction``: "sum" (default) or "avg". One tiny scalar all_reduce when a
+    torch.distributed group is live; otherwise returns ``value`` unchanged.
+    Backend-aware: CUDA tensor for nccl, CPU for gloo. gloo has no ReduceOp.AVG,
+    so "avg" is computed as sum / world_size (correct on every backend).
+    """
+    try:
+        import torch.distributed as dist
+        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+            world = dist.get_world_size()
+            t = torch.tensor([float(value)], dtype=torch.float64)
+            if dist.get_backend() == "nccl":
+                t = t.cuda()
+            dist.all_reduce(t, op=dist.ReduceOp.SUM)
+            total = t.item()
+            return total / world if reduction == "avg" else total
+    except Exception:
+        pass
+    return value
+
+
+def all_reduce_sum_scalar(value):
+    """Back-compat: integer sum of ``value`` across ranks. Prefer
+    ``all_reduce_scalar(value, "sum")``."""
+    return int(all_reduce_scalar(int(value), reduction="sum"))
+
+

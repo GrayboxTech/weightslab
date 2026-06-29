@@ -3,6 +3,8 @@ import time
 import traceback
 import threading
 import logging
+import threading
+import time
 import traceback
 import warnings
 import numpy as np
@@ -93,6 +95,20 @@ class LedgeredDataFrameManager:
         self._array_store: H5ArrayStore | None = None
         self._origin_revisions: Dict[str, int] = {}
         self._pending: set[int] = set()
+        # Sample-ids with per-sample UP writes (signals / last_seen) since the last
+        # DDP outbox drain. Populated ONLY by the per-sample writers (enqueue_batch,
+        # update_by_groups_bulk) — NOT by upsert_df (merge-back / DOWN reconcile),
+        # so it's exactly this rank's UP change-set with no re-ship loop. Drained
+        # by the outbox each flush (drain_outbox_dirty).
+        self._outbox_dirty: set = set()
+        self._outbox_dirty_lock = threading.Lock()
+        # DOWN-plane delta: sample-ids whose DOWN_ONLY cells (discarded/tags) changed
+        # since the last reconcile, so rank-0 broadcasts only the change-set, not the
+        # whole deny-list every step. _down_full_pending forces ONE full snapshot
+        # (first reconcile / after a restore) so children converge before deltas.
+        self._down_dirty: set = set()
+        self._down_dirty_lock = threading.Lock()
+        self._down_full_pending = True
         self._force_flush = False
         self._flush_interval = flush_interval
         self._flush_max_rows = flush_max_rows
@@ -382,6 +398,112 @@ class LedgeredDataFrameManager:
 
         return affected_origins
 
+    # ---- DOWN-only (deny-list / tags) change detection --------------------
+    # The DDP plane lists DOWN_ONLY columns that flow rank-0 -> children via
+    # `reconcile_all`. When such a column actually changes (a UI discard / tag,
+    # or a child applying rank-0's reconciled snapshot), every registered
+    # loader's iterator is invalidated so its workers tear down and a
+    # since-discarded sample sitting in a prefetch queue is dropped before it can
+    # be trained on (the sampler also stops yielding it via the pandas deny-list
+    # check, which refreshes on the revision bump below). Invalidation is gated
+    # on an ACTUAL value change — critical under DDP, where rank-N re-applies the
+    # SAME deny-list snapshot every step and must not respawn workers each step.
+    def drain_outbox_dirty(self) -> set:
+        """Return and clear the set of sample-ids with fresh per-sample UP writes
+        since the last drain (the DDP outbox's change-set). O(changes). Empty set
+        means nothing changed → the outbox flush ships nothing this step."""
+        with self._outbox_dirty_lock:
+            dirty = self._outbox_dirty
+            self._outbox_dirty = set()
+        return dirty
+
+    @staticmethod
+    def _down_only_columns() -> set[str]:
+        """Source of truth: weightslab.components.parallel_state.DOWN_ONLY. Lazy
+        import to avoid a circular dependency (planes -> ledgers -> here)."""
+        try:
+            from weightslab.components.parallel_state import DOWN_ONLY
+            return set(DOWN_ONLY)
+        except Exception:
+            return {"discarded", "user_tags"}  # safe default; matches planes
+
+    @staticmethod
+    def _cells_differ(old, new) -> bool:
+        """NaN-safe scalar/list comparison for DOWN_ONLY change detection.
+        Treats None/NaN as equal to each other; falls back to 'differ' on any
+        uncomparable type so we err toward invalidating (correctness over a
+        spurious respawn)."""
+        def _is_na(v):
+            if v is None:
+                return True
+            if isinstance(v, (list, tuple, set, dict)):
+                return False
+            try:
+                return bool(pd.isna(v))
+            except Exception:
+                return False
+        o_na, n_na = _is_na(old), _is_na(new)
+        if o_na and n_na:
+            return False
+        if o_na != n_na:
+            return True
+        try:
+            return bool(old != new)
+        except Exception:
+            return True
+
+    def _down_only_changed(self, df_norm: pd.DataFrame) -> bool:
+        """True iff `df_norm` changes any DOWN_ONLY (deny-list / tags) cell versus
+        the CURRENT self._df. Must be called BEFORE the upsert merges df_norm in.
+
+        Gates iterator invalidation. Critical under DDP, where rank-N re-applies
+        the same reconciled deny-list snapshot every step and must NOT respawn
+        workers when nothing actually changed.
+        """
+        down_only = self._down_only_columns()
+        cols = [c for c in df_norm.columns if c in down_only]
+        if not cols:
+            return False
+        for col in cols:
+            new_col = df_norm[col]
+            if col not in self._df.columns:
+                # Brand-new DOWN_ONLY column: a change iff any non-null value.
+                if new_col.notna().any():
+                    return True
+                continue
+            for sid, new_val in new_col.items():
+                if sid in self._df.index:
+                    old_val = self._df.at[sid, col]
+                else:
+                    old_val = None              # new row
+                if self._cells_differ(old_val, new_val):
+                    return True
+        return False
+
+    def _invalidate_loader_iters_on_down_only_change(self, df_norm: pd.DataFrame) -> None:
+        """If `df_norm` touched any DOWN_ONLY column, mark every registered
+        loader's iterator as stale. Triggers on BOTH rank-0 direct discards
+        AND rank-N reconcile-applies (apply_df_down_state calls upsert_df) so
+        every rank gets a fresh iter symmetrically. No-op if no loader has an
+        active iter (e.g. during ledger init, before training starts)."""
+        down_only = self._down_only_columns()
+        if not any(c in down_only for c in df_norm.columns):
+            return
+        try:
+            from weightslab.backend.ledgers import get_dataloaders, get_dataloader
+        except Exception:
+            return
+        for name in get_dataloaders():
+            loader = get_dataloader(name)
+            if loader is None:
+                continue
+            inv = getattr(loader, "_invalidate_iter", None)
+            if callable(inv):
+                try:
+                    inv()
+                except Exception as exc:
+                    logger.debug("[invalidate iter] %s: %s", name, exc)
+
     def get_array_store(self) -> H5ArrayStore | None:
         """Get the array store instance."""
         return self._array_store
@@ -545,7 +667,10 @@ class LedgeredDataFrameManager:
         loaded_df = self._store.load_all(origin) if self._store else pd.DataFrame()
 
         if not loaded_df.empty:
-            # Ensure multi-level index on (sample_id, annotation_id) if available
+            # A restore/reload changes DOWN_ONLY state wholesale -> force one full DOWN
+            # reconcile so children re-converge before deltas resume.
+            self.mark_down_full_resend()
+            # Ensure single-level index on sample_id
             if "sample_id" in loaded_df.columns:
                 try:
                     if "annotation_id" in loaded_df.columns:
@@ -664,7 +789,15 @@ class LedgeredDataFrameManager:
         with self._lock:
             affected_origins = self._collect_affected_origins(df_norm, origin=origin)
 
-            # Align columns
+            # Detect DOWN_ONLY (deny-list / tags) changes BEFORE the merge below
+            # overwrites the prior values — used to gate iterator invalidation.
+            try:
+                down_only_changed = self._down_only_changed(df_norm)
+            except Exception as exc:
+                down_only_changed = False
+                logger.debug("[down-only diff] failed: %s", exc)
+
+            # Align columns: Ensure the global dataframe has all columns present in the update
             missing_cols = df_norm.columns.difference(self._df.columns)
             if len(missing_cols) > 0:
                 self._df = self._df.reindex(columns=self._df.columns.union(missing_cols))
@@ -727,6 +860,42 @@ class LedgeredDataFrameManager:
             self.mark_dirty_batch(sample_ids, force_flush=force_flush)
             self._bump_origin_revisions(affected_origins)
 
+            # Drop every registered loader's iterator ONLY if a DOWN_ONLY value
+            # actually changed (computed pre-merge above). Critical under DDP:
+            # rank-N's reconcile_all applies the SAME snapshot every step → if we
+            # invalidated unconditionally, workers would respawn every step and
+            # throughput would collapse.
+            if down_only_changed:
+                # DOWN-plane delta: these sample-ids' deny-list/tags changed, so the
+                # next reconcile ships just them (not the whole table). Marked after
+                # the merge so the drain reads the committed values.
+                with self._down_dirty_lock:
+                    self._down_dirty.update(str(s) for s in df_norm.index.tolist())
+                try:
+                    self._invalidate_loader_iters_on_down_only_change(df_norm)
+                except Exception as exc:
+                    logger.debug("[invalidate iter] failed: %s", exc)
+
+    def drain_down_delta(self):
+        """For the DOWN reconcile. Returns (full, sids): full=True -> rank-0 should
+        broadcast the WHOLE DOWN_ONLY state once (first reconcile / post-restore);
+        else `sids` is the set of sample-ids whose DOWN_ONLY cells changed since the
+        last drain (empty -> nothing to broadcast). Drains both."""
+        with self._down_dirty_lock:
+            if self._down_full_pending:
+                self._down_full_pending = False
+                self._down_dirty = set()
+                return True, None
+            sids = self._down_dirty
+            self._down_dirty = set()
+            return False, sids
+
+    def mark_down_full_resend(self):
+        """Force the next DOWN reconcile to be a full snapshot (call on restore /
+        wholesale df reload so children re-converge before deltas resume)."""
+        with self._down_dirty_lock:
+            self._down_full_pending = True
+
     def mark_dirty(self, sample_id: int):
         """Mark sample as dirty for H5 flush.
 
@@ -747,10 +916,6 @@ class LedgeredDataFrameManager:
             self._pending.update(set(sample_ids))
             if force_flush:
                 self._force_flush = True
-
-    def _is_array_column_to_norm(self, column_name: str, value: Any) -> bool:
-        """Check if a column should store arrays in separate H5 file."""
-        return column_name in self._array_columns and isinstance(value, (np.ndarray, ArrayH5Proxy))
 
     def _should_array_be_stored(self, array_name) -> bool:
         """Check if array storage is enabled."""
@@ -1004,6 +1169,10 @@ class LedgeredDataFrameManager:
             # Merge nested dicts: update existing sample_id records, add new ones
             for sample_id, record in records_to_add.items():
                 self._buffer.setdefault(sample_id, {}).update(record)
+        # Mark these sids as having fresh UP writes for the DDP outbox.
+        with self._outbox_dirty_lock:
+            self._outbox_dirty.update(str(s) for s in records_to_add)
+        with self._buffer_lock:
             logger.debug(f"Enqueued {len(records_to_add)} records to buffer. Buffer size is now {len(self._buffer)}.")
             should_flush = len(self._buffer) >= self._flush_max_rows or self.first_init # Check buffer size and trigger flush if needed
 
@@ -1284,6 +1453,8 @@ class LedgeredDataFrameManager:
 
             if affected_ids:
                 self.mark_dirty_batch(affected_ids)
+                with self._outbox_dirty_lock:
+                    self._outbox_dirty.update(str(s) for s in affected_ids)
 
     def get_tainted_group_ids(self, group_ids: List[Any], origin: str) -> set:
         """Return the subset of group_ids where at least one member is discarded.
@@ -1438,7 +1609,7 @@ class LedgeredDataFrameManager:
                     subset = self._df[column]
             else:
                 subset = self._df
-        if limit > 0:
+        if limit is not None and limit > 0:
             subset = subset.head(limit)
         return subset.copy() if copy else subset
 
@@ -1778,6 +1949,9 @@ class LedgeredDataFrameManager:
         finally:
             self._lock.release()
 
+        # Array signals (prediction/prediction_raw/target) stored RAW — no bbox->segmap
+        # rasterize here (meaningless for detection, and it decoded an image per flush
+        # just to read H,W). Masks are produced on demand via get_prediction_mask().
         # Det→seg conversion / array normalization over all written rows.
         if applied_index is not None and len(applied_index) > 0:
             if applied_index.has_duplicates:

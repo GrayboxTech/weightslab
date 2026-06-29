@@ -426,6 +426,20 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             # Reply
             if success:
                 logger.info(f"Successfully restored checkpoint: {experiment_hash}")
+                # Pause after restore so the user explicitly drives the next train
+                # cycle. get_HP_snapshot now strips is_training from the saved config,
+                # so register_hyperparams no longer resurrects a stale is_training=True
+                # on restore — this is the intentional pause, not a workaround for that.
+                if trainer:
+                    try:
+                        trainer.pause()
+                    except Exception as exc:
+                        logger.debug(f"Post-restore re-pause skipped: {exc}")
+                if hp is not None:
+                    try:
+                        hp['is_training'] = False
+                    except Exception:
+                        pass
                 self._log_audit(
                     "checkpoint_restore",
                     "success",
