@@ -288,8 +288,13 @@ def _check_docker():
         )
     except subprocess.CalledProcessError:
         logger.error(
+            "\n"
+            "============================================================="
+            "============================================================="
             "Docker is installed but the daemon is not running.\n"
-            "Start it with: Docker Desktop or 'sudo systemctl start docker'"
+            "Start it with: Docker Desktop or 'sudo systemctl start docker'."
+            "============================================================="
+            "\n"
         )
         sys.exit(1)
 
