@@ -546,15 +546,52 @@ These variables are injected into the browser bundle at build / dev time.
      - ``512``
      - Maximum number of metadata histogram bars shown above the sample slider.
        Values above ``512`` are clamped to ``512`` to keep rendering responsive.
+   * - ``VITE_GRID_WINDOW_SIZE``
+     - ``6``
+     - Total batches held in the sliding prefetch window (current + look-back +
+       look-ahead). Increasing this prefetches more aggressively at the cost of
+       memory. ``VITE_MAX_PREFETCH_BATCHES`` is derived from this value
+       (``window − 1``). **Runtime override (no rebuild):** ``GRID_WINDOW_SIZE``
+       (nginx env) or ``window.WS_GRID_WINDOW_SIZE``.
    * - ``VITE_WS_MAX_IMAGE_CACHE_SIZE``
-     - *(prefetch + 4)*
-     - Maximum number of images held in the WebSocket image cache.
+     - *(window + 2)*
+     - Maximum number of image entries held in the in-browser image cache.
+       Defaults to ``VITE_GRID_WINDOW_SIZE + 2``. **Runtime override:**
+       ``GRID_MAX_IMAGE_CACHE_SIZE`` (nginx env) or ``window.WS_MAX_IMAGE_CACHE_SIZE``.
    * - ``VITE_WS_GRID_CACHE_MAX_MB``
      - ``128``
      - Maximum memory (MB) for the grid-view image tile cache.
+       **Runtime override:** ``GRID_CACHE_MAX_MB`` (nginx env) or
+       ``window.WS_GRID_CACHE_MAX_MB``.
    * - ``VITE_WS_MODAL_CACHE_MAX_MB``
      - ``64``
      - Maximum memory (MB) for the full-resolution modal image cache.
+       **Runtime override:** ``MODAL_CACHE_MAX_MB`` (nginx env) or
+       ``window.WS_MODAL_CACHE_MAX_MB``.
+
+
+Point cloud
+~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Variable
+     - Default
+     - Description
+   * - ``VITE_WL_PC_MAX_POINTS``
+     - *(unset — no cap)*
+     - Maximum number of 3-D points rendered per point-cloud sample in the
+       modal viewer. Leave unset for no cap. Useful on low-end GPUs.
+       **Runtime override:** ``PC_MAX_POINTS`` (nginx env) or
+       ``window.WS_WL_PC_MAX_POINTS``.
+   * - ``VITE_WL_DISABLE_GPU_RENDERING``
+     - ``0``
+     - Set to ``1`` to force CPU-side (canvas 2-D) rendering for point clouds,
+       bypassing the three.js WebGL renderer. Useful when GPU drivers are absent
+       or broken inside a headless container. **Runtime override:**
+       ``DISABLE_GPU_RENDERING`` (nginx env) or ``window.WS_WL_DISABLE_GPU_RENDERING``.
 
 
 Bounding-box render limits
@@ -653,3 +690,65 @@ enabled**; set it to ``0`` / ``false`` / ``no`` / ``off`` (any case) to disable.
    limits), with a build-time ``VITE_ENABLE_*`` fallback for the dev server.
    Because ``config.js`` is served ``no-store``, a container restart + normal
    reload is enough to pick up a change.
+
+
+Deploying with ``build-and-deploy.sh``
+---------------------------------------
+
+The helper script ``weightslab/ui/docker/utils/build-and-deploy.sh`` (and its
+mirror in ``weights_studio/docker/utils/``) writes all runtime configuration
+into the ``docker/.env`` file before starting the containers.  Any UI variable
+can be passed directly as a ``KEY=VALUE`` positional argument — no need to set
+environment variables beforehand:
+
+.. code-block:: bash
+
+   # From the docker/ directory
+   bash utils/build-and-deploy.sh ENABLE_AGENT=0 BB_THUMB_RENDER=50
+
+   # Dev mode
+   bash utils/build-and-deploy.sh --dev ENABLE_PLOTS=0 ENABLE_AGENT=0
+
+   # Multiple overrides
+   bash utils/build-and-deploy.sh --dev \
+       ENABLE_PLOTS=0 \
+       ENABLE_DATA_EXPLORATION=0 \
+       BB_THUMB_RENDER=20 \
+       BB_MODAL_RENDER=200 \
+       WS_HISTOGRAM_MAX_BINS=256
+
+The following ``KEY=VALUE`` arguments are recognised:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Argument
+     - Effect
+   * - ``ENABLE_PLOTS=0``
+     - Disable the plots board and Signals card.
+   * - ``ENABLE_DATA_EXPLORATION=0``
+     - Disable the data grid and metadata panel.
+   * - ``ENABLE_HYPERPARAMETERS_OPTIMIZATION=0``
+     - Disable the Hyperparameters section.
+   * - ``ENABLE_AGENT=0``
+     - Disable the agent chat panel.
+   * - ``BB_THUMB_RENDER=N``
+     - Set the thumbnail bounding-box cap to N.
+   * - ``BB_MODAL_RENDER=N``
+     - Set the modal bounding-box cap to N.
+   * - ``WS_HISTOGRAM_MAX_BINS=N``
+     - Set the histogram bar cap to N (max 512).
+   * - ``GRID_WINDOW_SIZE=N``
+     - Set the prefetch sliding-window size (default 6).
+   * - ``GRID_CACHE_MAX_MB=N``
+     - Set the grid-view image cache memory budget in MB (default 128).
+   * - ``MODAL_CACHE_MAX_MB=N``
+     - Set the modal image cache memory budget in MB (default 64).
+   * - ``PC_MAX_POINTS=N``
+     - Cap the number of rendered point-cloud points (default: no cap).
+   * - ``DISABLE_GPU_RENDERING=1``
+     - Force CPU-side canvas rendering for point clouds (disables WebGL).
+
+Unrecognised arguments are silently ignored.  Any variable not supplied
+defaults to the value shown in the tables above.

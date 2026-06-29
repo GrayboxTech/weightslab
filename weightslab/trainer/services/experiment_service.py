@@ -421,13 +421,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                     target_step=target_step,
                 )
             else:
-                # force=True: explicit user-driven rollback must override the hash-equality
-                # skip in load_checkpoint. When divergent edits (discards / tags) land between
-                # save and restore, the cached data_hash still equals the saved one (it's only
-                # updated on save), so without force the data snapshot would be silently
-                # skipped — restore would succeed for model/config but leave the dataframe
-                # diverged.
-                success = checkpoint_manager.load_state(experiment_hash, load_logger=False, force=True)
+                success = checkpoint_manager.load_state(experiment_hash, load_logger=False) # Don't load logger for full restore to avoid overwriting signals already in memory
 
             # Reply
             if success:

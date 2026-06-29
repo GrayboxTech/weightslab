@@ -14,7 +14,7 @@ import threading
 import unittest
 import numpy as np
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from weightslab.data.dataframe_manager import LedgeredDataFrameManager
 
@@ -57,7 +57,6 @@ class TestFlushReleasesBufferLockEarly(unittest.TestCase):
         mgr = _make_mgr(enable_flushing_threads=False)
 
         # Seed the DataFrame so _apply_buffer_records has rows to update.
-        import pandas as pd
         for i in range(4):
             mgr._buffer[str(i)] = {"sample_id": str(i), "origin": "train"}
         mgr._drain_buffer()

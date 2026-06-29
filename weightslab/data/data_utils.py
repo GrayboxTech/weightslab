@@ -5,6 +5,8 @@ import logging
 
 from PIL import Image
 
+from weightslab.data.array_proxy import ArrayH5Proxy
+
 
 __all__ = [
     "_detect_dataset_split",
@@ -19,9 +21,6 @@ __all__ = [
 
 # load global logger
 logger = logging.getLogger(__name__)
-
-
-
 
 
 def _to_uint8_image(img_float: np.ndarray) -> np.ndarray:
@@ -222,6 +221,9 @@ def _downsample_nn(arr: np.ndarray, max_hw: int = 96) -> np.ndarray:
 
 
 def to_numpy_safe(x):
+    if isinstance(x, ArrayH5Proxy):
+        return np.asanyarray(x)
+
     if isinstance(x, (int, float)):
         return np.array([x])
 

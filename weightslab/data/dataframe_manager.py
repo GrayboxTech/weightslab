@@ -827,7 +827,7 @@ class LedgeredDataFrameManager:
                     # "Cannot setitem on a Categorical with a new category". The
                     # _optimize_dataframe_memory pass below re-applies categorical dtypes.
                     for col in all_cols:
-                        if col in self._df.columns and isinstance(self._df[col].dtype, pd.CategoricalDtype):
+                        if col in self._df.columns and col != SampleStatsEx.ORIGIN and isinstance(self._df[col].dtype, pd.CategoricalDtype):
                             self._df[col] = self._df[col].astype(object)
                     self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
 
@@ -1174,7 +1174,7 @@ class LedgeredDataFrameManager:
             self._outbox_dirty.update(str(s) for s in records_to_add)
         with self._buffer_lock:
             logger.debug(f"Enqueued {len(records_to_add)} records to buffer. Buffer size is now {len(self._buffer)}.")
-            should_flush = len(self._buffer) >= self._flush_max_rows or self.first_init  # Check buffer size and trigger flush if needed
+            should_flush = len(self._buffer) >= self._flush_max_rows or self.first_init # Check buffer size and trigger flush if needed
 
         # Trigger flush outside lock
         if should_flush:

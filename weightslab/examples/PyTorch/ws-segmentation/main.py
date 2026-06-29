@@ -160,6 +160,7 @@ if __name__ == "__main__":
     parameters.setdefault("eval_full_to_train_steps_ratio", 50)
     parameters.setdefault("number_of_workers", 4)
     parameters.setdefault("num_classes", 6) # adjust to your label set
+    parameters.setdefault("class_names", None) # adjust to your label set
     parameters.setdefault("ignore_index", 255) # if you have void pixels
     parameters.setdefault("image_size", 256)
     parameters.setdefault("compute_natural_sort", True)
@@ -174,6 +175,7 @@ if __name__ == "__main__":
         poll_interval=1.0,
     )
     num_classes = int(parameters["num_classes"])
+    class_names = parameters["class_names"]
     ignore_index = int(parameters["ignore_index"])
     image_size = int(parameters["image_size"])
 
@@ -211,6 +213,7 @@ if __name__ == "__main__":
         root=data_root,
         split="train",
         num_classes=num_classes,
+        class_names=class_names,
         ignore_index=ignore_index,
         image_size=image_size,
         max_samples=train_cfg.get("max_samples", None) # Optionally limit number of samples for faster testing
@@ -219,6 +222,7 @@ if __name__ == "__main__":
         root=data_root,
         split="val",
         num_classes=num_classes,
+        class_names=class_names,
         ignore_index=ignore_index,
         image_size=image_size,
         max_samples=test_cfg.get("max_samples", None) # Optionally limit number of samples for faster testing
@@ -337,9 +341,9 @@ if __name__ == "__main__":
     print(f" Data root: {data_root}")
     print("=" * 60 + "\n")
 
-    # # ================
-    # # Training Loop
-    # wl.start_training(timeout=3) # This will block and keep the main thread alive while background services run. You can optionally set a timeout (in seconds) to automatically stop after a certain duration.
+    # ================
+    # Training Loop
+    wl.start_training(timeout=3) # This will block and keep the main thread alive while background services run. You can optionally set a timeout (in seconds) to automatically stop after a certain duration.
 
     # ================
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
