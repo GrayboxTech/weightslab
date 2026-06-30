@@ -7,24 +7,20 @@ If you prefer to start from examples, see ``usecases`` right after this setup.
 Prerequisites
 -------------
 
-- Python 3.10+ installed.
-- A virtual environment tool (``venv`` or Conda).
-- Docker, plus **Docker Compose v2** (the ``docker compose`` plugin, recommended)
-  or the legacy v1 ``docker-compose`` binary (``>= 1.27``) — required to launch
-  the Weights Studio UI. ``weightslab ui launch`` auto-detects whichever you have.
+- Python v3.10+ installed.
+- A virtual environment tool like ``venv`` or Conda (optionnal).
+- Docker v4+ to start the UI.
 - Your training project available locally.
 
 Install WeightsLab
 ------------------
 
-Create and activate a virtual environment, then install WeightsLab in editable mode.
+Create and activate a virtual environment and install WeightsLab.
 
 .. code-block:: bash
-   cd ui
-   docker compose -f docker/docker-compose.yml up -d
-
    # From the repository root
    python -m venv .venv
+
    # Windows PowerShell
    .\.venv\Scripts\Activate.ps1
    # Linux/macOS
@@ -36,120 +32,106 @@ Create and activate a virtual environment, then install WeightsLab in editable m
 Try the bundled example
 ------------------------
 
-To see WeightsLab working end to end without writing any code, start the bundled
-classification (cls) example. It trains a small model and serves it until you
-stop it with ``Ctrl+C``:
+To see WeightsLab working end to end without writing any code, start a bundled
+example like the classification example (--cls). It run a small experiment on a classification task:
 
 .. code-block:: bash
 
-   weightslab example start
+   weightslab example start --cls
 
-Then, in another terminal, launch the UI and open https://localhost:5173:
+Then, in another terminal, launch the UI and open http://localhost:5173:
 
 .. code-block:: bash
 
    weightslab ui launch
 
 
-Optional: build docs locally
-----------------------------
+.. Launch WeightsLab services from your training script
+.. ----------------------------------------------------
 
-.. code-block:: bash
+.. At minimum, enable gRPC + CLI so the UI and local console can interact with your run. CLI will allow you to inspect and adjust hyperparameters on the fly, modify model architecture, and debug parameters, while gRPC serves data to the UI for monitoring and sample tagging.
 
-   pip install -r docs/requirements.txt
-   sphinx-build -b html docs docs/_build/html
+.. .. code-block:: python
 
+..    import weightslab as wl
 
-Launch WeightsLab services from your training script
-----------------------------------------------------
+..    # Start service endpoints used by Weights Studio and CLI.
+..    wl.serve(serving_grpc=True, serving_cli=True)
 
-At minimum, enable gRPC + CLI so the UI and local console can interact with your run. CLI will allow you to inspect and adjust hyperparameters on the fly, modify model architecture, and debug parameters, while gRPC serves data to the UI for monitoring and sample tagging.
+..    # Keep services alive while training is running.
+..    wl.keep_serving()
 
-.. code-block:: python
+.. If you want to run the CLI on another process, run:
 
-   import weightslab as wl
+.. .. code-block:: bash
 
-   # Start service endpoints used by Weights Studio and CLI.
-   wl.serve(serving_grpc=True, serving_cli=True)
-
-   # Keep services alive while training is running.
-   wl.keep_serving()
-
-If you want to run the CLI on another process, run:
-
-.. code-block:: bash
-
-   python -m weightslab.backend.cli serve --host localhost --port 60000
+..    python -m weightslab.backend.cli serve --host localhost --port 60000
 
 
-Connect with the CLI client
----------------------------
+.. Connect with the CLI client
+.. ---------------------------
 
-.. code-block:: bash
+.. .. code-block:: bash
 
-   python -m weightslab.backend.cli client --host localhost --port 60000
+..    python -m weightslab.backend.cli client --host localhost --port 60000
 
-Useful first commands:
+.. Useful first commands:
 
-- ``help``: list all command syntaxes and examples.
-- ``status``: show current models/loaders/optimizers/hyperparameters.
-- ``pause`` / ``resume``: toggle training state safely.
-- ``hp`` and ``hp <name>``: inspect hyperparameter sets.
-- ``set_hp [hp_name] <key.path> <value>``: update one hyperparameter value.
+.. - ``help``: list all command syntaxes and examples.
+.. - ``status``: show current models/loaders/optimizers/hyperparameters.
+.. - ``pause`` / ``resume``: toggle training state safely.
+.. - ``hp`` and ``hp <name>``: inspect hyperparameter sets.
+.. - ``set_hp [hp_name] <key.path> <value>``: update one hyperparameter value.
 
-Evaluation from the CLI
-~~~~~~~~~~~~~~~~~~~~~~~
+.. Evaluation from the CLI
+.. ~~~~~~~~~~~~~~~~~~~~~~~
 
-The CLI can trigger evaluation exactly as Weights Studio does.  Training is
-paused automatically, evaluation runs in a background thread, and the result
-is printed to the console when it completes.
+.. The CLI can trigger evaluation exactly as Weights Studio does.  Training is
+.. paused automatically, evaluation runs in a background thread, and the result
+.. is printed to the console when it completes.
 
-.. code-block:: text
+.. .. code-block:: text
 
-   # Evaluate on the first registered dataloader (WeightsLab picks it automatically)
-   wl> evaluate
+..    # Evaluate on the first registered dataloader (WeightsLab picks it automatically)
+..    wl> evaluate
 
-   # Evaluate on a specific split
-   wl> evaluate val_loader
+..    # Evaluate on a specific split
+..    wl> evaluate val_loader
 
-   # Evaluate only the first 50 batches
-   wl> evaluate test_loader --steps 50
+..    # Evaluate only the first 50 batches
+..    wl> evaluate test_loader --steps 50
 
-   # Evaluate only samples tagged "difficult"
-   wl> evaluate train_loader --tags difficult
+..    # Evaluate only samples tagged "difficult"
+..    wl> evaluate train_loader --tags difficult
 
-   # Poll progress
-   wl> eval_status
+..    # Poll progress
+..    wl> eval_status
 
-   # Cancel
-   wl> cancel_eval
+..    # Cancel
+..    wl> cancel_eval
 
-   # Resume training afterwards
-   wl> resume
+..    # Resume training afterwards
+..    wl> resume
 
-Audit mode
-~~~~~~~~~~
+.. Audit mode
+.. ~~~~~~~~~~
 
-Audit mode lets you freeze weights (optimizer ``step()`` is skipped) while the
-training loop keeps running, so you can inspect gradients and activations
-without modifying the model.
+.. Audit mode lets you freeze weights (optimizer ``step()`` is skipped) while the
+.. training loop keeps running, so you can inspect gradients and activations
+.. without modifying the model.
 
-.. code-block:: text
+.. .. code-block:: text
 
-   wl> audit on     # enable  — optimizer steps are skipped
-   wl> audit off    # disable — normal training restores
-   wl> audit        # show current state
+..    wl> audit on     # enable  — optimizer steps are skipped
+..    wl> audit off    # disable — normal training restores
+..    wl> audit        # show current state
 
 
 Use Weightslab Studio (UI)
 -----------------------
 
-For a full visual workflow (agent, samples, tags, discard/restore, plots), deploy the
-Weights Studio web app with the bundled CLI. ``weightslab ui launch`` removes any stale
-weightslab/weights_studio Docker resources that could break the launch (old containers,
-network, anonymous volumes, the cached frontend image, and a leftover generated ``.env``),
-then starts both the UI and the Envoy proxy, which routes data to your training script's
-gRPC server.
+For a full visual experiment monitoring workflow (agent, samples, tags, discard/restore, plots), deploy the
+Weights Studio web app with the bundled CLI.
 
 **By default the UI runs unsecured (HTTP, no gRPC auth) — no certificates are generated.**
 Pass ``--certs`` to generate (if missing) and use TLS certificates + a gRPC auth token:
@@ -161,19 +143,11 @@ Pass ``--certs`` to generate (if missing) and use TLS certificates + a gRPC auth
 
 .. important::
 
-   When using certs, set ``WEIGHTSLAB_CERTS_DIR`` so the training backend and any new
-   terminal use the **same** certificates — it is the single source of truth for TLS/auth.
-   Both ``weightslab se`` and ``weightslab ui launch --certs`` print the exact
-   ``export`` / ``setx`` command for your shell. You can also pre-generate certs with
-   ``weightslab se``.
+   When using certs, it is prefered to set manually the ``WEIGHTSLAB_CERTS_DIR`` environment variable so the training backend and any new
+   terminal use the **same** certificates — it is the single source of truth for TLS/auth. Please note that this step has to be done before starting the experiment.
 
 Run ``weightslab``, ``weightslab help``, or ``weightslab -h`` to see the banner and the full
 command reference (``se``, ``ui launch``, ``start example ...``).
-
-If you keep agent settings outside the repository, set ``AGENT_CONFIG_PATH`` so the backend
-can resolve ``agent_config.yaml`` from that directory. Environment variables used in the
-production compose file can be set in a ``.env`` file in the repository root, or exported
-before launching.
 
 To stop the UI later:
 
@@ -184,8 +158,8 @@ To stop the UI later:
 
 
 Recommended next reading
-------------------------
+-----------------------
+Now that you run the classification task and try WeightsLab, you can integrate it into your training script.
+To do so, please read the following:
 
 - ``four_way_approach``: understand model/data/hyperparameters/logger together.
-- ``usecases``: end-to-end PyTorch integration example.
-- ``pytorch_lightning``: Lightning integration and multi-GPU notes.

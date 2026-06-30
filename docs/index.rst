@@ -18,55 +18,61 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 .. grid:: 1 1 2 2
    :gutter: 2
 
-   .. grid-item-card:: 🚀 Quickstart
+   .. grid-item-card:: Quickstart
       :link: quickstart
       :link-type: doc
 
       Install, build, and run Weightslab documentation locally in minutes.
 
-   .. grid-item-card:: 🧭 Four-Way Approach
+   .. grid-item-card:: Four-Way Approach
       :link: four_way_approach
       :link-type: doc
 
       Understand how model, data, hyperparameters, and logger workflows connect.
 
-   .. grid-item-card:: 🧠 Model + Data Control
+   .. grid-item-card:: Model + Data Control
       :link: model_interaction
       :link-type: doc
 
       Learn how to wrap training components and iterate on difficult samples.
 
-   .. grid-item-card:: 📚 User Functions
+   .. grid-item-card:: User Functions
       :link: user_functions
       :link-type: doc
 
       Reference all public SDK functions with usage-oriented explanations.
 
-   .. grid-item-card:: 🧪 Use-Case Example
+   .. grid-item-card:: PyTorch examples
       :link: usecases
       :link-type: doc
 
       Follow a complete MNIST integration with comments and practical rationale.
 
-   .. grid-item-card:: ⚡ PyTorch Lightning
+   .. grid-item-card:: PyTorch Lightning
       :link: pytorch_lightning
       :link-type: doc
 
-      Integrate Weightslab with Lightning, including multi-GPU configuration.
+      Integrate Weightslab with Lightning.
 
-   .. grid-item-card:: 🖥️ Weights Studio
+   .. grid-item-card:: UltraLytics
+      :link: ultralytics
+      :link-type: doc
+
+      Integrate Weightslab with Ultralytics.
+
+   .. grid-item-card:: Weights Studio
       :link: weights_studio
       :link-type: doc
 
       Deploy and operate the UI: architecture, Docker, ports, and actions.
 
-   .. grid-item-card:: ⚙️ Configuration
+   .. grid-item-card:: Configuration
       :link: configuration
       :link-type: doc
 
       All environment variables for WeightsLab and Weights Studio with defaults and explanations.
 
-   .. grid-item-card:: 📡 gRPC Communication
+   .. grid-item-card:: gRPC Communication
       :link: grpc/index
       :link-type: doc
 
@@ -77,12 +83,14 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
    Wrap your training script once, then monitor, tag/discard, adjust, and improve continuously.
 
+
 .. toctree::
    :maxdepth: 2
    :caption: Getting Started
    :hidden:
 
    quickstart
+
 
 .. toctree::
    :maxdepth: 2
@@ -94,10 +102,26 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    data_exploration
    hyperparameters
    logger
-   usecases
-   segmentation_usecase
-   pytorch_lightning
+   ----
    weights_studio
+
+
+.. toctree::
+   :maxdepth: 2
+   :caption: External Library Integration
+   :hidden:
+
+   pytorch_lightning
+   ultralytics
+
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Examples
+   :hidden:
+
+   examples
+
 
 .. toctree::
    :maxdepth: 2
