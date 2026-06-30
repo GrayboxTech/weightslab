@@ -1421,6 +1421,8 @@ class DataService:
                         thumbnail=b""
                     )
                 )
+                if num_classes is not None and num_classes < label_raw.max():
+                    logger.warning(f'Be aware that the num_classes infered is inferior to max value in the label')
 
                 # Per-sample class_names emission. KEPT because the studio has
                 # no dataset-level RPC (no GetClassNames / GetDatasetMetadata
