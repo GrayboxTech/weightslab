@@ -239,7 +239,6 @@ if __name__ == "__main__":
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
-        defaults=parameters,
         poll_interval=1.0,
     )
 

@@ -944,7 +944,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                             raise KeyError("No manager in ledger")
                     except (KeyError, AttributeError):
                         # Create new manager and register it
-                        _checkpoint_manager = CheckpointManager(root_log_dir=root_log_dir)
+                        _checkpoint_manager = CheckpointManager(root_log_dir=obj['root_log_dir'])
                         try:
                             ledgers.register_checkpoint_manager(_checkpoint_manager)
                             logger.info("Registered new checkpoint manager in ledger")
