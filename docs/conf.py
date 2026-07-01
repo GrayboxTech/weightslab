@@ -93,7 +93,7 @@ html_title = "WeightsLab"
 html_favicon = "_static/favicon.png"
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
-html_js_files = ["version-switcher.js", "github-stars.js", "examples-gallery.js", "wl-topnav.js"]
+html_js_files = ["version-switcher.js", "github-stars.js", "examples-gallery.js", "wl-topnav.js", "wl-ribbon.js"]
 html_theme_options = {
     "light_logo": "logo-light.png",
     "dark_logo":  "logo-dark.png",

@@ -18,6 +18,7 @@ Install WeightsLab
 Create and activate a virtual environment and install WeightsLab.
 
 .. code-block:: bash
+
    # From the repository root
    python -m venv .venv
 
@@ -128,7 +129,7 @@ Then, in another terminal, launch the UI and open http://localhost:5173:
 
 
 Use Weightslab Studio (UI)
------------------------
+--------------------------
 
 For a full visual experiment monitoring workflow (agent, samples, tags, discard/restore, plots), deploy the
 Weights Studio web app with the bundled CLI.
@@ -157,8 +158,25 @@ To stop the UI later:
    weightslab ui drop   # stop and remove containers + images
 
 
+.. tip::
+
+   **Let an AI agent integrate WeightsLab for you.**
+
+   The repository ships with ``AGENTS.md`` — a compact context file that gives
+   any AI coding assistant (Claude, Copilot, Cursor, …) a complete picture of
+   the WeightsLab API.  Open your training script, attach ``AGENTS.md`` as
+   context, and ask:
+
+   .. code-block:: text
+
+      "Using the context in AGENTS.md, integrate WeightsLab into this training script."
+
+   The agent will wire up your model, data loader, loss, and hyperparameters in
+   a few edits — no manual API lookup needed.
+
+
 Recommended next reading
------------------------
+------------------------
 Now that you run the classification task and try WeightsLab, you can integrate it into your training script.
 To do so, please read the following:
 

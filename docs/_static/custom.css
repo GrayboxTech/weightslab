@@ -409,9 +409,21 @@ body[data-theme="dark"] .wl-only-dark {
   width: 100%;
   border-bottom: 1px solid var(--color-background-border);
   background: var(--color-background-primary);
-  position: sticky;
+  position: fixed;
   top: 0;
+  left: 0;
+  right: 0;
   z-index: 300;
+}
+
+/* Push Furo's page below the fixed nav */
+.page {
+  padding-top: 2.7rem;
+}
+
+/* Extra push when the tips ribbon is also visible */
+body.wl-ribbon-visible .page {
+  padding-top: 4.8rem;
 }
 
 .wl-topnav-inner {
@@ -515,11 +527,95 @@ body[data-theme="dark"] .wl-only-dark {
 body[data-theme="light"] .wl-topnav-theme .wl-ti-light { display: inline-flex; }
 body[data-theme="dark"]  .wl-topnav-theme .wl-ti-dark  { display: inline-flex; }
 
-/* Push Furo's sticky mobile-header below our topnav */
+/* Push Furo's mobile-header below our fixed topnav */
 @media (max-width: 82em) {
   .mobile-header {
     top: 2.7rem;
+    position: fixed;
   }
+  body.wl-ribbon-visible .mobile-header {
+    top: 4.8rem;
+  }
+}
+
+/* ── Tips ribbon ─────────────────────────────────────────────────────────── */
+.wl-ribbon {
+  position: fixed;
+  top: 2.7rem;
+  left: 0;
+  right: 0;
+  z-index: 299;
+  height: 2.1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0 1rem 0 1.1rem;
+  background: var(--color-background-secondary);
+  border-bottom: 1px solid var(--color-background-border);
+  font-size: 0.79rem;
+  overflow: hidden;
+}
+
+.wl-ribbon-icon {
+  flex-shrink: 0;
+  line-height: 0;
+  color: #f0a500;
+  opacity: 0.9;
+}
+
+.wl-ribbon-label {
+  flex-shrink: 0;
+  font-weight: 700;
+  font-family: "Montserrat", sans-serif;
+  font-size: 0.77rem;
+  color: #5f7393;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.wl-ribbon-sep {
+  flex-shrink: 0;
+  opacity: 0.4;
+}
+
+.wl-ribbon-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-foreground-secondary);
+  transition: opacity 0.28s ease;
+}
+
+.wl-ribbon-text code {
+  font-size: 0.76rem;
+  padding: 0.05em 0.3em;
+  border-radius: 0.25em;
+  background: var(--color-background-hover, rgba(100,100,100,0.1));
+  border: 1px solid var(--color-background-border);
+  color: var(--color-foreground-primary);
+}
+
+.wl-ribbon-close {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--color-foreground-muted);
+  opacity: 0.5;
+  padding: 0.25rem;
+  line-height: 0;
+  border-radius: 0.3rem;
+  transition: opacity 0.15s, background 0.15s;
+  margin-left: 0.3rem;
+}
+
+.wl-ribbon-close:hover {
+  opacity: 1;
+  background: var(--color-background-hover, rgba(100,100,100,0.1));
 }
 
 /* ── Per-page keyword tag bar ───────────────────────────────────────────── */

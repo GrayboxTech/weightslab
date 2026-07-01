@@ -46,7 +46,7 @@ Weights Studio frontend alongside it.
      - None
      - ``setup-host.sh``
      - **None**
-   * - TLS toggle
+   * - HTTPS (optional)
      - ``WEIGHTSLAB_TLS=1``
      - ``WEIGHTSLAB_TLS=1``
      - ``WEIGHTSLAB_TLS=1``
@@ -158,34 +158,35 @@ Running
 
 Open http://localhost:5173. Stop with ``Ctrl+C`` or ``docker compose down``.
 
-TLS (HTTPS + mTLS)
-~~~~~~~~~~~~~~~~~~
+.. dropdown:: Enable HTTPS / mTLS (optional)
+   :color: secondary
 
-DinD is the simplest option for TLS because the certs, Envoy, and the backend
-are all co-located:
+   Only needed for remote or production access. For local development, plain
+   HTTP at http://localhost:5173 works without any certificates.
 
-.. code-block:: bash
+   DinD is the simplest TLS option because certs, Envoy, and the backend are
+   co-located:
 
-   WEIGHTSLAB_TLS=1 docker compose up --build
+   .. code-block:: bash
 
-Then trust the generated CA on the host browser (once):
+      WEIGHTSLAB_TLS=1 docker compose up --build
 
-.. code-block:: powershell
+   Then trust the generated CA on the host browser (once):
 
-   # Windows — pull the CA out of the running container and trust it
-   docker cp weightslab_trainer_dind:/root/.weightslab-certs/ca.crt .
-   Import-Certificate -FilePath .\ca.crt -CertStoreLocation Cert:\CurrentUser\Root
+   .. code-block:: powershell
 
-Then open https://localhost:5173.
+      # Windows — pull the CA out of the running container and trust it
+      docker cp weightslab_trainer_dind:/root/.weightslab-certs/ca.crt .
+      Import-Certificate -FilePath .\ca.crt -CertStoreLocation Cert:\CurrentUser\Root
 
-What ``WEIGHTSLAB_TLS=1`` does in ``entrypoint.sh``:
+   Open https://localhost:5173.
 
-1. Runs ``weightslab ui launch --certs``, generating the cert set into
-   ``WEIGHTSLAB_CERTS_DIR`` (``/root/.weightslab-certs``) and configuring
-   Envoy + the frontend for HTTPS.
-2. Exports ``GRPC_TLS_ENABLED=1`` + ``GRPC_TLS_CERT_DIR=$WEIGHTSLAB_CERTS_DIR``
-   so the gRPC backend also speaks TLS. Without this, Envoy's upstream mTLS
-   handshake fails against a plaintext backend (503s).
+   What ``WEIGHTSLAB_TLS=1`` does in ``entrypoint.sh``:
+
+   1. Runs ``weightslab ui launch --certs``, generating certs into
+      ``WEIGHTSLAB_CERTS_DIR`` and configuring Envoy + the frontend for HTTPS.
+   2. Exports ``GRPC_TLS_ENABLED=1`` + ``GRPC_TLS_CERT_DIR`` so the gRPC
+      backend also speaks TLS (required to prevent Envoy upstream 503s).
 
 .. _docker-siblings-c:
 
@@ -283,53 +284,55 @@ Open http://localhost:5173.
    docker compose -p weightslab_ui -f ui-compose.yml down  # stop UI siblings
    docker volume rm wl_envoy_cfg                         # optional: drop staged config
 
-TLS (HTTPS + mTLS)
-~~~~~~~~~~~~~~~~~~
+.. dropdown:: Enable HTTPS / mTLS (optional)
+   :color: secondary
 
-TLS works here too — still without any host bind mounts. The certs are piped
-into named volumes the same way as ``envoy.yaml``:
+   Only needed for remote or production access. For local development, plain
+   HTTP at http://localhost:5173 works without any certificates.
 
-.. code-block:: bash
+   TLS works here without host bind mounts — certs are piped into named volumes
+   the same way as ``envoy.yaml``:
 
-   WEIGHTSLAB_TLS=1 docker compose up --build
+   .. code-block:: bash
 
-Then trust the CA:
+      WEIGHTSLAB_TLS=1 docker compose up --build
 
-.. code-block:: powershell
+   Then trust the CA on the host browser (once):
 
-   docker cp weightslab_trainer_selfcontained:/root/.weightslab-certs/ca.crt .
-   Import-Certificate -FilePath .\ca.crt -CertStoreLocation Cert:\CurrentUser\Root
+   .. code-block:: powershell
 
-Open https://localhost:5173.
+      docker cp weightslab_trainer_selfcontained:/root/.weightslab-certs/ca.crt .
+      Import-Certificate -FilePath .\ca.crt -CertStoreLocation Cert:\CurrentUser\Root
 
-What ``WEIGHTSLAB_TLS=1`` does:
+   Open https://localhost:5173.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 30 35 35
+   What ``WEIGHTSLAB_TLS=1`` delivers (all via named volumes, no host paths):
 
-   * - Layer
-     - Needs
-     - Delivered via
-   * - Browser ↔ Envoy (downstream)
-     - ``envoy-server.crt/key``
-     - ``wl_envoy_cfg`` volume → ``/etc/envoy/certs``
-   * - Envoy ↔ backend (upstream mTLS)
-     - ``envoy-client.crt/key`` + ``ca.crt``
-     - ``wl_envoy_cfg`` volume → ``/etc/envoy/certs``
-   * - Browser ↔ frontend (nginx HTTPS)
-     - ``envoy-server.crt/key``
-     - ``wl_nginx_certs`` volume → ``/etc/nginx/certs``
-   * - Backend gRPC server
-     - ``backend-server.crt/key`` + ``ca.crt``
-     - ``GRPC_TLS_ENABLED=1`` + ``GRPC_TLS_CERT_DIR``
+   .. list-table::
+      :header-rows: 1
+      :widths: 35 30 35
 
-.. note::
+      * - Layer
+        - What's needed
+        - How it arrives
+      * - Browser ↔ Envoy
+        - ``envoy-server.crt/key``
+        - ``wl_envoy_cfg`` volume
+      * - Envoy ↔ backend (mTLS)
+        - ``envoy-client.crt/key`` + ``ca.crt``
+        - ``wl_envoy_cfg`` volume
+      * - Browser ↔ frontend
+        - ``envoy-server.crt/key``
+        - ``wl_nginx_certs`` volume
+      * - Backend gRPC server
+        - ``backend-server.crt/key`` + ``ca.crt``
+        - ``GRPC_TLS_ENABLED=1`` + ``GRPC_TLS_CERT_DIR``
 
-   Generated keys are ``0600`` (owned by root). Envoy and nginx run
-   non-root, so ``entrypoint.sh`` also runs ``chmod a+rX`` on the cert
-   files in the volumes — without this, Envoy fails with
-   *"unable to read file …envoy-client.key"*.
+   .. note::
+
+      Generated keys are ``0600`` (owned by root). ``entrypoint.sh`` runs
+      ``chmod a+rX`` on cert files in the volumes so Envoy (non-root) can
+      read them.
 
 Common notes
 ------------
