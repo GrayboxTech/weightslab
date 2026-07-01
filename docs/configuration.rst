@@ -1,11 +1,6 @@
 Configuration
 =============
 
-.. contents:: On this page
-   :local:
-   :depth: 2
-
-----
 
 .. _config-sdk:
 
@@ -89,6 +84,18 @@ Accepted by every ``flag`` value.
      - ``True``
      - Register the object in the active ledger.
 
+.. code-block:: python
+
+   # These kwargs apply to every flag — shown here with flag="model"
+   model = wl.watch_or_edit(
+       model,
+       flag="model",
+       name="resnet50",               # default: inferred from variable name
+       root_log_dir="./logs",         # default: None  → WEIGHTSLAB_ROOT_LOG_DIR
+       skip_previous_auto_load=False, # default: False
+       register=True,                 # default: True
+   )
+
 Data loader — ``flag="data"``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -132,6 +139,23 @@ Data loader — ``flag="data"``
      - ``True``
      - Persist per-sample statistics to HDF5.
 
+.. code-block:: python
+
+   train_loader = wl.watch_or_edit(
+       train_dataset,
+       flag="data",
+       loader_name="train_loader",    # default: None
+       batch_size=32,                 # default: 1
+       shuffle=True,                  # default: False
+       num_workers=4,                 # default: 0
+       drop_last=False,               # default: False
+       pin_memory=True,               # default: True
+       is_training=True,              # default: False
+       persistent_workers=None,       # default: None (auto when num_workers > 0)
+       compute_hash=True,             # default: True
+       enable_h5_persistence=True,    # default: True
+   )
+
 Array / label preloading flags
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -164,6 +188,20 @@ See :ref:`good-practice-heavy-experiment` for the recommended combination.
      - ``True``
      - Scan all metadata files at init.
 
+.. code-block:: python
+
+   # Add preloading flags to the data loader call above
+   train_loader = wl.watch_or_edit(
+       train_dataset,
+       flag="data",
+       # ...loader kwargs...
+       array_autoload_arrays=False,   # default: False — keep False for large datasets
+       array_return_proxies=True,     # default: True
+       array_use_cache=True,          # default: True
+       preload_labels=True,           # default: True
+       preload_metadata=True,         # default: True
+   )
+
 Model — ``flag="model"``
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -193,6 +231,19 @@ Model — ``flag="model"``
      - ``False``
      - Force-wrap the model even if a checkpoint already provides one.
 
+.. code-block:: python
+
+   model = wl.watch_or_edit(
+       model,
+       flag="model",
+       dummy_input=torch.zeros(1, 3, 224, 224),  # default: None
+       device="cuda",                             # default: None (inferred)
+       opset_version=17,                          # default: 17
+       use_onnx=False,                            # default: False
+       print_graph=False,                         # default: False
+       forced_model_wrapping=False,               # default: False
+   )
+
 Hyperparameters — ``flag="hyperparameters"``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -214,6 +265,25 @@ Hyperparameters — ``flag="hyperparameters"``
      - ``None``
      - Checkpoint-manager options dict, e.g.
        ``{"load_config": True}``.
+
+.. code-block:: python
+
+   config = wl.watch_or_edit(
+       "hyperparameters.yaml",        # path or filename
+       flag="hyperparameters",
+       defaults={                     # default: None — written on first run
+           "learning_rate": 0.001,
+           "batch_size": 32,
+           "optimizer": "adam",
+           "num_epochs": 20,
+           "weight_decay": 1e-4,
+       },
+       poll_interval=1.0,             # default: 1.0 s
+       checkpoint_manager=None,       # default: None
+   )
+   # Access live-updated values during training:
+   # lr = config.learning_rate
+   # bs = config.batch_size
 
 Signal / metric / loss — ``flag="loss"`` / ``"metric"`` / ``"signal"``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -248,12 +318,35 @@ Signal / metric / loss — ``flag="loss"`` / ``"metric"`` / ``"signal"``
      - (*``@wl.signal`` only*) Populate ``ctx.subscribed_history``
        on each firing.
 
+.. code-block:: python
+
+   # Loss registered via watch_or_edit
+   criterion = wl.watch_or_edit(
+       nn.CrossEntropyLoss(),
+       flag="loss",
+       name="train_loss/sample",      # default: inferred
+       log=True,                      # default: True
+       per_sample=True,               # default: False
+   )
+
+   # Signal via decorator
+   @wl.signal(
+       name="loss_trajectory_class",  # default: inferred from function name
+       subscribe_to="train_loss/sample",
+       log=False,                     # default: True
+       include_history=True,          # default: False
+       compute_every_n_steps=1,       # default: 1
+   )
+   def classify_trajectory(ctx):
+       history = ctx.subscribed_history  # list of past values
+       # ... classify and return a tag string
+       return "monotonic"
+
 ----
 
 .. _config-env:
 
-Part B — Environment Variables
---------------------------------
+.. rubric:: Part B — Environment Variables
 
 All variables are optional; the built-in default is used when unset.
 
@@ -497,6 +590,13 @@ Data and Cache
    * - ``WL_DEFAULT_THUMBNAIL_SIZE``
      - ``720``
      - Longest-edge pixel size used when generating preview thumbnails.
+   * - ``WL_MODAL_MAX_RESOLUTION``
+     - *(unset — full resolution)*
+     - Maximum longest-edge pixel size for images served to the modal
+       full-resolution viewer.  When set, the backend downscales images whose
+       longest edge exceeds this value before transmission — reduces bandwidth and
+       GPU memory pressure on high-resolution datasets (e.g. medical or satellite
+       imagery).  Leave unset to serve images at their original resolution.
    * - ``WL_BATCH_CHUNK_SIZE``
      - ``0``
      - Number of samples per internal processing chunk.
