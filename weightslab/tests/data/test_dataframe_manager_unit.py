@@ -57,7 +57,11 @@ class TestDataFrameManagerUnit(unittest.TestCase):
     def test_enqueue_batch_buffers_records(self):
         mgr = LedgeredDataFrameManager(enable_flushing_threads=False, enable_h5_persistence=False)
 
-        with patch.object(mgr, "flush_async") as flush_async:
+        # threads disabled -> the triggered flush must drain SYNCHRONOUSLY via
+        # flush_if_needed_nonblocking, NOT flush_async (which waits up to 60s for a
+        # background drain thread that is never started when threads are off).
+        with patch.object(mgr, "flush_async") as flush_async, \
+             patch.object(mgr, "flush_if_needed_nonblocking") as flush_sync:
             mgr.enqueue_batch(
                 sample_ids=["10", "11"],
                 preds_raw=np.random.rand(2, 1, 3, 3).astype(np.float32),
@@ -67,10 +71,25 @@ class TestDataFrameManagerUnit(unittest.TestCase):
                 step=4,
             )
 
-        self.assertTrue(flush_async.called)
+        self.assertFalse(flush_async.called)
+        self.assertTrue(flush_sync.called)
         self.assertEqual(len(mgr._buffer), 2)
         self.assertIn("sample_id", mgr._buffer["10"])
         self.assertEqual(mgr._buffer["10"][SampleStats.Ex.LAST_SEEN.value], 4)
+
+    def test_threads_on_flush_uses_flush_async(self):
+        """Contrast to the threads-off path: with flushing threads ENABLED, the
+        triggered flush goes through the background flush_async, not the sync drain."""
+        mgr = LedgeredDataFrameManager(
+            flush_max_rows=1, enable_flushing_threads=True, enable_h5_persistence=False)
+        with patch.object(mgr, "flush_async") as flush_async, \
+             patch.object(mgr, "flush_if_needed_nonblocking") as flush_sync:
+            mgr.enqueue_batch(
+                sample_ids=["1"], preds_raw=None, preds=None,
+                losses={"loss": np.array([0.5])}, step=1,
+            )
+        self.assertTrue(flush_async.called)
+        self.assertFalse(flush_sync.called)
 
 
     def test_enqueue_instance_batch_buffers_records(self):
@@ -78,7 +97,8 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         buffer (keyed by (sample_id, annotation_id)) without touching the df."""
         mgr = LedgeredDataFrameManager(enable_flushing_threads=False, enable_h5_persistence=False)
 
-        with patch.object(mgr, "flush_async") as flush_async:
+        with patch.object(mgr, "flush_async") as flush_async, \
+             patch.object(mgr, "flush_if_needed_nonblocking") as flush_sync:
             # Instances live at annotation_id >= 1 (instance_id 0 is the sample row).
             mgr.enqueue_instance_batch(
                 sample_ids=["7", "7", "9"],
@@ -88,7 +108,9 @@ class TestDataFrameManagerUnit(unittest.TestCase):
                 step=3,
             )
 
-        self.assertTrue(flush_async.called)
+        # threads off -> synchronous drain, not the 60s flush_async path
+        self.assertFalse(flush_async.called)
+        self.assertTrue(flush_sync.called)
         # Buffered under composite keys, NOT mutating the dataframe yet.
         self.assertEqual(len(mgr._buffer), 3)
         self.assertIn(("7", 1), mgr._buffer)
