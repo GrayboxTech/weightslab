@@ -42,11 +42,12 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       Reference all public SDK functions with usage-oriented explanations.
 
-   .. grid-item-card:: PyTorch examples
-      :link: usecases
+   .. grid-item-card:: Examples
+      :link: examples/index
       :link-type: doc
 
-      Follow a complete MNIST integration with comments and practical rationale.
+      Classification, detection, segmentation, clustering, anomaly detection,
+      LiDAR, and Lightning — all with WeightsLab wired in.
 
    .. grid-item-card:: PyTorch Lightning
       :link: pytorch_lightning
@@ -94,6 +95,15 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
 .. toctree::
    :maxdepth: 2
+   :caption: Usage
+   :hidden:
+
+   usage/good_practice
+   usage/docker
+
+
+.. toctree::
+   :maxdepth: 2
    :caption: Core Concepts
    :hidden:
 
@@ -102,7 +112,6 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    data_exploration
    hyperparameters
    logger
-   ----
    weights_studio
 
 
@@ -116,11 +125,19 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 3
    :caption: Examples
    :hidden:
 
-   examples
+   examples/index
+
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Configuration
+   :hidden:
+
+   configuration
 
 
 .. toctree::
@@ -129,5 +146,4 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    :hidden:
 
    user_functions
-   configuration
    grpc/index
