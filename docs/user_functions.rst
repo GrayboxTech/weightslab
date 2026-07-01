@@ -439,7 +439,7 @@ Per-sample vs per-instance watched signals
    # one value per instance -> instance_id 1..N
    wl.watch_or_edit(PerInstanceDice(), flag="metric", name="dice/instance", per_instance=True, log=True)
 
-See :doc:`segmentation_usecase` for a full per-instance + per-sample example.
+See :doc:`examples/pytorch/segmentation` for a full per-instance + per-sample example.
 
 Tag/discard APIs
 ----------------
@@ -506,12 +506,7 @@ SignalContext
 
 Attribute                                    Description
 ``subscribed_value``                         Current value of the subscribed metric (float or None)
-``subscribed_history``                       List of historical entries for the subscribed signal
-                                             (only if ``include_history=True`` in decorator)
-                                             Each entry is a dict with keys:
-                                             - ``signal_value`` (float): the metric value
-                                             - ``model_age`` (int): training step when recorded
-                                             (``model_age`` included only if ``include_history_metadata=True``)
+``subscribed_history``                       List of signal entries (only if ``include_history=True``); each entry has ``signal_value`` (float) and optionally ``model_age`` (int, if ``include_history_metadata=True``).
 
 **Attributes for static signals & sample context** (general use):
 

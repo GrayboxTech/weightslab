@@ -78,6 +78,7 @@ component so callers can request only what they need:
 .. code-block:: python
 
    class MyDataset(Dataset):
+       ...
 
        def get_items(self, idx,
                      include_metadata=False,
@@ -143,7 +144,7 @@ sample can become expensive.
 Use this for small datasets or during debugging. The studio can render the
 prediction overlay and target overlay simultaneously.
 
-**Standard mode** — store only the loss, omit predictions during training:
+**Standard mode** — store only the loss per step and per sample, omit predictions during training:
 
 .. code-block:: python
 
@@ -160,11 +161,12 @@ optionally a different target tensor for eval:
 
    # During eval (triggered by the studio or your own eval loop):
    preds_processed = decode_and_nms(outputs.detach())
-   loss_per_sample = sig["loss"](outputs, targets, batch_ids=ids,
-                                 preds=preds_processed,
-                                 targets=targets)   # optional: override target
-                                                    # if it differs from the
-                                                    # one passed to the loss
+   loss_per_sample = sig["loss"](
+      outputs, targets,
+      batch_ids=ids,
+      preds=preds_processed,
+      targets=targets
+   )   # optional: override target if it differs from the one passed to the loss
 
 ``preds`` should be **processed** predictions (after NMS, argmax, etc.) rather
 than raw model outputs, because the studio renders them directly as overlays.

@@ -112,7 +112,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    data_exploration
    hyperparameters
    logger
-   weights_studio
+   .. weights_studio
 
 
 .. toctree::
