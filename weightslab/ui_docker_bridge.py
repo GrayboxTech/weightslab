@@ -152,14 +152,14 @@ examples:
 
 def _get_compose_file():
     """Return the path to the bundled docker-compose.yml."""
-    # return files("weightslab.ui.docker") / "docker-compose.yml"
-    return Path(__file__).parent / 'ui' / 'docker' / 'docker-compose.yml'
+    # return files("weightslab.docker.docker") / "docker-compose.yml"
+    return Path(__file__).parent.parent / 'docker' / 'docker' / 'docker-compose.yml'
 
 
 def _get_envoy_config():
     """Return the path to the bundled envoy.yaml."""
-    # return files("weightslab.ui.envoy") / "envoy.yaml"
-    return Path(__file__).parent / 'ui' / 'docker' / 'envoy.yaml'
+    # return files("weightslab.docker.envoy") / "envoy.yaml"
+    return Path(__file__).parent.parent / 'docker' / 'docker' / 'envoy.yaml'
 
 
 def _get_bootstrap_script() -> Path:
@@ -212,7 +212,7 @@ def _ensure_scripts_executable() -> None:
     """
     if _is_windows():
         return
-    ui_dir = Path(__file__).parent / 'ui'
+    ui_dir = Path(__file__).parent.parent / 'docker'
     try:
         scripts = list(ui_dir.rglob('*.sh'))
     except OSError as exc:
