@@ -421,27 +421,23 @@ body[data-theme="dark"] .wl-only-dark {
   padding-top: 2.7rem;
 }
 
-/* Extra push when the tips ribbon is also visible */
-body.wl-ribbon-visible .page {
-  padding-top: 4.8rem;
-}
 
 .wl-topnav-inner {
   display: flex;
   align-items: center;
-  justify-content: flex-end;   /* everything right-aligned, weco.ai style */
+  position: relative;
   max-width: 100%;
   padding: 0 1.2rem;
   height: 2.7rem;
 }
 
-/* The menu: flex row, items centered, pushed to the right, 10px gap */
+/* The menu: right column, flex-end aligned */
 .wl-topnav-menu {
   display: flex;
   flex: 1;
   align-items: center;
   justify-content: flex-end;
-  gap: 0.4rem;                 /* ~gap-2.5 in Tailwind */
+  gap: 0.4rem;
 }
 
 /* Base pill button */
@@ -533,89 +529,49 @@ body[data-theme="dark"]  .wl-topnav-theme .wl-ti-dark  { display: inline-flex; }
     top: 2.7rem;
     position: fixed;
   }
-  body.wl-ribbon-visible .mobile-header {
-    top: 4.8rem;
-  }
 }
 
-/* ── Tips ribbon ─────────────────────────────────────────────────────────── */
-.wl-ribbon {
-  position: fixed;
-  top: 2.7rem;
-  left: 0;
-  right: 0;
-  z-index: 299;
-  height: 2.1rem;
+/* ── Topnav center tip ───────────────────────────────────────────────────── */
+.wl-topnav-left {
+  flex: 1;
+}
+
+.wl-topnav-center {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
   display: flex;
   align-items: center;
-  gap: 0.45rem;
-  padding: 0 1rem 0 1.1rem;
-  background: var(--color-background-secondary);
-  border-bottom: 1px solid var(--color-background-border);
-  font-size: 0.79rem;
+  gap: 0.35rem;
+  max-width: 38%;
   overflow: hidden;
+  pointer-events: none;
 }
 
-.wl-ribbon-icon {
+.wl-topnav-tip-icon {
   flex-shrink: 0;
   line-height: 0;
   color: #f0a500;
-  opacity: 0.9;
+  opacity: 0.85;
 }
 
-.wl-ribbon-label {
-  flex-shrink: 0;
-  font-weight: 700;
-  font-family: "Montserrat", sans-serif;
-  font-size: 0.77rem;
-  color: #5f7393;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.wl-ribbon-sep {
-  flex-shrink: 0;
-  opacity: 0.4;
-}
-
-.wl-ribbon-text {
-  flex: 1;
+.wl-topnav-tip-text {
+  font-size: 0.775rem;
+  color: var(--color-foreground-secondary);
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--color-foreground-secondary);
   transition: opacity 0.28s ease;
 }
 
-.wl-ribbon-text code {
-  font-size: 0.76rem;
-  padding: 0.05em 0.3em;
-  border-radius: 0.25em;
+.wl-topnav-tip-text code {
+  font-size: 0.74rem;
+  padding: 0.04em 0.28em;
+  border-radius: 0.22em;
   background: var(--color-background-hover, rgba(100,100,100,0.1));
   border: 1px solid var(--color-background-border);
   color: var(--color-foreground-primary);
-}
-
-.wl-ribbon-close {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: var(--color-foreground-muted);
-  opacity: 0.5;
-  padding: 0.25rem;
-  line-height: 0;
-  border-radius: 0.3rem;
-  transition: opacity 0.15s, background 0.15s;
-  margin-left: 0.3rem;
-}
-
-.wl-ribbon-close:hover {
-  opacity: 1;
-  background: var(--color-background-hover, rgba(100,100,100,0.1));
+  font-family: monospace;
 }
 
 /* ── Per-page keyword tag bar ───────────────────────────────────────────── */

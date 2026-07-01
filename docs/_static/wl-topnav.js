@@ -36,6 +36,16 @@
 
     nav.innerHTML =
       '<div class="wl-topnav-inner">' +
+        '<div class="wl-topnav-left"></div>' +
+        '<div class="wl-topnav-center">' +
+          '<span class="wl-topnav-tip-icon" aria-hidden="true">' +
+            '<svg width="11" height="11" viewBox="0 0 20 20" fill="currentColor">' +
+              '<path d="M10 1a7 7 0 0 0-3.46 13.07A1 1 0 0 0 7 15v1a1 1 0 0 0 1 1h4a1 1' +
+              ' 0 0 0 1-1v-1c0-.17.06-.34.15-.47A7 7 0 0 0 10 1zm-1 15v-1h2v1H9z"/>' +
+            '</svg>' +
+          '</span>' +
+          '<span id="wl-topnav-tip" class="wl-topnav-tip-text"></span>' +
+        '</div>' +
         '<div class="wl-topnav-menu">' +
           '<a class="wl-topnav-btn" href="' + root + '/examples/index.html">Examples</a>' +
           '<a class="wl-topnav-btn" href="' + root + '/quickstart.html">Quickstart</a>' +
