@@ -164,17 +164,17 @@ def _get_envoy_config():
 
 def _get_bootstrap_script() -> Path:
     """Get the bootstrap-secure.ps1 script path."""
-    return Path(__file__).parent / 'ui' / 'docker' / 'utils' / 'build-and-deploy.sh'
+    return Path(__file__).parent.parent / 'docker' / 'docker' / 'utils' / 'build-and-deploy.sh'
 
 
 def _get_cert_script() -> Path:
     """Get the generate-certs-auth-token.sh script path."""
-    return Path(__file__).parent / 'ui' / 'docker' / 'utils' / 'generate-certs-auth-token.sh'
+    return Path(__file__).parent.parent / 'docker' / 'docker' / 'utils' / 'generate-certs-auth-token.sh'
 
 
 def _get_cert_script_ps1() -> Path:
     """Get the generate-certs-auth-token.ps1 script path."""
-    return Path(__file__).parent / 'ui' / 'docker' / 'utils' / 'generate-certs-auth-token.ps1'
+    return Path(__file__).parent.parent / 'docker' / 'docker' / 'utils' / 'generate-certs-auth-token.ps1'
 
 
 def _is_windows() -> bool:
@@ -949,7 +949,7 @@ _DEFAULT_EXAMPLE = "cls"
 
 def _get_example_dir(name: str = "ws-classification", category: str = "PyTorch") -> Path:
     """Path to a bundled example directory (under examples/<category>/<name>)."""
-    return Path(__file__).parent / 'examples' / category / name
+    return Path(__file__).parent.parent / 'examples' / category / name
 
 
 def _install_example_requirements(example_dir: Path) -> None:
