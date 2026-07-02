@@ -255,6 +255,9 @@ class DataService:
 
     def __init__(self, ctx):
         self._ctx = ctx
+        # Set by ExperimentService after construction so the agent can invoke
+        # architecture ops (freeze/reset) in-process. None in standalone/tests.
+        self.model_service = None
         # Use MonitoredRLock so the gRPC watchdog can observe the holder thread
         # and how long the lock has been held, and interrupt it if needed.
         from weightslab.watchdog.lock_monitor import MonitoredRLock
@@ -2152,6 +2155,20 @@ class DataService:
         if func == "df.modify":
             col = params.get("col")
             code = params.get("code")
+
+            # Hard safety gate: the agent (and Quick Filters) may create NEW
+            # columns freely, but must never overwrite values already recorded
+            # in an existing column. Only the `discarded` deny-list flag and
+            # `tag:*` boolean columns are writable once they already exist.
+            if col in df.columns and col != SampleStatsEx.DISCARDED.value and not str(col).startswith("tag:"):
+                msg = (
+                    f"Safety Violation: '{col}' already holds recorded data and cannot be "
+                    "overwritten. Create a new column instead, or update tag:*/discarded "
+                    "control columns."
+                )
+                logger.warning(msg)
+                return msg
+
             try:
                 # 0. Safety Check: If target column exists, check compatibility
                 if col in df.columns:
@@ -2469,7 +2486,56 @@ class DataService:
             except Exception as e:
                 return f"Analysis Error: {e}"
 
+        # E) Model introspection / architecture management (from the agent's model_info/model_action)
+        if func in {"model.info", "model.error"}:
+            return params.get("text") or params.get("reason") or "No model information available."
+
+        if func in {"model.freeze", "model.reset"}:
+            return self._apply_model_action(func.replace("model.", ""), params)
+
         return "No operation applied"
+
+    # Maps agent model_action names to the existing ManipulateWeights op types
+    # (the exact same architecture ops the grid's freeze/reset controls use).
+    _MODEL_ACTION_OP_TYPES = {
+        "freeze": pb2.WeightOperationType.FREEZE,
+        "reset": pb2.WeightOperationType.REINITIALIZE,
+    }
+
+    def _apply_model_action(self, action: str, params: dict) -> str:
+        """
+        Apply a freeze/reset architecture op to the layer(s) the agent
+        resolved. Delegates to ModelService.ManipulateWeights so this reuses
+        the exact same code path (locking included) as the grid's freeze/reset
+        controls.
+        """
+        op_type = self._MODEL_ACTION_OP_TYPES.get(action)
+        if op_type is None:
+            return f"Unsupported model action: {action}"
+
+        layer_ids = params.get("layer_ids") or []
+        if not layer_ids:
+            return "No layers matched the given criteria; nothing was changed."
+
+        model_service = getattr(self, "model_service", None)
+        if model_service is None:
+            return "Model service is not available; cannot modify architecture."
+
+        neuron_ids = params.get("neuron_ids") or []
+        applied = []
+        for layer_id in layer_ids:
+            weight_op = pb2.WeightOperation(op_type=op_type, layer_id=int(layer_id))
+            if neuron_ids:
+                weight_op.neuron_ids.extend(
+                    pb2.NeuronId(layer_id=int(layer_id), neuron_id=int(n)) for n in neuron_ids
+                )
+            request = pb2.WeightsOperationRequest(weight_operation=weight_op)
+            response = model_service.ManipulateWeights(request, None)
+            if not response.success:
+                return f"Failed to apply '{action}' to layer {layer_id}: {response.message}"
+            applied.append(layer_id)
+
+        return f"Applied '{action}' to layer(s): {applied}"
 
     # ------------------------------------------------------------------
     # Lock watchdog helpers

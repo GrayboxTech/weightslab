@@ -51,7 +51,26 @@ class TestAgentPromptUnit(unittest.TestCase):
         self.assertIn("{row_count}", INTENT_PROMPT)
         self.assertIn("{schema}", INTENT_PROMPT)
         self.assertIn("{history}", INTENT_PROMPT)
+        self.assertIn("{model_schema}", INTENT_PROMPT)
         self.assertIn("Denylisting", INTENT_PROMPT)
+        # Model management + column-write safety guidance must be present.
+        self.assertIn("MODEL CONTEXT", INTENT_PROMPT)
+        self.assertIn("COLUMN WRITE SAFETY", INTENT_PROMPT)
+        self.assertIn("model_action", INTENT_PROMPT)
+
+    def test_intent_prompt_formats_without_stray_braces(self):
+        # All JSON examples use doubled braces; a single stray brace would make
+        # .format() raise KeyError. This guards the many {{ }} examples.
+        rendered = INTENT_PROMPT.format(
+            schema="- [COL] `loss` (float64)",
+            row_count=3,
+            model_schema="- Layer `0` (`Conv2d` / conv): neurons_count=64",
+            history="None",
+        )
+        self.assertIn("loss", rendered)
+        self.assertIn("Conv2d", rendered)
+        # Doubled braces collapse to single braces in the rendered JSON examples.
+        self.assertIn('"kind": "model_info"', rendered)
 
     def test_agent_models_and_handlers(self):
         with unittest.mock.patch.dict(sys.modules, _install_agent_dependency_stubs(), clear=False):

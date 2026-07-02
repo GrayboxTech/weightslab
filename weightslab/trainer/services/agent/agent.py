@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 # Ensure intent_prompt is accessible
 from .intent_prompt import INTENT_PROMPT
 from weightslab.data.sample_stats import SampleStatsEx
+from weightslab.trainer.trainer_tools import get_layer_representations
 
 
 # Set up logging
@@ -50,7 +51,7 @@ class Condition(BaseModel):
     value2: Optional[Union[float, int]] = Field(default=None, description="The secondary value for 'between'")
 
 class AtomicIntent(BaseModel):
-    kind: Literal["keep", "drop", "sort", "group", "head", "tail", "reset", "analysis", "transform", "action", "noop", "clarify"] = Field(
+    kind: Literal["keep", "drop", "sort", "group", "head", "tail", "reset", "analysis", "transform", "action", "model_info", "model_action", "noop", "clarify"] = Field(
         description="The type of operation. Use 'action' for external tasks like saving or plotting."
     )
     conditions: Optional[List[Condition]] = Field(default=None, description="Conditions for keep/drop")
@@ -71,10 +72,28 @@ class AtomicIntent(BaseModel):
     action_name: Optional[str] = Field(default=None, description="Name of the action (e.g. 'save_dataset')")
     action_params: Optional[Dict[str, Any]] = Field(default=None, description="Parameters for the action")
 
+    # Model introspection / architecture management (kind="model_info"/"model_action")
+    layer_query: Optional[List[Condition]] = Field(
+        default=None,
+        description="Conditions over layer attributes (layer_id, layer_name, layer_type, neurons_count, incoming_neurons_count, frozen) to select which layer(s) to inspect or act on. Omit to target every layer.",
+    )
+    model_query_expression: Optional[str] = Field(
+        default=None,
+        description="Pandas expression evaluated against `layers_df` for aggregate model questions (e.g. 'layers_df[\"neurons_count\"].sum()'). Use layer_query instead for simple filters.",
+    )
+    model_action_name: Optional[Literal["freeze", "reset"]] = Field(
+        default=None,
+        description="Architecture operation to apply to the layer(s)/neuron(s) selected by layer_query.",
+    )
+    neuron_indices: Optional[List[int]] = Field(
+        default=None,
+        description="Specific neuron indices within the selected layer(s) for model_action. Omit to target the whole layer.",
+    )
+
 class Intent(BaseModel):
     reasoning: str = Field(description="The thought process or clarification question.")
-    primary_goal: Literal["ui_manipulation", "data_analysis", "action", "out_of_scope"] = Field(
-        description="Whether the user wants to change the grid view, get an answer, or perform an action."
+    primary_goal: Literal["ui_manipulation", "data_analysis", "action", "model_management", "out_of_scope"] = Field(
+        description="Whether the user wants to change the grid view, get an answer, perform an action, or inspect/manage the model's architecture."
     )
     steps: List[AtomicIntent] = Field(description="A sequence of atomic operations to execute in order.")
 
@@ -267,6 +286,46 @@ class ActionHandler(IntentHandler):
             "params": step.action_params or {}
         }
 
+class ModelInfoHandler(IntentHandler):
+    """Read-only architecture questions (layer/neuron counts, frozen state, full dump)."""
+    def build_op(self, step: AtomicIntent, context: Intent) -> Optional[dict]:
+        agent = self.agent
+        if not agent.model_available:
+            return {"function": "model.info", "params": {"text": agent._format_layers_table()}}
+
+        if step.model_query_expression:
+            code = agent._clean_code(step.model_query_expression)
+            try:
+                result = eval(code, {"layers_df": agent.model_layers_df, "pd": pd})
+                text = str(result)
+            except Exception as e:
+                text = f"Could not evaluate model query: {e}"
+            return {"function": "model.info", "params": {"text": text}}
+
+        selected = agent._select_layers(step.layer_query)
+        return {"function": "model.info", "params": {"text": agent._format_layers_table(selected)}}
+
+class ModelActionHandler(IntentHandler):
+    """Architecture management: freeze/reset layers or specific neurons within them."""
+    def build_op(self, step: AtomicIntent, context: Intent) -> Optional[dict]:
+        agent = self.agent
+        action = step.model_action_name
+        if not action:
+            return None
+
+        if not agent.model_available:
+            return {"function": "model.error", "params": {"reason": "No model is currently registered; there is no architecture to modify."}}
+
+        selected = agent._select_layers(step.layer_query)
+        layer_ids = [] if selected is None else selected["layer_id"].tolist()
+        if not layer_ids:
+            return {"function": "model.error", "params": {"reason": "No layers matched the given criteria; nothing was changed."}}
+
+        return {
+            "function": f"model.{action}",
+            "params": {"layer_ids": layer_ids, "neuron_ids": step.neuron_indices or []},
+        }
+
 
 # ==========================================
 # 3. THE AGENT (Orchestrator)
@@ -279,6 +338,7 @@ class DataManipulationAgent:
         self.ctx = context
 
         self._setup_schema()
+        self._setup_model_schema()
         self._build_column_index()
         self._load_config()
         self._setup_providers()
@@ -297,6 +357,8 @@ class DataManipulationAgent:
             "reset": ViewHandler(self),
             "clarify": ClarifyHandler(self),
             "action": ActionHandler(self),
+            "model_info": ModelInfoHandler(self),
+            "model_action": ModelActionHandler(self),
             "noop": None
         }
 
@@ -371,6 +433,125 @@ class DataManipulationAgent:
             'row_count': row_count
         }
         self._build_column_index()
+
+    def _setup_model_schema(self):
+        """
+        Builds a small layer-level table describing the live model's
+        architecture, mirroring `_setup_schema` but for `model.*` requests
+        (introspection + freeze/reset) instead of dataframe requests.
+        """
+        columns = [
+            "layer_id", "layer_name", "layer_type", "neurons_count",
+            "incoming_neurons_count", "kernel_size", "stride", "frozen",
+        ]
+        self.model_layers_df = pd.DataFrame(columns=columns)
+        self.model_available = False
+
+        try:
+            data_service = self.ctx
+            exp_ctx = getattr(data_service, "_ctx", None)
+            if exp_ctx is None:
+                return
+            exp_ctx.ensure_components()
+            model = exp_ctx.components.get("model")
+            if model is None:
+                return
+
+            rows = []
+            for rep in get_layer_representations(model):
+                lrs = [ns.learning_rate for ns in rep.neurons_statistics]
+                # A layer is considered frozen when every neuron's learning
+                # rate has been zeroed out (how `FREEZE` is implemented).
+                frozen = bool(lrs) and all(lr == 0 for lr in lrs)
+                rows.append({
+                    "layer_id": rep.layer_id,
+                    "layer_name": rep.layer_name,
+                    "layer_type": rep.layer_type,
+                    "neurons_count": rep.neurons_count,
+                    "incoming_neurons_count": rep.incoming_neurons_count,
+                    "kernel_size": rep.kernel_size,
+                    "stride": rep.stride,
+                    "frozen": frozen,
+                })
+            if rows:
+                self.model_layers_df = pd.DataFrame(rows, columns=columns)
+                self.model_available = True
+        except Exception as e:
+            _LOGGER.warning(f"[Agent] Failed to build model schema: {e}")
+
+    def _build_layer_mask(self, conditions: List["Condition"]) -> Optional[str]:
+        """Builds a boolean mask expression over `layers_df` (small in-memory
+        layer table), analogous to `_build_python_mask` for the dataframe."""
+        if not conditions or self.model_layers_df is None or self.model_layers_df.empty:
+            return None
+
+        parts = []
+        for cond in conditions:
+            col = cond.column
+            if col not in self.model_layers_df.columns:
+                continue
+
+            op = cond.op.lower()
+            if op in ("=", "equals"):
+                op = "=="
+
+            val = cond.value
+            if col not in ("layer_name", "layer_type") and isinstance(val, str):
+                low = val.strip().lower()
+                if low in ("true", "false"):
+                    val = (low == "true")
+                else:
+                    try:
+                        val = float(val)
+                    except ValueError:
+                        pass
+
+            col_ref = f"layers_df['{col}']"
+            val_repr = repr(val)
+
+            if op == "==": parts.append(f"({col_ref} == {val_repr})")
+            elif op == "!=": parts.append(f"({col_ref} != {val_repr})")
+            elif op == ">": parts.append(f"({col_ref} > {val_repr})")
+            elif op == "<": parts.append(f"({col_ref} < {val_repr})")
+            elif op == ">=": parts.append(f"({col_ref} >= {val_repr})")
+            elif op == "<=": parts.append(f"({col_ref} <= {val_repr})")
+            elif op == "contains": parts.append(f"({col_ref}.astype(str).str.contains({val_repr}, na=False, regex=False))")
+            elif op == "in":
+                v = val if isinstance(val, list) else [val]
+                parts.append(f"({col_ref}.isin({v!r}))")
+            elif op == "not in":
+                v = val if isinstance(val, list) else [val]
+                parts.append(f"(~{col_ref}.isin({v!r}))")
+
+        return " & ".join(parts) if parts else None
+
+    def _select_layers(self, conditions: Optional[List["Condition"]]) -> pd.DataFrame:
+        """Returns the subset of `model_layers_df` matching `conditions` (all layers if none given)."""
+        df = self.model_layers_df
+        if df is None or df.empty or not conditions:
+            return df
+        expr = self._build_layer_mask(conditions)
+        if not expr:
+            return df
+        try:
+            return df[eval(expr, {"layers_df": df})]
+        except Exception as e:
+            _LOGGER.warning(f"[Agent] Failed to filter layers with {expr!r}: {e}")
+            return df
+
+    def _format_layers_table(self, df: Optional[pd.DataFrame] = None) -> str:
+        target = df if df is not None else self.model_layers_df
+        if not self.model_available or target is None or target.empty:
+            return "No model is currently registered, so there is no architecture information available."
+
+        lines = [f"Model has {len(target)} layer(s):"]
+        for _, row in target.iterrows():
+            lines.append(
+                f"- Layer {row['layer_id']} ({row['layer_name']}/{row['layer_type']}): "
+                f"{row['neurons_count']} neurons, incoming={row['incoming_neurons_count']}, "
+                f"frozen={row['frozen']}"
+            )
+        return "\n".join(lines)
 
     def _load_config(self):
         self.preferred_provider = os.environ.get("PREFERRED_PROVIDER", "openrouter") # Default to OpenRouter if API key is provided, otherwise fallback to local Ollama. This can be overridden by config file or env variable.
@@ -863,6 +1044,63 @@ class DataManipulationAgent:
         if coerced:
             intent.reasoning += " [Note: agent tried to drop samples from view; rewrote as deny-list flag (discarded=True). Rephrase as 'hide' or 'show only' if you wanted view-only filtering.]"
 
+    def _is_agent_writable_column(self, col: Optional[str]) -> bool:
+        """
+        Invariant: the agent may create NEW columns freely (derived signals),
+        but must never overwrite values already recorded in an existing
+        column. The only existing columns it may write to are the control
+        columns it owns: `discarded` and any `tag:*` boolean column.
+        """
+        if not col:
+            return False
+        if col not in self.df_schema.get('columns', []):
+            return True  # Does not exist yet -> creating a new column is always allowed.
+        return col == "discarded" or col.startswith("tag:")
+
+    def _coerce_protected_transform_intent(self, intent: Intent) -> None:
+        # Invariant: the agent must never mutate values in an existing data
+        # column (signals, labels, metadata, sample_id, origin, ...). Steps
+        # that target such a column are dropped; the user is told to ask for
+        # a new derived column instead.
+        blocked = []
+        kept_steps = []
+        for step in intent.steps:
+            if step.kind == "transform" and not self._is_agent_writable_column(step.target_column):
+                blocked.append(step.target_column)
+                continue
+            kept_steps.append(step)
+        if blocked:
+            intent.steps = kept_steps
+            intent.reasoning += (
+                f" [Safety: refused to overwrite existing column(s) {blocked} — the agent "
+                "may only create new columns or update tag:*/discarded control columns. "
+                "Ask for a new derived column (e.g. 'create <name> from ...') instead.]"
+            )
+
+    def _resolve_intent_to_ops(self, intent: Intent) -> List[dict]:
+        """Applies safety coercions then converts an intent into executable ops.
+
+        Multi-step intents may reference, in a LATER step's conditions, a
+        column an EARLIER `transform` step in the same intent is about to
+        create (e.g. "Tag X with A and B. Then discard these data." — the
+        drop condition targets the tag column created a moment before).
+        Temporarily register those pending columns so column resolution treats
+        them as valid instead of silently failing to match.
+        """
+        pending_columns = [
+            step.target_column for step in intent.steps
+            if step.kind == "transform" and step.target_column and step.target_column not in self._cols
+        ]
+        self._cols.extend(pending_columns)
+        try:
+            self._coerce_discard_intent(intent)
+            self._coerce_protected_transform_intent(intent)
+            return self._intent_to_pandas_op(intent)
+        finally:
+            for col in pending_columns:
+                if col in self._cols:
+                    self._cols.remove(col)
+
     def _intent_to_pandas_op(self, intent: Intent) -> List[dict]:
             """Dispatches structured intent steps to registered handlers."""
             if intent.primary_goal == "out_of_scope":
@@ -967,8 +1205,7 @@ class DataManipulationAgent:
 
             if parsed_intent:
                 _LOGGER.info(f"[{name}] Reasoning: {parsed_intent.reasoning}")
-                self._coerce_discard_intent(parsed_intent)
-                ops = self._intent_to_pandas_op(parsed_intent)
+                ops = self._resolve_intent_to_ops(parsed_intent)
                 _LOGGER.info(f"[{name}] Converted to {len(ops)} operations")
                 return ops
             return None
@@ -1016,6 +1253,7 @@ class DataManipulationAgent:
         self._last_query_error = None
 
         self._setup_schema()
+        self._setup_model_schema()
 
         # 1. Format metadata for the prompt
         schema_lines = []
@@ -1034,9 +1272,22 @@ class DataManipulationAgent:
 
         formatted_schema = "\n".join(schema_lines)
 
+        # 2. Format the live model architecture for the prompt (may be unavailable)
+        if self.model_available:
+            model_schema_lines = [
+                f"- Layer `{row['layer_id']}` (`{row['layer_name']}` / {row['layer_type']}): "
+                f"neurons_count={row['neurons_count']}, incoming_neurons_count={row['incoming_neurons_count']}, "
+                f"frozen={row['frozen']}"
+                for _, row in self.model_layers_df.iterrows()
+            ]
+            formatted_model_schema = "\n".join(model_schema_lines)
+        else:
+            formatted_model_schema = "No model is currently registered."
+
         system_prompt = INTENT_PROMPT.format(
             schema=formatted_schema,
             row_count=self.df_schema['row_count'],
+            model_schema=formatted_model_schema,
             history="\\n".join(self.history[-5:]) if self.history else "None"
         )
 

@@ -52,3 +52,9 @@ Recommendations
 - Start with a small tag vocabulary (for example: ``hard_examples``, ``noisy_label``).
 - Keep discard operations reversible by tracking them in your experiment notes.
 - Re-evaluate discarded sets periodically after model improvements.
+
+.. seealso::
+
+   The same tagging and discarding can be driven in plain English from the
+   Weights Studio chat bar or the CLI. See :doc:`agent` for how to initialize
+   and use the AI agent.
