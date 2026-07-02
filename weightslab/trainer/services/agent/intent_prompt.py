@@ -21,7 +21,7 @@ You can use regex first to map origins value in the dataframe and origin ask by 
 The live model's layers, from `get_interactive_layers`-style introspection:
 {model_schema}
 
-Use this table to answer architecture questions (layer/neuron counts, which layers are frozen, full dumps) and to resolve which layer(s) a freeze/reset request refers to. If it says "No model is currently registered.", answer via `model_info` explaining that no model is available; do not attempt `model_action`.
+Use this table to answer architecture questions (layer/neuron counts, which layers are frozen, full dumps) and to resolve which layer(s) a freeze/reset/unfreeze request refers to. If it says "No model is currently registered.", answer via `model_info` explaining that no model is available; do not attempt `model_action`.
 
 ---
 ## 2. STRATEGY SELECTION (Heuristics)
@@ -38,7 +38,7 @@ Choose the `kind` based on the user's VERB and INTENT:
 | **Discard / Remove** | "Discard...", "Drop...", "Remove...", "Ban...", "Denylist...", "Exclude from training" | `transform` (target=`discarded`) |
 | **Clarify** | "Sort by metrics" (if multiple exist) | `clarify` |
 | **Model Question** | "Which layer has...", "Is layer X frozen?", "Show model details", "How many neurons in..." | `model_info` |
-| **Model Management** | "Freeze layer/neurons...", "Reset layer/neurons..." | `model_action` |
+| **Model Management** | "Freeze layer/neurons...", "Reset layer/neurons...", "Unfreeze layer/neurons..." | `model_action` |
 
 ---
 ## 3. COLUMN RESOLUTION RULES
@@ -57,6 +57,7 @@ Choose the `kind` based on the user's VERB and INTENT:
   - "Remove tag" or "untag" means setting the corresponding `tag:COLUMN_NAME` values to `False` for targeted rows.
   - "Rename tag A to B" means transferring `True` flags from `tag:A` into `tag:B` (create/update) and clearing `tag:A` to `False`.
 7. **Chained "then discard/tag these" requests**: when a request tags samples and then discards/untags "these"/"them" in a following sentence, reuse the SAME tag column created in the earlier step as the condition for the later step (see Ex24), rather than recomputing the original filter.
+8. **Temporary/scratch columns**: if computing the user's requested result needs one or more INTERMEDIATE columns that the user never asked for (e.g. two helper tags combined into a final one, see Ex22), set `is_temporary: true` on those intermediate `transform` steps. They are dropped automatically once the whole request finishes executing. Never set `is_temporary` on the column the user actually asked for.
 
 ---
 ## 4. SCHEMA RULES (STRICT)
@@ -67,9 +68,10 @@ Choose the `kind` based on the user's VERB and INTENT:
   - `analysis_expression`: A valid Python/Pandas string (e.g., `df['col'].mean()`).
   - `transform_code`: Logic for the new value (e.g. `df['col'] * 2`) for `transform` kind. `target_column` must satisfy COLUMN WRITE SAFETY.
   - `target_column`: Name of the column to set for `transform` kind.
+  - `is_temporary`: Optional bool for `transform` kind. `true` if `target_column` is scratch state only used to compute a later step's result within the same request (see rule 8). Defaults to `false`.
   - `layer_query`: List of condition dicts over layer attributes (`layer_id`, `layer_name`, `layer_type`, `neurons_count`, `incoming_neurons_count`, `frozen`) for `model_info`/`model_action`. Omit to target every layer.
   - `model_query_expression`: Python expression over `layers_df` for aggregate model questions (e.g. `"layers_df['neurons_count'].sum()"`), for `model_info`.
-  - `model_action_name`: `"freeze"` or `"reset"`, for `model_action`. There is no `"unfreeze"` — to undo a freeze, ask to `reset` the layer.
+  - `model_action_name`: `"freeze"`, `"reset"`, or `"unfreeze"`, for `model_action`. `"unfreeze"` only ever touches layers/neurons that are ALREADY frozen (it is implemented as re-applying freeze, which toggles); it is a no-op on anything not currently frozen.
   - `neuron_indices`: Optional list of specific neuron indices within the selected layer(s), for `model_action`. Omit to target whole layers.
 
 ---
@@ -378,20 +380,22 @@ User: "Tag as 'hard_example' train samples with loss > 2 that are not already ha
 }}
 
 
-**Ex22: Goldset 50% With 30/70 Hard-Easy Mix**
+**Ex22: Goldset 50% With 30/70 Hard-Easy Mix (Scratch Columns Cleaned Up)**
 User: "Can you add the tag 'goldset' to 50% of train samples, where 30% of that goldset are hard (high loss) and 70% are easy (low loss)?"
 {{
-  "reasoning": "Goldset is 50% of train. To enforce a 30/70 hard-easy composition inside that 50%, select hard from top 15% train-loss and easy from bottom 35% train-loss, then union them into tag:goldset.",
+  "reasoning": "Goldset is 50% of train. To enforce a 30/70 hard-easy composition inside that 50%, select hard from top 15% train-loss and easy from bottom 35% train-loss, then union them into tag:goldset. The two helper tags are scratch only — the user asked for 'goldset', not for them to persist — so they are marked is_temporary and removed automatically once tag:goldset is computed.",
   "primary_goal": "ui_manipulation",
   "steps": [
     {{
       "kind": "transform",
       "target_column": "tag:goldset_hard",
+      "is_temporary": true,
       "transform_code": "np.where((df['origin'] == 'train') & (df['train_loss'] >= df[df['origin'] == 'train']['train_loss'].quantile(0.85)), True, df.get('tag:goldset_hard', False))"
     }},
     {{
       "kind": "transform",
       "target_column": "tag:goldset_easy",
+      "is_temporary": true,
       "transform_code": "np.where((df['origin'] == 'train') & (df['train_loss'] <= df[df['origin'] == 'train']['train_loss'].quantile(0.35)), True, df.get('tag:goldset_easy', False))"
     }},
     {{
@@ -472,6 +476,27 @@ User: "Multiply the loss column by 2"
 }}
 
 
+**Ex26b: Derived Column Needing A Scratch Intermediate (Cleaned Up Automatically)**
+User: "Create a column 'combined_score' that normalizes train_loss to 0-1 and combines it 50/50 with confidence"
+{{
+  "reasoning": "combined_score is the only column the user asked for. Computing it needs an intermediate min-max-normalized loss column, which is scratch — mark it is_temporary so it's removed automatically once combined_score is computed.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "transform",
+      "target_column": "loss_normalized",
+      "is_temporary": true,
+      "transform_code": "(df['train_loss'] - df['train_loss'].min()) / (df['train_loss'].max() - df['train_loss'].min())"
+    }},
+    {{
+      "kind": "transform",
+      "target_column": "combined_score",
+      "transform_code": "0.5 * df.get('loss_normalized', 0) + 0.5 * df['confidence']"
+    }}
+  ]
+}}
+
+
 **Ex27: Model Question (Filter By Neuron Count)**
 User: "Which layer has more than 2000 neurons?"
 {{
@@ -536,6 +561,51 @@ User: "Reset layer 3"
       "kind": "model_action",
       "model_action_name": "reset",
       "layer_query": [{{ "column": "layer_id", "op": "==", "value": 3 }}]
+    }}
+  ]
+}}
+
+
+**Ex32: Unfreeze A Specific Layer**
+User: "Unfreeze layer 3"
+{{
+  "reasoning": "Explicit layer_id match. unfreeze re-applies the freeze toggle, which is automatically constrained to layers that are currently frozen, so this is a no-op if layer 3 isn't frozen.",
+  "primary_goal": "model_management",
+  "steps": [
+    {{
+      "kind": "model_action",
+      "model_action_name": "unfreeze",
+      "layer_query": [{{ "column": "layer_id", "op": "==", "value": 3 }}]
+    }}
+  ]
+}}
+
+
+**Ex33: Unfreeze Specific Neurons In A Layer**
+User: "Unfreeze neurons 3 and 5 of layer 2"
+{{
+  "reasoning": "Scope the unfreeze to a single layer and explicit neuron indices; only the ones that are actually frozen among 3 and 5 will be touched.",
+  "primary_goal": "model_management",
+  "steps": [
+    {{
+      "kind": "model_action",
+      "model_action_name": "unfreeze",
+      "layer_query": [{{ "column": "layer_id", "op": "==", "value": 2 }}],
+      "neuron_indices": [3, 5]
+    }}
+  ]
+}}
+
+
+**Ex34: Unfreeze Every Frozen Layer**
+User: "Unfreeze everything"
+{{
+  "reasoning": "No layer_query given, so every layer is considered, but unfreeze only ever touches the subset that is currently frozen.",
+  "primary_goal": "model_management",
+  "steps": [
+    {{
+      "kind": "model_action",
+      "model_action_name": "unfreeze"
     }}
   ]
 }}

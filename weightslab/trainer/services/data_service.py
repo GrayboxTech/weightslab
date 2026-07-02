@@ -2475,6 +2475,26 @@ class DataService:
                 logger.error(f"Op {func_name} failed: {e}")
                 return f"Failed to apply {func_name}: {e}"
 
+        # C2) Cleanup of agent-created scratch columns (is_temporary=True on a
+        # transform step). Only ever emitted by the agent itself for a column
+        # it just created in this same request, never by the LLM directly, so
+        # this cannot be used to delete pre-existing user data.
+        if func == "df.drop_column":
+            col = params.get("col")
+            if not col or col not in df.columns:
+                return f"No temporary column '{col}' to remove."
+            try:
+                df.drop(columns=[col], inplace=True)
+                if self._df_manager is not None:
+                    try:
+                        self._df_manager.drop_column(col)
+                    except Exception as e:
+                        logger.warning(f"Failed to drop temporary column '{col}' from ledger: {e}")
+                return f"Removed temporary column '{col}'"
+            except Exception as e:
+                logger.error(f"Failed to drop temporary column {col}: {e}")
+                return f"Failed to remove temporary column '{col}': {e}"
+
         # D) Analysis (Read-Only)
         if func == "df.analyze":
             code = params.get("code")

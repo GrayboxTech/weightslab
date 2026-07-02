@@ -2,6 +2,7 @@ import importlib
 import sys
 import types
 import unittest
+
 from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import MagicMock
@@ -53,6 +54,17 @@ _LAYER_ROWS = [
         "neurons_count": 2048, "incoming_neurons_count": 64,
         "kernel_size": None, "stride": None, "frozen": True,
     },
+]
+
+# Layer 0 is NOT fully frozen at the layer level, but neuron 2 within it is
+# individually frozen — exercises the neuron-scoped unfreeze path. Layer 1's
+# neurons are all frozen, matching its layer-level frozen=True.
+_NEURON_ROWS = [
+    {"layer_id": 0, "neuron_id": 0, "learning_rate": 1.0, "frozen": False},
+    {"layer_id": 0, "neuron_id": 1, "learning_rate": 1.0, "frozen": False},
+    {"layer_id": 0, "neuron_id": 2, "learning_rate": 0.0, "frozen": True},
+    {"layer_id": 1, "neuron_id": 0, "learning_rate": 0.0, "frozen": True},
+    {"layer_id": 1, "neuron_id": 1, "learning_rate": 0.0, "frozen": True},
 ]
 
 
@@ -160,6 +172,63 @@ class TestChainedTagThenDiscard(unittest.TestCase):
         agent._resolve_intent_to_ops(intent)
         # Pending column must be removed again after resolution (no schema leak).
         self.assertNotIn("tag:Disabled", agent._cols)
+
+
+class TestTemporaryColumnCleanup(unittest.TestCase):
+    """Scratch columns (is_temporary=True) used only to compute a later
+    step's result must be auto-removed once the whole request finishes."""
+
+    def test_temporary_columns_are_dropped_after_final_step(self):
+        agent_mod, agent = _make_agent(df=pd.DataFrame({"train_loss": [0.1, 0.9]}))
+        hard_step = agent_mod.AtomicIntent(
+            kind="transform", target_column="tag:goldset_hard", is_temporary=True,
+            transform_code="np.where(df['train_loss'] > 0.8, True, df.get('tag:goldset_hard', False))",
+        )
+        easy_step = agent_mod.AtomicIntent(
+            kind="transform", target_column="tag:goldset_easy", is_temporary=True,
+            transform_code="np.where(df['train_loss'] < 0.2, True, df.get('tag:goldset_easy', False))",
+        )
+        final_step = agent_mod.AtomicIntent(
+            kind="transform", target_column="tag:goldset",
+            transform_code="np.where(df.get('tag:goldset_hard', False) | df.get('tag:goldset_easy', False), True, df.get('tag:goldset', False))",
+        )
+        intent = agent_mod.Intent(
+            reasoning="goldset hard/easy", primary_goal="ui_manipulation",
+            steps=[hard_step, easy_step, final_step],
+        )
+
+        ops = agent._resolve_intent_to_ops(intent)
+
+        # The three df.modify ops run first (in order), then cleanup for the
+        # two scratch columns — never for the user-requested tag:goldset.
+        self.assertEqual([op["function"] for op in ops], [
+            "df.modify", "df.modify", "df.modify", "df.drop_column", "df.drop_column",
+        ])
+        modify_cols = [op["params"]["col"] for op in ops if op["function"] == "df.modify"]
+        self.assertEqual(modify_cols, ["tag:goldset_hard", "tag:goldset_easy", "tag:goldset"])
+        cleanup_cols = [op["params"]["col"] for op in ops if op["function"] == "df.drop_column"]
+        self.assertEqual(cleanup_cols, ["tag:goldset_hard", "tag:goldset_easy"])
+
+    def test_non_temporary_transform_is_never_cleaned_up(self):
+        agent_mod, agent = _make_agent(df=pd.DataFrame({"train_loss": [0.1, 0.9]}))
+        step = agent_mod.AtomicIntent(
+            kind="transform", target_column="loss_scaled",
+            transform_code="df['train_loss'] * 2",
+        )
+        intent = agent_mod.Intent(reasoning="scale loss", primary_goal="ui_manipulation", steps=[step])
+
+        ops = agent._resolve_intent_to_ops(intent)
+
+        self.assertEqual([op["function"] for op in ops], ["df.modify"])
+
+    def test_transform_handler_propagates_temporary_flag(self):
+        agent_mod, agent = _make_agent(df=pd.DataFrame({"loss": [0.1]}))
+        step = agent_mod.AtomicIntent(
+            kind="transform", target_column="tmp_col", is_temporary=True, transform_code="df['loss'] * 2",
+        )
+        op = agent_mod.TransformHandler(agent).build_op(step, agent_mod.Intent(reasoning="x", primary_goal="ui_manipulation", steps=[step]))
+
+        self.assertTrue(op["params"]["temporary"])
 
 
 class TestModelSchemaHelpers(unittest.TestCase):
@@ -273,6 +342,83 @@ class TestModelActionHandler(unittest.TestCase):
         self.assertEqual(op["function"], "model.error")
 
 
+class TestUnfreeze(unittest.TestCase):
+    """unfreeze re-applies the freeze toggle, but only against layers/neurons
+    that are ALREADY frozen, so it can never accidentally freeze something
+    that wasn't frozen yet."""
+
+    def _agent_with_model(self):
+        agent_mod, agent = _make_agent()
+        agent.model_layers_df = pd.DataFrame(_LAYER_ROWS)
+        agent.model_neurons_df = pd.DataFrame(_NEURON_ROWS)
+        agent.model_available = True
+        return agent_mod, agent
+
+    def test_unfreeze_frozen_layer_dispatches_as_freeze(self):
+        agent_mod, agent = self._agent_with_model()
+        step = agent_mod.AtomicIntent(
+            kind="model_action",
+            model_action_name="unfreeze",
+            layer_query=[agent_mod.Condition(column="layer_id", op="==", value=1)],
+        )
+        intent = agent_mod.Intent(reasoning="unfreeze layer 1", primary_goal="model_management", steps=[step])
+        op = agent_mod.ModelActionHandler(agent).build_op(step, intent)
+
+        self.assertEqual(op["function"], "model.freeze")
+        self.assertEqual(op["params"]["layer_ids"], [1])
+
+    def test_unfreeze_already_unfrozen_layer_is_a_noop(self):
+        agent_mod, agent = self._agent_with_model()
+        step = agent_mod.AtomicIntent(
+            kind="model_action",
+            model_action_name="unfreeze",
+            layer_query=[agent_mod.Condition(column="layer_id", op="==", value=0)],
+        )
+        intent = agent_mod.Intent(reasoning="unfreeze layer 0", primary_goal="model_management", steps=[step])
+        op = agent_mod.ModelActionHandler(agent).build_op(step, intent)
+
+        # Layer 0 is not frozen at the layer level -> must refuse, never freeze it.
+        self.assertEqual(op["function"], "model.error")
+
+    def test_unfreeze_all_only_targets_frozen_layers(self):
+        agent_mod, agent = self._agent_with_model()
+        step = agent_mod.AtomicIntent(kind="model_action", model_action_name="unfreeze")
+        intent = agent_mod.Intent(reasoning="unfreeze everything", primary_goal="model_management", steps=[step])
+        op = agent_mod.ModelActionHandler(agent).build_op(step, intent)
+
+        self.assertEqual(op["function"], "model.freeze")
+        self.assertEqual(op["params"]["layer_ids"], [1])  # only the frozen layer
+
+    def test_unfreeze_specific_frozen_neuron_in_partially_frozen_layer(self):
+        agent_mod, agent = self._agent_with_model()
+        step = agent_mod.AtomicIntent(
+            kind="model_action",
+            model_action_name="unfreeze",
+            layer_query=[agent_mod.Condition(column="layer_id", op="==", value=0)],
+            neuron_indices=[0, 2],  # neuron 0 is unfrozen, neuron 2 is frozen
+        )
+        intent = agent_mod.Intent(reasoning="unfreeze neuron 2 of layer 0", primary_goal="model_management", steps=[step])
+        op = agent_mod.ModelActionHandler(agent).build_op(step, intent)
+
+        self.assertEqual(op["function"], "model.freeze")
+        self.assertEqual(op["params"]["layer_ids"], [0])
+        # Only neuron 2 (actually frozen) is toggled; neuron 0 is left alone.
+        self.assertEqual(op["params"]["neuron_ids"], [2])
+
+    def test_unfreeze_neurons_none_frozen_is_refused(self):
+        agent_mod, agent = self._agent_with_model()
+        step = agent_mod.AtomicIntent(
+            kind="model_action",
+            model_action_name="unfreeze",
+            layer_query=[agent_mod.Condition(column="layer_id", op="==", value=0)],
+            neuron_indices=[0, 1],  # both unfrozen
+        )
+        intent = agent_mod.Intent(reasoning="unfreeze neurons 0,1 of layer 0", primary_goal="model_management", steps=[step])
+        op = agent_mod.ModelActionHandler(agent).build_op(step, intent)
+
+        self.assertEqual(op["function"], "model.error")
+
+
 class TestDataServiceAgentDispatch(unittest.TestCase):
     """Exercises the execution layer (_apply_agent_operation) that the agent's
     ops funnel through: column-write safety net + model freeze/reset dispatch."""
@@ -316,6 +462,25 @@ class TestDataServiceAgentDispatch(unittest.TestCase):
         self.assertIn("Modified column", msg2)
         self.assertListEqual(df["discarded"].tolist(), [False, True])
         self.assertListEqual(df["tag:x"].tolist(), [False, True])
+
+    def test_drop_column_removes_temporary_column(self):
+        ds = self._make_data_service()
+        df = pd.DataFrame({"loss": [0.1], "tag:goldset_hard": [True]})
+
+        msg = ds._apply_agent_operation(df, "df.drop_column", {"col": "tag:goldset_hard"})
+
+        self.assertIn("Removed temporary column", msg)
+        self.assertNotIn("tag:goldset_hard", df.columns)
+        self.assertIn("loss", df.columns)  # untouched
+
+    def test_drop_column_missing_column_is_a_noop_message(self):
+        ds = self._make_data_service()
+        df = pd.DataFrame({"loss": [0.1]})
+
+        msg = ds._apply_agent_operation(df, "df.drop_column", {"col": "does_not_exist"})
+
+        self.assertIn("No temporary column", msg)
+        self.assertIn("loss", df.columns)
 
     def test_model_info_and_error_passthrough(self):
         ds = self._make_data_service()

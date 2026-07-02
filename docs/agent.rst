@@ -41,7 +41,7 @@ The agent recognizes four broad families of request:
    * - **Model introspection & management**
      - "Which layer has more than 2000 neurons?", "Which layers are frozen?",
        "Show me the complete model details", "Freeze the layer with more than
-       2000 neurons", "Reset layer 3".
+       2000 neurons", "Reset layer 3", "Unfreeze layer 3", "Unfreeze everything".
 
 Compound, multi-step requests work too. A prompt such as *"Tag as 'Disabled'
 samples with training loss greater than 0.3 and loss_shape classified as
@@ -66,14 +66,23 @@ data:
   "multiply the loss column by 2", it will instead create a new
   ``loss_scaled`` column and tell you it did so. This is enforced both in the
   planner and again at the execution layer.
+- **Scratch columns are cleaned up automatically.** When computing the column
+  you asked for needs one or more intermediate helper columns (for example two
+  helper tags combined into a final one), the agent marks them as temporary and
+  removes them again — from both the grid and the ledger — right after the
+  request finishes. Only the column you actually asked for remains.
 - **Read-only analysis is sandboxed.** Aggregate questions ("what is the
   average loss?") are evaluated read-only; ``import`` and dunder access are
   blocked.
 
 Model management uses the *same* architecture operations as the Weights Studio
-grid controls: ``freeze`` zeroes a layer/neuron's learning rate, and ``reset``
-reinitializes its weights. There is no "unfreeze" verb — to undo a freeze, ask
-the agent to **reset** the layer.
+grid controls: ``freeze`` zeroes a layer/neuron's learning rate and ``reset``
+reinitializes its weights. ``unfreeze`` is implemented by re-applying ``freeze``
+to the subset that is **already frozen** (freezing toggles the learning rate
+between its previous value and zero, so freezing an already-frozen
+layer/neuron restores it). This means ``unfreeze`` can never accidentally
+freeze something that wasn't frozen yet — if nothing in your selection is
+frozen, it's a safe no-op.
 
 Initializing the agent
 ----------------------
@@ -187,10 +196,135 @@ Using the agent effectively
 - **Ask for derived columns, not edits.** To transform an existing signal, ask
   for a *new* column ("create ``error_sq`` as loss squared") rather than asking
   to change the original in place.
-- **Undo a freeze with reset.** There is no unfreeze; reset reinitializes the
-  layer/neurons.
+- **Use unfreeze to undo a freeze.** ``reset`` reinitializes weights (destructive);
+  ``unfreeze`` only restores trainability and is a no-op on anything not
+  currently frozen.
 - **Inspect before acting.** Ask "show me the complete model details" or "which
-  layers are frozen?" before issuing freeze/reset commands.
+  layers are frozen?" before issuing freeze/reset/unfreeze commands.
+
+Example prompts by task
+------------------------
+
+The tables below illustrate the kind of phrasing the agent understands for
+each task family. Adjust column/tag/layer names to match your own experiment.
+
+Sorting & filtering the grid
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 60 40
+
+   * - Prompt
+     - What happens
+   * - "Sort by train loss, highest first"
+     - Sorts the grid descending on the resolved loss column.
+   * - "Keep only validation samples"
+     - Filters the view to ``origin == 'val'``.
+   * - "Keep the top 10% with highest loss"
+     - Sorts descending, then keeps the first 10% of rows.
+   * - "Group by predicted class"
+     - Groups/sorts the grid by the resolved class column.
+   * - "Show only samples with loss > 5"
+     - Deny-lists everything *not* matching, then surfaces matches at the top.
+   * - "Reset all filters"
+     - Clears filters/sorting and restores the full view.
+
+Tagging & discarding samples
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 60 40
+
+   * - Prompt
+     - What happens
+   * - "Tag train samples with train loss greater than 1.5"
+     - Creates/updates a boolean ``tag:<inferred_name>`` column.
+   * - "Tag as 'Disabled' samples with training loss greater than 0.3 and
+       loss_shape classified as 'plateaued'. Then discard these data."
+     - Creates ``tag:Disabled`` from the two conditions, then discards the
+       same tagged rows (reuses the tag, doesn't recompute the filter).
+   * - "Untag 'goldset' on validation samples"
+     - Sets ``tag:goldset`` to ``False`` for the matching subset.
+   * - "Discard all samples with loss > 5"
+     - Sets ``discarded = True`` for matches. Rows are never deleted.
+   * - "Add the tag 'goldset' to 50% of train samples, 30% hard / 70% easy"
+     - Builds two temporary helper tags to compute the mix, unions them into
+       ``tag:goldset``, then removes the two helpers automatically.
+
+Deriving new signals / columns
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 60 40
+
+   * - Prompt
+     - What happens
+   * - "Create a column 'loss_ratio' as train_loss divided by val_loss"
+     - Creates a brand-new derived column from two existing ones.
+   * - "Add a boolean column 'is_outlier' for loss above mean + 2·std"
+     - Creates a new boolean column from an aggregate expression.
+   * - "Multiply the loss column by 2"
+     - Refused as an in-place edit; creates ``loss_scaled`` instead and says so.
+   * - "Create 'combined_score' from normalized loss and confidence"
+     - Uses a temporary normalized-loss helper column, then removes it once
+       ``combined_score`` is computed.
+
+Answering data questions
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 60 40
+
+   * - Prompt
+     - What happens
+   * - "What is the average loss?"
+     - Read-only aggregate answer.
+   * - "What is the average loss of the 10 hardest samples?"
+     - Filters to the bottom/top 10 first, then aggregates.
+   * - "How many samples per origin?"
+     - Read-only value-count breakdown.
+
+Model introspection
+~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 60 40
+
+   * - Prompt
+     - What happens
+   * - "Show me the complete model details"
+     - Lists every layer: id, type, neuron counts, frozen state.
+   * - "Which layer has more than 2000 neurons?"
+     - Filters the live layer table on ``neurons_count``.
+   * - "Which layers are currently frozen?"
+     - Filters the live layer table on ``frozen``.
+   * - "How many neurons does layer 2 have?"
+     - Read-only lookup against the live layer table.
+
+Model management (freeze / reset / unfreeze)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 60 40
+
+   * - Prompt
+     - What happens
+   * - "Freeze the layer with more than 2000 neurons"
+     - Resolves the matching layer(s) and freezes them.
+   * - "Reset layer 3"
+     - Reinitializes layer 3's weights.
+   * - "Unfreeze layer 3"
+     - Restores layer 3 if (and only if) it is currently frozen; a no-op otherwise.
+   * - "Unfreeze neurons 3 and 5 of layer 2"
+     - Restores only whichever of those two neurons is actually frozen.
+   * - "Unfreeze everything"
+     - Restores every currently-frozen layer; leaves already-trainable layers untouched.
 
 Workflow pattern
 ----------------

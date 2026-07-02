@@ -67,6 +67,10 @@ class AtomicIntent(BaseModel):
     # Transformation (Column Modification)
     transform_code: Optional[str] = Field(default=None, description="Pandas expression for the new value (e.g. df['col'] * 2)")
     target_column: Optional[str] = Field(default=None, description="The column to create or modify")
+    is_temporary: Optional[bool] = Field(
+        default=False,
+        description="True if target_column is scratch state used only to help compute a LATER step's result within this same request (e.g. two intermediate tags combined into a final one). It is dropped automatically once the whole request finishes executing. Never set this on the column the user actually asked for.",
+    )
 
     # Future-proofing for Actions
     action_name: Optional[str] = Field(default=None, description="Name of the action (e.g. 'save_dataset')")
@@ -81,9 +85,9 @@ class AtomicIntent(BaseModel):
         default=None,
         description="Pandas expression evaluated against `layers_df` for aggregate model questions (e.g. 'layers_df[\"neurons_count\"].sum()'). Use layer_query instead for simple filters.",
     )
-    model_action_name: Optional[Literal["freeze", "reset"]] = Field(
+    model_action_name: Optional[Literal["freeze", "reset", "unfreeze"]] = Field(
         default=None,
-        description="Architecture operation to apply to the layer(s)/neuron(s) selected by layer_query.",
+        description="Architecture operation to apply to the layer(s)/neuron(s) selected by layer_query. 'unfreeze' only ever touches currently-frozen layers/neurons.",
     )
     neuron_indices: Optional[List[int]] = Field(
         default=None,
@@ -256,7 +260,8 @@ class TransformHandler(IntentHandler):
             "function": "df.modify",
             "params": {
                 "col": step.target_column,
-                "code": fixed_code
+                "code": fixed_code,
+                "temporary": bool(step.is_temporary),
             }
         }
 
@@ -306,7 +311,15 @@ class ModelInfoHandler(IntentHandler):
         return {"function": "model.info", "params": {"text": agent._format_layers_table(selected)}}
 
 class ModelActionHandler(IntentHandler):
-    """Architecture management: freeze/reset layers or specific neurons within them."""
+    """Architecture management: freeze/reset/unfreeze layers or specific neurons.
+
+    `unfreeze` reuses the same `model.freeze` execution path: freezing a
+    neuron TOGGLES its learning rate (new_lr = 1.0 - current_lr), so applying
+    it again to an already-frozen neuron restores it — no separate backend
+    primitive exists or is needed. To keep this safe, an unfreeze request is
+    always constrained to layers/neurons that are ALREADY frozen, so it can
+    never accidentally freeze something that wasn't frozen yet.
+    """
     def build_op(self, step: AtomicIntent, context: Intent) -> Optional[dict]:
         agent = self.agent
         action = step.model_action_name
@@ -315,6 +328,9 @@ class ModelActionHandler(IntentHandler):
 
         if not agent.model_available:
             return {"function": "model.error", "params": {"reason": "No model is currently registered; there is no architecture to modify."}}
+
+        if action == "unfreeze":
+            return self._build_unfreeze_op(agent, step)
 
         selected = agent._select_layers(step.layer_query)
         layer_ids = [] if selected is None else selected["layer_id"].tolist()
@@ -325,6 +341,39 @@ class ModelActionHandler(IntentHandler):
             "function": f"model.{action}",
             "params": {"layer_ids": layer_ids, "neuron_ids": step.neuron_indices or []},
         }
+
+    @staticmethod
+    def _build_unfreeze_op(agent, step: AtomicIntent) -> dict:
+        selected = agent._select_layers(step.layer_query)
+        layer_ids = [] if selected is None else selected["layer_id"].tolist()
+        if not layer_ids:
+            return {"function": "model.error", "params": {"reason": "No layers matched the given criteria; nothing to unfreeze."}}
+
+        # Neuron-scoped unfreeze on a single resolved layer: only toggle the
+        # subset of the requested neurons that are actually frozen.
+        if step.neuron_indices and len(layer_ids) == 1:
+            layer_id = layer_ids[0]
+            neurons_df = agent.model_neurons_df
+            frozen_ids = []
+            if neurons_df is not None and not neurons_df.empty:
+                mask = (
+                    (neurons_df["layer_id"] == layer_id)
+                    & (neurons_df["neuron_id"].isin(step.neuron_indices))
+                    & (neurons_df["frozen"] == True)  # noqa: E712
+                )
+                frozen_ids = neurons_df.loc[mask, "neuron_id"].tolist()
+            if not frozen_ids:
+                return {"function": "model.error", "params": {"reason": f"None of the requested neurons in layer {layer_id} are currently frozen."}}
+            return {"function": "model.freeze", "params": {"layer_ids": [layer_id], "neuron_ids": frozen_ids}}
+
+        # Layer-scoped unfreeze: constrain to layers that are ACTUALLY frozen
+        # (freeze toggles, so applying it to an unfrozen layer would freeze it).
+        frozen_selected = selected[selected["frozen"] == True] if "frozen" in selected.columns else selected.iloc[0:0]  # noqa: E712
+        frozen_layer_ids = frozen_selected["layer_id"].tolist()
+        if not frozen_layer_ids:
+            return {"function": "model.error", "params": {"reason": "None of the selected layers are currently frozen; nothing to unfreeze."}}
+
+        return {"function": "model.freeze", "params": {"layer_ids": frozen_layer_ids, "neuron_ids": []}}
 
 
 # ==========================================
@@ -436,15 +485,18 @@ class DataManipulationAgent:
 
     def _setup_model_schema(self):
         """
-        Builds a small layer-level table describing the live model's
-        architecture, mirroring `_setup_schema` but for `model.*` requests
-        (introspection + freeze/reset) instead of dataframe requests.
+        Builds small layer- and neuron-level tables describing the live
+        model's architecture, mirroring `_setup_schema` but for `model.*`
+        requests (introspection + freeze/reset/unfreeze) instead of
+        dataframe requests.
         """
-        columns = [
+        layer_columns = [
             "layer_id", "layer_name", "layer_type", "neurons_count",
             "incoming_neurons_count", "kernel_size", "stride", "frozen",
         ]
-        self.model_layers_df = pd.DataFrame(columns=columns)
+        neuron_columns = ["layer_id", "neuron_id", "learning_rate", "frozen"]
+        self.model_layers_df = pd.DataFrame(columns=layer_columns)
+        self.model_neurons_df = pd.DataFrame(columns=neuron_columns)
         self.model_available = False
 
         try:
@@ -457,13 +509,14 @@ class DataManipulationAgent:
             if model is None:
                 return
 
-            rows = []
+            layer_rows = []
+            neuron_rows = []
             for rep in get_layer_representations(model):
                 lrs = [ns.learning_rate for ns in rep.neurons_statistics]
                 # A layer is considered frozen when every neuron's learning
                 # rate has been zeroed out (how `FREEZE` is implemented).
                 frozen = bool(lrs) and all(lr == 0 for lr in lrs)
-                rows.append({
+                layer_rows.append({
                     "layer_id": rep.layer_id,
                     "layer_name": rep.layer_name,
                     "layer_type": rep.layer_type,
@@ -473,9 +526,18 @@ class DataManipulationAgent:
                     "stride": rep.stride,
                     "frozen": frozen,
                 })
-            if rows:
-                self.model_layers_df = pd.DataFrame(rows, columns=columns)
+                for ns in rep.neurons_statistics:
+                    neuron_rows.append({
+                        "layer_id": rep.layer_id,
+                        "neuron_id": ns.neuron_id.neuron_id,
+                        "learning_rate": ns.learning_rate,
+                        "frozen": ns.learning_rate == 0,
+                    })
+            if layer_rows:
+                self.model_layers_df = pd.DataFrame(layer_rows, columns=layer_columns)
                 self.model_available = True
+            if neuron_rows:
+                self.model_neurons_df = pd.DataFrame(neuron_rows, columns=neuron_columns)
         except Exception as e:
             _LOGGER.warning(f"[Agent] Failed to build model schema: {e}")
 
@@ -1134,6 +1196,21 @@ class DataManipulationAgent:
 
                 except Exception as e:
                     _LOGGER.error(f"Handler {step.kind} failed: {e}")
+
+            # Auto-cleanup: scratch columns created only to help compute a
+            # LATER step's result (is_temporary=True) never remain in the
+            # live dataframe once the whole request has finished executing.
+            final_targets = {
+                s.target_column for s in intent.steps
+                if s.kind == "transform" and not s.is_temporary and s.target_column
+            }
+            temp_columns = [
+                s.target_column for s in intent.steps
+                if s.kind == "transform" and s.is_temporary and s.target_column
+                and s.target_column not in final_targets
+            ]
+            for col in dict.fromkeys(temp_columns):  # de-dup, preserve order
+                ops.append({"function": "df.drop_column", "params": {"col": col}})
 
             return ops
 

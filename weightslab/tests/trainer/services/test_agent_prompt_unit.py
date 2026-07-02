@@ -57,6 +57,9 @@ class TestAgentPromptUnit(unittest.TestCase):
         self.assertIn("MODEL CONTEXT", INTENT_PROMPT)
         self.assertIn("COLUMN WRITE SAFETY", INTENT_PROMPT)
         self.assertIn("model_action", INTENT_PROMPT)
+        # Temporary/scratch column support and unfreeze must be documented.
+        self.assertIn("is_temporary", INTENT_PROMPT)
+        self.assertIn('"unfreeze"', INTENT_PROMPT)
 
     def test_intent_prompt_formats_without_stray_braces(self):
         # All JSON examples use doubled braces; a single stray brace would make
