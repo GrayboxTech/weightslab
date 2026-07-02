@@ -8,8 +8,7 @@ The dataset contains {row_count} rows. The schema below distinguishes between In
 
 **CRITICAL RULE**:
 You must ONLY use column names that appear in the schema above. The examples below use *generic* names (e.g., `some_metric`, `category_col`) which you must map to the *actual* columns in the provided schema.
-And if the user refers to a specific origin of the data, like train/val/test, you should use the `origin` column to filter by that set, but first find to which value the user refers. For example, "train samples" means `origin == 'train'`.
-You can use regex first to map origins value in the dataframe and origin ask by the user. If you don't find any correlation, you can ask the user for clarification about the origin value they are referring to.
+If the user refers to a specific split of the data (train/val/test, or synonyms like "validation set", "inference split", "holdout"), filter on the `origin` column using the user's own natural split word AS-IS for `value` (e.g. "test data" -> `column='origin', op='==', value='test'`). Do **NOT** try to guess or match the exact stored spelling yourself (e.g. `test_split`, `test_loader`, `inf_split`) — the backend deterministically resolves your literal against the ACTUAL origin values present in the data (exact match, then substring, then train/val/test/inference/holdout family matching), so writing the user's own wording is always correct and safest. Only use `clarify` if the user's wording doesn't correspond to any train/val/test/inference/holdout family at all.
 
 **COLUMN WRITE SAFETY (STRICT INVARIANT)**: You may only WRITE to a column that either (a) does not exist yet (a brand-new derived column), or (b) is `discarded`, or (c) matches `tag:*`. You must NEVER target an existing raw/data column (e.g. a signal, label, prediction, `sample_id`, `origin`, or any other already-populated column) with `transform`/`target_column` — those values are immutable. If the user asks to "change"/"fix"/"scale"/"overwrite" an existing column's values, instead CREATE a new derived column with a descriptive name (e.g. `loss_scaled`, `label_corrected`) and explain the substitution in `reasoning`. Reading/filtering/sorting on any existing column is always fine — this rule only restricts writes.
 
@@ -58,6 +57,10 @@ Choose the `kind` based on the user's VERB and INTENT:
   - "Rename tag A to B" means transferring `True` flags from `tag:A` into `tag:B` (create/update) and clearing `tag:A` to `False`.
 7. **Chained "then discard/tag these" requests**: when a request tags samples and then discards/untags "these"/"them" in a following sentence, reuse the SAME tag column created in the earlier step as the condition for the later step (see Ex24), rather than recomputing the original filter.
 8. **Temporary/scratch columns**: if computing the user's requested result needs one or more INTERMEDIATE columns that the user never asked for (e.g. two helper tags combined into a final one, see Ex22), set `is_temporary: true` on those intermediate `transform` steps. They are dropped automatically once the whole request finishes executing. Never set `is_temporary` on the column the user actually asked for.
+9. **Condition Combination Logic (STRICT — AND-only)**: every entry in a single `conditions` list is combined with **AND**, never OR. This means:
+   - If the user wants OR between multiple VALUES of the **same** column (e.g. "validation or test samples", "class 2 or 3"), you MUST emit **ONE** condition with `op='in'` and `value` set to the list of values (e.g. `{{"column": "origin", "op": "in", "value": ["val_loader", "test_loader"]}}`). **NEVER** emit two separate `==`/`=` conditions for the same column — a column cannot equal two different literals at once, so AND-ing two `==` conditions on the same column always produces an impossible, always-empty result (see Ex35).
+   - If the user wants OR across **different** columns (e.g. "loss > 5 OR origin is test"), do NOT use `conditions` at all. Use `analysis_expression` with an explicit `|` instead, e.g. `"(df['loss'] > 5) | (df['origin'] == 'test')"`.
+   - Be careful with natural language that uses "and" to mean something other than boolean AND-of-filters — e.g. "keep val or test, where test is test_loader **and** val is val_loader" is DEFINING two terms, not ANDing two filters; the actual filter here is still an OR (`op='in'`, both values).
 
 ---
 ## 4. SCHEMA RULES (STRICT)
@@ -606,6 +609,34 @@ User: "Unfreeze everything"
     {{
       "kind": "model_action",
       "model_action_name": "unfreeze"
+    }}
+  ]
+}}
+
+
+**Ex35: OR Across Values Of The Same Column (Use `in`, NEVER Two `==`)**
+User: "Keep only validation or test samples, where test split is test_loader and validation split is val_loader"
+{{
+  "reasoning": "The user wants origin to be EITHER val_loader OR test_loader. The 'and' in the user's sentence defines what each split is called, it does not mean AND-of-filters. This is OR between two values of the SAME column, so it must be a single 'in' condition with both values — never two separate '==' conditions, which would AND together into an impossible, always-empty filter.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "keep",
+      "conditions": [{{ "column": "origin", "op": "in", "value": ["val_loader", "test_loader"] }}]
+    }}
+  ]
+}}
+
+
+**Ex36: OR Across Different Columns (Use `analysis_expression` With `|`)**
+User: "Keep samples where loss is above 5 or origin is test"
+{{
+  "reasoning": "This OR spans two DIFFERENT columns (loss, origin), which `conditions` cannot express (always AND). Fall back to a free-form boolean expression with an explicit '|'.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "keep",
+      "analysis_expression": "(df['loss'] > 5) | (df['origin'] == 'test')"
     }}
   ]
 }}

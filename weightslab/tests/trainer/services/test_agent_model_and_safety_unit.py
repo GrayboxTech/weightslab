@@ -110,6 +110,137 @@ class TestColumnWriteSafety(unittest.TestCase):
         self.assertNotIn("Safety", intent.reasoning)
 
 
+class TestSplitValueResolution(unittest.TestCase):
+    """The origin/split value a user says ("test", "inference") must
+    deterministically resolve to whatever the dataset's ACTUAL origin values
+    are ("test_split", "test_loader", "inf_split", ...), regardless of naming
+    convention, without relying on the LLM to guess the exact spelling."""
+
+    def _agent_with_origin_values(self, values):
+        df = pd.DataFrame(
+            {"loss": [0.1] * len(values)},
+            index=pd.MultiIndex.from_tuples(
+                [(v, i) for i, v in enumerate(values)], names=["origin", "sample_id"],
+            ),
+        )
+        _, agent = _make_agent(df=df)
+        return agent
+
+    def test_exact_match_is_used_as_is(self):
+        agent = self._agent_with_origin_values(["train", "test"])
+        self.assertEqual(agent._resolve_categorical_value("origin", "test"), "test")
+
+    def test_substring_match_resolves_test_split(self):
+        agent = self._agent_with_origin_values(["train_split", "test_split"])
+        self.assertEqual(agent._resolve_categorical_value("origin", "test"), "test_split")
+        self.assertEqual(agent._resolve_categorical_value("origin", "train"), "train_split")
+
+    def test_substring_match_resolves_test_loader(self):
+        agent = self._agent_with_origin_values(["train_loader", "test_loader"])
+        self.assertEqual(agent._resolve_categorical_value("origin", "test"), "test_loader")
+
+    def test_family_match_resolves_inference_to_inf_split(self):
+        agent = self._agent_with_origin_values(["train_split", "inf_split"])
+        self.assertEqual(agent._resolve_categorical_value("origin", "test"), "inf_split")
+        self.assertEqual(agent._resolve_categorical_value("origin", "inference"), "inf_split")
+        self.assertEqual(agent._resolve_categorical_value("origin", "test data"), "inf_split")
+
+    def test_family_match_resolves_holdout(self):
+        agent = self._agent_with_origin_values(["train", "holdout"])
+        self.assertEqual(agent._resolve_categorical_value("origin", "test"), "holdout")
+
+    def test_unrecognized_value_falls_back_to_literal(self):
+        agent = self._agent_with_origin_values(["train_split", "test_split"])
+        self.assertEqual(agent._resolve_categorical_value("origin", "quarantine"), "quarantine")
+
+    def test_non_categorical_column_returns_value_unchanged(self):
+        agent = self._agent_with_origin_values(["train", "test"])
+        self.assertEqual(agent._resolve_categorical_value("does_not_exist", "test"), "test")
+
+    def test_build_python_mask_resolves_origin_literal_end_to_end(self):
+        agent_mod, agent = _make_agent(
+            df=pd.DataFrame(
+                {"train_loss": [0.1, 0.9]},
+                index=pd.MultiIndex.from_tuples(
+                    [("train_split", 1), ("inf_split", 2)], names=["origin", "sample_id"],
+                ),
+            )
+        )
+        mask = agent._build_python_mask(
+            [agent_mod.Condition(column="origin", op="==", value="test")]
+        )
+        self.assertIsNotNone(mask)
+        self.assertIn("'inf_split'", mask)
+        self.assertNotIn("'test'", mask)
+
+
+class TestSameColumnEqualityCoalescing(unittest.TestCase):
+    """Reproduces the reported bug: 'keep only validation or test samples'
+    was planned as two `==` conditions on `origin`, which _build_python_mask
+    always ANDs together -> an impossible, always-empty filter. Same-column
+    equality conditions must be coalesced into a single `in` (OR) instead."""
+
+    def _agent_with_origins(self, values):
+        df = pd.DataFrame(
+            {"loss": [0.1] * len(values)},
+            index=pd.MultiIndex.from_tuples(
+                [(v, i) for i, v in enumerate(values)], names=["origin", "sample_id"],
+            ),
+        )
+        _, agent = _make_agent(df=df)
+        return agent
+
+    def test_two_equality_conditions_on_same_column_become_in(self):
+        agent = self._agent_with_origins(["train_loader", "val_loader", "test_loader"])
+        conditions = self._conditions("val_loader", "test_loader")
+
+        coalesced = agent._coalesce_same_column_equality(conditions)
+
+        self.assertEqual(len(coalesced), 1)
+        self.assertEqual(coalesced[0].op, "in")
+        self.assertEqual(coalesced[0].value, ["val_loader", "test_loader"])
+
+    def test_reported_scenario_end_to_end_mask_is_or_not_and(self):
+        agent = self._agent_with_origins(["train_loader", "val_loader", "test_loader"])
+        conditions = self._conditions("val_loader", "test_loader")
+
+        mask = agent._build_python_mask(conditions)
+
+        self.assertIsNotNone(mask)
+        self.assertIn(".isin(", mask)
+        self.assertNotIn(" & ", mask)  # must be a single OR-style isin, not an AND of two ==
+
+    def test_single_equality_condition_is_left_alone(self):
+        agent = self._agent_with_origins(["train_loader", "test_loader"])
+        import weightslab.trainer.services.agent.agent as agent_mod
+        conditions = [agent_mod.Condition(column="origin", op="==", value="test")]
+
+        coalesced = agent._coalesce_same_column_equality(conditions)
+
+        self.assertEqual(len(coalesced), 1)
+        self.assertEqual(coalesced[0].op, "==")
+
+    def test_different_columns_are_not_merged(self):
+        import weightslab.trainer.services.agent.agent as agent_mod
+        agent = self._agent_with_origins(["train_loader", "test_loader"])
+        conditions = [
+            agent_mod.Condition(column="origin", op="==", value="test_loader"),
+            agent_mod.Condition(column="loss", op=">", value=0.5),
+        ]
+
+        coalesced = agent._coalesce_same_column_equality(conditions)
+
+        self.assertEqual(len(coalesced), 2)
+
+    @staticmethod
+    def _conditions(val1, val2):
+        import weightslab.trainer.services.agent.agent as agent_mod
+        return [
+            agent_mod.Condition(column="origin", op="==", value=val1),
+            agent_mod.Condition(column="origin", op="==", value=val2),
+        ]
+
+
 class TestChainedTagThenDiscard(unittest.TestCase):
     """'Tag X with conditions A and B. Then discard these data.' must reuse the
     tag created in the first step rather than losing the compound filter."""

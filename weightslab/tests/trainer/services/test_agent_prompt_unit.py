@@ -60,6 +60,9 @@ class TestAgentPromptUnit(unittest.TestCase):
         # Temporary/scratch column support and unfreeze must be documented.
         self.assertIn("is_temporary", INTENT_PROMPT)
         self.assertIn('"unfreeze"', INTENT_PROMPT)
+        # AND/OR condition-combination guidance must be documented.
+        self.assertIn("Condition Combination Logic", INTENT_PROMPT)
+        self.assertIn('"in"', INTENT_PROMPT)
 
     def test_intent_prompt_formats_without_stray_braces(self):
         # All JSON examples use doubled braces; a single stray brace would make

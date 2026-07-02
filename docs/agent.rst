@@ -187,9 +187,15 @@ See :doc:`configuration` for the full list of agent environment variables, the
 Using the agent effectively
 ----------------------------
 
-- **Be explicit about origin.** "train samples" is resolved to
-  ``origin == 'train'``; if the split value is ambiguous the agent asks for
-  clarification.
+- **Use your own words for splits.** "train samples", "test data", "the
+  inference split", "holdout" all resolve to the ``origin`` column
+  automatically — the agent maps your wording to whatever the dataset's actual
+  split values are (``train_split``, ``test_loader``, ``inf_split``, …), so
+  you never need to know the exact stored spelling.
+- **"A or B" on the same field → one condition, not two filters.** "Keep
+  validation or test samples" is a single origin-is-one-of condition. Phrasing
+  it as two separate statements ("keep validation samples and test samples")
+  can still work, but the clearest phrasing uses "or" explicitly.
 - **Name your tags.** Tags are boolean columns named ``tag:<name>``. If you name
   one (e.g. "tag as ``goldset``") the agent uses ``tag:goldset``; otherwise it
   infers a short, semantic name.
@@ -220,7 +226,13 @@ Sorting & filtering the grid
    * - "Sort by train loss, highest first"
      - Sorts the grid descending on the resolved loss column.
    * - "Keep only validation samples"
-     - Filters the view to ``origin == 'val'``.
+     - Filters the view to ``origin == 'val'`` (resolved to your dataset's
+       actual split value, e.g. ``val_loader``).
+   * - "Keep only validation or test samples, where test split is test_loader
+       and validation split is val_loader"
+     - Filters to ``origin`` being *either* value — planned (and, as a safety
+       net, auto-corrected) as one ``in`` condition, never two contradictory
+       ``==`` conditions ANDed together.
    * - "Keep the top 10% with highest loss"
      - Sorts descending, then keeps the first 10% of rows.
    * - "Group by predicted class"

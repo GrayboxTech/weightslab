@@ -962,9 +962,121 @@ class DataManipulationAgent:
 
         return best_col if best_score > 0.3 else None
 
+    # Semantic families for dataset split naming. Any dataset may store its
+    # origin values under different spellings ("test", "test_split",
+    # "test_loader", "inf_split", "holdout", ...); this lets a user's natural
+    # word ("test", "inference") deterministically resolve to whatever the
+    # ACTUAL stored value is, instead of relying on the LLM to guess the
+    # exact spelling or on prompt-only regex heuristics.
+    _SPLIT_VALUE_FAMILIES = {
+        "train": {"train", "training", "tr"},
+        "val": {"val", "valid", "validation", "dev"},
+        "test": {
+            "test", "testing", "eval", "evaluation", "inference", "inf",
+            "holdout", "hold",
+        },
+    }
+
+    @classmethod
+    def _split_family(cls, token: str) -> Optional[str]:
+        for family, words in cls._SPLIT_VALUE_FAMILIES.items():
+            if token in words:
+                return family
+        return None
+
+    def _resolve_categorical_value(self, column: str, value: str):
+        """
+        Maps a user-provided literal (e.g. "test") to the actual value present
+        in `column`'s data (e.g. "inf_split"), so origin/split filters never
+        silently return zero rows because of a naming mismatch. Falls back to
+        the original literal if no confident match is found.
+        """
+        if not isinstance(value, str):
+            return value
+
+        candidates = self.df_schema['metadata'].get(column, {}).get('samples')
+        if not candidates:
+            return value
+
+        raw_lower = value.strip().lower()
+
+        # 1. Exact match (case-insensitive) -> use the dataset's own casing.
+        for c in candidates:
+            if str(c).lower() == raw_lower:
+                return c
+
+        # 2. Substring containment either way (e.g. "test" <-> "test_split").
+        for c in candidates:
+            c_lower = str(c).lower()
+            if raw_lower in c_lower or c_lower in raw_lower:
+                return c
+
+        # 3. Split-family match (train/val/test/inference/holdout synonyms),
+        # tokenizing both the user value and each candidate on separators.
+        user_tokens = set(re.split(r"[ _/\-]+", raw_lower)) - {""}
+        user_families = {self._split_family(t) for t in user_tokens} - {None}
+        if user_families:
+            for c in candidates:
+                c_tokens = set(re.split(r"[ _/\-]+", str(c).lower())) - {""}
+                c_families = {self._split_family(t) for t in c_tokens} - {None}
+                if user_families & c_families:
+                    return c
+
+        # 4. Generic token-overlap fallback (same spirit as _resolve_column).
+        best_c, best_score = None, 0.0
+        for c in candidates:
+            c_tokens = set(re.split(r"[ _/\-]+", str(c).lower())) - {""}
+            if not c_tokens or not user_tokens:
+                continue
+            score = len(user_tokens & c_tokens) / len(user_tokens | c_tokens)
+            if score > best_score:
+                best_score, best_c = score, c
+
+        return best_c if best_score > 0.3 else value
+
+    def _coalesce_same_column_equality(self, conditions: List[Condition]) -> List[Condition]:
+        """
+        All entries of a `conditions` list are AND-ed together when compiled
+        into a mask. Two (or more) equality conditions on the SAME column are
+        therefore always contradictory — a column can't equal two different
+        literals at once — so that always-empty result is virtually never
+        what was intended; it's almost always a mis-planned OR (e.g. "keep
+        validation or test samples" emitted as `origin=='val'` AND
+        `origin=='test'`). Deterministically collapse such groups into a
+        single `in` condition so the OR semantics the user actually asked for
+        survive regardless of how the plan phrased it.
+        """
+        if not conditions or len(conditions) < 2:
+            return conditions
+
+        groups: Dict[str, List[Condition]] = {}
+        result: List[Optional[Condition]] = []
+        slot_of: Dict[str, int] = {}
+
+        for cond in conditions:
+            op = (cond.op or "").lower()
+            if op in ("==", "=", "equals"):
+                key = self._resolve_column(cond.column) or cond.column
+                groups.setdefault(key, []).append(cond)
+                if key not in slot_of:
+                    slot_of[key] = len(result)
+                    result.append(None)  # reserved slot, filled in below
+            else:
+                result.append(cond)
+
+        for key, group in groups.items():
+            idx = slot_of[key]
+            if len(group) == 1:
+                result[idx] = group[0]
+            else:
+                result[idx] = Condition(column=group[0].column, op="in", value=[c.value for c in group])
+
+        return [c for c in result if c is not None]
+
     def _build_python_mask(self, conditions: List[Condition], n: Optional[int] = None) -> Optional[str]:
         """Builds an explicit Python boolean mask (df['col'] == val) for Index stability."""
         if not conditions: return None
+        conditions = self._coalesce_same_column_equality(conditions)
         parts = []
         for cond in conditions:
             resolved_col = self._resolve_column(cond.column)
@@ -1033,12 +1145,18 @@ class DataManipulationAgent:
                 # It's a literal. Apply type correction to fix Index mismatches.
                 meta = self.df_schema['metadata'].get(resolved_col, {})
                 dtype = str(meta.get('dtype', '')).lower()
+                is_categorical_dtype = 'str' in dtype or 'object' in dtype or 'category' in dtype
 
                 def cast_v(v):
                     try:
+                        if isinstance(v, str) and is_categorical_dtype:
+                            # Deterministically map the user's wording to the
+                            # actual stored value (e.g. "test" -> "inf_split")
+                            # instead of relying on an LLM-guessed spelling.
+                            v = self._resolve_categorical_value(resolved_col, v)
                         if 'int' in dtype: return int(v)
                         if 'float' in dtype: return float(v)
-                        if 'str' in dtype or 'object' in dtype: return str(v)
+                        if is_categorical_dtype: return str(v)
                     except: pass
                     return v
 
