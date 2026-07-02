@@ -663,7 +663,7 @@ class ModelInterface(NetworkWithOps):
 
     def eval(self):
         try:
-            return super().eval()
+            return self.model.eval()
         except (RuntimeError, Exception):
             logger.warning(
                 f"[{self.__class__.__name__}]: Caught RuntimeError during eval(): {Exception}. \
@@ -673,7 +673,7 @@ class ModelInterface(NetworkWithOps):
 
     def train(self, mode: bool = True):
         try:
-            return super().train(mode=mode)
+            return self.model.train(mode=mode)
         except (RuntimeError, Exception):
             logger.warning(
                 f"[{self.__class__.__name__}]: Caught RuntimeError during train(): {Exception}. \
@@ -691,7 +691,7 @@ class ModelInterface(NetworkWithOps):
         Returns:
             bool: `True` if the model is in training mode, `False` otherwise.
         """
-        return self.training
+        return self.training if not hasattr(self.model, 'training') else self.model.training
 
     def monkey_patching(self):
         """
