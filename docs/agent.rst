@@ -84,6 +84,82 @@ layer/neuron restores it). This means ``unfreeze`` can never accidentally
 freeze something that wasn't frozen yet — if nothing in your selection is
 frozen, it's a safe no-op.
 
+Robustness against LLM mistakes
+--------------------------------
+
+The agent's planner is an LLM, and LLMs make mechanical mistakes. Rather than
+trusting the plan blindly, several deterministic, code-level corrections run
+before/at execution so a wrong wording or a subtly wrong generated expression
+still produces the right result:
+
+- **Numeric literals are never left as strings.** "greater than 2e-4"
+  (scientific notation included) is coerced to a real number for ordering
+  comparisons even if a column's dtype was misclassified (a common case for
+  derived/signal columns pandas stores as ``object``), preventing a
+  ``'>' not supported between instances of 'float' and 'str'`` crash.
+- **Two conditions on the same column are never silently AND-ed into an
+  impossible filter.** "Keep validation or test samples" must be OR, not AND
+  (a column can't equal two different values at once) — same-column equality
+  conditions are deterministically coalesced into a single ``in`` (OR) check
+  regardless of how the plan phrased it.
+- **Python's `and`/`or` never crash a pandas mask.** A generated expression
+  like ``(df['a'] > 1) and (df['b'] == 2)`` raises "truth value of a Series is
+  ambiguous" because `and`/`or` implicitly call ``bool()`` on each operand.
+  Such expressions are rewritten (via the AST, so precedence/parentheses are
+  preserved) to the bitwise ``&``/``|`` equivalents before evaluation.
+- **Split names are matched against the real values, not guessed.** The
+  ``origin`` column's schema line shows its actual stored values together
+  with an explicit "match by substring" rule (e.g. "validation" → whichever
+  value contains "val"), and a deterministic resolver double-checks/repairs
+  the final literal against those values — catching both "unusual dataset
+  naming" and "the model picked the wrong one" cases. This resolution applies
+  everywhere a split literal can appear — structured filter conditions *and*
+  free-form generated code (e.g. inside a tag's ``transform_code``).
+- **Generic words never resolve to a control column.** A request that
+  mentions "loss" only ever resolves to a real data/signal column — never to
+  a boolean ``tag:*`` column whose name happens to contain "loss" as a
+  substring (e.g. ``tag:high_train_loss``), which previously crashed
+  arithmetic ("numpy boolean subtract...") on the wrong column. Explicitly
+  mentioning "tag" (or the exact ``tag:name``) still resolves normally.
+- **Analysis questions see the same data as everything else.** Read-only
+  ``What is the average loss?``-style questions use the identical evaluation
+  context as tagging/filtering (including the ``origin``/``sample_id``
+  backward-compat when they live in the index), instead of a bare
+  context that raised ``Analysis Error: 'origin'`` for any dataset where the
+  split is an index level rather than a column.
+- **A confusing prompt never produces a hard, unhelpful failure.** If the
+  model's reply can't be parsed as a plan (too garbled, or plain prose with
+  no JSON at all, regardless of length), the agent always wraps it as a
+  ``clarify``-style reply using the model's own words — never the generic
+  "Internal Agent Error: Failed to generate a plan."
+- **Schema changes are never hidden by a co-occurring question.** A single
+  request that both creates a column *and* asks an analysis question (e.g.
+  "create X, then tell me its average") is still reported as a data-changing
+  turn, so Weights Studio's grid/column list refresh always fires.
+
+None of these silently mask a genuinely wrong request — they only correct
+mechanical mistakes in *how* a correct intent was expressed.
+
+Testing the agent's prompt engineering
+----------------------------------------
+
+Because the agent's behavior depends on an LLM, ordinary unit tests can't
+fully guard against prompt regressions. WeightsLab ships an opt-in live
+evaluation suite that runs a battery of realistic prompts (including the
+exact scenarios above) against a real model and checks the resulting
+dataframe state:
+
+.. code-block:: bash
+
+   export UTEST_AGENT_PROMPT_EVALUATION=sk-or-...        # OpenRouter API key
+   export UTEST_AGENT_PROMPT_EVALUATION_MODEL=openai/gpt-4o-mini  # optional
+   pytest weightslab/tests/trainer/services/test_agent_live_prompt_evaluation.py -v
+
+Without ``UTEST_AGENT_PROMPT_EVALUATION`` set, the suite logs a note and
+skips entirely (it never runs by accident in CI or consumes API credits
+unintentionally). A small always-on sanity check for the harness itself
+(fixture shape, op-runner correctness) still runs regardless.
+
 Initializing the agent
 ----------------------
 

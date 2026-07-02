@@ -1,3 +1,4 @@
+import ast
 import io
 import time
 import logging
@@ -243,6 +244,46 @@ def is_protected_metadata_name(column_name: str) -> bool:
         return True
 
     return False
+
+
+class _BoolOpToBitwise(ast.NodeTransformer):
+    """AST transformer: rewrites `A and B` / `A or B` into `A & B` / `A | B`."""
+
+    def visit_BoolOp(self, node):
+        self.generic_visit(node)
+        op_cls = ast.BitAnd if isinstance(node.op, ast.And) else ast.BitOr
+        result = node.values[0]
+        for value in node.values[1:]:
+            result = ast.BinOp(left=result, op=op_cls(), right=value)
+        return ast.copy_location(result, node)
+
+
+_AND_OR_KEYWORD_RE = re.compile(r"\b(and|or)\b")
+
+
+def rewrite_boolean_keywords_to_bitwise(code: str) -> str:
+    """
+    Rewrites Python `and`/`or` boolean operators to their pandas-safe bitwise
+    equivalents (`&`/`|`) in a single-expression code string.
+
+    LLMs frequently write pandas boolean masks with Python's `and`/`or`
+    keywords (e.g. `(df['a'] > 1) and (df['b'] < 2)`), which raises "The
+    truth value of a Series/array is ambiguous" because `and`/`or` implicitly
+    call `bool()` on each operand — something a multi-row Series/array can
+    never satisfy. Rewriting via the AST (not string substitution) correctly
+    preserves operator precedence/parenthesization. Falls back to the
+    original code unchanged if it isn't a single parseable expression (e.g.
+    multi-statement snippets), so this is always safe to call.
+    """
+    if not code or not _AND_OR_KEYWORD_RE.search(code):
+        return code
+    try:
+        tree = ast.parse(code, mode="eval")
+        tree = _BoolOpToBitwise().visit(tree)
+        ast.fix_missing_locations(tree)
+        return ast.unparse(tree)
+    except Exception:
+        return code
 
 
 class DataService:
@@ -2074,6 +2115,68 @@ class DataService:
 
         df.sort_values(inplace=True, **params)
 
+    @staticmethod
+    def _build_agent_eval_globals(df):
+        """
+        Builds the eval() globals used for agent-generated code (df.modify /
+        df.analyze), exposing `origin`/`sample_id` as plain Series whenever
+        they live in the index rather than as regular columns, plus a
+        reset_index view (`df_reset`). Returns (eval_globals, origin_series)
+        so callers can also patch a `df['origin']` backward-compat KeyError.
+        """
+        origin_series = None
+        if SampleStatsEx.ORIGIN.value in df.columns:
+            origin_series = df[SampleStatsEx.ORIGIN.value]
+        elif isinstance(df.index, pd.MultiIndex) and SampleStatsEx.ORIGIN.value in df.index.names:
+            origin_series = pd.Series(
+                df.index.get_level_values(SampleStatsEx.ORIGIN.value),
+                index=df.index,
+            )
+        elif df.index.name == SampleStatsEx.ORIGIN.value:
+            origin_series = pd.Series(df.index, index=df.index)
+
+        df_reset = safe_reset_index(df)
+        eval_globals = {"df": df, "df_reset": df_reset, "np": np, "pd": pd}
+        if origin_series is not None:
+            eval_globals[SampleStatsEx.ORIGIN.value] = origin_series
+
+        sample_id_series = None
+        if SampleStatsEx.SAMPLE_ID.value in df.columns:
+            sample_id_series = df[SampleStatsEx.SAMPLE_ID.value]
+        elif isinstance(df.index, pd.MultiIndex) and SampleStatsEx.SAMPLE_ID.value in df.index.names:
+            sample_id_series = pd.Series(
+                df.index.get_level_values(SampleStatsEx.SAMPLE_ID.value),
+                index=df.index,
+            )
+        elif df.index.name == SampleStatsEx.SAMPLE_ID.value:
+            sample_id_series = pd.Series(df.index, index=df.index)
+        if sample_id_series is not None:
+            eval_globals[SampleStatsEx.SAMPLE_ID.value] = sample_id_series
+
+        return eval_globals, origin_series
+
+    @staticmethod
+    def _eval_agent_code(code: str, eval_globals: dict, origin_series):
+        """
+        Evaluates agent-generated code with a backward-compat fallback: the
+        agent frequently emits `df['origin']` even when `origin` actually
+        lives in the index (a MultiIndex level rather than a column), which
+        raises a bare KeyError. When that specific KeyError occurs and an
+        origin Series is available, retry with `df['origin']` rewritten to
+        the plain `origin` name (exposed by `_build_agent_eval_globals`).
+        """
+        try:
+            return eval(code, eval_globals)
+        except KeyError as e:
+            if str(e).strip("'\"") == SampleStatsEx.ORIGIN.value and origin_series is not None:
+                patched_code = re.sub(
+                    r"df\[\s*['\"]origin['\"]\s*\]",
+                    SampleStatsEx.ORIGIN.value,
+                    code,
+                )
+                return eval(patched_code, eval_globals)
+            raise
+
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -2116,9 +2219,10 @@ class DataService:
 
         # A) Agent-driven df.apply_mask (for complex filters)
         if func == "df.apply_mask":
-            code = params.get("code", "")
+            code = rewrite_boolean_keywords_to_bitwise(params.get("code", ""))
             try:
-                mask = eval(code, {"df": df, "np": np, "pd": pd})
+                eval_globals, origin_series = self._build_agent_eval_globals(df)
+                mask = self._eval_agent_code(code, eval_globals, origin_series)
                 if isinstance(mask, (pd.Series, np.ndarray, list, pd.Index)):
                     if isinstance(mask, (list, pd.Index)) and not pd.api.types.is_bool_dtype(pd.Series(mask)):
                          kept = df.loc[mask]
@@ -2154,7 +2258,7 @@ class DataService:
         # C) Column Modification (Transform)
         if func == "df.modify":
             col = params.get("col")
-            code = params.get("code")
+            code = rewrite_boolean_keywords_to_bitwise(params.get("code"))
 
             # Hard safety gate: the agent (and Quick Filters) may create NEW
             # columns freely, but must never overwrite values already recorded
@@ -2180,52 +2284,11 @@ class DataService:
                          pass
 
                 # 1. Evaluate the expression with safe context.
-                # Keep df as-is (no copy), but expose `origin` whether it is a column or an index level.
-                # Also provide a reset_index version for operations that need all data as columns.
-                origin_series = None
-                if SampleStatsEx.ORIGIN.value in df.columns:
-                    origin_series = df[SampleStatsEx.ORIGIN.value]
-                elif isinstance(df.index, pd.MultiIndex) and SampleStatsEx.ORIGIN.value in df.index.names:
-                    origin_series = pd.Series(
-                        df.index.get_level_values(SampleStatsEx.ORIGIN.value),
-                        index=df.index,
-                    )
-                elif df.index.name == SampleStatsEx.ORIGIN.value:
-                    origin_series = pd.Series(df.index, index=df.index)
-
-                # Provide both indexed and reset_index versions for flexibility
-                df_reset = safe_reset_index(df)
-                eval_globals = {"df": df, "df_reset": df_reset, "np": np, "pd": pd}
-                if origin_series is not None:
-                    eval_globals[SampleStatsEx.ORIGIN.value] = origin_series
-
-                # Also expose sample_id if it's in the index
-                sample_id_series = None
-                if SampleStatsEx.SAMPLE_ID.value in df.columns:
-                    sample_id_series = df[SampleStatsEx.SAMPLE_ID.value]
-                elif isinstance(df.index, pd.MultiIndex) and SampleStatsEx.SAMPLE_ID.value in df.index.names:
-                    sample_id_series = pd.Series(
-                        df.index.get_level_values(SampleStatsEx.SAMPLE_ID.value),
-                        index=df.index,
-                    )
-                elif df.index.name == SampleStatsEx.SAMPLE_ID.value:
-                    sample_id_series = pd.Series(df.index, index=df.index)
-                if sample_id_series is not None:
-                    eval_globals[SampleStatsEx.SAMPLE_ID.value] = sample_id_series
-
-                try:
-                    new_values = eval(code, eval_globals)
-                except KeyError as e:
-                    # Backward-compat: agent often emits df['origin'] even when origin is in index.
-                    if str(e).strip("'\"") == SampleStatsEx.ORIGIN.value and origin_series is not None:
-                        patched_code = re.sub(
-                            r"df\[\s*['\"]origin['\"]\s*\]",
-                            SampleStatsEx.ORIGIN.value,
-                            code,
-                        )
-                        new_values = eval(patched_code, eval_globals)
-                    else:
-                        raise
+                # Keep df as-is (no copy), but expose `origin`/`sample_id`
+                # whether they are columns or index levels, plus a
+                # reset_index view (df_reset) -- see _build_agent_eval_globals.
+                eval_globals, origin_series = self._build_agent_eval_globals(df)
+                new_values = self._eval_agent_code(code, eval_globals, origin_series)
 
                 # 2. Check for scalar vs series compatibility
                 # (Pandas handles most of this, but we ensure robustness)
@@ -2500,8 +2563,15 @@ class DataService:
             code = params.get("code")
             if not code: return "No code provided"
             if "import " in code or "__" in code: return "Safety Violation"
+            code = rewrite_boolean_keywords_to_bitwise(code)
             try:
-                result = eval(code, {"df": df, "pd": pd, "np": np})
+                # Same eval context as df.modify: exposes `origin`/`sample_id`
+                # when they live in the index, plus the df['origin'] backward-
+                # compat fallback -- without this, "average loss" on a
+                # dataset where origin is an index level raised a bare
+                # `Analysis Error: 'origin'` KeyError.
+                eval_globals, origin_series = self._build_agent_eval_globals(df)
+                result = self._eval_agent_code(code, eval_globals, origin_series)
                 return f"Analysis Result: {result}"
             except Exception as e:
                 return f"Analysis Error: {e}"
@@ -3627,12 +3697,15 @@ class DataService:
                         self._slowUpdateInternals(force=True)
 
                         if self._all_datasets_df is None:
-                            self._all_datasets_df = self._pull_into_all_data_view_df() or pd.DataFrame()
+                            pulled = self._pull_into_all_data_view_df()
+                            self._all_datasets_df = pulled if pulled is not None else pd.DataFrame()
 
                         df = self._all_datasets_df # .copy() # Remove copy because memory waste and slowdown
                         messages = []
                         intent_type = pb2.INTENT_FILTER
                         analysis_result = ""
+                        schema_mutated = False
+                        _SCHEMA_MUTATING_FUNCS = {"df.modify", "df.drop_column"}
 
                         for op in operations:
                             func = op.get("function")
@@ -3640,10 +3713,14 @@ class DataService:
 
                             if params.get("__agent_reset__"):
                                 logger.debug("[ApplyDataQuery] Agent requested reset")
-                                df = self._pull_into_all_data_view_df() or pd.DataFrame()
+                                pulled = self._pull_into_all_data_view_df()
+                                df = pulled if pulled is not None else pd.DataFrame()
                                 self._is_filtered = False
                                 messages.append("Reset view")
                                 continue
+
+                            if func in _SCHEMA_MUTATING_FUNCS:
+                                schema_mutated = True
 
                             msg = self._apply_agent_operation(df, func, params)
                             messages.append(msg)
@@ -3660,6 +3737,14 @@ class DataService:
                             elif msg.startswith("Analysis Error:") or msg.startswith("Safety Violation:"):
                                 intent_type = pb2.INTENT_ANALYSIS
                                 analysis_result = msg
+
+                        # A request that both creates/drops a column AND asks an analysis
+                        # question in the same turn must still be reported as a FILTER
+                        # intent: the frontend only refreshes the grid/column list (via
+                        # GetMetaData) on INTENT_FILTER, so downgrading to INTENT_ANALYSIS
+                        # here would silently hide a real schema change from the UI.
+                        if schema_mutated:
+                            intent_type = pb2.INTENT_FILTER
 
                         final_message = " | ".join(messages) if messages else "No operation performed"
 

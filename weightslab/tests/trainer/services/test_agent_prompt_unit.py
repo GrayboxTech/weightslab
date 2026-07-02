@@ -33,6 +33,9 @@ class _FakeAgent:
         self._seen = (conditions, n)
         return "df['signals//train_loss'] > 0.2"
 
+    def _rewrite_origin_literals(self, code):
+        return code
+
 
 class _FakeChatModel:
     def __init__(self, *args, **kwargs):

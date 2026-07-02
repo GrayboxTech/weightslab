@@ -1,3 +1,4 @@
+import ast
 import os
 import re
 import json
@@ -199,7 +200,7 @@ class FilterHandler(IntentHandler):
 
         # Case B: Free-form Expression (Top N, etc)
         elif step.analysis_expression:
-            expr = self.agent._clean_code(step.analysis_expression)
+            expr = self.agent._rewrite_origin_literals(self.agent._clean_code(step.analysis_expression))
             if kind == "keep":
                 return {"function": "df.apply_mask", "params": {"code": expr}}
             else: # drop
@@ -229,6 +230,7 @@ class AnalysisHandler(IntentHandler):
             return match.group(0) # If it's a value (e.g., 'bug' in tags), leave it alone
 
         fixed_code = re.sub(pattern, replace_col, raw_code)
+        fixed_code = self.agent._rewrite_origin_literals(fixed_code)
 
         return {
             "function": "df.analyze",
@@ -255,6 +257,7 @@ class TransformHandler(IntentHandler):
             return match.group(0)
 
         fixed_code = re.sub(pattern, replace_col, raw_code)
+        fixed_code = self.agent._rewrite_origin_literals(fixed_code)
 
         return {
             "function": "df.modify",
@@ -917,7 +920,7 @@ class DataManipulationAgent:
     def _build_column_index(self):
         """Builds normalized token indexes and lightweight synonyms for column resolution."""
         self._cols = list(self.df_schema['columns'])
-        self._col_tokens = {c: set(t for t in re.split(r"[ _/\.]+", str(c).lower()) if t) for c in self._cols}
+        self._col_tokens = {c: set(t for t in re.split(r"[ _/:\.]+", str(c).lower()) if t) for c in self._cols}
         self._column_synonyms = {
             "loss": {"loss", "error", "score"}, "score": {"score", "loss", "error"},
             "age": {"age"}, "label": {"label", "class", "target"},
@@ -936,8 +939,19 @@ class DataManipulationAgent:
         # 1. Exact Match (Fast path)
         if user_name in self._cols: return user_name
 
+        # Fuzzy matching (substring/token) must not accidentally resolve a
+        # generic word (e.g. "loss") to a `tag:*` control column just because
+        # the tag's user-chosen name happens to contain that word as a
+        # substring (e.g. a request for "loss" wrongly matching
+        # `tag:high_train_loss`, a boolean column, causing a numpy "boolean
+        # subtract"/"ambiguous truth value" crash downstream). Control
+        # columns should only be reachable via fuzzy match when the user is
+        # explicitly talking about tags.
+        user_mentions_tag = "tag" in user_lower
+        fuzzy_candidates = self._cols if user_mentions_tag else [c for c in self._cols if not str(c).startswith("tag:")]
+
         # 2. Substring / Normalized Match (The Fix) - matches "train loss" OR "signals//train_loss" to "signals//train_loss/mlt_loss"
-        for c in self._cols:
+        for c in fuzzy_candidates:
             c_lower = c.lower()
             c_clean = re.sub(r"[ /_]+", "_", c_lower) # Normalize candidate: "signals//train_loss/mlt_loss" -> "signals_train_loss_mlt_loss"
 
@@ -954,7 +968,8 @@ class DataManipulationAgent:
                     user_tokens.update(syns)
 
         best_col, best_score = None, 0.0
-        for c, c_tokens in self._col_tokens.items():
+        for c in fuzzy_candidates:
+            c_tokens = self._col_tokens.get(c)
             if not c_tokens: continue
             score = len(user_tokens & c_tokens) / len(user_tokens | c_tokens)
             if score > best_score:
@@ -1034,6 +1049,40 @@ class DataManipulationAgent:
 
         return best_c if best_score > 0.3 else value
 
+    # Matches plain integers/decimals and scientific notation (e.g. "2e-4",
+    # "1.5E+10", "-0.003"), used as a last-resort numeric coercion for
+    # ordering comparisons when a column's dtype couldn't be reliably
+    # classified (e.g. a numeric signal column stored as pandas `object`).
+    _NUMERIC_LITERAL_RE = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$")
+
+    @classmethod
+    def _looks_numeric(cls, v) -> bool:
+        return isinstance(v, str) and bool(cls._NUMERIC_LITERAL_RE.match(v.strip()))
+
+    @classmethod
+    def _coerce_numeric_literal(cls, v):
+        """
+        Best-effort numeric coercion (handles scientific notation like
+        "2e-4"). Used as a fallback for ordering comparisons (>,<,>=,<=,
+        between) when the target column's dtype metadata is missing or
+        wrongly classified as categorical, so a numeric literal never
+        survives as a string into a comparison and crashes at execution time
+        (e.g. "'>' not supported between instances of 'float' and 'str'").
+        Returns `v` unchanged (same object) if it doesn't look numeric.
+        """
+        if isinstance(v, (int, float)):
+            return v
+        if cls._looks_numeric(v):
+            s = v.strip()
+            try:
+                return int(s)
+            except ValueError:
+                try:
+                    return float(s)
+                except ValueError:
+                    pass
+        return v
+
     def _coalesce_same_column_equality(self, conditions: List[Condition]) -> List[Condition]:
         """
         All entries of a `conditions` list are AND-ed together when compiled
@@ -1072,6 +1121,76 @@ class DataManipulationAgent:
                 result[idx] = Condition(column=group[0].column, op="in", value=[c.value for c in group])
 
         return [c for c in result if c is not None]
+
+    def _rewrite_origin_literals(self, code: str) -> str:
+        """
+        Post-processes free-form generated code (`transform_code`/
+        `analysis_expression`) so any string literal compared against the
+        `origin` column goes through the same deterministic split-value
+        resolution as structured `conditions` — this path (raw Python code
+        the LLM writes directly, e.g. for `transform`/`analysis` kinds) does
+        NOT go through `_build_python_mask`, so without this it silently
+        matches nothing when the LLM writes `df['origin'] == 'train'` but the
+        actual stored value is `'train_loader'`.
+
+        Handles `df['origin'] ==/!= 'X'` and the index-level equivalent
+        `df.index.get_level_values('origin') ==/!= 'X'`, plus `.isin([...])`
+        on either form. Falls back to the original code unchanged if it
+        isn't a single parseable expression.
+        """
+        origin_col = SampleStatsEx.ORIGIN.value
+        if not code or origin_col not in code:
+            return code
+        try:
+            tree = ast.parse(code, mode="eval")
+        except SyntaxError:
+            return code
+
+        agent = self
+
+        def _is_origin_ref(node) -> bool:
+            if isinstance(node, ast.Subscript):
+                key = node.slice
+                # Python <3.9 wraps the slice in an ast.Index; unwrap if present.
+                if hasattr(ast, "Index") and isinstance(key, getattr(ast, "Index")):
+                    key = key.value
+                return (
+                    isinstance(key, ast.Constant) and key.value == origin_col
+                    and isinstance(node.value, ast.Name) and node.value.id == "df"
+                )
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get_level_values":
+                return bool(node.args) and isinstance(node.args[0], ast.Constant) and node.args[0].value == origin_col
+            return False
+
+        def _resolve_const(node):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                resolved = agent._resolve_categorical_value(origin_col, node.value)
+                if resolved != node.value:
+                    return ast.copy_location(ast.Constant(value=resolved), node)
+            return node
+
+        class _Rewriter(ast.NodeTransformer):
+            def visit_Compare(self, node):
+                self.generic_visit(node)
+                if _is_origin_ref(node.left):
+                    node.comparators = [_resolve_const(c) for c in node.comparators]
+                elif node.comparators and _is_origin_ref(node.comparators[0]) and isinstance(node.left, ast.Constant):
+                    node.left = _resolve_const(node.left)
+                return node
+
+            def visit_Call(self, node):
+                self.generic_visit(node)
+                if isinstance(node.func, ast.Attribute) and node.func.attr == "isin" and _is_origin_ref(node.func.value):
+                    if node.args and isinstance(node.args[0], (ast.List, ast.Tuple)):
+                        node.args[0].elts = [_resolve_const(e) for e in node.args[0].elts]
+                return node
+
+        try:
+            new_tree = _Rewriter().visit(tree)
+            ast.fix_missing_locations(new_tree)
+            return ast.unparse(new_tree)
+        except Exception:
+            return code
 
     def _build_python_mask(self, conditions: List[Condition], n: Optional[int] = None) -> Optional[str]:
         """Builds an explicit Python boolean mask (df['col'] == val) for Index stability."""
@@ -1146,6 +1265,7 @@ class DataManipulationAgent:
                 meta = self.df_schema['metadata'].get(resolved_col, {})
                 dtype = str(meta.get('dtype', '')).lower()
                 is_categorical_dtype = 'str' in dtype or 'object' in dtype or 'category' in dtype
+                is_ordering_op = op in (">", "<", ">=", "<=", "between")
 
                 def cast_v(v):
                     try:
@@ -1156,6 +1276,16 @@ class DataManipulationAgent:
                             v = self._resolve_categorical_value(resolved_col, v)
                         if 'int' in dtype: return int(v)
                         if 'float' in dtype: return float(v)
+                        if is_ordering_op:
+                            # dtype metadata is missing/mis-detected (e.g. a
+                            # numeric signal column stored as pandas `object`).
+                            # An ordering comparison against a numeric-looking
+                            # literal (even scientific notation like "2e-4")
+                            # is always intended numerically, so coerce it
+                            # regardless of the (unreliable) dtype string.
+                            coerced = self._coerce_numeric_literal(v)
+                            if coerced is not v:
+                                return coerced
                         if is_categorical_dtype: return str(v)
                     except: pass
                     return v
@@ -1334,21 +1464,20 @@ class DataManipulationAgent:
 
     def _parse_intent_from_response(self, name: str, intent) -> Optional[Intent]:
         text = intent.content if hasattr(intent, 'content') else str(intent)
+        if not text or not text.strip():
+            return None
 
         # 1. Isolate JSON block
         start = text.find('{')
         end = text.rfind('}')
         if start == -1 or end == -1:
-            # If no JSON found, check if it's a short text (likely a refusal or out-of-scope reply)
-            if len(text) < 500:
-                _LOGGER.info(f"[{name}] No JSON found, but text is short. Wrapping as out_of_scope.")
-                return Intent(
-                    reasoning=text,
-                    primary_goal="out_of_scope",
-                    steps=[]
-                )
-            _LOGGER.error(f"[{name}] No JSON braces found in response: {text[:200]}...")
-            return None
+            # No JSON at all -- the LLM likely refused, asked a clarifying
+            # question, or got confused by an ambiguous/malformed prompt.
+            # Always surface its own words back to the user (truncated)
+            # instead of a generic "Internal Agent Error", regardless of how
+            # long the response is.
+            _LOGGER.info(f"[{name}] No JSON found in response. Wrapping as out_of_scope.")
+            return Intent(reasoning=text[:800].strip(), primary_goal="out_of_scope", steps=[])
 
         # 2. Extract and pre-clean (avoid breaking valid escaped newlines)
         json_str = text[start:end+1]
@@ -1374,10 +1503,18 @@ class DataManipulationAgent:
                 # Try parsing again
                 data = json.loads(fixed_json)
                 return Intent(**data)
-            except:
+            except Exception:
                 pass
 
-            return None
+            # 5. Could not parse or repair the JSON either -- still give the
+            # user something actionable instead of a hard "failed to
+            # generate a plan" error further up the call chain.
+            _LOGGER.warning(f"[{name}] Could not parse or repair JSON; wrapping raw text as out_of_scope.")
+            return Intent(
+                reasoning=f"The agent's response could not be parsed as a valid plan. Raw response (truncated): {text[:500].strip()}",
+                primary_goal="out_of_scope",
+                steps=[],
+            )
 
     def _query_langchain(self, name: str, chain, instruction: str, system_prompt: str) -> Optional[dict]:
         try:
@@ -1459,7 +1596,25 @@ class DataManipulationAgent:
                 tag = "[COL]"
 
             line = f"- {tag} `{col}` ({meta['dtype']})"
-            if "range" in meta:
+            if col == SampleStatsEx.ORIGIN.value and "samples" in meta:
+                # Show the actual split values (handles ANY naming scheme,
+                # not just train/val/test/inference/holdout), but give an
+                # explicit, mechanical matching rule instead of leaving it to
+                # freeform guessing — that's what previously caused the LLM to
+                # confuse e.g. train_loader/val_loader. If it still can't tell
+                # confidently, it should fall back to the user's plain word,
+                # which _resolve_categorical_value then resolves deterministically.
+                line += (
+                    f" | This is the dataset SPLIT column. Actual values: {meta['samples']}. "
+                    "Match the user's split word to whichever listed value "
+                    "TEXTUALLY CONTAINS that word, case-insensitively (e.g. "
+                    "'validation'/'val' -> the value containing 'val'; "
+                    "'test'/'inference' -> the one containing 'test' or 'inf'; "
+                    "'train' -> the one containing 'train'). Never swap two "
+                    "listed values for each other. If unsure which one matches, "
+                    "write the user's own plain word instead of guessing."
+                )
+            elif "range" in meta:
                 line += f" | Range: {meta['range'][0]:.3f} to {meta['range'][1]:.3f} | Mean: {meta['mean']:.3f}"
             elif "samples" in meta:
                 line += f" | Samples: {meta['samples']} | Unique: {meta['unique_count']}"

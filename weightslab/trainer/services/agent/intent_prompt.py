@@ -8,7 +8,7 @@ The dataset contains {row_count} rows. The schema below distinguishes between In
 
 **CRITICAL RULE**:
 You must ONLY use column names that appear in the schema above. The examples below use *generic* names (e.g., `some_metric`, `category_col`) which you must map to the *actual* columns in the provided schema.
-If the user refers to a specific split of the data (train/val/test, or synonyms like "validation set", "inference split", "holdout"), filter on the `origin` column using the user's own natural split word AS-IS for `value` (e.g. "test data" -> `column='origin', op='==', value='test'`). Do **NOT** try to guess or match the exact stored spelling yourself (e.g. `test_split`, `test_loader`, `inf_split`) — the backend deterministically resolves your literal against the ACTUAL origin values present in the data (exact match, then substring, then train/val/test/inference/holdout family matching), so writing the user's own wording is always correct and safest. Only use `clarify` if the user's wording doesn't correspond to any train/val/test/inference/holdout family at all.
+If the user refers to a specific split of the data (train/val/test, or synonyms like "validation set", "inference split", "holdout"), filter on the `origin` column. The `origin` schema line below lists its ACTUAL stored values plus a mechanical matching rule — use it: pick whichever listed value textually CONTAINS the user's split word, case-insensitively (e.g. "validation"/"val" -> the listed value containing "val"; never confuse it with the one containing "train"). Double-check against the DATA CONTEXT before finalizing — do not swap two listed values for each other. If you cannot confidently tell which listed value corresponds to the user's word (e.g. an unusual naming scheme), write the user's own plain word instead (train/val/validation/test/inference/holdout/dev/eval) rather than guessing; the backend deterministically resolves that plain word against the actual origin values (exact match, then substring, then train/val/test/inference/holdout family matching). Example: "test data" -> `column='origin', op='==', value='test_split'` (if that's the listed match) or `value='test'` (if unsure); "validation or test samples" -> `column='origin', op='in', value=[...]` with both resolved values (see rule 9). Only use `clarify` if the user's wording doesn't correspond to anything in the list or any train/val/test/inference/holdout family.
 
 **COLUMN WRITE SAFETY (STRICT INVARIANT)**: You may only WRITE to a column that either (a) does not exist yet (a brand-new derived column), or (b) is `discarded`, or (c) matches `tag:*`. You must NEVER target an existing raw/data column (e.g. a signal, label, prediction, `sample_id`, `origin`, or any other already-populated column) with `transform`/`target_column` — those values are immutable. If the user asks to "change"/"fix"/"scale"/"overwrite" an existing column's values, instead CREATE a new derived column with a descriptive name (e.g. `loss_scaled`, `label_corrected`) and explain the substitution in `reasoning`. Reading/filtering/sorting on any existing column is always fine — this rule only restricts writes.
 
@@ -637,6 +637,34 @@ User: "Keep samples where loss is above 5 or origin is test"
     {{
       "kind": "keep",
       "analysis_expression": "(df['loss'] > 5) | (df['origin'] == 'test')"
+    }}
+  ]
+}}
+
+
+**Ex37: Split Filter — Confident Substring Match Against The Listed Values**
+User: "Keep only validation or test samples" (origin schema line lists: ['train_loader', 'val_loader', 'test_loader'])
+{{
+  "reasoning": "The origin schema line lists the actual stored values. 'validation'/'val' textually matches 'val_loader' (contains 'val'); 'test' textually matches 'test_loader' (contains 'test'). Neither is 'train_loader', so it is correctly excluded. Use the exact listed values, not the plain words, since the match is unambiguous.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "keep",
+      "conditions": [{{ "column": "origin", "op": "in", "value": ["val_loader", "test_loader"] }}]
+    }}
+  ]
+}}
+
+
+**Ex38: Split Filter — Ambiguous Naming, Fall Back To The Plain Word**
+User: "Keep only validation or test samples" (origin schema line lists: ['fold_0', 'fold_1', 'fold_2'])
+{{
+  "reasoning": "None of the listed values ('fold_0', 'fold_1', 'fold_2') textually contain 'val' or 'test' — this naming scheme can't be matched confidently by substring. Fall back to the user's own plain words and let the backend's deterministic resolver handle it (or return a clarify if it truly can't be resolved), instead of guessing which fold is which.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "keep",
+      "conditions": [{{ "column": "origin", "op": "in", "value": ["val", "test"] }}]
     }}
   ]
 }}

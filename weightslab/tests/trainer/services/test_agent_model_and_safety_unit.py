@@ -1,5 +1,6 @@
 import importlib
 import sys
+import threading
 import types
 import unittest
 
@@ -10,7 +11,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 
 import weightslab.proto.experiment_service_pb2 as pb2
-from weightslab.trainer.services.data_service import DataService
+from weightslab.trainer.services.data_service import DataService, rewrite_boolean_keywords_to_bitwise
 
 
 def _install_agent_dependency_stubs():
@@ -110,6 +111,91 @@ class TestColumnWriteSafety(unittest.TestCase):
         self.assertNotIn("Safety", intent.reasoning)
 
 
+class TestOriginSchemaPromptLine(unittest.TestCase):
+    """The origin column's actual values must be shown in the prompt (so the
+    agent can match by substring for any naming scheme), paired with explicit
+    matching guidance — not hidden, and not shown without guidance."""
+
+    def test_origin_line_shows_values_and_matching_rule(self):
+        _, agent = _make_agent(
+            df=pd.DataFrame(
+                {"loss": [0.1, 0.2, 0.3]},
+                index=pd.MultiIndex.from_tuples(
+                    [("train_loader", 1), ("val_loader", 2), ("test_loader", 3)],
+                    names=["origin", "sample_id"],
+                ),
+            )
+        )
+
+        captured = {}
+
+        def fake_try_query_provider(provider, instruction, system_prompt):
+            captured["system_prompt"] = system_prompt
+            return None
+
+        agent._try_query_provider = fake_try_query_provider
+        agent.preferred_provider = "openrouter"
+        agent.fallback_to_local = False
+
+        agent.query("keep only validation or test samples")
+
+        prompt = captured["system_prompt"]
+        self.assertIn("origin", prompt)
+        self.assertIn("train_loader", prompt)
+        self.assertIn("val_loader", prompt)
+        self.assertIn("test_loader", prompt)
+        self.assertIn("TEXTUALLY CONTAINS", prompt)
+        self.assertIn("SPLIT column", prompt)
+
+
+class TestParseIntentGracefulFallback(unittest.TestCase):
+    """Reported bug: a confusing/malformed user prompt made the LLM produce
+    a long non-JSON response (or unrepairable JSON), and the agent surfaced
+    a generic "Internal Agent Error: Failed to generate a plan." instead of
+    anything actionable. _parse_intent_from_response must always produce an
+    Intent (wrapped as out_of_scope with the LLM's own text as reasoning)
+    rather than returning None, regardless of response length or shape."""
+
+    def test_long_non_json_response_is_wrapped_not_dropped(self):
+        _, agent = _make_agent()
+        long_text = "I am not able to execute this task. " * 30  # > 500 chars, no JSON
+        self.assertGreater(len(long_text), 500)
+
+        intent = agent._parse_intent_from_response("test", SimpleNamespace(content=long_text))
+
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.primary_goal, "out_of_scope")
+        self.assertIn("not able to execute", intent.reasoning)
+
+    def test_short_non_json_response_is_wrapped(self):
+        _, agent = _make_agent()
+        intent = agent._parse_intent_from_response("test", SimpleNamespace(content="I need more information."))
+
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.primary_goal, "out_of_scope")
+
+    def test_unrepairable_json_is_wrapped_not_dropped(self):
+        _, agent = _make_agent()
+        garbled = '{"reasoning": "trying to help" "primary_goal": ui_manipulation steps: [}'
+        intent = agent._parse_intent_from_response("test", SimpleNamespace(content=garbled))
+
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.primary_goal, "out_of_scope")
+        self.assertIn("could not be parsed", intent.reasoning)
+
+    def test_empty_response_still_returns_none(self):
+        _, agent = _make_agent()
+        self.assertIsNone(agent._parse_intent_from_response("test", SimpleNamespace(content="")))
+
+    def test_valid_json_still_parses_normally(self):
+        _, agent = _make_agent()
+        valid = '{"reasoning": "ok", "primary_goal": "ui_manipulation", "steps": []}'
+        intent = agent._parse_intent_from_response("test", SimpleNamespace(content=valid))
+
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.primary_goal, "ui_manipulation")
+
+
 class TestSplitValueResolution(unittest.TestCase):
     """The origin/split value a user says ("test", "inference") must
     deterministically resolve to whatever the dataset's ACTUAL origin values
@@ -172,6 +258,176 @@ class TestSplitValueResolution(unittest.TestCase):
         self.assertIsNotNone(mask)
         self.assertIn("'inf_split'", mask)
         self.assertNotIn("'test'", mask)
+
+
+class TestTagColumnFuzzyMatchCollision(unittest.TestCase):
+    """Reproduces a reported bug: "Create 'combined_score' from normalized
+    loss" crashed with "numpy boolean subtract... use bitwise_xor" because
+    generic word "loss" fuzzy-matched a boolean `tag:high_train_loss` column
+    (which contains "loss" as a substring) instead of the real numeric loss
+    column, and arithmetic on a boolean array raises that exact error."""
+
+    def _agent_with_tag_and_loss_columns(self):
+        df = pd.DataFrame({
+            "train_loss": [0.1, 0.9],
+            "tag:high_train_loss": [False, True],
+        })
+        _, agent = _make_agent(df=df)
+        return agent
+
+    def test_generic_word_does_not_resolve_to_tag_column(self):
+        agent = self._agent_with_tag_and_loss_columns()
+        self.assertEqual(agent._resolve_column("loss"), "train_loss")
+
+    def test_explicit_tag_mention_can_still_resolve_to_tag_column(self):
+        agent = self._agent_with_tag_and_loss_columns()
+        self.assertEqual(agent._resolve_column("tag high_train_loss"), "tag:high_train_loss")
+
+    def test_exact_tag_name_always_resolves_regardless_of_wording(self):
+        agent = self._agent_with_tag_and_loss_columns()
+        self.assertEqual(agent._resolve_column("tag:high_train_loss"), "tag:high_train_loss")
+
+    def test_no_competing_plain_column_still_avoids_tag_column(self):
+        # Even with NO plain "loss" column at all, a generic word must not
+        # resolve to a control column -- better to return None (safe no-op /
+        # clarify upstream) than silently crash on boolean arithmetic.
+        df = pd.DataFrame({"tag:high_train_loss": [False, True]})
+        _, agent = _make_agent(df=df)
+        self.assertIsNone(agent._resolve_column("loss"))
+
+
+class TestOriginLiteralRewriteInFreeFormCode(unittest.TestCase):
+    """Reproduces a reported bug: "Tag train samples with train loss greater
+    than 0.0002" silently tagged NOTHING, because the LLM wrote
+    `df['origin'] == 'train'` directly in `transform_code` (free-form Python,
+    not a structured Condition), which never went through the same
+    deterministic origin-value resolution as filter conditions."""
+
+    def _agent_with_origins(self, values):
+        df = pd.DataFrame(
+            {"train_loss": [0.1] * len(values)},
+            index=pd.MultiIndex.from_tuples(
+                [(v, i) for i, v in enumerate(values)], names=["origin", "sample_id"],
+            ),
+        )
+        _, agent = _make_agent(df=df)
+        return agent
+
+    def test_rewrite_origin_literals_in_equality_comparison(self):
+        agent = self._agent_with_origins(["train_loader", "val_loader"])
+        code = "df['origin'] == 'train'"
+
+        fixed = agent._rewrite_origin_literals(code)
+
+        self.assertIn("train_loader", fixed)
+        self.assertNotIn("'train'", fixed)
+
+    def test_rewrite_origin_literals_on_index_get_level_values(self):
+        agent = self._agent_with_origins(["train_loader", "val_loader"])
+        code = "df.index.get_level_values('origin') == 'train'"
+
+        fixed = agent._rewrite_origin_literals(code)
+
+        self.assertIn("train_loader", fixed)
+
+    def test_rewrite_origin_literals_in_isin_list(self):
+        agent = self._agent_with_origins(["train_loader", "val_loader", "test_loader"])
+        code = "df['origin'].isin(['val', 'test'])"
+
+        fixed = agent._rewrite_origin_literals(code)
+
+        self.assertIn("val_loader", fixed)
+        self.assertIn("test_loader", fixed)
+
+    def test_transform_handler_end_to_end_reproduces_and_fixes_reported_bug(self):
+        agent_mod, agent = self._transform_setup(["train_loader", "val_loader"])
+        step = agent_mod.AtomicIntent(
+            kind="transform",
+            target_column="tag:high_train_loss",
+            transform_code=(
+                "np.where((df['origin'] == 'train') & (df['train_loss'] > 0.0002), "
+                "True, df.get('tag:high_train_loss', False))"
+            ),
+        )
+        op = agent_mod.TransformHandler(agent).build_op(
+            step, agent_mod.Intent(reasoning="tag", primary_goal="ui_manipulation", steps=[step])
+        )
+
+        self.assertIn("train_loader", op["params"]["code"])
+        self.assertNotIn("'train'", op["params"]["code"])
+
+    def test_does_not_touch_unrelated_columns_or_values(self):
+        agent = self._agent_with_origins(["train_loader", "val_loader"])
+        code = "df['target'] == 'train'"  # 'target' is NOT the origin column
+
+        fixed = agent._rewrite_origin_literals(code)
+
+        self.assertEqual(fixed, code)
+
+    def _transform_setup(self, values):
+        import importlib
+        agent_mod = importlib.import_module("weightslab.trainer.services.agent.agent")
+        agent = self._agent_with_origins(values)
+        return agent_mod, agent
+
+
+class TestNumericLiteralCoercion(unittest.TestCase):
+    """Reproduces the reported bug: "show samples greater than 2e-4" crashed
+    with "'>' not supported between instances of 'float' and 'str'" because
+    the target column's dtype was misclassified as categorical (a common
+    real-world case for derived/signal columns stored as pandas `object`),
+    so the scientific-notation literal never got cast to a number."""
+
+    def test_looks_numeric(self):
+        agent_mod = self._agent_mod()
+        self.assertTrue(agent_mod.DataManipulationAgent._looks_numeric("2e-4"))
+        self.assertTrue(agent_mod.DataManipulationAgent._looks_numeric("-0.003"))
+        self.assertTrue(agent_mod.DataManipulationAgent._looks_numeric("1.5E+10"))
+        self.assertTrue(agent_mod.DataManipulationAgent._looks_numeric("42"))
+        self.assertFalse(agent_mod.DataManipulationAgent._looks_numeric("val_loader"))
+        self.assertFalse(agent_mod.DataManipulationAgent._looks_numeric("2e-4x"))
+
+    def test_coerce_numeric_literal(self):
+        agent_mod = self._agent_mod()
+        self.assertEqual(agent_mod.DataManipulationAgent._coerce_numeric_literal("2e-4"), 2e-4)
+        self.assertEqual(agent_mod.DataManipulationAgent._coerce_numeric_literal("42"), 42)
+        self.assertIsInstance(agent_mod.DataManipulationAgent._coerce_numeric_literal("42"), int)
+        self.assertEqual(agent_mod.DataManipulationAgent._coerce_numeric_literal("not_a_number"), "not_a_number")
+
+    def test_ordering_comparison_coerces_scientific_notation_on_object_dtype_column(self):
+        # Column is float-valued but stored as `object` dtype (common for
+        # derived/signal columns) -> dtype metadata says "object", which
+        # would previously be (wrongly) treated as categorical.
+        agent_mod, agent = self._make_agent_with_object_dtype_column()
+
+        mask = agent._build_python_mask(
+            [agent_mod.Condition(column="signal_col", op=">", value="2e-4")]
+        )
+
+        self.assertIsNotNone(mask)
+        self.assertIn("0.0002", mask)  # numeric literal, not a quoted string
+        self.assertNotIn("'2e-4'", mask)
+
+    def test_ordering_comparison_end_to_end_does_not_crash(self):
+        agent_mod, agent = self._make_agent_with_object_dtype_column()
+        df = agent.ctx._all_datasets_df
+
+        mask = agent._build_python_mask(
+            [agent_mod.Condition(column="signal_col", op=">", value="2e-4")]
+        )
+        result = eval(mask, {"df": df})  # noqa: S307 (test-only, trusted input)
+
+        self.assertListEqual(list(result), [False, True])
+
+    @staticmethod
+    def _agent_mod():
+        with mock.patch.dict(sys.modules, _install_agent_dependency_stubs(), clear=False):
+            return importlib.import_module("weightslab.trainer.services.agent.agent")
+
+    def _make_agent_with_object_dtype_column(self):
+        import numpy as np
+        df = pd.DataFrame({"signal_col": np.array([0.0001, 0.0005], dtype=object)})
+        return _make_agent(df=df)
 
 
 class TestSameColumnEqualityCoalescing(unittest.TestCase):
@@ -594,6 +850,42 @@ class TestDataServiceAgentDispatch(unittest.TestCase):
         self.assertListEqual(df["discarded"].tolist(), [False, True])
         self.assertListEqual(df["tag:x"].tolist(), [False, True])
 
+    def test_df_analyze_resolves_origin_when_origin_is_an_index_level(self):
+        # Reported bug: "What is the average train loss?" crashed with
+        # "Analysis Error: 'origin'" because origin lives in the MultiIndex,
+        # not as a column, and df.analyze's eval() didn't expose it (unlike
+        # df.modify, which already had this backward-compat).
+        ds = self._make_data_service()
+        df = pd.DataFrame(
+            {"loss": [0.1, 0.5, 0.9]},
+            index=pd.MultiIndex.from_tuples(
+                [("train", 1), ("train", 2), ("val", 3)], names=["origin", "sample_id"],
+            ),
+        )
+
+        msg = ds._apply_agent_operation(
+            df, "df.analyze", {"code": "df[df['origin'] == 'train']['loss'].mean()"}
+        )
+
+        self.assertIn("Analysis Result:", msg)
+        self.assertNotIn("Error", msg)
+        self.assertIn("0.3", msg)  # mean(0.1, 0.5) == 0.3
+
+    def test_df_apply_mask_resolves_origin_when_origin_is_an_index_level(self):
+        ds = self._make_data_service()
+        df = pd.DataFrame(
+            {"loss": [0.1, 0.5, 0.9]},
+            index=pd.MultiIndex.from_tuples(
+                [("train", 1), ("train", 2), ("val", 3)], names=["origin", "sample_id"],
+            ),
+        )
+
+        msg = ds._apply_agent_operation(df, "df.apply_mask", {"code": "df['origin'] == 'train'"})
+
+        self.assertIn("Applied mask", msg)
+        self.assertEqual(len(df), 2)
+        self.assertListEqual(sorted(df.index.get_level_values("origin").unique().tolist()), ["train"])
+
     def test_drop_column_removes_temporary_column(self):
         ds = self._make_data_service()
         df = pd.DataFrame({"loss": [0.1], "tag:goldset_hard": [True]})
@@ -673,6 +965,172 @@ class TestDataServiceAgentDispatch(unittest.TestCase):
 
         self.assertIn("Failed to apply 'freeze'", msg)
         self.assertIn("Model not found", msg)
+
+
+class TestBooleanKeywordRewrite(unittest.TestCase):
+    """Reproduces the reported bug: "Tag as 'ToDisabled' samples with
+    training loss greater than 0.0002 and target contains the class 2"
+    crashed with "The truth value of an array with more than one element is
+    ambiguous" because the generated code used Python's `and` keyword
+    between two pandas boolean Series instead of the bitwise `&`."""
+
+    def test_and_becomes_bitwise_and_with_parens_preserved(self):
+        code = "(df['loss'] > 0.5) and (df['target'] == 2)"
+        fixed = rewrite_boolean_keywords_to_bitwise(code)
+        self.assertNotIn(" and ", fixed)
+        self.assertIn("&", fixed)
+
+    def test_or_becomes_bitwise_or(self):
+        code = "(df['origin'] == 'val') or (df['origin'] == 'test')"
+        fixed = rewrite_boolean_keywords_to_bitwise(code)
+        self.assertNotIn(" or ", fixed)
+        self.assertIn("|", fixed)
+
+    def test_rewrite_actually_evaluates_correctly_on_a_real_dataframe(self):
+        df = pd.DataFrame({"loss": [0.0001, 0.0005], "target": [1, 2]})
+        code = "(df['loss'] > 0.0002) and (df['target'] == 2)"
+        fixed = rewrite_boolean_keywords_to_bitwise(code)
+
+        result = eval(fixed, {"df": df})  # noqa: S307 (test-only, trusted input)
+
+        self.assertListEqual(list(result), [False, True])
+        with self.assertRaises(ValueError):
+            eval(code, {"df": df})  # noqa: S307 -- confirms the ORIGINAL code does crash
+
+    def test_no_and_or_keyword_is_left_unchanged(self):
+        code = "df['loss'] * 2"
+        self.assertEqual(rewrite_boolean_keywords_to_bitwise(code), code)
+
+    def test_column_names_containing_and_or_are_not_mistaken_for_keywords(self):
+        # "brand" contains "and", "corridor" contains "or" -- must not be
+        # mistaken for the `and`/`or` keywords (word-boundary regex pre-filter).
+        code = "df['brand'] > 0"
+        self.assertEqual(rewrite_boolean_keywords_to_bitwise(code), code)
+
+    def test_unparseable_code_falls_back_to_original_unchanged(self):
+        code = "q1 = df['loss'].quantile(0.25); q1 and q1"  # multi-statement, not a single expression
+        self.assertEqual(rewrite_boolean_keywords_to_bitwise(code), code)
+
+    def test_df_modify_end_to_end_with_and_keyword_does_not_crash(self):
+        ds = DataService.__new__(DataService)
+        ds._df_manager = None
+        df = pd.DataFrame({"train_loss": [0.0001, 0.0005], "target": [1, 2]})
+
+        msg = ds._apply_agent_operation(
+            df, "df.modify",
+            {"col": "tag:ToDisabled", "code": "np.where((df['train_loss'] > 0.0002) and (df['target'] == 2), True, df.get('tag:ToDisabled', False))"},
+        )
+
+        self.assertIn("Modified column", msg)
+        self.assertListEqual(df["tag:ToDisabled"].tolist(), [False, True])
+
+    def test_df_apply_mask_end_to_end_with_or_keyword_does_not_crash(self):
+        ds = DataService.__new__(DataService)
+        df = pd.DataFrame({"origin": ["train", "val", "test"]}, index=[0, 1, 2])
+
+        msg = ds._apply_agent_operation(
+            df, "df.apply_mask",
+            {"code": "(df['origin'] == 'val') or (df['origin'] == 'test')"},
+        )
+
+        self.assertIn("Applied mask", msg)
+        self.assertListEqual(sorted(df["origin"].tolist()), ["test", "val"])
+
+
+class TestApplyDataQueryAgentReset(unittest.TestCase):
+    """Regression test for a reported crash: `X or pd.DataFrame()` raises
+    pandas' "truth value of a DataFrame is ambiguous" the moment X is an
+    actual (non-None) DataFrame, since `or` evaluates bool(X) first and
+    pandas disallows that unconditionally. This hit every "reset the view"
+    request against a real (non-empty) dataset."""
+
+    def _make_data_service(self, agent, pulled_df):
+        ds = DataService.__new__(DataService)
+        ds._ctx = MagicMock()
+        ds._lock = threading.RLock()
+        ds._df_manager = None
+        ds._all_datasets_df = pd.DataFrame({"loss": [0.1, 0.9]})
+        ds._is_filtered = True
+        ds._agent = agent
+        ds._slowUpdateInternals = MagicMock()
+        ds._pull_into_all_data_view_df = MagicMock(return_value=pulled_df)
+        ds.audit_logger = None
+        return ds
+
+    def test_reset_does_not_crash_on_a_real_non_empty_dataframe(self):
+        agent = MagicMock()
+        agent.query.return_value = [{"function": "df.reset_view", "params": {"__agent_reset__": True}}]
+        pulled = pd.DataFrame({"loss": [0.1, 0.9, 0.5]})
+        ds = self._make_data_service(agent, pulled_df=pulled)
+
+        response = ds.ApplyDataQuery(
+            pb2.DataQueryRequest(query="reset the view", is_natural_language=True), None
+        )
+
+        self.assertTrue(response.success)
+        self.assertIn("Reset view", response.message)
+        self.assertEqual(response.number_of_all_samples, 3)
+
+    def test_reset_still_works_when_pulled_view_is_none(self):
+        agent = MagicMock()
+        agent.query.return_value = [{"function": "df.reset_view", "params": {"__agent_reset__": True}}]
+        ds = self._make_data_service(agent, pulled_df=None)
+
+        response = ds.ApplyDataQuery(
+            pb2.DataQueryRequest(query="reset the view", is_natural_language=True), None
+        )
+
+        self.assertTrue(response.success)
+        self.assertEqual(response.number_of_all_samples, 0)
+
+
+class TestApplyDataQueryIntentClassification(unittest.TestCase):
+    """A request that both creates/drops a column AND asks an analysis
+    question in the same turn must still report INTENT_FILTER: the frontend
+    only refreshes the grid/column list on INTENT_FILTER (via GetMetaData),
+    so downgrading to INTENT_ANALYSIS would hide a real schema change from
+    the UI — reported bug: a newly created column ('loss_ratio') never
+    appeared in Weights Studio."""
+
+    def _make_data_service(self, agent):
+        ds = DataService.__new__(DataService)
+        ds._ctx = MagicMock()
+        ds._lock = threading.RLock()
+        ds._df_manager = None
+        ds._all_datasets_df = pd.DataFrame({"loss": [0.1, 0.9]})
+        ds._is_filtered = True
+        ds._agent = agent
+        ds._slowUpdateInternals = MagicMock()
+        ds._pull_into_all_data_view_df = MagicMock(return_value=None)
+        ds.audit_logger = None
+        return ds
+
+    def test_column_creation_plus_analysis_step_stays_filter_intent(self):
+        agent = MagicMock()
+        agent.query.return_value = [
+            {"function": "df.modify", "params": {"col": "loss_ratio", "code": "df['loss'] * 2"}},
+            {"function": "df.analyze", "params": {"code": "df['loss'].mean()"}},
+        ]
+        ds = self._make_data_service(agent)
+
+        response = ds.ApplyDataQuery(
+            pb2.DataQueryRequest(query="create loss_ratio, then average loss", is_natural_language=True), None
+        )
+
+        self.assertEqual(response.agent_intent_type, pb2.INTENT_FILTER)
+        self.assertIn("loss_ratio", ds._all_datasets_df.columns)
+        self.assertIn("Analysis Result:", response.message)
+
+    def test_pure_analysis_request_without_mutation_stays_analysis_intent(self):
+        agent = MagicMock()
+        agent.query.return_value = [{"function": "df.analyze", "params": {"code": "df['loss'].mean()"}}]
+        ds = self._make_data_service(agent)
+
+        response = ds.ApplyDataQuery(
+            pb2.DataQueryRequest(query="average loss", is_natural_language=True), None
+        )
+
+        self.assertEqual(response.agent_intent_type, pb2.INTENT_ANALYSIS)
 
 
 if __name__ == "__main__":
