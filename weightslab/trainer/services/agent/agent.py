@@ -2,6 +2,7 @@ import ast
 import os
 import re
 import json
+import time
 import yaml
 import logging
 import threading
@@ -415,8 +416,57 @@ class DataManipulationAgent:
             "noop": None
         }
 
+    @staticmethod
+    def _format_samples_for_prompt(samples, max_items: int = 6, max_len: int = 60) -> str:
+        """Render sample values compactly for the LLM prompt.
+
+        The raw schema keeps full values (needed by _resolve_categorical_value),
+        but object columns can hold huge reprs — absolute file paths, ArrayH5Proxy
+        objects — that bloat the prompt by thousands of tokens for zero planning
+        value. Truncate each value's length and cap the count for display only.
+        """
+        if not samples:
+            return "[]"
+        shown = []
+        for v in samples[:max_items]:
+            s = str(v)
+            if len(s) > max_len:
+                s = s[:max_len] + "…"
+            shown.append(s)
+        suffix = f", … (+{len(samples) - max_items} more)" if len(samples) > max_items else ""
+        return "[" + ", ".join(repr(x) for x in shown) + "]" + suffix
+
+    def _dataframe_fingerprint(self):
+        """Cheap fingerprint of the shared dataframe, used to decide whether the
+        (expensive) per-column stats schema needs rebuilding.
+
+        Every mutation path in DataService surfaces as either a reassignment of
+        ``_all_datasets_df`` (id changes) or a shape/column/index change, so
+        this tuple is a correct invalidation signal without hashing the data.
+        Numeric ranges/means can still drift during training without changing
+        the fingerprint, but those only feed the LLM's numeric *hints*, never
+        correctness (column resolution, origin values), so staleness is fine.
+        """
+        df = getattr(self.ctx, "_all_datasets_df", None)
+        if df is None:
+            return None
+        try:
+            return (id(df), df.shape, tuple(df.columns), tuple(df.index.names))
+        except Exception:
+            return None
+
     def _setup_schema(self):
         """Builds a rich column schema with statistical context for the LLM."""
+        # Skip the expensive rebuild when the dataframe is unchanged since the
+        # last build (same call is made on every query()); see plan Phase B.3.
+        fp = self._dataframe_fingerprint()
+        if (
+            fp is not None
+            and fp == getattr(self, "_schema_fp", None)
+            and getattr(self, "df_schema", None) is not None
+        ):
+            return
+
         df = self.ctx._all_datasets_df
 
         # Internal bookkeeping columns/levels that the user should never query
@@ -486,6 +536,7 @@ class DataManipulationAgent:
             'row_count': row_count
         }
         self._build_column_index()
+        self._schema_fp = fp
 
     def _setup_model_schema(self):
         """
@@ -499,34 +550,59 @@ class DataManipulationAgent:
             "incoming_neurons_count", "kernel_size", "stride", "frozen",
         ]
         neuron_columns = ["layer_id", "neuron_id", "learning_rate", "frozen"]
+
+        # Resolve the live model cheaply first so we can decide whether the
+        # (potentially expensive) per-neuron walk below needs to rerun.
+        model = None
+        try:
+            exp_ctx = getattr(self.ctx, "_ctx", None)
+            if exp_ctx is None:
+                _LOGGER.info("[Agent] No experiment context (_ctx) available on DataService; skipping model schema.")
+            else:
+                exp_ctx.ensure_components()
+                model = exp_ctx.components.get("model")
+                if model is None:
+                    try:
+                        from weightslab.backend.ledgers import list_models, get_model
+                        registered = list_models()
+                        model = get_model(registered[0]) if registered else None
+                    except Exception:
+                        registered = "<could not list>"
+                    if model is None:
+                        _LOGGER.info(
+                            "[Agent] components.get('model') returned None (ledger-registered model names: %s). "
+                            "Model-related agent requests will report 'no model registered'. If a model IS "
+                            "registered under a name other than the experiment name / 'experiment' / 'main', "
+                            "ExperimentContext.ensure_components()'s model-resolution heuristic won't find it.",
+                            registered,
+                        )
+        except Exception as e:
+            _LOGGER.warning(f"[Agent] Failed to resolve model for schema: {e}", exc_info=True)
+            model = None
+
+        # Cache guard: same model object and not explicitly invalidated (frozen
+        # state is mutated by model_action, which keeps the same object, so
+        # invalidate_model_schema() is called after any model.* op) -> reuse the
+        # already-built tables and skip the neuron walk. See plan Phase B.3.
+        fp = (id(model),) if model is not None else None
+        if (
+            fp is not None
+            and fp == getattr(self, "_model_schema_fp", None)
+            and not getattr(self, "_model_schema_dirty", False)
+            and getattr(self, "model_layers_df", None) is not None
+        ):
+            return
+
         self.model_layers_df = pd.DataFrame(columns=layer_columns)
         self.model_neurons_df = pd.DataFrame(columns=neuron_columns)
         self.model_available = False
+        self._model_schema_fp = fp
+        self._model_schema_dirty = False
+
+        if model is None:
+            return
 
         try:
-            data_service = self.ctx
-            exp_ctx = getattr(data_service, "_ctx", None)
-            if exp_ctx is None:
-                _LOGGER.info("[Agent] No experiment context (_ctx) available on DataService; skipping model schema.")
-                return
-            exp_ctx.ensure_components()
-            model = exp_ctx.components.get("model")
-            if model is None:
-                try:
-                    from weightslab.backend.ledgers import list_models, get_model
-                    registered = list_models()
-                    model = get_model(registered[0]) if registered else None
-                except Exception:
-                    registered = "<could not list>"
-                _LOGGER.info(
-                    "[Agent] components.get('model') returned None (ledger-registered model names: %s). "
-                    "Model-related agent requests will report 'no model registered'. If a model IS "
-                    "registered under a name other than the experiment name / 'experiment' / 'main', "
-                    "ExperimentContext.ensure_components()'s model-resolution heuristic won't find it.",
-                    registered,
-                )
-                return
-
             layer_rows = []
             neuron_rows = []
             for rep in get_layer_representations(model):
@@ -558,6 +634,16 @@ class DataManipulationAgent:
                 self.model_neurons_df = pd.DataFrame(neuron_rows, columns=neuron_columns)
         except Exception as e:
             _LOGGER.warning(f"[Agent] Failed to build model schema: {e}", exc_info=True)
+
+    def invalidate_model_schema(self) -> None:
+        """Force the next `_setup_model_schema()` to rebuild the layer/neuron
+        tables even though the model object is unchanged.
+
+        Freeze/reset/unfreeze mutate per-neuron learning rates (hence `frozen`
+        flags) in place on the same model object, so the cheap identity
+        fingerprint can't detect them. DataService calls this right after
+        applying any `model.*` op so frozen state never goes stale."""
+        self._model_schema_dirty = True
 
     def _build_layer_mask(self, conditions: List["Condition"]) -> Optional[str]:
         """Builds a boolean mask expression over `layers_df` (small in-memory
@@ -628,8 +714,8 @@ class DataManipulationAgent:
         for _, row in target.iterrows():
             lines.append(
                 f"- Layer {row['layer_id']} ({row['layer_name']}/{row['layer_type']}): "
-                f"{row['neurons_count']} neurons, incoming={row['incoming_neurons_count']}, "
-                f"frozen={row['frozen']}"
+                f"\t{row['neurons_count']} neurons, incoming={row['incoming_neurons_count']}, "
+                f"\tfrozen={row['frozen']}"
             )
         return "\n".join(lines)
 
@@ -637,10 +723,25 @@ class DataManipulationAgent:
         self.preferred_provider = os.environ.get("PREFERRED_PROVIDER", "openrouter") # Default to OpenRouter if API key is provided, otherwise fallback to local Ollama. This can be overridden by config file or env variable.
 
         # Cloud provider settings with sensible defaults. OpenRouter is the default cloud provider if API key is provided.
-        self.openrouter_model = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct")
+        # Default to a fast flash-class model: the intent-planning task is
+        # simple JSON generation, and a 70B model added ~15-30s of latency for
+        # no accuracy benefit (see plan Phase B.1). Override with OPENROUTER_MODEL
+        # (or agent_config.yaml) to use a larger model.
+        self.openrouter_model = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.0-flash-001")
         self.openrouter_base_url = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         self.openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", None)
         self.openrouter_request_timeout = float(os.environ.get("OPENROUTER_REQUEST_TIMEOUT", "15.0"))
+        # Bias OpenRouter's upstream provider selection ("throughput"/"latency"/
+        # "price"); empty string lets OpenRouter choose freely (see Phase B.2).
+        self.openrouter_provider_sort = os.environ.get("OPENROUTER_PROVIDER_SORT", "throughput")
+        # Ask the model for a schema-validated Intent object directly instead of
+        # free-form JSON + regex repair. More reliable, but only works on models
+        # whose OpenRouter route supports structured/JSON-schema output (e.g.
+        # Gemini, GPT-4o). Default OFF so an unsupported model can't break; flip
+        # on with OPENROUTER_STRUCTURED_OUTPUT=1 or the config key.
+        self.openrouter_structured_output = os.environ.get(
+            "OPENROUTER_STRUCTURED_OUTPUT", ""
+        ).strip().lower() in ("1", "true", "yes", "on")
 
         # Local fallback if no cloud (OpenRouter) is available or if the user prefers it. Ollama is the default local provider.
         self.fallback_to_local = True # Default to allowing fallback to local Ollama if OpenRouter fails
@@ -682,6 +783,8 @@ class DataManipulationAgent:
                 self.openrouter_base_url = a_cfg.get("openrouter_base_url", self.openrouter_base_url)
                 self.openrouter_api_key = a_cfg.get("openrouter_api_key", self.openrouter_api_key)
                 self.openrouter_request_timeout = float(a_cfg.get("openrouter_request_timeout", self.openrouter_request_timeout))
+                self.openrouter_provider_sort = a_cfg.get("openrouter_provider_sort", self.openrouter_provider_sort)
+                self.openrouter_structured_output = bool(a_cfg.get("openrouter_structured_output", self.openrouter_structured_output))
 
                 # OLLAMA
                 self.ollama_host = a_cfg.get("ollama_host", self.ollama_host)
@@ -753,16 +856,29 @@ class DataManipulationAgent:
                     openrouter_base_url = self._normalize_openrouter_base_url(self.openrouter_base_url, explicit_openrouter_port)
                     parsed = urlparse(openrouter_base_url)
                     effective_port = self._effective_http_port(parsed, explicit_openrouter_port)
+
+                    # Bias OpenRouter's upstream routing so it doesn't pick a
+                    # slow/cold provider for the model — a major source of the
+                    # query tail latency (see plan Phase B.2). Configurable via
+                    # `openrouter_provider_sort` ("throughput"/"latency"/"price");
+                    # set to "" to let OpenRouter choose freely.
+                    extra_body = None
+                    sort = getattr(self, "openrouter_provider_sort", "throughput")
+                    if sort:
+                        extra_body = {"provider": {"sort": sort}}
+
                     llm = ChatOpenAI(
                         model=self.openrouter_model, temperature=0,
                         api_key=self.openrouter_api_key,
                         base_url=openrouter_base_url,
                         streaming=False, max_retries=1, request_timeout=self.openrouter_request_timeout,
+                        extra_body=extra_body,
                     )
                     self.chain_openrouter = llm
                     initialized = True
                     _LOGGER.info(
-                        f"[Agent] OpenRouter enabled: {self.openrouter_model} via {parsed.hostname}:{effective_port}"
+                        f"[Agent] OpenRouter enabled: {self.openrouter_model} via {parsed.hostname}:{effective_port} "
+                        f"(provider sort={sort or 'default'})"
                     )
             except Exception as e: _LOGGER.error(f"OpenRouter error: {e}")
 
@@ -951,7 +1067,7 @@ class DataManipulationAgent:
         self.chain_ollama = None
         self.chain_openrouter = None
         self.openrouter_api_key = None
-        self.openrouter_model = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct")
+        self.openrouter_model = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.0-flash-001")
         self.preferred_provider = "openrouter"
 
         return True, "Agent connection reset. Type /init to set up again."
@@ -1564,13 +1680,43 @@ class DataManipulationAgent:
             # NOTE: If using RAG, add {{examples}} replacement here
 
             prompt = ChatPromptTemplate.from_messages([("system", escaped_sys), ("human", "{instruction}")])
-            response = (prompt | chain).invoke({"instruction": instruction})
 
+            # Optionally bind schema-validated structured output (Intent) so the
+            # model returns a parsed object directly, skipping the free-form JSON
+            # + regex-repair path in _parse_intent_from_response. Gated because
+            # not every OpenRouter route supports it (see _load_config).
+            runnable_chain = chain
+            if name == "openrouter" and getattr(self, "openrouter_structured_output", False):
+                try:
+                    runnable_chain = chain.with_structured_output(Intent)
+                except Exception as e:
+                    _LOGGER.warning(f"[{name}] structured output unavailable, falling back to free-form JSON: {e}")
+                    runnable_chain = chain
+
+            # Time the pure LLM round-trip (see plan Phase A). This is the
+            # dominant cost of a query; ~chars/4 is a rough token estimate.
+            prompt_chars = len(escaped_sys) + len(instruction)
+            model_name = getattr(self, f"{name}_model", None) or getattr(self, "openrouter_model", name)
+            _t0 = time.perf_counter()
+            response = (prompt | runnable_chain).invoke({"instruction": instruction})
+            _llm_elapsed = time.perf_counter() - _t0
+
+            _LOGGER.info(
+                f"[{name}] LLM invoke took {_llm_elapsed:.2f}s "
+                f"(model={model_name}, prompt~{prompt_chars} chars / ~{prompt_chars // 4} tokens)"
+            )
             _LOGGER.info(f"[{name}] Response received")
 
             parsed_intent = None
             if isinstance(response, Intent):
                 parsed_intent = response
+            elif isinstance(response, dict):
+                # with_structured_output can hand back a plain dict on some
+                # langchain versions instead of the pydantic instance.
+                try:
+                    parsed_intent = Intent(**response)
+                except Exception:
+                    parsed_intent = self._parse_intent_from_response(name, response)
             else:
                 parsed_intent = self._parse_intent_from_response(name, response)
 
@@ -1617,14 +1763,18 @@ class DataManipulationAgent:
             return None
 
     def query(self, instruction: str, abort_event: Optional[threading.Event] = None, status_callback: Optional[Callable[[str], None]] = None) -> List[dict]:
+        _query_t0 = time.perf_counter()
         _LOGGER.info(f"[Agent] Query started: '{instruction}'")
         if abort_event and abort_event.is_set(): return []
 
         # Reset per-query error tracking so a stale failure doesn't leak forward.
         self._last_query_error = None
 
+        # Time the schema build (cheap when cached; see plan Phase A/B.3).
+        _schema_t0 = time.perf_counter()
         self._setup_schema()
         self._setup_model_schema()
+        _LOGGER.info(f"[Agent] Schema build took {time.perf_counter() - _schema_t0:.3f}s")
 
         # 1. Format metadata for the prompt
         schema_lines = []
@@ -1644,7 +1794,7 @@ class DataManipulationAgent:
                 # confidently, it should fall back to the user's plain word,
                 # which _resolve_categorical_value then resolves deterministically.
                 line += (
-                    f" | This is the dataset SPLIT column. Actual values: {meta['samples']}. "
+                    f" | This is the dataset SPLIT column. Actual values: {self._format_samples_for_prompt(meta['samples'], max_items=20)}. "
                     "Match the user's split word to whichever listed value "
                     "TEXTUALLY CONTAINS that word, case-insensitively (e.g. "
                     "'validation'/'val' -> the value containing 'val'; "
@@ -1656,7 +1806,7 @@ class DataManipulationAgent:
             elif "range" in meta:
                 line += f" | Range: {meta['range'][0]:.3f} to {meta['range'][1]:.3f} | Mean: {meta['mean']:.3f}"
             elif "samples" in meta:
-                line += f" | Samples: {meta['samples']} | Unique: {meta['unique_count']}"
+                line += f" | Samples: {self._format_samples_for_prompt(meta['samples'])} | Unique: {meta['unique_count']}"
             schema_lines.append(line)
 
         formatted_schema = "\n".join(schema_lines)
@@ -1692,6 +1842,7 @@ class DataManipulationAgent:
                     # Update History with Action
                     self.history.append(f"User: {instruction}")
                     self.history.append(f"Action: {len(result)} ops executed")
+                    _LOGGER.info(f"[Agent] Query total wall time: {time.perf_counter() - _query_t0:.2f}s (provider={provider})")
                     return result
             except Exception as e:
                 _LOGGER.error(f"Provider {provider} failed: {e}")
@@ -1714,4 +1865,5 @@ class DataManipulationAgent:
         elif not self.is_ollama_available() and not os.environ.get("OPENROUTER_API_KEY"):
             error_msg = "No LLM providers configured. Please check your API keys or local Ollama setup. Initialize the agent with /init."
 
+        _LOGGER.info(f"[Agent] Query total wall time: {time.perf_counter() - _query_t0:.2f}s (no provider succeeded)")
         return [{"function": "out_of_scope", "params": {"reason": error_msg}}]

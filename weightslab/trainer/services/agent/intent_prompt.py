@@ -246,15 +246,6 @@ User: "Tag as 'goldset' train samples with train loss greater than 1.65, then re
 }}
 
 
-**Ex13: Out of Scope / General Question**
-User: "What is the capital of France?"
-{{
-  "reasoning": "User is asking a general knowledge question unrelated to the dataset.",
-  "primary_goal": "out_of_scope",
-  "steps": []
-}}
-
-
 **Ex14: Top Percent**
 User: "Keep the top 10% with highest loss"
 {{
@@ -304,21 +295,6 @@ User: "Remove tag 'goldset' from validation samples"
 }}
 
 
-**Ex17: Untag Already Tagged Data**
-User: "Untag already tagged 'goldset' samples"
-{{
-  "reasoning": "Request targets rows already tagged as goldset, so set True flags back to False.",
-  "primary_goal": "ui_manipulation",
-  "steps": [
-    {{
-      "kind": "transform",
-      "target_column": "tag:goldset",
-      "transform_code": "np.where(df.get('tag:goldset', False) == True, False, df.get('tag:goldset', False))"
-    }}
-  ]
-}}
-
-
 **Ex18: Rename Tag A To B**
 User: "Change tag name from 'goldset' to 'priority'"
 {{
@@ -348,36 +324,6 @@ User: "Keep only goldset samples"
     {{
       "kind": "keep",
       "conditions": [{{ "column": "tag:goldset", "op": "==", "value": true }}]
-    }}
-  ]
-}}
-
-
-**Ex20: Remove Tag Everywhere**
-User: "Remove tag 'priority' from all samples"
-{{
-  "reasoning": "Global tag removal means setting the entire tag:priority column to False.",
-  "primary_goal": "ui_manipulation",
-  "steps": [
-    {{
-      "kind": "transform",
-      "target_column": "tag:priority",
-      "transform_code": "False"
-    }}
-  ]
-}}
-
-
-**Ex21: Tag Only Currently Untagged Rows**
-User: "Tag as 'hard_example' train samples with loss > 2 that are not already hard_example"
-{{
-  "reasoning": "Set True only on matching rows that are not already tagged, while preserving existing values.",
-  "primary_goal": "ui_manipulation",
-  "steps": [
-    {{
-      "kind": "transform",
-      "target_column": "tag:hard_example",
-      "transform_code": "np.where((df['origin'] == 'train') & (df['loss'] > 2) & (df.get('tag:hard_example', False) == False), True, df.get('tag:hard_example', False))"
     }}
   ]
 }}

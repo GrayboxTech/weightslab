@@ -4,14 +4,28 @@ realistic user prompts.
 
 This suite is OPT-IN: every test calls a REAL LLM through OpenRouter
 (consuming API credits and real wall-clock time), so it is skipped entirely
-unless the ``UTEST_AGENT_PROMPT_EVALUATION`` environment variable holds a
-valid OpenRouter API key:
+unless an OpenRouter API key can be resolved. The key/model are resolved, in
+priority order, from:
 
-    export UTEST_AGENT_PROMPT_EVALUATION=sk-or-...
+  1. The dedicated ``UTEST_AGENT_PROMPT_EVALUATION`` /
+     ``UTEST_AGENT_PROMPT_EVALUATION_MODEL`` env vars (explicit opt-in).
+  2. The standard ``OPENROUTER_API_KEY`` / ``OPENROUTER_MODEL`` env vars —
+     including any loaded from a repo ``.env`` file — so the same credentials
+     the running agent uses also drive this suite with no extra setup.
+
+So any of these work from the command line:
+
+    # reuse your existing OpenRouter config (.env or exported env var)
     pytest weightslab/tests/trainer/services/test_agent_live_prompt_evaluation.py -v
 
-Optionally override the model with ``UTEST_AGENT_PROMPT_EVALUATION_MODEL``
-(defaults to the agent's own default OpenRouter model).
+    # or pass explicitly for this run only (PowerShell)
+    $env:OPENROUTER_API_KEY="sk-or-..."; $env:OPENROUTER_MODEL="google/gemini-flash-latest"; pytest ... -v
+
+    # or the dedicated opt-in vars (cmd.exe)
+    set UTEST_AGENT_PROMPT_EVALUATION=sk-or-...
+    pytest ... -v
+
+The model defaults to the agent's own default OpenRouter model when unset.
 
 Each test reproduces a specific, previously-reported bug/scenario and
 verifies the agent's plan, once executed against a realistic synthetic
@@ -24,25 +38,60 @@ import logging
 import os
 import re
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
 
 from weightslab.trainer.services.agent.agent import DataManipulationAgent
 from weightslab.trainer.services.data_service import DataService
 
 logger = logging.getLogger(__name__)
 
-API_KEY = os.environ.get("UTEST_AGENT_PROMPT_EVALUATION", "").strip()
-MODEL = os.environ.get("UTEST_AGENT_PROMPT_EVALUATION_MODEL", "").strip() or None
+
+def _resolve_live_credentials() -> "tuple[str, str | None]":
+    """Resolve the OpenRouter (key, model) for the live suite.
+
+    Mirrors the agent's own config loading: pull in any repo ``.env`` first,
+    then prefer the dedicated UTEST_* opt-in vars, falling back to the standard
+    OPENROUTER_* vars so the same credentials the agent runs on also drive this
+    suite without duplicating them.
+    """
+    if load_dotenv is not None:
+        # weightslab/tests/trainer/services/<file> -> parents[4] = repo root,
+        # parents[3] = inner package; the agent reads .env from both.
+        here = Path(__file__).resolve()
+        for candidate in (here.parents[4] / ".env", here.parents[3] / ".env"):
+            if candidate.exists():
+                load_dotenv(dotenv_path=candidate, override=False)
+        load_dotenv(override=False)
+
+    key = (
+        os.environ.get("UTEST_AGENT_PROMPT_EVALUATION", "").strip()
+        or os.environ.get("OPENROUTER_API_KEY", "").strip()
+    )
+    model = (
+        os.environ.get("UTEST_AGENT_PROMPT_EVALUATION_MODEL", "").strip()
+        or os.environ.get("OPENROUTER_MODEL", "").strip()
+        or None
+    )
+    return key, model
+
+
+API_KEY, MODEL = _resolve_live_credentials()
 
 if not API_KEY:
     logger.info(
-        "[test_agent_live_prompt_evaluation] UTEST_AGENT_PROMPT_EVALUATION is not set -- "
-        "skipping live-LLM agent prompt evaluation tests. Set it to an OpenRouter API key "
-        "(and optionally UTEST_AGENT_PROMPT_EVALUATION_MODEL) to run this suite against a "
-        "real model."
+        "[test_agent_live_prompt_evaluation] No OpenRouter key found "
+        "(checked UTEST_AGENT_PROMPT_EVALUATION and OPENROUTER_API_KEY, incl. .env) -- "
+        "skipping live-LLM agent prompt evaluation tests. Set one of those (and optionally "
+        "OPENROUTER_MODEL) to run this suite against a real model."
     )
 
 
@@ -369,7 +418,7 @@ class TestAgentRstDocumentedPrompts(unittest.TestCase):
 
     def test_doc_show_only_samples_with_loss_above_5(self):
         df = self._fresh_df()
-        ops = self._query("Show only samples with loss > 5")
+        ops = self._query("Show only samples with training loss > 5")
         df, messages = _run_ops(df, ops)
 
         # No fixture row has loss > 5, so the deny-list-inverse pattern must
@@ -525,10 +574,18 @@ class TestAgentRstDocumentedPrompts(unittest.TestCase):
 
     def test_doc_average_loss(self):
         df = self._fresh_df()
+
+        # Ask for loss without specifying train vs val; the agent should notify the user to precise it's demand.
         ops = self._query("What is the average loss?")
         df, messages = _run_ops(df, ops)
 
         combined = " | ".join(messages)
+
+        # Precise we need the average validation loss, the agent should answer with the correct value.
+        ops = self._query("Oh sorry I forgot, it is the validation loss i want.")
+        df, messages = _run_ops(df, ops)
+
+        combined = f"{combined} | ".join(messages)
         self.assertIn("Analysis Result:", combined, messages)
         value = _extract_analysis_number(combined)
         self.assertIsNotNone(value, ("Could not parse a numeric result from", combined))

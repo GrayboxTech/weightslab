@@ -2624,6 +2624,16 @@ class DataService:
                 return f"Failed to apply '{action}' to layer {layer_id}: {response.message}"
             applied.append(layer_id)
 
+        # Freeze/reset mutate per-neuron learning rates on the same model
+        # object, which the agent's cheap model-schema cache can't detect by
+        # identity — force it to rebuild so `frozen` flags aren't stale.
+        agent = getattr(self, "_agent", None)
+        if agent is not None:
+            try:
+                agent.invalidate_model_schema()
+            except Exception as exc:
+                logger.debug("invalidate_model_schema failed: %s", exc)
+
         return f"Applied '{action}' to layer(s): {applied}"
 
     # ------------------------------------------------------------------
