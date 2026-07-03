@@ -28,10 +28,10 @@ The agent recognizes four broad families of request:
    * - Capability
      - Example prompts
    * - **Data grid manipulation**
-     - "Sort by train loss descending", "Keep only validation samples",
+     - "Sort by train loss, highest first", "Keep only validation samples",
        "Show only samples with loss > 5", "Group by predicted class".
    * - **Tag & discard**
-     - "Tag samples with loss > 0.3 as ``hard``",
+     - "Tag train samples with train loss greater than 1.5",
        "Tag as ``Disabled`` samples with training loss greater than 0.3 and
        loss_shape classified as ``plateaued``. Then discard these data.",
        "Untag ``goldset`` on validation samples".
@@ -39,9 +39,10 @@ The agent recognizes four broad families of request:
      - "Create a column ``loss_ratio`` as train_loss divided by val_loss",
        "Add a boolean column ``is_outlier`` for loss above mean + 2·std".
    * - **Model introspection & management**
-     - "Which layer has more than 2000 neurons?", "Which layers are frozen?",
-       "Show me the complete model details", "Freeze the layer with more than
-       2000 neurons", "Reset layer 3", "Unfreeze layer 3", "Unfreeze everything".
+     - "Which layer has more than 2000 neurons?", "Which layers are currently
+       frozen?", "Show me the complete model details", "Freeze the layer with
+       more than 2000 neurons", "Reset layer 3", "Unfreeze layer 3", "Unfreeze
+       everything".
 
 Compound, multi-step requests work too. A prompt such as *"Tag as 'Disabled'
 samples with training loss greater than 0.3 and loss_shape classified as
@@ -98,8 +99,8 @@ still produces the right result:
   derived/signal columns pandas stores as ``object``), preventing a
   ``'>' not supported between instances of 'float' and 'str'`` crash.
 - **Two conditions on the same column are never silently AND-ed into an
-  impossible filter.** "Keep validation or test samples" must be OR, not AND
-  (a column can't equal two different values at once) — same-column equality
+  impossible filter.** "Keep only validation or test samples" must be OR, not
+  AND (a column can't equal two different values at once) — same-column equality
   conditions are deterministically coalesced into a single ``in`` (OR) check
   regardless of how the plan phrased it.
 - **Python's `and`/`or` never crash a pandas mask.** A generated expression
@@ -256,8 +257,8 @@ Type one of these commands into the chat bar:
      - Clears the current connection and returns the agent to the uninitialized
        state.
 
-Once initialized, just type requests in plain English (e.g. *"tag samples with
-train loss above 1.5 as hard_examples"*) and press Enter.
+Once initialized, just type requests in plain English (e.g. *"Tag train
+samples with train loss greater than 1.5"*) and press Enter.
 
 .. note::
 

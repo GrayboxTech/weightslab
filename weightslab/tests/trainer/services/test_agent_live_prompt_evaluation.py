@@ -437,6 +437,25 @@ class TestAgentRstDocumentedPrompts(unittest.TestCase):
         # should be marked discarded -- the inverse of test_doc_show_only_*.
         self.assertFalse(df["discarded"].astype(bool).any(), messages)
 
+    def test_doc_cli_discard_and_tag_combined(self):
+        # CLI example (docs/agent.rst "Option 2 — Command-line interface"):
+        # "agent query discard all samples with loss > 5 and tag them as
+        # hard_examples" -- combines two different action types (discard by
+        # threshold + tag by threshold) in a single instruction, distinct
+        # from the other discard/tag tests which each do only one action.
+        df = self._fresh_df()
+        ops = self._query("discard all samples with loss > 5 and tag them as hard_examples")
+        df, messages = _run_ops(df, ops)
+
+        # No fixture row has loss > 5, so nothing should actually end up
+        # discarded/tagged -- but both actions must still be recognized and
+        # planned without the compound instruction crashing or being dropped.
+        self.assertFalse(df["discarded"].astype(bool).any(), messages)
+        new_tag_cols = [c for c in df.columns if str(c).startswith("tag:") and c not in self.base_df.columns]
+        self.assertTrue(new_tag_cols, messages)
+        for col in new_tag_cols:
+            self.assertFalse(df[col].astype(bool).any(), (col, messages))
+
     def test_doc_goldset_50_percent_hard_easy_mix(self):
         df = self._fresh_df()
         ops = self._query(
@@ -466,7 +485,7 @@ class TestAgentRstDocumentedPrompts(unittest.TestCase):
 
     def test_doc_create_is_outlier_column(self):
         df = self._fresh_df()
-        ops = self._query("Add a boolean column 'is_outlier' for loss above mean + 2 std")
+        ops = self._query("Add a boolean column 'is_outlier' for loss above mean + 2·std")
         df, messages = _run_ops(df, ops)
 
         new_cols = [c for c in df.columns if c not in self.base_df.columns]
