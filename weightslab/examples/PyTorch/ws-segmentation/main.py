@@ -202,9 +202,14 @@ if __name__ == "__main__":
 
     # --- 5) Data (BDD100k reduced) ---
     default_data_root = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "data", "BDD100k_reduced")
+        os.path.join(os.path.dirname(__file__), "BDD_subset")
     )
     data_root = parameters.get("data_root", default_data_root)
+    if os.path.exists(data_root):
+        print(f"Using data root: {data_root}")
+    else:
+        data_root = default_data_root
+        print(f"Data root not found, using default: {data_root}")
 
     train_cfg = parameters.get("data", {}).get("train_loader", {})
     test_cfg = parameters.get("data", {}).get("test_loader", {})
@@ -264,7 +269,8 @@ if __name__ == "__main__":
     model = wl.watch_or_edit(
         _model,
         flag="model",
-        device=device
+        device=device,
+        compute_dependencies=True
     )
     lr = parameters.get("optimizer", {}).get("lr", 1e-3)
     _optimizer = optim.Adam(model.parameters(), lr=lr)
