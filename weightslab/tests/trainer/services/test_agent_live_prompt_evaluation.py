@@ -22,6 +22,7 @@ generated code/wording.
 """
 import logging
 import os
+import re
 import unittest
 from types import SimpleNamespace
 
@@ -94,6 +95,22 @@ def _make_live_agent(df: pd.DataFrame) -> DataManipulationAgent:
     if not ok:
         raise RuntimeError(f"Failed to initialize live agent for testing: {message}")
     return agent
+
+
+_ANALYSIS_NUMBER_RE = re.compile(r"Analysis Result:.*?(?<![\w.])(-?\d+\.?\d*(?:[eE][+-]?\d+)?)")
+
+
+def _extract_analysis_number(text: str) -> "float | None":
+    """Pulls the first numeric value out of an 'Analysis Result: ...' message
+    (e.g. 'Analysis Result: 0.4123' or '...: np.float64(0.41)'), so live
+    analysis-question tests can check the actual returned VALUE, not just
+    that some result text was produced. The negative lookbehind keeps this
+    from grabbing digits embedded in an identifier (e.g. the "64" in
+    "np.float64(...)") -- it only matches a number not immediately preceded
+    by a word character or a dot.
+    """
+    match = _ANALYSIS_NUMBER_RE.search(text)
+    return float(match.group(1)) if match else None
 
 
 def _run_ops(df: pd.DataFrame, ops: list) -> "tuple[pd.DataFrame, list]":
@@ -455,7 +472,15 @@ class TestAgentRstDocumentedPrompts(unittest.TestCase):
         new_cols = [c for c in df.columns if c not in self.base_df.columns]
         self.assertTrue(new_cols, messages)
         col = new_cols[0]
-        self.assertLessEqual(int(df[col].astype(bool).sum()), 3, (col, messages))
+        # "loss" is ambiguous (train_loss vs val_loss exist), but val_loss is
+        # an affine transform of train_loss (val_loss = 1.1*train_loss+0.01),
+        # which preserves z-scores exactly -- so the outlier MASK is
+        # identical either way, letting this be an exact per-row check
+        # rather than just a count.
+        expected = (
+            self.base_df["train_loss"] > (self.base_df["train_loss"].mean() + 2 * self.base_df["train_loss"].std())
+        ).tolist()
+        self.assertListEqual(df[col].astype(bool).tolist(), expected, (col, messages))
 
     def test_doc_multiply_loss_column_by_2(self):
         df = self._fresh_df()
@@ -486,6 +511,16 @@ class TestAgentRstDocumentedPrompts(unittest.TestCase):
 
         combined = " | ".join(messages)
         self.assertIn("Analysis Result:", combined, messages)
+        value = _extract_analysis_number(combined)
+        self.assertIsNotNone(value, ("Could not parse a numeric result from", combined))
+        # "loss" is ambiguous between train_loss and val_loss (different
+        # means), so accept whichever one the agent picked -- but the
+        # returned number must match ONE of them, not just be "a number".
+        candidates = [self.base_df["train_loss"].mean(), self.base_df["val_loss"].mean()]
+        self.assertTrue(
+            any(abs(value - c) < 1e-3 for c in candidates),
+            (value, candidates, messages),
+        )
 
     def test_doc_average_loss_of_10_hardest_samples(self):
         df = self._fresh_df()
@@ -496,6 +531,21 @@ class TestAgentRstDocumentedPrompts(unittest.TestCase):
         self.assertIn("Analysis Result:", combined, messages)
         # Reported bug: this returned "nan" instead of a real number.
         self.assertNotIn("nan", combined.lower(), messages)
+        value = _extract_analysis_number(combined)
+        self.assertIsNotNone(value, ("Could not parse a numeric result from", combined))
+        # "hardest" (highest loss) is the standard ML reading, but accept the
+        # inverse too rather than assume the agent's wording choice; either
+        # way it must be the mean of an actual top/bottom-10 subset, on
+        # whichever loss column it picked.
+        candidates = [
+            self.base_df[col].sort_values(ascending=asc).head(10).mean()
+            for col in ("train_loss", "val_loss")
+            for asc in (False, True)
+        ]
+        self.assertTrue(
+            any(abs(value - c) < 1e-3 for c in candidates),
+            (value, candidates, messages),
+        )
 
     def test_doc_samples_per_origin(self):
         df = self._fresh_df()
@@ -504,6 +554,11 @@ class TestAgentRstDocumentedPrompts(unittest.TestCase):
 
         combined = " | ".join(messages)
         self.assertIn("Analysis Result:", combined, messages)
+        # Actual counts: 8 train_loader, 4 val_loader, 4 test_loader --
+        # check the real counts appear as whole numbers, not just any text.
+        found_numbers = {int(n) for n in re.findall(r"\b\d+\b", combined)}
+        self.assertIn(8, found_numbers, (combined, "expected count 8 for train_loader"))
+        self.assertIn(4, found_numbers, (combined, "expected count 4 for val_loader/test_loader"))
 
     # ---- Model introspection ---------------------------------------------------
 
@@ -591,6 +646,13 @@ class TestHarnessFixtureAndRunner(unittest.TestCase):
         self.assertIn("doubled", result_df.columns)
         self.assertListEqual(result_df["doubled"].tolist(), (df["train_loss"] * 2).tolist())
         self.assertIn("Reset view", messages)
+
+    def test_extract_analysis_number_parses_plain_and_wrapped_values(self):
+        self.assertAlmostEqual(_extract_analysis_number("Analysis Result: 0.4123"), 0.4123)
+        self.assertAlmostEqual(_extract_analysis_number("Analysis Result: np.float64(0.41)"), 0.41)
+        self.assertAlmostEqual(_extract_analysis_number("... | Analysis Result: -2.5e-3"), -2.5e-3)
+        self.assertIsNone(_extract_analysis_number("Analysis Error: 'origin'"))
+        self.assertIsNone(_extract_analysis_number("No numbers here at all"))
 
 
 if __name__ == "__main__":
