@@ -148,6 +148,89 @@ class TestOriginSchemaPromptLine(unittest.TestCase):
         self.assertIn("SPLIT column", prompt)
 
 
+class TestConversationHistory(unittest.TestCase):
+    """The agent's only cross-turn memory is `self.history`: a flat list of
+    "User: <raw text>" / "Action: N ops executed" strings, with only the
+    last 5 entries fed into the next system prompt. These tests pin down
+    that exact (limited) contract so a future refactor can't silently make
+    it worse (or better) without a test noticing."""
+
+    def _agent_with_scripted_provider(self, responses):
+        """Builds an agent whose provider returns each of `responses` in
+        turn (one non-empty ops list per call), so query() succeeds and
+        appends to history without needing a real LLM."""
+        agent_mod, agent = _make_agent()
+        calls = {"system_prompts": []}
+        it = iter(responses)
+
+        def fake_try_query_provider(provider, instruction, system_prompt):
+            calls["system_prompts"].append(system_prompt)
+            return next(it)
+
+        agent._try_query_provider = fake_try_query_provider
+        agent.preferred_provider = "openrouter"
+        agent.fallback_to_local = False
+        return agent, calls
+
+    def test_history_starts_empty(self):
+        _, agent = _make_agent()
+        self.assertEqual(agent.history, [])
+
+    def test_history_accumulates_user_text_and_op_count(self):
+        agent, _ = self._agent_with_scripted_provider([
+            [{"function": "df.sort_values", "params": {"by": ["loss"], "ascending": [True]}}],
+        ])
+
+        agent.query("sort by loss ascending")
+
+        self.assertEqual(agent.history, [
+            "User: sort by loss ascending",
+            "Action: 1 ops executed",
+        ])
+
+    def test_history_is_included_in_the_next_query_system_prompt(self):
+        agent, calls = self._agent_with_scripted_provider([
+            [{"function": "df.sort_values", "params": {"by": ["loss"], "ascending": [True]}}],
+            [{"function": "df.reset_view", "params": {"__agent_reset__": True}}],
+        ])
+
+        agent.query("sort by loss ascending")
+        agent.query("now reset the view")
+
+        second_prompt = calls["system_prompts"][1]
+        self.assertIn("User: sort by loss ascending", second_prompt)
+        self.assertIn("Action: 1 ops executed", second_prompt)
+
+    def test_only_last_five_history_entries_are_sent(self):
+        # Each turn appends 2 entries ("User: ..." + "Action: ..."), so after
+        # enough turns the window can only ever hold the last 5 raw entries
+        # -- verify the fed history exactly matches self.history[-5:] as
+        # snapshotted immediately before each call (computed, not hand-picked,
+        # to avoid an off-by-one on which half of a turn's pair survives).
+        agent, calls = self._agent_with_scripted_provider([
+            [{"function": "df.sort_values", "params": {"by": ["loss"], "ascending": [True]}}]
+            for _ in range(6)
+        ])
+
+        for i in range(6):
+            window_before_call = list(agent.history[-5:])
+            agent.query(f"turn {i}")
+            expected_text = "\\n".join(window_before_call) if window_before_call else "None"
+            self.assertIn(expected_text, calls["system_prompts"][i])
+
+        # After 6 turns (12 entries total), the very first turn's text must
+        # have fallen out of the tail-end window entirely.
+        self.assertNotIn("User: turn 0", agent.history[-5:])
+
+    def test_history_unaffected_by_a_failed_query(self):
+        # A provider failure must NOT corrupt or grow history with a partial entry.
+        agent, _ = self._agent_with_scripted_provider([None])  # no ops -> query() treats as failure
+
+        agent.query("this will fail to produce a plan")
+
+        self.assertEqual(agent.history, [])
+
+
 class TestParseIntentGracefulFallback(unittest.TestCase):
     """Reported bug: a confusing/malformed user prompt made the LLM produce
     a long non-JSON response (or unrepairable JSON), and the agent surfaced

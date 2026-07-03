@@ -137,6 +137,31 @@ class TestAgentLivePromptEvaluation(unittest.TestCase):
         expected = self.base_df["train_loss"] > 0.5
         self.assertListEqual(df["tag:hard_examples"].astype(bool).tolist(), expected.tolist(), messages)
 
+    def test_cross_turn_memory_followup_references_prior_tag(self):
+        # Cross-turn memory check: the agent's ONLY memory between separate
+        # messages is `self.history` (last 5 raw "User:"/"Action:" lines,
+        # no structured details). A vague follow-up like "now discard those"
+        # must still work by re-reading the prior turn's own wording from
+        # history. This is NOT covered by the intra-request chaining fix
+        # (which only helps within a single multi-sentence request), so it
+        # needs its own fresh agent, isolated from other tests' history, to
+        # be a deterministic check of this specific behavior.
+        df = self._fresh_df()
+        fresh_agent = _make_live_agent(self.base_df.copy())
+
+        ops_1 = fresh_agent.query("Tag samples with train loss greater than 0.5 as hard_examples")
+        df, messages_1 = _run_ops(df, ops_1)
+        self.assertIn("tag:hard_examples", df.columns, messages_1)
+
+        ops_2 = fresh_agent.query("Now discard those samples")
+        df, messages_2 = _run_ops(df, ops_2)
+
+        expected_mask = self.base_df["train_loss"] > 0.5
+        self.assertTrue(expected_mask.any(), "Fixture must contain at least one matching row")
+        context = {"turn1": messages_1, "turn2": messages_2, "history": fresh_agent.history}
+        self.assertTrue((df.loc[expected_mask, "discarded"] == True).all(), context)  # noqa: E712
+        self.assertTrue((df.loc[~expected_mask, "discarded"] == False).all(), context)  # noqa: E712
+
     def test_chained_tag_then_discard_two_conditions(self):
         # Reported scenario: "Tag as 'Disabled' samples with training loss
         # greater than 0.3 and loss_shape classified as 'plateaued'. Then

@@ -160,6 +160,39 @@ skips entirely (it never runs by accident in CI or consumes API credits
 unintentionally). A small always-on sanity check for the harness itself
 (fixture shape, op-runner correctness) still runs regardless.
 
+The rest of the agent's test coverage lives alongside it and needs no API key:
+
+.. code-block:: bash
+
+   pytest weightslab/tests/trainer/services/test_agent_prompt_unit.py \
+          weightslab/tests/trainer/services/test_agent_model_and_safety_unit.py \
+          weightslab/tests/trainer/services/test_agent_service_unit.py -v
+
+These exercise the planner/executor logic directly (handlers, safety nets,
+resolvers, dispatch) via hand-built plans rather than natural language — they
+don't call an LLM, so they're not "queries" in the same sense as the live
+suite above, but they pin down every fix described in this page.
+
+Conversation memory (what's actually kept between turns)
+------------------------------------------------------------
+
+The agent's cross-turn memory is intentionally small: a flat list
+(``self.history``) of ``"User: <raw text>"`` / ``"Action: N ops executed"``
+lines, with only the **last 5 entries** fed into the next turn's prompt — no
+structured record of which columns/tags/layers a prior turn actually touched,
+and it resets on backend restart or ``/reset``. This is *separate* from the
+intra-request chaining described above (which only helps within a single
+multi-sentence request): a follow-up like *"now discard those samples"* in a
+**new** message has to work by the model re-reading the previous turn's own
+wording from that trimmed history, not from any structured state. It usually
+works because the original instruction text is preserved verbatim, but it's
+weaker than true memory — don't rely on it across many turns or for details a
+prior turn didn't literally say. ``test_agent_model_and_safety_unit.py``
+(``TestConversationHistory``) pins down the exact accumulate/trim contract,
+and ``test_agent_live_prompt_evaluation.py``
+(``test_cross_turn_memory_followup_references_prior_tag``) exercises this
+scenario end-to-end against a real model.
+
 Initializing the agent
 ----------------------
 

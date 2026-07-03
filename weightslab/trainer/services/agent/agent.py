@@ -506,10 +506,23 @@ class DataManipulationAgent:
             data_service = self.ctx
             exp_ctx = getattr(data_service, "_ctx", None)
             if exp_ctx is None:
+                _LOGGER.info("[Agent] No experiment context (_ctx) available on DataService; skipping model schema.")
                 return
             exp_ctx.ensure_components()
             model = exp_ctx.components.get("model")
             if model is None:
+                try:
+                    from weightslab.backend.ledgers import list_models
+                    registered = list_models()
+                except Exception:
+                    registered = "<could not list>"
+                _LOGGER.info(
+                    "[Agent] components.get('model') returned None (ledger-registered model names: %s). "
+                    "Model-related agent requests will report 'no model registered'. If a model IS "
+                    "registered under a name other than the experiment name / 'experiment' / 'main', "
+                    "ExperimentContext.ensure_components()'s model-resolution heuristic won't find it.",
+                    registered,
+                )
                 return
 
             layer_rows = []
@@ -542,7 +555,7 @@ class DataManipulationAgent:
             if neuron_rows:
                 self.model_neurons_df = pd.DataFrame(neuron_rows, columns=neuron_columns)
         except Exception as e:
-            _LOGGER.warning(f"[Agent] Failed to build model schema: {e}")
+            _LOGGER.warning(f"[Agent] Failed to build model schema: {e}", exc_info=True)
 
     def _build_layer_mask(self, conditions: List["Condition"]) -> Optional[str]:
         """Builds a boolean mask expression over `layers_df` (small in-memory
