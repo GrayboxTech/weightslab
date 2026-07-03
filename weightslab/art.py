@@ -75,9 +75,10 @@ _banner_lines = [""]
 _banner_lines += [f"{_RED}{line}{_RESET}" for line in _wordmark_lines]
 _banner_lines += [
     "",
-    f"{_GREEN}{_SUBTITLE.center(_WIDTH)}{_RESET}",
-    f"{_BOLD}{_CREDIT.center(_WIDTH)}{_RESET}",
-    "",
+    f"{_GREEN}{_SUBTITLE}{_RESET}",
+    f"{_BOLD}{_CREDIT}{_RESET}",
+    "#" * _WIDTH,
+    "\n"
 ]
 _BANNER = "\n".join(_banner_lines) + "\n"
 
