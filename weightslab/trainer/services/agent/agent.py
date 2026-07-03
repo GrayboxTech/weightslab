@@ -394,6 +394,7 @@ class DataManipulationAgent:
         self._build_column_index()
         self._load_config()
         self._setup_providers()
+        self._verify_startup_providers()
         self.history = []
 
         # --- HANDLER REGISTRY ---
@@ -512,8 +513,9 @@ class DataManipulationAgent:
             model = exp_ctx.components.get("model")
             if model is None:
                 try:
-                    from weightslab.backend.ledgers import list_models
+                    from weightslab.backend.ledgers import list_models, get_model
                     registered = list_models()
+                    model = get_model(registered[0]) if registered else None
                 except Exception:
                     registered = "<could not list>"
                 _LOGGER.info(
@@ -780,6 +782,30 @@ class DataManipulationAgent:
             except Exception as e: _LOGGER.error(f"Ollama error: {e}")
 
         return initialized
+
+    def _verify_startup_providers(self) -> None:
+        """
+        A provider configured at construction time (agent_config.yaml / env
+        vars, e.g. OPENROUTER_API_KEY) never goes through the connectivity
+        check the `/init` UI flow runs (see `initialize_with_cloud_key`) --
+        `_setup_providers()` only builds a client object from whatever key
+        string it was given, it never confirms the key is actually accepted.
+        `is_available()` treats "a client object exists" as "ready", so a
+        bad startup key would otherwise report available=True indefinitely
+        (CheckAgentHealth says "ready to help you") until the first real
+        query 401s. Probe once here instead, so that mismatch can't happen.
+
+        Only runs for the OpenRouter chain built in `__init__`: Ollama's
+        `is_available()` already does a live reachability check every call,
+        and `initialize_with_cloud_key`/`change_model` already run their own
+        explicit post-`_setup_providers()` check.
+        """
+        if self.chain_openrouter is None:
+            return
+        ok, message = self._check_chat_provider("openrouter")
+        if not ok:
+            _LOGGER.warning(f"[Agent] Startup OpenRouter connectivity check failed, disabling it: {message}")
+            self.chain_openrouter = None
 
     def _check_chat_provider(self, provider: str) -> "tuple[bool, str]":
         """Run a minimal chat request to verify the provider is actually usable."""
@@ -1674,7 +1700,12 @@ class DataManipulationAgent:
         # If we get here, all providers failed
         error_msg = "Internal Agent Error: Failed to generate a plan."
         if self._is_auth_error(self._last_query_error):
-            # The provider rejected our credentials — the agent isn't connected.
+            # The provider rejected our credentials — the agent isn't
+            # connected. Invalidate the cached client so is_available()/
+            # CheckAgentHealth immediately stop reporting "available" for a
+            # connection that just proved broken, instead of leaving the
+            # health check permanently stale until the process restarts.
+            self.chain_openrouter = None
             error_msg = (
                 "Agent not connected: the LLM provider rejected the request "
                 "(401 Unauthorized). Check your API key and re-initialize the "

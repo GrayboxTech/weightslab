@@ -165,7 +165,7 @@ The suite has two test classes:
 - ``TestAgentLivePromptEvaluation`` — regression tests for specific
   previously-reported bugs (compound conditions, split-name confusion,
   scientific notation, cross-turn memory, …).
-- ``TestAgentRstDocumentedPrompts`` — **one test per example prompt listed on
+- ``TestAgentRstDocumentedPrompts`` — **one test per example prompt listed on**
   this page's "Example prompts by task" tables**, in the same wording, so
   every documented promise has its own independently re-runnable test.
 
@@ -317,6 +317,17 @@ way to enable the local Ollama provider.
 
 See :doc:`configuration` for the full list of agent environment variables, the
 ``agent_config.yaml`` lookup order, and every supported YAML key.
+
+.. note::
+
+   "Available" means the credentials were actually confirmed to work, not
+   just that a client object was constructed. A key configured via
+   ``agent_config.yaml``/environment variables (Option 3) is probed once at
+   backend startup exactly like the ``/init`` UI flow already does, and if a
+   live query ever gets rejected with 401, the connection is immediately
+   marked unavailable rather than continuing to report "ready" until the
+   next restart. If health checks and real requests ever disagree, that's a
+   bug — the two are kept in sync by design.
 
 Using the agent effectively
 ----------------------------
