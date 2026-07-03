@@ -201,7 +201,7 @@ def _handle_command(cmd: str) -> Any:
                     'check agent': 'agent status',
                     'initialize openrouter': 'agent init --api-key sk-or-... --model openai/gpt-4o-mini --timeout 20',
                     'list available models': 'agent models',
-                    'switch model': 'agent model meta-llama/llama-3.3-70b-instruct',
+                    'switch model': 'agent model ~google/gemini-flash-latest',
                     'query the agent': 'agent query discard all samples with loss > 5 and tag them as hard_examples',
                     'query shortcut': 'ask tag train samples with loss > 1.2 as goldset',
                 }
