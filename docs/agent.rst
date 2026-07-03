@@ -160,6 +160,31 @@ skips entirely (it never runs by accident in CI or consumes API credits
 unintentionally). A small always-on sanity check for the harness itself
 (fixture shape, op-runner correctness) still runs regardless.
 
+The suite has two test classes:
+
+- ``TestAgentLivePromptEvaluation`` — regression tests for specific
+  previously-reported bugs (compound conditions, split-name confusion,
+  scientific notation, cross-turn memory, …).
+- ``TestAgentRstDocumentedPrompts`` — **one test per example prompt listed on
+  this page's "Example prompts by task" tables**, in the same wording, so
+  every documented promise has its own independently re-runnable test.
+
+Because every prompt is its own ``test_`` method, a single failure doesn't
+require re-running the whole (slow, API-consuming) suite — re-run just the
+failed ones:
+
+.. code-block:: bash
+
+   # Run everything and see what fails:
+   pytest weightslab/tests/trainer/services/test_agent_live_prompt_evaluation.py -v
+
+   # Re-run only whatever failed last time:
+   pytest weightslab/tests/trainer/services/test_agent_live_prompt_evaluation.py --lf -v
+
+   # Run a single documented example by name:
+   pytest weightslab/tests/trainer/services/test_agent_live_prompt_evaluation.py -v \
+          -k test_doc_reset_layer_3
+
 The rest of the agent's test coverage lives alongside it and needs no API key:
 
 .. code-block:: bash
