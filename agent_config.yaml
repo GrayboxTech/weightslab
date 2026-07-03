@@ -15,7 +15,13 @@ agent:
   ollama_model: llama3.2:3b
 
   # # Remote Model Selection
-  # openrouter_model: meta-llama/llama-3.3-70b-instruct  # Open router model name, e.g., 'meta-llama/llama-3.3-70b-instruct' (can also be set as env variable OPENROUTER_MODEL)
+  # Default is a fast flash-class model. The intent-planning task is simple JSON
+  # generation, so a small/fast model responds in ~2-4s where a 70B model took
+  # ~15-30s for no accuracy gain. Switch back to a large model here if you see
+  # accuracy issues (speed/accuracy tradeoff).
+  # openrouter_model: google/gemini-2.0-flash-001  # Open router model name (can also be set as env variable OPENROUTER_MODEL). Fast alternatives: openai/gpt-4o-mini, meta-llama/llama-3.1-8b-instruct. Accurate/slow: meta-llama/llama-3.3-70b-instruct
   # openrouter_api_key: <your_openrouter_api_key>  # Open router API key (can also be set as env variable OPENROUTER_API_KEY)
   # openrouter_base_url: https://openrouter.ai/api/v1  # Open router base URL (can also be set as env variable OPENROUTER_BASE_URL)
   # openrouter_request_timeout: 15.0  # Timeout for OpenRouter API requests in seconds (can also be set as env variable OPENROUTER_REQUEST_TIMEOUT)
+  # openrouter_provider_sort: throughput  # Bias OpenRouter's upstream routing to avoid slow providers: 'throughput' | 'latency' | 'price'. Empty string = let OpenRouter choose (env: OPENROUTER_PROVIDER_SORT)
+  # openrouter_structured_output: false  # Ask the model for a schema-validated plan directly (skips free-form JSON + regex repair). More reliable, but only works on models whose OpenRouter route supports structured/JSON-schema output (e.g. Gemini, GPT-4o). env: OPENROUTER_STRUCTURED_OUTPUT=1
