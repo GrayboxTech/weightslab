@@ -277,7 +277,7 @@ the interactive console exposes an ``agent`` verb:
    agent status                        # Is the agent available?
    agent init --api-key sk-or-... --model openai/gpt-4o-mini [--timeout 20]
    agent models                        # List available OpenRouter models
-   agent model meta-llama/llama-3.3-70b-instruct   # Switch model
+   agent model ~google/gemini-flash-latest   # Switch model
    agent reset                         # Clear the connection
    agent query <prompt>                # Run a natural-language request
    query <prompt>                      # Shortcut for `agent query`
@@ -304,7 +304,7 @@ way to enable the local Ollama provider.
    # agent_config.yaml (repo root, package root, cwd, or $AGENT_CONFIG_PATH)
    agent:
      provider: openrouter          # or "ollama"
-     openrouter_model: meta-llama/llama-3.3-70b-instruct
+     openrouter_model: ~google/gemini-flash-latest
      fallback_to_local: false
      # Local Ollama alternative:
      ollama_model: llama3.2:3b

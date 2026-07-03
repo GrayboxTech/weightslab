@@ -357,14 +357,13 @@ if __name__ == "__main__":
 
     # Start WeightsLab services (gRPC only, no CLI)
     wl.serve(
-        serving_grpc=parameters.get("serving_grpc", False),
-        serving_cli=parameters.get("serving_cli", False),
+        serving_grpc=parameters.get("serving_grpc", False)
     )
 
     print("=" * 60)
     print(" STARTING TRAINING")
     print(f" Evaluation every {eval_full_to_train_steps_ratio} steps")
-    print(f"� Dataset splits: train={len(_train_dataset)}, test={len(_test_dataset)}")
+    print(f" Dataset splits: train={len(_train_dataset)}, test={len(_test_dataset)}")
     print(f" Logs will be saved to: {log_dir}")
     print("=" * 60 + "\n")
 

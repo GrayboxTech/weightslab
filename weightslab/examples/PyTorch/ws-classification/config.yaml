@@ -23,7 +23,6 @@ ledger_flush_interval: 30.0
 
 # Configure clients
 serving_grpc: true
-serving_cli: false
 
 # DataLoader parameters
 # data_root: .\data  # Auto downloaded from mnist server

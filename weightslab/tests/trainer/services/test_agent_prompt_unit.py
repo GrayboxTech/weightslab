@@ -165,7 +165,7 @@ class TestAgentPromptUnit(unittest.TestCase):
 
         with mock.patch.object(agent_mod, "ChatOpenAI", _FailingChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
             agent = agent_mod.DataManipulationAgent(ctx)
-            ok, message = agent.initialize_with_cloud_key("bad-key", "openrouter", "meta-llama/llama-3.3-70b-instruct")
+            ok, message = agent.initialize_with_cloud_key("bad-key", "openrouter", "~google/gemini-flash-latest")
 
         self.assertFalse(ok)
         self.assertIn("connectivity check failed", message)

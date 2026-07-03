@@ -727,7 +727,7 @@ class DataManipulationAgent:
         # simple JSON generation, and a 70B model added ~15-30s of latency for
         # no accuracy benefit (see plan Phase B.1). Override with OPENROUTER_MODEL
         # (or agent_config.yaml) to use a larger model.
-        self.openrouter_model = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.0-flash-001")
+        self.openrouter_model = os.environ.get("OPENROUTER_MODEL", "~google/gemini-flash-latest")
         self.openrouter_base_url = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         self.openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", None)
         self.openrouter_request_timeout = float(os.environ.get("OPENROUTER_REQUEST_TIMEOUT", "15.0"))
@@ -1067,7 +1067,7 @@ class DataManipulationAgent:
         self.chain_ollama = None
         self.chain_openrouter = None
         self.openrouter_api_key = None
-        self.openrouter_model = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.0-flash-001")
+        self.openrouter_model = os.environ.get("OPENROUTER_MODEL", "~google/gemini-flash-latest")
         self.preferred_provider = "openrouter"
 
         return True, "Agent connection reset. Type /init to set up again."
