@@ -2216,7 +2216,6 @@ class DataService:
             return f"Action triggered: {action_name} (Not implemented)"
 
         # --- 3. DATAFRAME MANIPULATION ---
-
         # A) Agent-driven df.apply_mask (for complex filters)
         if func == "df.apply_mask":
             code = rewrite_boolean_keywords_to_bitwise(params.get("code", ""))
