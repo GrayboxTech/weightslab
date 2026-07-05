@@ -100,8 +100,8 @@ For a detailed installation guide and advanced configuration &rarr; [Installatio
 
 2. **Wrap your parameters, model, optimizer, signals, and dataset:**
 ```python
-   parameters      = wl.watch_or_edit(parameters,                              flag='hp',     ...) # ← WeightsLab monitors your parameters and lets you update them from the UI
-   model           = wl.watch_or_edit(parameters,                                       flag='hp', ...) # ← WeightsLab monitors your model state
+   parameters      = wl.watch_or_edit(parameters, flag='hp',     ...) # ← WeightsLab monitors your parameters and lets you update them from the UI
+   model           = wl.watch_or_edit(model, flag='model', ...) # ← WeightsLab monitors your model state
    optimizer       = wl.watch_or_edit(optim.Adam(...),                         flag='opt',    ...) # ← Tracks optimizer state and lets you update the learning rate from the UI
    
    train_criterion = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"),  flag='signal', name="train_loss/sample", per_sample=True, log=True)   # ← Wrap and plot your signals on the UI
