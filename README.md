@@ -195,7 +195,7 @@ def main():
                     # instance_id=[1, 2],
                 )
 
-        avg_loss = total_loss / len(dataloader)
+        avg_loss = total_loss / len(loader)
         print(f"Epoch {epoch+1}/5 - Loss: {avg_loss:.4f}")
 
     print("✅ Training complete!")
