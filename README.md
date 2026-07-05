@@ -26,7 +26,7 @@ WeightsLab is an open-source PyTorch tool for dataset debugging, data quality mo
 
 <br>
 
-Most data problems are invisible until your model tells you: through loss spikes, poor generalization, or silent underperformance. WeightsLab connects those training signals back to the exact samples causing them
+Most data problems are invisible until your model tells you: through loss spikes, poor generalization, or silent underperformance. WeightsLab connects those training signals back to the exact samples causing them.
 
 **Wrap your training script with the SDK** to capture per-sample signals live.  
 **Open Studio** to inspect, filter, and curate your dataset mid-training, without restarting.
