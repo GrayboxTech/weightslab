@@ -37,7 +37,7 @@ Most data problems are invisible until your model tells you: through loss spikes
 
 <br>
 
- → `give it a star ⭐` and join our [`early access ⏰`](https://grayboxtech.github.io/signup/)
+ → `give it a star ⭐`
 
 <br>
 
