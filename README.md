@@ -35,8 +35,6 @@ Most data problems are invisible until your model tells you: through loss spikes
 - **Curate** - Discard bad samples, create data subsets, rebalance distributions 
 - **Continue** - Resume training on your cleaned dataset, no restart required 
 
-WeightsLab is an open-source PyTorch tool for dataset debugging, data quality monitoring, mislabel detection, and mid-training data curation for computer vision datasets (images, video & LiDAR point clouds).
-
 <br>
 
  → `give it a star ⭐` and join our [`early access ⏰`](https://grayboxtech.github.io/signup/)
