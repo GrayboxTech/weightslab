@@ -43,6 +43,14 @@ The agent recognizes four broad families of request:
        frozen?", "Show me the complete model details", "Freeze the layer with
        more than 2000 neurons", "Reset layer 3", "Unfreeze layer 3", "Unfreeze
        everything".
+   * - **Save checkpoints & data state**
+     - "Save a checkpoint", "Dump the model weights and its architecture",
+       "Save the current data state (tags and discards)".
+   * - **Signal-history queries**
+     - "Tag samples that never had a training loss below 0.5", "Discard samples
+       whose loss was ever above 5", "Keep samples whose average training loss
+       stayed under 0.2" — queries over each sample's signal history *over
+       training*, not just its latest value.
 
 Compound, multi-step requests work too. A prompt such as *"Tag as 'Disabled'
 samples with training loss greater than 0.3 and loss_shape classified as
@@ -483,6 +491,59 @@ Model management (freeze / reset / unfreeze)
      - Restores only whichever of those two neurons is actually frozen.
    * - "Unfreeze everything"
      - Restores every currently-frozen layer; leaves already-trainable layers untouched.
+
+Saving checkpoints & data state
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The agent can trigger the same checkpoint machinery Weights Studio uses, so you
+can persist progress mid-session from a prompt.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 60 40
+
+   * - Prompt
+     - What happens
+   * - "Save a checkpoint" / "Dump the model weights"
+     - Writes a model-weights checkpoint (and optimizer state) via the live
+       CheckpointManager.
+   * - "Save the model and its architecture"
+     - Also serializes the full model architecture alongside the weights.
+   * - "Save the current data state"
+     - Snapshots the current per-sample tags and ``discarded`` flags (plus RNG
+       state) as a data checkpoint.
+
+Querying signal history (behavior over training)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The data grid holds each sample's **latest** signal value. The experiment
+logger separately keeps the **full per-sample time series** of every logged
+signal, so the agent can answer questions about how a signal behaved *over the
+course of training* — via a ``signal_history('<metric>', '<min|max|mean|count>')``
+expression it builds for you.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 60 40
+
+   * - Prompt
+     - What happens
+   * - "Tag samples that never had a training loss below 0.5"
+     - Tags rows whose **minimum** ``train_loss`` over training was ≥ 0.5
+       (``signal_history('train_loss','min') >= 0.5``).
+   * - "Discard samples whose loss was ever above 5"
+     - Deny-lists rows whose **maximum** loss over training exceeded 5.
+   * - "Keep samples whose average training loss stayed under 0.2"
+     - Filters on the **mean** of each sample's loss history.
+
+.. note::
+
+   Signal history is only available for signals that were logged with
+   ``wl.save_signals(..., log=True)`` (the flag that writes the per-sample
+   history to the logger's DuckDB store). A sample with no recorded history is
+   treated as *not matching* (its ``signal_history`` value is ``NaN``, so
+   comparisons are ``False``) — the query never errors, it just excludes those
+   rows.
 
 Workflow pattern
 ----------------
