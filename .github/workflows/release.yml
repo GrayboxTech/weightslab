@@ -363,15 +363,14 @@ jobs:
 
           # CLI banner (weightslab/art.py), loaded as a standalone file so we
           # don't pull in the full package (and its heavy optional deps) just
-          # to print a logo. The dynamic branch/commit stamp it appends is
-          # meaningless in a detached-HEAD CI checkout, so it's trimmed off.
+          # to print a logo. ANSI color codes are stripped (Markdown can't render
+          # them); the box-drawing/ASCII art itself renders fine in a code fence.
           banner_block = ""
           try:
             spec = importlib.util.spec_from_file_location("wl_art", "weightslab/art.py")
             wl_art = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(wl_art)
             plain_banner = re.sub(r'\x1b\[[0-9;]*m', '', wl_art._BANNER)
-            plain_banner = plain_banner.split("By GrayBx", 1)[0] + "By GrayBx"
             banner_block = f"```text\n{plain_banner.strip(chr(10))}\n```\n\n"
           except Exception:
             pass
@@ -708,15 +707,14 @@ jobs:
 
           # CLI banner (weightslab/art.py), loaded as a standalone file so we
           # don't pull in the full package (and its heavy optional deps) just
-          # to print a logo. The dynamic branch/commit stamp it appends is
-          # meaningless in a detached-HEAD CI checkout, so it's trimmed off.
+          # to print a logo. ANSI color codes are stripped (Markdown can't render
+          # them); the box-drawing/ASCII art itself renders fine in a code fence.
           banner_block = ""
           try:
             spec = importlib.util.spec_from_file_location("wl_art", "weightslab/art.py")
             wl_art = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(wl_art)
             plain_banner = re.sub(r'\x1b\[[0-9;]*m', '', wl_art._BANNER)
-            plain_banner = plain_banner.split("By GrayBx", 1)[0] + "By GrayBx"
             banner_block = f"```text\n{plain_banner.strip(chr(10))}\n```\n\n"
           except Exception:
             pass
