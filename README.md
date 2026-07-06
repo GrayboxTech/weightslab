@@ -26,14 +26,11 @@ WeightsLab is an open-source PyTorch tool for dataset debugging, data quality mo
 Longer-term, we're building toward bringing dataset management, training, fine-tuning, and validation together in a single, unified workflow.
 
 <br>
-
 <div align="center">
-  <img src="https://github.com/user-attachments/assets/adc00648-0720-432e-9d8f-1003e946c906" width="800" alt="WeightsLab Studio demo" />
-  <p><sub><a href="https://youtu.be/GBBDDaJQLWk">▶ Watch full demo</a></sub></p>
+  <img src="https://github.com/GrayboxTech/assets/blob/main/GIF/weightslab_demo_bdd.gif" width="1280" alt="WeightsLab Studio demo" />
+  <!-- <sub><a href="https://youtu.be/GBBDDaJQLWk">▶ Watch full demo</a></sub> -->
 </div>
-
 <br>
-
 Most data problems are invisible until your model tells you: through loss spikes, poor generalization, or silent underperformance. WeightsLab connects those training signals back to the exact samples causing them.
 
 **Wrap your training script with the SDK** to capture per-sample signals live.  
