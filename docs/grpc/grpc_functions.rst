@@ -64,7 +64,6 @@ Connection
     // Weights Studio connects to gRPC server
     const channel = grpc.web.grpc.createChannel("http://localhost:50051");
     const client = new ExperimentServiceClient(channel);
-```
 
 RPC Methods
 ===========

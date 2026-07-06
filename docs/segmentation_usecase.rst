@@ -1,5 +1,5 @@
 Segmentation Use Case — Per-instance & Per-sample Signals (PyTorch)
-==================================================================
+===================================================================
 
 This page walks through the segmentation integration from:
 

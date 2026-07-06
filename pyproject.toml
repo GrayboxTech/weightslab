@@ -104,9 +104,6 @@ weightslab = "weightslab.ui_docker_bridge:main"
 [project.urls]
 Homepage = "https://github.com/GrayboxTech/weightslab"
 
-[tool.setuptools.package-data]
-"weightslab.ui" = ["*.yml", "*.yaml", "*.sh", "*.ps1"]
-
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["weightslab", "weightslab.*"]

@@ -162,29 +162,29 @@ examples:
 
 def _get_compose_file():
     """Return the path to the bundled docker-compose.yml."""
-    # return files("weightslab.ui.docker") / "docker-compose.yml"
-    return Path(__file__).parent / 'ui' / 'docker' / 'docker-compose.yml'
+    # return files("weightslab.docker.docker") / "docker-compose.yml"
+    return Path(__file__).parent.parent / 'docker' / 'docker' / 'docker-compose.yml'
 
 
 def _get_envoy_config():
     """Return the path to the bundled envoy.yaml."""
-    # return files("weightslab.ui.envoy") / "envoy.yaml"
-    return Path(__file__).parent / 'ui' / 'docker' / 'envoy.yaml'
+    # return files("weightslab.docker.envoy") / "envoy.yaml"
+    return Path(__file__).parent.parent / 'docker' / 'docker' / 'envoy.yaml'
 
 
 def _get_bootstrap_script() -> Path:
     """Get the bootstrap-secure.ps1 script path."""
-    return Path(__file__).parent / 'ui' / 'docker' / 'utils' / 'build-and-deploy.sh'
+    return Path(__file__).parent.parent / 'docker' / 'docker' / 'utils' / 'build-and-deploy.sh'
 
 
 def _get_cert_script() -> Path:
     """Get the generate-certs-auth-token.sh script path."""
-    return Path(__file__).parent / 'ui' / 'docker' / 'utils' / 'generate-certs-auth-token.sh'
+    return Path(__file__).parent.parent / 'docker' / 'docker' / 'utils' / 'generate-certs-auth-token.sh'
 
 
 def _get_cert_script_ps1() -> Path:
     """Get the generate-certs-auth-token.ps1 script path."""
-    return Path(__file__).parent / 'ui' / 'docker' / 'utils' / 'generate-certs-auth-token.ps1'
+    return Path(__file__).parent.parent / 'docker' / 'docker' / 'utils' / 'generate-certs-auth-token.ps1'
 
 
 def _is_windows() -> bool:
@@ -222,7 +222,7 @@ def _ensure_scripts_executable() -> None:
     """
     if _is_windows():
         return
-    ui_dir = Path(__file__).parent / 'ui'
+    ui_dir = Path(__file__).parent.parent / 'docker'
     try:
         scripts = list(ui_dir.rglob('*.sh'))
     except OSError as exc:
@@ -964,7 +964,7 @@ _DEFAULT_EXAMPLE = "cls"
 
 def _get_example_dir(name: str = "ws-classification", category: str = "PyTorch") -> Path:
     """Path to a bundled example directory (under examples/<category>/<name>)."""
-    return Path(__file__).parent / 'examples' / category / name
+    return Path(__file__).parent.parent / 'examples' / category / name
 
 
 def _install_example_requirements(example_dir: Path) -> None:

@@ -221,7 +221,7 @@ jobs:
         run: |
           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
           # A per-test timeout guards against any regression that hangs a test.
-          python -m pytest ./weightslab/tests -v --timeout=300
+          python -m pytest ./tests -v --timeout=300
 
   build-and-publish-dev:
     # Only publish to TestPyPI when pushing to main (not on PRs or dev branch pushes).

@@ -60,11 +60,13 @@ Each log entry includes:
 - **action_type**: Type of action performed
 - **status**: "success" or "failed"
 - **details**: Dictionary containing:
+
   - Before/after values for changes
   - Affected item count
   - Sample IDs for data operations
   - Configuration details
   - Any other context relevant to the action
+
 - **error**: Error message if status == "failed"
 
 File Locations
@@ -174,8 +176,10 @@ Control which format audit logs are written to using the ``AUDIT_LOG_FORMAT`` en
 - If not specified: ``AUDIT_LOG_FORMAT`` defaults to ``json``
 - Only one format file is created per experiment (not both)
 - File is created in ``root_log_dir`` as either:
+
   - ``audit_log.json`` (for json format)
   - ``audit_log.csv`` (for csv format)
+
 - When set to ``none``, no audit logs are created or maintained
 
 **Valid Options:**

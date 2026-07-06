@@ -944,7 +944,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                             raise KeyError("No manager in ledger")
                     except (KeyError, AttributeError):
                         # Create new manager and register it
-                        _checkpoint_manager = CheckpointManager(root_log_dir=root_log_dir)
+                        _checkpoint_manager = CheckpointManager(root_log_dir=obj['root_log_dir'])
                         try:
                             ledgers.register_checkpoint_manager(_checkpoint_manager)
                             logger.info("Registered new checkpoint manager in ledger")
@@ -3024,32 +3024,50 @@ class _EvalManagedLoader:
 
     def __iter__(self):
         it = iter(self._loader)
-        while True:
-            if self._max_batches is not None and self._processed_batches >= self._max_batches:
-                return
+        try:
+            while True:
+                if self._max_batches is not None and self._processed_batches >= self._max_batches:
+                    return
 
-            self._check_cancel_or_timeout()
-            try:
-                batch = next(it)
-            except StopIteration:
-                return
+                self._check_cancel_or_timeout()
+                try:
+                    batch = next(it)
+                except StopIteration:
+                    return
 
-            batch_started = time.monotonic()
-            yield batch
+                batch_started = time.monotonic()
+                yield batch
 
-            batch_seconds = max(1e-6, time.monotonic() - batch_started)
-            self._processed_batches += 1
-            self._avg_batch_seconds = (
-                (self._avg_batch_seconds * (self._processed_batches - 1)) + batch_seconds
-            ) / self._processed_batches
+                batch_seconds = max(1e-6, time.monotonic() - batch_started)
+                self._processed_batches += 1
+                self._avg_batch_seconds = (
+                    (self._avg_batch_seconds * (self._processed_batches - 1)) + batch_seconds
+                ) / self._processed_batches
 
-            progress_total = self._total_batches
-            progress_current = min(self._processed_batches, progress_total) if progress_total > 0 else self._processed_batches
-            self._controller.report_progress(
-                progress_current,
-                progress_total,
-                f"Evaluating '{self._split_name}'…",
-            )
+                progress_total = self._total_batches
+                progress_current = min(self._processed_batches, progress_total) if progress_total > 0 else self._processed_batches
+                self._controller.report_progress(
+                    progress_current,
+                    progress_total,
+                    f"Evaluating '{self._split_name}'…",
+                )
+        finally:
+            # Any exit that isn't `it` itself raising StopIteration (max_batches
+            # cap, cancel/timeout, or the caller breaking/erroring out of its
+            # `for batch in loader:` — which closes this generator via
+            # GeneratorExit) leaves `is_a_loop` stuck True on the wrapped
+            # loader (set by Proxy.__iter__ in ledgers.py and only cleared on
+            # a natural StopIteration). If `self._loader` is the *training*
+            # loader (e.g. an "evaluate N steps on train split" request),
+            # that stuck flag makes the next plain `next(train_loader)` call
+            # in the user's training loop wrongly propagate StopIteration at
+            # the next epoch boundary instead of transparently auto-resetting.
+            underlying = getattr(it, '_it', None)
+            if underlying is not None:
+                try:
+                    underlying.is_a_loop = False
+                except Exception:
+                    pass
 
 
 # ##############################################################################################################

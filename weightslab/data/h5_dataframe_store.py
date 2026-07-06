@@ -441,15 +441,23 @@ class H5DataFrameStore:
                     return json.loads(stripped)
                 except json.JSONDecodeError:
                     # Fallback: numpy repr uses spaces as delimiters without commas.
-                    # E.g. "[0.1 0.2]" or "[[0.1 0.2]\n [0.3 0.4]]"
+                    # E.g. "[0.1 0.2]" or "[[0.1 0.2]\n [0.3 0.4]]" (rows separated
+                    # by "]\n [" or "] [", which the number-gap substitution below
+                    # never touches since it requires a digit/dot on both sides).
                     try:
+                        normalized = stripped.replace('\n', ' ')
+                        normalized = re.sub(r'\]\s+\[', '], [', normalized)
                         normalized = re.sub(
                             r'(?<=[0-9.])\s+(?=[-0-9.\[])',
                             ', ',
-                            stripped.replace('\n', ' '),
+                            normalized,
                         )
                         return json.loads(normalized)
                     except Exception:
+                        logger.warning(
+                            "Could not deserialize legacy non-JSON value in column %r "
+                            "(sample stays with the raw string): %.200r", col, stripped
+                        )
                         return val
 
             for col in cols_to_deserialize:

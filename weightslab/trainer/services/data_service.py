@@ -1263,7 +1263,7 @@ class DataService:
                 task_type = "classification" # Default fallback
                 if label is not None:
                     if isinstance(label, dict):
-                        if ('boxes' in label or 'bboxes' in label):
+                        if ('boxes' in label or 'bboxes' in label or 'bb' in label):
                             task_type = 'detection'
                     else:
                         l_arr = to_numpy_safe(label)
@@ -1378,7 +1378,7 @@ class DataService:
                                 bbox_format = detect_bbox_format(bboxes)
                                 bbox_data = {
                                     "bboxes": bboxes.tolist(),
-                                    "class_ids": class_ids.tolist() if class_ids is not None else 1,
+                                    "class_ids": class_ids.tolist() if hasattr(class_ids, 'tolist') else (class_ids if class_ids is not None else 1),
                                     "format": bbox_format
                                 }
                     if not bbox_data and label_raw is not None:
@@ -1509,12 +1509,27 @@ class DataService:
 
                 # Handle dictionary labels (e.g. detection targets)
                 if isinstance(label, dict):
+                    def _json_default(o):
+                        if isinstance(o, np.ndarray):
+                            return o.tolist()
+                        if isinstance(o, (np.integer, np.floating)):
+                            return o.item()
+                        if hasattr(o, "detach") and hasattr(o, "cpu") and hasattr(o, "tolist"):
+                            return o.detach().cpu().tolist()  # torch.Tensor, without a hard import
+                        return str(o)
+                    try:
+                        # json.dumps (not str()) so the frontend's JSON.parse
+                        # of this 'target' stat never sees Python-repr syntax
+                        # (single quotes, tuples, numpy array reprs).
+                        dict_value_string = json.dumps(label, default=_json_default)
+                    except Exception:
+                        dict_value_string = json.dumps({"repr": str(label)})
                     data_stats.append(
                         create_data_stat(
                             name='target',
                             stat_type='string',
                             shape=[1],
-                            value_string=str(label), # Simplified visualization
+                            value_string=dict_value_string,
                             thumbnail=b""
                         )
                     )
@@ -1614,7 +1629,7 @@ class DataService:
                                 bbox_format = detect_bbox_format(pred_bboxes)
                                 pred_bbox_data = {
                                     "bboxes": pred_bboxes.tolist(),
-                                    "class_ids": pred_class_ids.tolist() if pred_class_ids is not None else 1,
+                                    "class_ids": pred_class_ids.tolist() if hasattr(pred_class_ids, 'tolist') else (pred_class_ids if pred_class_ids is not None else 1),
                                     "format": bbox_format
                                 }
                     if not pred_bbox_data and pred is not None:
@@ -1752,7 +1767,7 @@ class DataService:
                             target_width = w_limit
                             target_height = int(target_width / aspect_ratio)
                     elif request.resize_width == 0 and request.resize_height == 0:
-                        target_height = int(os.environ.get("WL_DEFAULT_THUMBNAIL_SIZE", 180)) # Default full resolution image is 360p on the longest side, but can be overridden by env var
+                        target_height = int(os.environ.get("WL_DEFAULT_THUMBNAIL_SIZE", 180)) # Default full resolution image is 180p on the longest side, but can be overridden by env var
                         target_width = int(target_height * aspect_ratio)
 
                     if is_full_resolution:

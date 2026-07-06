@@ -57,7 +57,7 @@ jobs:
         run: |
           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
           python -m pip install pytorch_lightning
-          python -m unittest discover -s ./weightslab/tests -p "test_*.py" -t . -v
+          python -m unittest discover -s ./tests -p "test_*.py" -t . -v
 
   # ═══════════════════════════════════════════════════════════════════════════
   # DEV RELEASE — tag on dev branch, not yet merged to main
@@ -66,9 +66,9 @@ jobs:
 
   build-and-publish-dev-release:
     name: Build & Publish Dev Release (TestPyPI)
-    needs: detect-target
+    needs: [detect-target,test]
     runs-on: ubuntu-latest
-    if: ${{ needs.detect-target.outputs.is_main != 'true' }}
+    if: ${{ needs.detect-target.outputs.is_main == 'true' }}
     permissions:
       contents: read
     outputs:
@@ -187,9 +187,11 @@ jobs:
           print('installed version:', m.version('weightslab'))
           "
 
+  # Only when note in main branch
   create-dev-release:
     name: Create GitHub Pre-Release
-    needs: [build-and-publish-dev-release, test-install-from-pip-dev-release]
+    needs: [detect-target, build-and-publish-dev-release, test-install-from-pip-dev-release]
+    if: ${{ needs.detect-target.outputs.is_main != 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -418,8 +420,7 @@ jobs:
 
   build-and-publish-main:
     name: Build & Publish Main (PyPI)
-    needs: [detect-target,test]
-    # needs: [detect-target]
+    needs: [test-install-from-pip-dev-release, detect-target]
     runs-on: ubuntu-latest
     if: ${{ needs.detect-target.outputs.is_main == 'true' }}
     permissions:
@@ -533,7 +534,7 @@ jobs:
 
   create-main-release:
     name: Create GitHub Release
-    needs: [build-and-publish-main, test-install-from-pip-main]
+    needs: [test-install-from-pip-main]
     runs-on: ubuntu-latest
     permissions:
       contents: write

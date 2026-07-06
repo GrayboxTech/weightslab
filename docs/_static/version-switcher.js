@@ -1,16 +1,17 @@
 (function () {
   'use strict';
 
-  function ensureDefaultTheme() {
-    try {
-      const storedTheme = window.localStorage.getItem('theme');
-      if (!storedTheme || storedTheme === 'auto') {
-        window.localStorage.setItem('theme', 'light');
-      }
-    } catch (error) {
-      return;
+  // ── 2-mode theme toggle (light ↔ dark, no "auto") ──────────────────────────
+  // Normalize any stored "auto" (Furo default) to "light" before first paint.
+  try {
+    var _stored = localStorage.getItem('theme');
+    if (!_stored || _stored === 'auto') {
+      localStorage.setItem('theme', 'light');
+      if (document.body) document.body.dataset.theme = 'light';
     }
-  }
+  } catch (_e) {}
+
+  // ───────────────────────────────────────────────────────────────────────────
 
   function fetchVersions() {
     const candidates = [
@@ -94,8 +95,6 @@
       document.body.prepend(container);
     }
   }
-
-  ensureDefaultTheme();
 
   document.addEventListener('DOMContentLoaded', function () {
     fetchVersions().then(mountSelector).catch(function () {
