@@ -154,8 +154,18 @@ To stop the UI later:
 
 .. code-block:: bash
 
-   weightslab ui stop   # stop containers (keep images)
-   weightslab ui drop   # stop and remove containers + images
+   docker stop weights_studio_envoy weights_studio_frontend
+
+Prefer a terminal over a browser? ``weightslab cli`` opens an interactive
+console connected to the running experiment (pause/resume, status, evaluate,
+tag/discard samples, query the agent, …) — no UI container required:
+
+.. code-block:: bash
+
+   weightslab cli
+
+Full reference for both — every ``weightslab`` subcommand and every console
+command, with all flags and defaults — lives in :doc:`user_commands`.
 
 
 .. tip::

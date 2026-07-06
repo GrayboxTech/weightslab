@@ -9,12 +9,15 @@ Public API surface
 ------------------
 
 - ``wl.watch_or_edit``
+- ``wl.guard_training_context`` / ``wl.guard_testing_context``
+- ``wl.start_training``
 - ``wl.serve``
 - ``wl.keep_serving``
 - ``wl.signal``
 - ``wl.compute_signals``
 - ``wl.save_signals``
 - ``wl.save_instance_signals``  *(per-instance / per-annotation signals)*
+- ``wl.save_group_signals``  *(group-level signals, e.g. pair/contrastive losses)*
 - ``wl.tag_samples``
 - ``wl.register_categorical_tag``  *(multi-value tags)*
 - ``wl.set_categorical_tag``  *(multi-value tags)*
@@ -24,6 +27,12 @@ Public API surface
 - ``wl.SignalContext``
 - ``wl.eval_fn``  *(decorator — optional)*
 - ``wl.run_pending_evaluation``  *(optional, for training-loop integration)*
+- ``wl.trigger_pending_evaluation_async``  *(optional, for the background gRPC/CLI worker)*
+- ``wl.pointcloud_thumbnail`` / ``wl.pointcloud_boxes``  *(decorators — LiDAR / point-cloud tasks)*
+- ``wl.clear_all``
+- ``wl.seed_everything``
+- ``wl.set_log_directory``
+- ``wl.ledger``  *(direct access to the global registry — advanced)*
 
 watch_or_edit
 -------------
@@ -80,6 +89,92 @@ Hyperparameters via YAML path
        poll_interval=1.0,
    )
 
+.. _guard-contexts:
+
+guard_training_context / guard_testing_context
+------------------------------------------------
+
+**Signature**
+
+.. code-block:: python
+
+   with wl.guard_training_context:
+       ...
+
+   with wl.guard_testing_context:   # combine with torch.no_grad() as usual
+       ...
+
+Both are ready-to-use context-manager **instances** (not classes/functions to
+call) — do not write ``guard_training_context()``.
+
+**Purpose**
+
+Tell WeightsLab which phase a block of code belongs to, so the internals route
+state correctly without any extra bookkeeping in your training loop:
+
+- ``guard_training_context`` — marks the block as a **training** step: the
+  model's age counter advances, signals/losses computed inside are written to
+  the train partition of the ledger, and it respects the pause/resume state
+  (blocks while paused, honoring ``wl.watch_or_edit(..., flag="hyperparameters")``'s
+  ``is_training`` toggle from the CLI/UI).
+- ``guard_testing_context`` — marks the block as **evaluation/inference**:
+  signals are written to the test/val partition instead, and it does not
+  advance the training step counter.
+
+**Typical usage**
+
+.. code-block:: python
+
+   def train_step():
+       with wl.guard_training_context:
+           inputs, ids, targets, _ = next(train_loader)
+           outputs = model(inputs)
+           loss = criterion(outputs, targets, batch_ids=ids)
+       return loss
+
+   def eval_step():
+       with wl.guard_testing_context, torch.no_grad():
+           for inputs, ids, targets, _ in val_loader:
+               outputs = model(inputs)
+               metric(outputs, targets, batch_ids=ids)
+
+**Notes**
+
+- Wrap the smallest block that contains the forward pass and the
+  loss/metric calls that should be attributed to that phase — not the whole
+  epoch loop.
+- These are the two context managers referenced throughout the
+  :doc:`examples/index` (classification, segmentation, detection, clustering,
+  generation, LiDAR, and the PyTorch Lightning integration) as
+  ``with guard_training_context:`` / ``with guard_testing_context:``.
+
+start_training
+--------------
+
+**Signature**
+
+.. code-block:: python
+
+   wl.start_training(timeout=None)
+
+**Purpose**
+
+Ensure training is not paused (equivalent to a ``resume``) before entering
+your training loop, optionally blocking first.
+
+**Arguments**
+
+- ``timeout`` *(int, optional)* — if a positive integer, sleep for that many
+  seconds *before* resuming. ``None`` (default) resumes immediately.
+
+**Typical usage**
+
+.. code-block:: python
+
+   wl.start_training()  # make sure we start unpaused
+   for step, batch in enumerate(train_loader):
+       ...
+
 serve
 -----
 
@@ -87,16 +182,32 @@ serve
 
 .. code-block:: python
 
-   wl.serve(serving_cli=False, serving_grpc=False, **kwargs)
+   wl.serve(serving_cli=True, serving_grpc=False, spawn_cli_client=False, **kwargs)
 
 **Purpose**
 
 Start Weightslab backend services.
 
-**Notes**
+**Arguments**
 
-- ``serving_grpc=True`` starts gRPC backend.
-- ``serving_cli=True`` starts CLI backend.
+- ``serving_cli`` *(bool, default ``True``)* — start the interactive CLI
+  server (the one ``weightslab cli`` connects to).
+- ``serving_grpc`` *(bool, default ``False``)* — start the gRPC server used by
+  Weights Studio.
+- ``spawn_cli_client`` *(bool, default ``False``)* — when ``serving_cli`` is
+  on, also open the interactive REPL in a new console window immediately.
+  Leave ``False`` to start the CLI server **headless**: it still advertises
+  its port, so any terminal can attach later with ``weightslab cli`` (see
+  :doc:`user_commands`).
+- ``**kwargs`` — extra server options forwarded to the underlying backends,
+  e.g. ``cli_host``, ``cli_port``, ``grpc_port``.
+
+**Typical usage**
+
+.. code-block:: python
+
+   # gRPC for Weights Studio + a headless CLI server (attach on demand)
+   wl.serve(serving_grpc=True, serving_cli=True)
 
 keep_serving
 ------------
@@ -105,16 +216,19 @@ keep_serving
 
 .. code-block:: python
 
-   wl.keep_serving(timeout=None)
+   wl.keep_serving(timeout=None, release_gpu=True)
 
 **Purpose**
 
 Keep the process alive so background services continue running.
 
-**Notes**
+**Arguments**
 
-- Use ``timeout`` to stop automatically.
-- If ``timeout=None``, the call blocks until interruption.
+- ``timeout`` *(int, optional)* — maximum number of seconds to keep running.
+  ``None`` (default) blocks until interrupted (Ctrl+C).
+- ``release_gpu`` *(bool, default ``True``)* — before entering the wait loop,
+  move tracked torch objects to CPU and release cached CUDA memory, so an idle
+  serving process (e.g. between training runs) doesn't hold GPU memory.
 
 signal
 ------
@@ -414,6 +528,50 @@ segmentation masks. Values land at ``(sample_id, annotation_id)`` for
 - Annotation ids are **1-based** and assigned in the order instances appear
   within each sample.
 
+save_group_signals
+-------------------
+
+**Signature**
+
+.. code-block:: python
+
+   wl.save_group_signals(signals, group_ids, origin="train", step=None, log=True)
+
+**Purpose**
+
+Persist and broadcast **group-level** statistics — a value that describes a
+*group* of samples rather than a single one (e.g. a contrastive/pairwise loss
+computed over an image pair, or any metric shared by every member of a group).
+
+**Arguments**
+
+- ``signals`` *(dict)* — ``{name: value}``. Each value is either a scalar
+  (applied to every group) or a batch tensor/list the same length as
+  ``group_ids`` (one value per group, broadcast to that group's members).
+- ``group_ids`` *(list of str, or torch.Tensor)* — the group ID each batch
+  entry belongs to.
+- ``origin`` *(str, default ``"train"``)* — split name (``"train"``, ``"val"``, …).
+- ``step`` *(int, optional)* — training step; defaults to the current model age.
+- ``log`` *(bool, default ``True``)* — also log the mean/scalar value to the
+  Weights Studio metrics dashboard.
+
+**Typical usage**
+
+.. code-block:: python
+
+   wl.save_group_signals(
+      signals={"contrastive_loss": pair_loss_batch},   # one value per pair
+      group_ids=pair_ids,
+      origin="train",
+      step=current_step,
+   )
+
+**Note**
+
+If any member of a group is discarded, the group's signal update for that
+group is skipped for that call (per-sample signals are unaffected — only the
+group-level write is suppressed).
+
 .. _per-instance-signals:
 
 Per-sample vs per-instance watched signals
@@ -683,6 +841,35 @@ optional when ``wl.watch_or_edit`` registrations are in place.
 **Returns** ``True`` when an evaluation ran (training-loop callers should
 ``continue`` to skip the training step), ``False`` otherwise.
 
+trigger_pending_evaluation_async
+---------------------------------
+
+**Signature**
+
+.. code-block:: python
+
+   wl.trigger_pending_evaluation_async() -> bool
+
+**Purpose**
+
+Start a **background thread** to execute a pending evaluation request,
+resolving the model, loaders, and evaluation function automatically from the
+ledger (i.e. from your ``wl.watch_or_edit`` registrations and any
+``@wl.eval_fn``). This is the non-blocking counterpart to
+:func:`run_pending_evaluation`: use it when you don't want to poll from
+inside the training loop and instead let the background worker service
+evaluation requests coming from the CLI (``evaluate``) or Weights Studio.
+
+**Returns** ``True`` when a worker is active or was started, ``False`` when
+there is no pending/running evaluation to service.
+
+**Notes**
+
+- When training is driven purely by the background gRPC/CLI worker (the
+  common case when using Weights Studio), you don't need to call this at
+  all — the worker calls it for you.
+- Prefer :func:`run_pending_evaluation` for training-loop integration where
+  you want the evaluation to run synchronously between steps.
 
 **Where SignalContext is used**
 
@@ -1038,3 +1225,161 @@ Dump the ``loss_shape`` categorical tag and signals for sample-level rows only
         columns=["signals", "tag:loss_shape"],
         instance_id=0,
     )
+
+Point-cloud customization (LiDAR)
+----------------------------------
+
+For ``task_type = "detection_pointcloud"`` datasets, Weights Studio previews
+each sample as a server-rendered 2D image (default: bird's-eye view). These
+two decorators let you override how points and boxes get projected into that
+2D preview — see :doc:`examples/usecases/lidar_detection` for the full
+use case.
+
+pointcloud_thumbnail
+~~~~~~~~~~~~~~~~~~~~~
+
+**Signature**
+
+.. code-block:: python
+
+   @wl.pointcloud_thumbnail
+   def to_range_image(points):   # points: [M, 2..F] float
+       ...
+       return image                # (H, W, 3) uint8, or a PIL.Image
+
+**Purpose**
+
+Register a custom 2D thumbnail renderer for point-cloud samples, e.g. a
+range/spherical LiDAR-scan projection instead of the default bird's-eye view.
+
+**Notes**
+
+- A ``render_thumbnail_2d`` method on the dataset itself takes precedence
+  over this global registration.
+- ``@wl.3d_pc_thumb`` is not valid Python (identifiers can't start with a
+  digit) — hence the spelled-out name.
+
+pointcloud_boxes
+~~~~~~~~~~~~~~~~~
+
+**Signature**
+
+.. code-block:: python
+
+   @wl.pointcloud_boxes
+   def boxes_to_range(boxes):
+       ...
+       return normalized_boxes      # [N, 6]: x1, y1, x2, y2, cls, conf
+
+**Purpose**
+
+Register a custom box projector so bounding-box overlays line up with a
+custom ``@wl.pointcloud_thumbnail`` projection. Maps metric boxes
+(``[N, 7..9]`` for 3D, ``[N, 4..6]`` for 2D) to normalized
+``[x1, y1, x2, y2, cls, conf]`` boxes in the thumbnail image's frame.
+
+**Notes**
+
+- A ``project_boxes_2d`` method on the dataset takes precedence over this
+  global registration.
+
+Utilities
+---------
+
+clear_all
+~~~~~~~~~
+
+**Signature**
+
+.. code-block:: python
+
+   wl.clear_all()
+
+**Purpose**
+
+Clear every WeightsLab registry (models, dataloaders, optimizers, loggers,
+signals, checkpoint managers, hyperparameters). Mainly useful between
+independent runs in the same process — e.g. test suites or notebooks that
+call ``wl.watch_or_edit`` repeatedly and need a clean ledger each time.
+
+seed_everything
+~~~~~~~~~~~~~~~~
+
+**Signature**
+
+.. code-block:: python
+
+   wl.seed_everything(seed=42)
+
+**Purpose**
+
+Seed Python's ``random``, NumPy, and PyTorch (CPU + CUDA) for reproducibility,
+and set ``torch.backends.cudnn.deterministic = True``.
+
+**Arguments**
+
+- ``seed`` *(int, default ``42``)*.
+
+set_log_directory
+~~~~~~~~~~~~~~~~~~
+
+**Signature**
+
+.. code-block:: python
+
+   wl.set_log_directory(new_log_dir)
+
+**Purpose**
+
+Relocate WeightsLab's log file from its initial temp-directory location to
+``new_log_dir``, keeping the original timestamped filename. This is normally
+called automatically once ``root_log_dir`` is resolved in a training script;
+call it manually to relocate logs yourself.
+
+**Arguments**
+
+- ``new_log_dir`` *(str)* — destination directory (created if missing).
+
+**Typical usage**
+
+.. code-block:: python
+
+   import weightslab as wl
+   # Logging starts in a temp directory automatically at import time.
+   wl.set_log_directory("./my_experiment/logs")
+
+**Notes**
+
+- The old temp-directory log file is *moved*, not copied.
+- All subsequent log lines are written to the new location.
+
+ledger
+------
+
+``wl.ledger`` is the global registry (``GLOBAL_LEDGER``) that
+``wl.watch_or_edit`` and the other functions on this page read from and write
+to. Most workflows never need to touch it directly — it's documented here for
+advanced use (e.g. writing your own CLI-style tooling, or inspecting
+registrations outside the decorators/functions above).
+
+**Common read accessors**
+
+.. code-block:: python
+
+   wl.ledger.get_model(name="default")          # -> the registered model (or its proxy)
+   wl.ledger.get_dataloader(name="train_loader")
+   wl.ledger.get_optimizer(name="default")
+   wl.ledger.list_models()                        # -> [str]
+   wl.ledger.list_dataloaders()                   # -> [str]
+   wl.ledger.list_optimizers()                    # -> [str]
+   wl.ledger.list_hyperparams()                   # -> [str]
+   wl.ledger.snapshot()                           # -> {"models": [...], "dataloaders": [...], ...}
+
+**Notes**
+
+- Registration (``register_model``, ``register_dataloader``, …) is normally
+  done for you by ``wl.watch_or_edit`` — call it directly only if you're
+  building tooling on top of WeightsLab rather than a training script.
+- This is exactly what powers the ``status`` / ``list_models`` /
+  ``list_loaders`` / ``list_optimizers`` / ``dump`` commands in the
+  interactive CLI — see :doc:`user_commands`.
