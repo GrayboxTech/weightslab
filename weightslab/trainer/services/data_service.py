@@ -4019,11 +4019,14 @@ class DataService:
     def GetHistogram(self, request, context):
         """Server-side histogram binning of one column (typed RPC).
 
-        Bins the current all-data view by ROW ORDER into <= max_bins equal-
-        population bins; each bin carries {min,max,avg,count} over its finite
-        values plus a per-(origin,discarded) sub-bar breakdown. Returns typed
-        HistogramBin messages (no DataStat name-encoding). Empty bins are emitted
-        with count=0 and NaN stats so the client's positional bars stay aligned.
+        Numeric columns: bins the current all-data view by ROW ORDER into
+        <= max_bins equal-population bins; each bin carries {min,max,avg,count}
+        plus a per-(origin,discarded) sub-bar breakdown.
+
+        Categorical/string columns: counts occurrences per unique value and
+        returns CategoricalHistogramBar entries sorted by count descending.
+        The response carries is_categorical=True and categorical_bars instead
+        of bins (bins will be empty).
         """
         try:
             column = request.column or ""
@@ -4039,12 +4042,56 @@ class DataService:
                     success=False, message=f"column '{column}' not in view",
                     total_rows=n, bins=[])
 
-            bars = max(1, min(n, max_bins))
-            vals = pd.to_numeric(df[column], errors="coerce").to_numpy()
             origin = (df["origin"].astype(str).to_numpy() if "origin" in df.columns
                       else np.full(n, ""))
             disc = (df["discarded"].astype(bool).to_numpy() if "discarded" in df.columns
                     else np.zeros(n, bool))
+
+            # Detect whether column is categorical (string/object) or numeric.
+            col_series = df[column]
+            numeric_vals = pd.to_numeric(col_series, errors="coerce")
+            is_categorical = numeric_vals.isna().all() or (
+                col_series.dtype == object or
+                str(col_series.dtype) == "category" or
+                hasattr(col_series, "cat")
+            )
+            # A column that has a few non-NaN numeric values mixed with mostly
+            # NaN still counts as numeric; only treat as categorical when
+            # pd.to_numeric fails on all values.
+            if not is_categorical and numeric_vals.notna().sum() == 0:
+                is_categorical = True
+
+            if is_categorical:
+                # --- Categorical path ---
+                labels = col_series.astype(str).where(col_series.notna(), "")
+                gf = pd.DataFrame({"l": labels, "o": origin, "d": disc})
+                total_count = gf.groupby("l")["l"].count().rename("count")
+                sub_map: dict = {}
+                for (lbl, d, o), c in gf.groupby(["l", "d", "o"]).size().items():
+                    sub_map.setdefault(str(lbl), []).append(
+                        pb2.HistogramSubBar(origin=str(o), discarded=bool(d), count=int(c)))
+                cat_bars = [
+                    pb2.CategoricalHistogramBar(
+                        label=str(lbl),
+                        count=int(cnt),
+                        sub_bars=sub_map.get(str(lbl), []),
+                    )
+                    for lbl, cnt in total_count.sort_values(ascending=False).items()
+                ]
+                logger.info("[HistCat] column=%s rows=%d categories=%d",
+                            column, n, len(cat_bars))
+                return pb2.HistogramResponse(
+                    success=True,
+                    message=f"categorical histogram {column}: {len(cat_bars)} categories from {n} rows",
+                    total_rows=n,
+                    bins=[],
+                    is_categorical=True,
+                    categorical_bars=cat_bars,
+                )
+
+            # --- Numeric path (unchanged) ---
+            bars = max(1, min(n, max_bins))
+            vals = numeric_vals.to_numpy()
             edges = (np.arange(bars + 1) * n) // bars
             bin_of_row = np.searchsorted(edges, np.arange(n), side="right") - 1
             fin = np.isfinite(vals)
@@ -4074,7 +4121,7 @@ class DataService:
             return pb2.HistogramResponse(
                 success=True,
                 message=f"histogram {column}: {len(bins)} bins from {n} rows",
-                total_rows=n, bins=bins)
+                total_rows=n, bins=bins, is_categorical=False, categorical_bars=[])
         except Exception as e:
             logger.error("Error in GetHistogram: %s", str(e), exc_info=True)
             return pb2.HistogramResponse(
