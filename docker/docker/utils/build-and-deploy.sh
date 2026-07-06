@@ -150,14 +150,16 @@ export VITE_GRPC_AUTH_TOKEN
 # Get weightslab root from environment variable or derive from script location
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# The compose stack lives one level up from this script (docker/docker/utils/ ->
+# docker/docker/), where docker-compose.yml and the generated .env belong. Always
+# derive it from the script location: it is correct both in-repo and pip-installed,
+# and never drifts when the package layout changes. (A stale hardcoded
+# "$WEIGHTSLAB_ROOT/weightslab/ui/docker" here wrote .env to a non-existent dir, so
+# docker compose fell back to its defaults — HTTPS on but gRPC auth off.)
 if [ -n "$WEIGHTSLAB_ROOT" ]; then
-    # WEIGHTSLAB_ROOT is explicitly set - use it
-    echo "Using WEIGHTSLAB_ROOT from environment: $WEIGHTSLAB_ROOT"
-    DOCKER_DIR="$WEIGHTSLAB_ROOT/weightslab/ui/docker"
-else
-    # Default: derive from script location (script is at weightslab/ui/docker/utils/)
-    DOCKER_DIR="$(dirname "$SCRIPT_DIR")"
+    echo "WEIGHTSLAB_ROOT from environment: $WEIGHTSLAB_ROOT (compose dir derived from script location)"
 fi
+DOCKER_DIR="$(dirname "$SCRIPT_DIR")"
 
 ENV_FILE="$DOCKER_DIR/.env"
 echo "SCRIPT_DIR: $SCRIPT_DIR"

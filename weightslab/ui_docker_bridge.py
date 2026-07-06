@@ -25,6 +25,33 @@ _CERTS_DIR_IN_ORIGINAL_ENV: bool = "WEIGHTSLAB_CERTS_DIR" in os.environ
 _FRONTEND_IMAGE = "graybx/weightslab"
 _STACK_CONTAINERS = ("weights_studio_envoy", "weights_studio_frontend")
 
+# Default frontend image repo (no tag) and tag. Overridable per-launch via the
+# `--image/-i` and `--version/-v` flags on `weightslab ui launch`, which are
+# passed to docker compose through the WS_FRONTEND_IMAGE env var (see the
+# `${WS_FRONTEND_IMAGE:-...}` substitution in docker-compose.yml).
+_DEFAULT_FRONTEND_REPO = "graybx/weightslab"
+_DEFAULT_FRONTEND_TAG = "latest"
+
+
+def _resolve_frontend_image(image_arg=None, version_arg=None) -> str:
+    """Return the full ``repo:tag`` frontend image ref from the CLI flags.
+
+    ``image_arg`` is the repo (e.g. ``guillaumep2705/weightslab``) and may itself
+    carry a tag; ``version_arg`` is the tag (e.g. ``latest`` or ``v1.2.3``). An
+    explicit ``--version`` always wins over any tag embedded in ``--image``.
+    Falls back to ``graybx/weightslab:latest`` when neither is given.
+    """
+    image = image_arg or _DEFAULT_FRONTEND_REPO
+    # A ':' in the last path segment is a tag (not a registry port like host:5000/img).
+    last_segment = image.rsplit("/", 1)[-1]
+    has_tag = ":" in last_segment
+    if version_arg:
+        repo = image.rsplit(":", 1)[0] if has_tag else image
+        return f"{repo}:{version_arg}"
+    if has_tag:
+        return image
+    return f"{image}:{_DEFAULT_FRONTEND_TAG}"
+
 # Cached Docker Compose base command. Resolved once per process to either the
 # v2 plugin (``["docker", "compose"]``) or the legacy v1 standalone binary
 # (``["docker-compose"]``) — see _detect_compose_cmd(). None until first probe.
@@ -150,6 +177,8 @@ examples:
   weightslab se --force-certs # regenerate the certs
   weightslab ui launch # clean + launch (unsecured HTTP, default)
   weightslab ui launch --certs # secured launch (HTTPS + gRPC auth)
+  weightslab ui launch -i guillaumep2705/weightslab # pull frontend from a custom repo (latest)
+  weightslab ui launch -i guillaumep2705/weightslab -v v1.2.3 # pin a specific version/tag
   weightslab start example # run the classification demo (default)
   weightslab start example --seg # run the segmentation demo
   weightslab start example --det # run the detection demo
@@ -691,7 +720,7 @@ def _remove_docker_image(image: str) -> None:
     )
 
 
-def _clean_stale_docker_resources() -> None:
+def _clean_stale_docker_resources(frontend_image: str = _FRONTEND_IMAGE) -> None:
     """Remove leftover weightslab / weights_studio Docker state before a launch.
 
     Stale containers, the compose network, anonymous volumes, a cached frontend
@@ -699,6 +728,10 @@ def _clean_stale_docker_resources() -> None:
     launch (an old image served instead of a rebuild, or an empty cert mount
     that crashes Envoy). This is scoped STRICTLY to weightslab/weights_studio
     resources — it never runs a global ``docker system prune``.
+
+    ``frontend_image`` is the repo (optionally ``repo:tag``) whose cached copy is
+    dropped so ``up --pull always`` fetches a fresh one — pass the resolved value
+    when ``--image/--version`` point at a non-default repo.
     """
     logger.info("Cleaning stale Docker resources (weightslab/weights_studio only)...")
     compose_file = _get_compose_file()
@@ -718,7 +751,7 @@ def _clean_stale_docker_resources() -> None:
         )
 
     # 3. Drop the cached frontend image so a fresh one is built/pulled.
-    _remove_docker_image(_FRONTEND_IMAGE)
+    _remove_docker_image(frontend_image)
 
     # 4. Remove the generated .env so stale values don't leak into compose.
     env_file = Path(compose_file).parent / ".env"
@@ -743,6 +776,8 @@ def ui_launch(args):
       --force-certs with --certs, regenerate certificates even if they exist
       --no-clean skip the stale Docker resource cleanup step
       --dev use the dev compose overlay
+      -i/--image frontend image repo to run/pull (default: graybx/weightslab)
+      -v/--version frontend image tag/version to pull (default: latest)
     """
     try:
         from weightslab.utils.telemetry import ping_ui_launch
@@ -760,6 +795,17 @@ def ui_launch(args):
     force_certs = getattr(args, "force_certs", False)
     no_clean = getattr(args, "no_clean", False)
     certs_dir_arg = getattr(args, "certs_dir", None)
+
+    # Resolve which frontend image to run. docker compose reads it via the
+    # WS_FRONTEND_IMAGE env var (see `${WS_FRONTEND_IMAGE:-...}` in the compose
+    # file); export it so both `up --pull always` below and the stale-image
+    # cleanup target the same repo/tag.
+    frontend_image = _resolve_frontend_image(
+        getattr(args, "image", None), getattr(args, "version", None)
+    )
+    os.environ["WS_FRONTEND_IMAGE"] = frontend_image
+    frontend_repo = frontend_image.rsplit(":", 1)[0] if ":" in frontend_image.rsplit("/", 1)[-1] else frontend_image
+    logger.info(f"Using frontend image: {frontend_image}")
 
     # A custom certs dir (positional arg) takes precedence over the env var /
     # default. Otherwise fall back to $WEIGHTSLAB_CERTS_DIR or ~/.weightslab-certs.
@@ -802,7 +848,7 @@ def ui_launch(args):
     if no_clean:
         logger.info("Skipping stale Docker resource cleanup (--no-clean)")
     else:
-        _clean_stale_docker_resources()
+        _clean_stale_docker_resources(frontend_repo)
 
     # Single source of truth: the deploy pipeline (build-and-deploy.sh + the
     # compose `auto` logic) derives TLS/auth solely from cert-file presence in
@@ -1109,6 +1155,11 @@ def _build_parser() -> argparse.ArgumentParser:
     launch_ui_parser = ui_sub.add_parser(
         "launch", help="Clean stale Docker state, then launch the UI (unsecured by default; --certs for TLS)")
     launch_ui_parser.add_argument('--certs', action='store_true', help='Generate (if missing) and use TLS certs + gRPC auth token (secured HTTPS). Default: unsecured HTTP.')
+    launch_ui_parser.add_argument('-i', '--image', default=None,
+                                  help='Frontend image repo to run/pull (default: graybx/weightslab). '
+                                       'e.g. guillaumep2705/weightslab')
+    launch_ui_parser.add_argument('-v', '--version', default=None,
+                                  help='Frontend image tag/version to pull (default: latest). e.g. v1.2.3')
     launch_ui_parser.add_argument('certs_dir', nargs='?', default=None,
                                   help='Custom directory for certs/token (default: $WEIGHTSLAB_CERTS_DIR or ~/.weightslab-certs)')
 
