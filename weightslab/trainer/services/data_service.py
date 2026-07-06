@@ -1465,7 +1465,17 @@ class DataService:
                         thumbnail=b""
                     )
                 )
-                if num_classes is not None and num_classes < label_raw.max():
+                # Sanity check: warn if the inferred num_classes is smaller than
+                # the largest class id present in the label. Guard against empty
+                # or non-array labels (e.g. detection samples with no objects),
+                # where .max() on a zero-size array raises ValueError.
+                label_np = to_numpy_safe(label_raw) if label_raw is not None else None
+                if (
+                    num_classes is not None
+                    and label_np is not None
+                    and label_np.size > 0
+                    and num_classes < label_np.max()
+                ):
                     logger.warning(f'Be aware that the num_classes infered is inferior to max value in the label')
 
                 # Per-sample class_names emission. KEPT because the studio has
