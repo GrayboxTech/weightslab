@@ -22,7 +22,8 @@
 
 ## What it does
 
-WeightsLab is an open-source PyTorch tool for dataset debugging, data quality monitoring, mislabel detection, and mid-training data curation for computer vision datasets: images, video & LiDAR point clouds. Longer-term, we're building toward bringing dataset management, training, fine-tuning, and validation together in a single, unified workflow.
+WeightsLab is an open-source PyTorch tool for dataset debugging, data quality monitoring, mislabel detection, and mid-training data curation for computer vision datasets: images, video & LiDAR point clouds. 
+Longer-term, we're building toward bringing dataset management, training, fine-tuning, and validation together in a single, unified workflow.
 
 <br>
 
