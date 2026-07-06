@@ -38,6 +38,9 @@ Choose the `kind` based on the user's VERB and INTENT:
 | **Clarify** | "Sort by metrics" (if multiple exist) | `clarify` |
 | **Model Question** | "Which layer has...", "Is layer X frozen?", "Show model details", "How many neurons in..." | `model_info` |
 | **Model Management** | "Freeze layer/neurons...", "Reset layer/neurons...", "Unfreeze layer/neurons..." | `model_action` |
+| **Save checkpoint** | "Save a checkpoint", "Dump the model weights", "Save the model (and its architecture)" | `action` (`action_name="save_checkpoint"`) |
+| **Save data state** | "Save the current data state", "Persist the tags and discards", "Snapshot the dataset state" | `action` (`action_name="save_data"`) |
+| **History query** | "...that never had train loss below 0.5", "...whose loss was ever above 5", "min/max/mean loss OVER TRAINING" | `transform`/`keep` using `signal_history(...)` (see rule 10) |
 
 ---
 ## 3. COLUMN RESOLUTION RULES
@@ -61,6 +64,11 @@ Choose the `kind` based on the user's VERB and INTENT:
    - If the user wants OR between multiple VALUES of the **same** column (e.g. "validation or test samples", "class 2 or 3"), you MUST emit **ONE** condition with `op='in'` and `value` set to the list of values (e.g. `{{"column": "origin", "op": "in", "value": ["val_loader", "test_loader"]}}`). **NEVER** emit two separate `==`/`=` conditions for the same column — a column cannot equal two different literals at once, so AND-ing two `==` conditions on the same column always produces an impossible, always-empty result (see Ex35).
    - If the user wants OR across **different** columns (e.g. "loss > 5 OR origin is test"), do NOT use `conditions` at all. Use `analysis_expression` with an explicit `|` instead, e.g. `"(df['loss'] > 5) | (df['origin'] == 'test')"`.
    - Be careful with natural language that uses "and" to mean something other than boolean AND-of-filters — e.g. "keep val or test, where test is test_loader **and** val is val_loader" is DEFINING two terms, not ANDing two filters; the actual filter here is still an OR (`op='in'`, both values).
+10. **Signal HISTORY queries (`signal_history`)**: the DATA CONTEXT columns hold each sample's *latest* signal value only. When the user asks about a signal's behavior OVER TRAINING — "never had", "was ever", "at any point", "min/max/mean over training", "always stayed above/below" — you MUST use the special function `signal_history('<metric>', '<reduce>')` inside `transform_code` or `analysis_expression`. It returns a per-sample Series of that signal's history reduced by `<reduce>` — one of `min`, `max`, `mean`, `count`; `<metric>` is the bare signal name (e.g. `train_loss`, not the `signals//...` column). Translate the wording:
+   - "never had train loss below 0.5" / "train loss always ≥ 0.5" → `signal_history('train_loss','min') >= 0.5`
+   - "ever had loss above 5" / "loss spiked over 5 at some point" → `signal_history('train_loss','max') > 5`
+   - "average train loss over training below 0.2" → `signal_history('train_loss','mean') < 0.2`
+   Use it exactly like a normal column expression (create a tag, discard, or keep on it — see Ex39). A sample with no recorded history yields NaN (comparisons are False), so it's safely excluded.
 
 ---
 ## 4. SCHEMA RULES (STRICT)
@@ -76,6 +84,8 @@ Choose the `kind` based on the user's VERB and INTENT:
   - `model_query_expression`: Python expression over `layers_df` for aggregate model questions (e.g. `"layers_df['neurons_count'].sum()"`), for `model_info`.
   - `model_action_name`: `"freeze"`, `"reset"`, or `"unfreeze"`, for `model_action`. `"unfreeze"` only ever touches layers/neurons that are ALREADY frozen (it is implemented as re-applying freeze, which toggles); it is a no-op on anything not currently frozen.
   - `neuron_indices`: Optional list of specific neuron indices within the selected layer(s), for `model_action`. Omit to target whole layers.
+  - `action_name`: Name of an external action, for `kind="action"` (`primary_goal="action"`). Supported: `"save_checkpoint"` (dump model weights; add `action_params={{"architecture": true}}` to also save the model architecture) and `"save_data"` (snapshot the current data state — tags + discard flags).
+  - `action_params`: Optional dict of parameters for the action (e.g. `{{"architecture": true}}` for `save_checkpoint`).
 
 ---
 ---
@@ -611,6 +621,50 @@ User: "Keep only validation or test samples" (origin schema line lists: ['fold_0
     {{
       "kind": "keep",
       "conditions": [{{ "column": "origin", "op": "in", "value": ["val", "test"] }}]
+    }}
+  ]
+}}
+
+
+**Ex39: Signal History Query (Tag Samples That Never Dropped Below A Threshold)**
+User: "Tag samples that never had a training loss smaller than 0.5"
+{{
+  "reasoning": "'never had train loss below 0.5' is a query over each sample's train_loss HISTORY, not its current value: the minimum train_loss over training must be >= 0.5. Use signal_history('train_loss','min') and set a boolean tag where it is >= 0.5.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "transform",
+      "target_column": "tag:never_below_0_5",
+      "transform_code": "np.where(signal_history('train_loss', 'min') >= 0.5, True, df.get('tag:never_below_0_5', False))"
+    }}
+  ]
+}}
+
+
+**Ex40: Save A Model Checkpoint (Optionally With Architecture)**
+User: "Save a checkpoint of the model and its architecture"
+{{
+  "reasoning": "External save action. The user wants the model weights dumped AND the architecture, so use action save_checkpoint with architecture=true.",
+  "primary_goal": "action",
+  "steps": [
+    {{
+      "kind": "action",
+      "action_name": "save_checkpoint",
+      "action_params": {{ "architecture": true }}
+    }}
+  ]
+}}
+
+
+**Ex41: Save The Current Data State**
+User: "Save the current data state"
+{{
+  "reasoning": "External save action snapshotting the current tags and discard flags.",
+  "primary_goal": "action",
+  "steps": [
+    {{
+      "kind": "action",
+      "action_name": "save_data"
     }}
   ]
 }}

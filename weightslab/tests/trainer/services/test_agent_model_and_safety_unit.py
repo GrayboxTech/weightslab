@@ -1308,5 +1308,122 @@ class TestApplyDataQueryIntentClassification(unittest.TestCase):
         self.assertEqual(response.agent_intent_type, pb2.INTENT_ANALYSIS)
 
 
+class TestAgentSaveActions(unittest.TestCase):
+    """action.save_checkpoint / action.save_data dispatch to the live
+    CheckpointManager (weights, optional architecture, data snapshot)."""
+
+    def _cm(self):
+        cm = MagicMock()
+        cm.current_exp_hash = "abc"
+        cm.save_model_checkpoint.return_value = "/tmp/w.pt"
+        cm.save_model_architecture.return_value = "/tmp/a.dill"
+        cm.save_data_snapshot.return_value = "/tmp/d.json"
+        return cm
+
+    def _ds(self, cm):
+        ds = DataService.__new__(DataService)
+        ds._df_manager = None
+        ds.model_service = None
+        exp_ctx = SimpleNamespace(components={"checkpoint_manager": cm, "model": object()})
+        exp_ctx.ensure_components = lambda: None
+        ds._ctx = exp_ctx
+        return ds
+
+    def test_save_checkpoint_weights_only(self):
+        cm = self._cm()
+        ds = self._ds(cm)
+        msg = ds._apply_agent_operation(pd.DataFrame({"loss": [0.1]}), "action.save_checkpoint", {})
+        self.assertIn("weights", msg)
+        self.assertNotIn("architecture", msg)
+        cm.save_model_checkpoint.assert_called_once()
+        cm.save_model_architecture.assert_not_called()
+
+    def test_save_checkpoint_with_architecture(self):
+        cm = self._cm()
+        ds = self._ds(cm)
+        msg = ds._apply_agent_operation(pd.DataFrame({"loss": [0.1]}), "action.save_checkpoint", {"architecture": True})
+        self.assertIn("architecture", msg)
+        cm.save_model_architecture.assert_called_once()
+
+    def test_save_data(self):
+        cm = self._cm()
+        ds = self._ds(cm)
+        msg = ds._apply_agent_operation(pd.DataFrame({"loss": [0.1]}), "action.save_data", {})
+        self.assertIn("data state", msg.lower())
+        cm.save_data_snapshot.assert_called_once()
+
+    def test_ensures_experiment_hash_before_saving(self):
+        cm = self._cm()
+        cm.current_exp_hash = None  # not set yet -> must call update_experiment_hash first
+        ds = self._ds(cm)
+        ds._apply_agent_operation(pd.DataFrame({"loss": [0.1]}), "action.save_checkpoint", {})
+        cm.update_experiment_hash.assert_called_once()
+
+    def test_no_checkpoint_manager_is_graceful(self):
+        import weightslab.backend.ledgers as ledgers_mod
+        ds = DataService.__new__(DataService)
+        ds._df_manager = None
+        ds.model_service = None
+        ds._ctx = SimpleNamespace(components={}, ensure_components=lambda: None)
+        with mock.patch.object(ledgers_mod, "get_checkpoint_manager", return_value=None):
+            msg = ds._apply_agent_operation(pd.DataFrame({"loss": [0.1]}), "action.save_checkpoint", {})
+        self.assertIn("no checkpoint manager", msg.lower())
+
+
+class TestSignalHistoryHelper(unittest.TestCase):
+    """signal_history(metric, reduce) exposes per-sample logger HISTORY to agent
+    code, enabling "never/ever" queries the current-value dataframe can't answer."""
+
+    def _logger_with_history(self):
+        from weightslab.backend.logger import LoggerQueue
+        lg = LoggerQueue(register=False)
+        lg.chkpt_manager = None
+        lg.graph_names.add("train_loss")
+        hist = {"0": [0.9, 0.6, 0.55], "1": [0.4, 0.3, 0.2], "2": [0.7, 0.5, 0.5]}
+        for step in range(3):
+            for sid, vals in hist.items():
+                lg._stage_sample_row("train_loss", "h", sid, step, vals[step])
+        return lg
+
+    def _df(self):
+        return pd.DataFrame({"loss": [1, 2, 3]}, index=pd.Index(["0", "1", "2"], name="sample_id"))
+
+    def test_reduce_series_min_aligned_to_index(self):
+        import weightslab.backend.ledgers as ledgers_mod
+        lg = self._logger_with_history()
+        df = self._df()
+        with mock.patch.object(ledgers_mod, "get_logger", return_value=lg), \
+             mock.patch.object(ledgers_mod, "get_checkpoint_manager", return_value=None):
+            s = DataService._reduce_signal_history_series(df, "train_loss", "min")
+        self.assertAlmostEqual(s.loc["0"], 0.55, places=5)
+        self.assertAlmostEqual(s.loc["1"], 0.20, places=5)
+        self.assertAlmostEqual(s.loc["2"], 0.50, places=5)
+
+    def test_no_logger_returns_all_nan(self):
+        import weightslab.backend.ledgers as ledgers_mod
+        df = self._df()
+        with mock.patch.object(ledgers_mod, "get_logger", return_value=None):
+            s = DataService._reduce_signal_history_series(df, "train_loss", "min")
+        self.assertTrue(s.isna().all())
+
+    def test_transform_end_to_end_tags_never_below(self):
+        import weightslab.backend.ledgers as ledgers_mod
+        lg = self._logger_with_history()
+        ds = DataService.__new__(DataService)
+        ds._df_manager = None
+        ds.model_service = None
+        df = self._df()
+        with mock.patch.object(ledgers_mod, "get_logger", return_value=lg), \
+             mock.patch.object(ledgers_mod, "get_checkpoint_manager", return_value=None):
+            msg = ds._apply_agent_operation(
+                df, "df.modify",
+                {"col": "tag:never_below",
+                 "code": "np.where(signal_history('train_loss', 'min') >= 0.5, True, False)"},
+            )
+        self.assertIn("Modified column", msg)
+        # samples 0 (min 0.55) and 2 (min 0.50) never dropped below 0.5; sample 1 did.
+        self.assertListEqual(df["tag:never_below"].tolist(), [True, False, True])
+
+
 if __name__ == "__main__":
     unittest.main()

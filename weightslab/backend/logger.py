@@ -790,6 +790,74 @@ class LoggerQueue:
             result.setdefault(h, []).append((int(step), float(mean_val)))
         return result
 
+    def reduce_per_sample(
+        self,
+        graph_name: str,
+        reduce: str = "min",
+        sample_ids=None,
+        exp_hash: str | None = None,
+    ) -> dict:
+        """Reduce each sample's signal HISTORY to a single value.
+
+        Unlike ``aggregate_per_sample_by_step`` (which averages *across samples*
+        per step), this groups ``per_sample`` rows BY sample_id and reduces over
+        that sample's whole time series — the axis needed for questions like
+        "which samples never had train_loss below 0.5" (``reduce='min'`` then
+        compare ``>= 0.5``).
+
+        Args:
+            graph_name: The registered signal/metric name.
+            reduce: One of ``min`` | ``max`` | ``mean``/``avg`` | ``count``.
+            sample_ids: Optional iterable to restrict the query.
+            exp_hash: ``None`` = all hashes; otherwise restrict to one.
+
+        Returns:
+            ``{sample_id (str): reduced_value (float)}``; empty if the metric is
+            unknown or has no recorded history.
+        """
+        agg = {
+            "min": "min(value)", "max": "max(value)",
+            "mean": "avg(value)", "avg": "avg(value)", "count": "count(value)",
+        }.get(str(reduce).lower())
+        if agg is None:
+            raise ValueError(f"Unsupported reduce '{reduce}'. Use min/max/mean/count.")
+
+        with self._lock:
+            self._flush_stage()
+            params = [graph_name]
+            sql = f"SELECT sample_id, {agg} AS v FROM per_sample WHERE metric_name = ?"
+            sql += self._hash_filter(exp_hash, params)
+            if sample_ids is not None:
+                sql += " AND sample_id IN (SELECT UNNEST(?))"
+                params.append([str(s) for s in sample_ids])
+            sql += " GROUP BY sample_id"
+            rows = self._conn.execute(sql, params).fetchall()
+
+        return {str(sid): float(v) for (sid, v) in rows if v is not None}
+
+    def resolve_graph_name(self, name: str) -> str | None:
+        """Best-effort map a user-facing metric name to a stored graph name.
+
+        The logger records signals under their registered name (e.g. ``train_loss``
+        or ``train_mlt_loss/CE``), which rarely matches the dataframe's column
+        spelling (``signals//train_loss/sample``). Resolve by exact match, then
+        case-insensitive, then unambiguous substring either way; returns ``None``
+        if nothing matches so callers can degrade gracefully.
+        """
+        if not name:
+            return None
+        if name in self.graph_names:
+            return name
+        low = str(name).lower()
+        for g in self.graph_names:
+            if g.lower() == low:
+                return g
+        candidates = [g for g in self.graph_names if low in g.lower() or g.lower() in low]
+        if candidates:
+            # Prefer the shortest (closest) match for determinism.
+            return sorted(candidates, key=len)[0]
+        return None
+
     def add_instance_scalars(
         self,
         graph_name: str,

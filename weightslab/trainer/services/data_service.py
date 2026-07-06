@@ -2137,6 +2137,13 @@ class DataService:
 
         df_reset = safe_reset_index(df)
         eval_globals = {"df": df, "df_reset": df_reset, "np": np, "pd": pd}
+        # Expose per-sample signal HISTORY (from the experiment logger's DuckDB
+        # store) to agent code, so prompts like "tag samples that never had
+        # train_loss below 0.5" work: signal_history('train_loss','min') >= 0.5.
+        # Returns a Series aligned to df.index (NaN where a sample has no history).
+        eval_globals["signal_history"] = (
+            lambda metric, reduce="min": DataService._reduce_signal_history_series(df, metric, reduce)
+        )
         if origin_series is not None:
             eval_globals[SampleStatsEx.ORIGIN.value] = origin_series
 
@@ -2177,6 +2184,138 @@ class DataService:
                 return eval(patched_code, eval_globals)
             raise
 
+    @staticmethod
+    def _reduce_signal_history_series(df, metric: str, reduce: str = "min"):
+        """Per-sample reduction of a signal's full HISTORY, aligned to df.index.
+
+        Backs the ``signal_history(metric, reduce)`` helper exposed to agent code.
+        Reads the experiment logger's DuckDB per-sample store (append-only
+        ``(metric, hash, sample_id, step, value)``), reduces each sample's whole
+        time series (min/max/mean/count), and maps it back onto the current
+        dataframe rows by sample_id. Rows whose sample has no recorded history
+        get NaN — so, e.g., ``signal_history('train_loss','min') >= 0.5`` is
+        False for them (no evidence they stayed above 0.5), never a crash.
+
+        Only populated when signals were logged with ``save_signals(..., log=True)``;
+        with no logger / no history it returns an all-NaN Series (a safe no-op).
+        """
+        from weightslab.backend import ledgers
+
+        # Resolve each row's sample_id (column or index level).
+        sample_level = SampleStatsEx.SAMPLE_ID.value
+        if sample_level in df.columns:
+            sid_values = df[sample_level]
+        elif isinstance(df.index, pd.MultiIndex) and sample_level in (df.index.names or []):
+            sid_values = pd.Series(df.index.get_level_values(sample_level), index=df.index)
+        else:
+            sid_values = pd.Series(df.index, index=df.index)
+
+        empty = pd.Series(np.nan, index=df.index)
+
+        try:
+            logger_q = ledgers.get_logger()
+        except Exception:
+            logger_q = None
+        if logger_q is None or not hasattr(logger_q, "reduce_per_sample"):
+            return empty
+
+        try:
+            resolved = logger_q.resolve_graph_name(metric) if hasattr(logger_q, "resolve_graph_name") else metric
+        except Exception:
+            resolved = metric
+        if not resolved:
+            return empty
+
+        exp_hash = None
+        try:
+            cm = ledgers.get_checkpoint_manager()
+            if cm is not None and hasattr(cm, "get_current_experiment_hash"):
+                exp_hash = cm.get_current_experiment_hash()
+        except Exception:
+            exp_hash = None
+
+        try:
+            reduced = logger_q.reduce_per_sample(resolved, reduce=reduce, exp_hash=exp_hash)
+        except Exception as exc:
+            logger.debug(f"[Agent] signal_history('{metric}','{reduce}') failed: {exc}")
+            return empty
+        if not reduced:
+            return empty
+
+        mapped = sid_values.astype(str).map(reduced)
+        return pd.Series(pd.to_numeric(mapped, errors="coerce").to_numpy(), index=df.index)
+
+    def _resolve_checkpoint_manager(self):
+        """Fetch the live CheckpointManager: prefer the experiment context's
+        components, fall back to the global ledger. Returns None if unavailable."""
+        cm = None
+        try:
+            if getattr(self, "_ctx", None) is not None:
+                self._ctx.ensure_components()
+                cm = self._ctx.components.get("checkpoint_manager")
+        except Exception:
+            cm = None
+        if cm is None:
+            try:
+                from weightslab.backend.ledgers import get_checkpoint_manager
+                cm = get_checkpoint_manager()
+            except Exception:
+                cm = None
+        # A ledger miss yields a Proxy(None) placeholder; treat "no save method" as absent.
+        if cm is None or not hasattr(cm, "save_model_checkpoint"):
+            return None
+        return cm
+
+    def _agent_save_checkpoint(self, include_architecture: bool = False) -> str:
+        """Agent action: dump a model-weights checkpoint (and, if requested, the
+        model architecture) via the live CheckpointManager. Mirrors the manual
+        save path: ensure an experiment hash exists first, since every
+        ``save_*`` returns None when ``current_exp_hash`` is unset."""
+        cm = self._resolve_checkpoint_manager()
+        if cm is None:
+            return "Action: no checkpoint manager available; nothing was saved."
+        try:
+            if not getattr(cm, "current_exp_hash", None) and hasattr(cm, "update_experiment_hash"):
+                cm.update_experiment_hash()
+            saved = []
+            if cm.save_model_checkpoint(force_dump_pending=True, update_manifest=True):
+                saved.append("weights")
+            if include_architecture and hasattr(cm, "save_model_architecture"):
+                model = None
+                try:
+                    model = self._ctx.components.get("model") if getattr(self, "_ctx", None) else None
+                except Exception:
+                    model = None
+                if model is None:
+                    try:
+                        from weightslab.backend.ledgers import get_model
+                        model = get_model()
+                    except Exception:
+                        model = None
+                if model is not None and cm.save_model_architecture(model):
+                    saved.append("architecture")
+            if not saved:
+                return "Action: checkpoint save produced no output (is an experiment hash set?)."
+            return f"Action: saved model checkpoint ({' + '.join(saved)})."
+        except Exception as e:
+            return f"Action: failed to save checkpoint: {e}"
+
+    def _agent_save_data_state(self) -> str:
+        """Agent action: snapshot the current data state (per-sample tags +
+        discard flags + RNG) via the live CheckpointManager."""
+        cm = self._resolve_checkpoint_manager()
+        if cm is None or not hasattr(cm, "save_data_snapshot"):
+            return "Action: no checkpoint manager available; data state not saved."
+        try:
+            if not getattr(cm, "current_exp_hash", None) and hasattr(cm, "update_experiment_hash"):
+                cm.update_experiment_hash()
+            path = cm.save_data_snapshot(force_new_state=True)
+            if path:
+                return "Action: saved current data state (tags + discard flags)."
+            return "Action: data-state save produced no output (is an experiment hash set?)."
+        except Exception as e:
+            return f"Action: failed to save data state: {e}"
+
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -2212,6 +2351,15 @@ class DataService:
             elif action_name == "compute_natural_sort":
                 msg = self._compute_natural_sort_stats()
                 return f"Action: {msg}"
+
+            # Save a model checkpoint (weights; + architecture when requested).
+            elif action_name in ("save_checkpoint", "save_model", "checkpoint", "dump_model"):
+                include_arch = bool(params.get("architecture") or params.get("include_architecture"))
+                return self._agent_save_checkpoint(include_architecture=include_arch)
+
+            # Save the current data state (tags + discard flags) as a snapshot.
+            elif action_name in ("save_data", "save_data_state", "dump_data"):
+                return self._agent_save_data_state()
 
             return f"Action triggered: {action_name} (Not implemented)"
 
