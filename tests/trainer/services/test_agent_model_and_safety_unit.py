@@ -1452,6 +1452,113 @@ class TestAgentLoadActions(unittest.TestCase):
         self.assertIn("invalid step", msg.lower())
         cm.load_state.assert_not_called()
 
+    def test_compound_load_experiment_then_weights_at_step(self):
+        # "Load experiment state from <hash> AND step 57": load_experiment
+        # restores the full state at the latest/max step (target_step=None), then
+        # load_weights pins the weights to step 57. Both must execute, in order.
+        cm = self._cm()
+        ds = self._ds(cm)
+        df = pd.DataFrame({"loss": [0.1]})
+        ops = [
+            {"function": "action.load_experiment", "params": {"hash": "abc123def456"}},
+            {"function": "action.load_weights", "params": {"step": 57, "hash": "abc123def456"}},
+        ]
+        msgs = [ds._apply_agent_operation(df, op["function"], op["params"]) for op in ops]
+
+        self.assertIn("loaded experiment state", msgs[0].lower())
+        self.assertIn("step 57", msgs[1])
+        self.assertEqual(cm.load_state.call_count, 2)
+        # 1st: full state, config included, latest step (no target_step).
+        first = cm.load_state.call_args_list[0].kwargs
+        self.assertEqual(first.get("exp_hash"), "abc123def456")
+        self.assertTrue(first.get("load_config"))
+        self.assertIsNone(first.get("target_step"))
+        # 2nd: weights-only, pinned to step 57.
+        second = cm.load_state.call_args_list[1].kwargs
+        self.assertEqual(second.get("target_step"), 57)
+        self.assertTrue(second.get("load_weights"))
+        self.assertFalse(second.get("load_model"))
+        self.assertFalse(second.get("load_config"))
+
+
+class TestAgentHyperparamActions(unittest.TestCase):
+    """action.set_hyperparam changes the live (wrapped) HP config IN PLACE.
+    Each test verifies get_hyperparams() actually reflects the change."""
+
+    def setUp(self):
+        from weightslab.backend import ledgers
+        self.ledgers = ledgers
+        # Fresh config each test (register_hyperparams clears+updates the wrapped
+        # dict in place under "main", so this resets state between tests).
+        ledgers.register_hyperparams({
+            "experiment_dump_to_train_steps_ratio": 250,
+            "eval_full_to_train_steps_ratio": 500,
+            "optimizer": {"lr": 0.001},
+            "data": {"train_loader": {"batch_size": 16}},
+        })
+        self.hp_name = ledgers.resolve_hp_name()
+
+    def tearDown(self):
+        # Don't leak a registered HP set into other test classes.
+        try:
+            self.ledgers.register_hyperparams({})
+        except Exception:
+            pass
+
+    def _act(self, param, op, value):
+        ds = DataService.__new__(DataService)
+        ds._df_manager = None
+        ds.model_service = None
+        return ds._apply_agent_operation(
+            pd.DataFrame({"loss": [0.1]}), "action.set_hyperparam",
+            {"param": param, "op": op, "value": value},
+        )
+
+    def _read(self, dotted):
+        cur = self.ledgers.get_hyperparams(self.hp_name)
+        for part in dotted.split("."):
+            cur = cur.get(part, None) if hasattr(cur, "get") else None
+        return cur
+
+    def test_set_batch_size(self):
+        msg = self._act("batch_size", "set", 32)
+        self.assertIn("was 16", msg)
+        self.assertEqual(int(self._read("data.train_loader.batch_size")), 32)
+
+    def test_scale_learning_rate_by_10_percent(self):
+        self._act("learning_rate", "scale", 1.1)
+        self.assertAlmostEqual(float(self._read("optimizer.lr")), 0.0011, places=6)
+
+    def test_set_dump_ratio(self):
+        self._act("dump_ratio", "set", 15)
+        self.assertEqual(int(self._read("experiment_dump_to_train_steps_ratio")), 15)
+
+    def test_set_eval_ratio(self):
+        self._act("eval_ratio", "set", 20)
+        self.assertEqual(int(self._read("eval_full_to_train_steps_ratio")), 20)
+
+    def test_explicit_dotted_path(self):
+        self._act("data.train_loader.batch_size", "set", 64)
+        self.assertEqual(int(self._read("data.train_loader.batch_size")), 64)
+
+    def test_integer_hp_stays_integer_after_scale(self):
+        self._act("batch_size", "scale", 1.5)  # 16 * 1.5 = 24
+        val = self._read("data.train_loader.batch_size")
+        self.assertEqual(int(val), 24)
+        self.assertIsInstance(val, int)
+
+    def test_unknown_param_is_refused_and_invents_nothing(self):
+        msg = self._act("does_not_exist_hp", "set", 5)
+        self.assertIn("could not find", msg.lower())
+        # The key must NOT have been created in the config (set_hyperparam
+        # auto-creates paths, so refusing means the resolver never handed it one).
+        self.assertNotIn("does_not_exist_hp", self.ledgers.get_hyperparams(self.hp_name))
+
+    def test_no_value_is_refused(self):
+        msg = self._act("batch_size", "set", None)
+        self.assertIn("no value", msg.lower())
+        self.assertEqual(int(self._read("data.train_loader.batch_size")), 16)  # unchanged
+
 
 class TestSignalHistoryHelper(unittest.TestCase):
     """signal_history(metric, reduce) exposes per-sample logger HISTORY to agent

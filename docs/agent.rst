@@ -4,7 +4,7 @@ AI Agent
 WeightsLab ships an in-process **AI agent** that turns natural-language
 requests into concrete actions on your experiment: it can filter and sort the
 data grid, tag and discard samples, derive new signal columns, answer questions
-about the live model, and freeze or reset layers and neurons.
+about the data or the live model, show model information, and freeze or reset layers and neurons on-demand.
 
 The agent runs inside the training backend (next to the live dataframe and
 model), so it operates on the *same* state you see in Weights Studio — no data
@@ -43,9 +43,15 @@ The agent recognizes four broad families of request:
        frozen?", "Show me the complete model details", "Freeze the layer with
        more than 2000 neurons", "Reset layer 3", "Unfreeze layer 3", "Unfreeze
        everything".
-   * - **Save checkpoints & data state**
+   * - **Save checkpoints & experiment state**
      - "Save a checkpoint", "Dump the model weights and its architecture",
        "Save the current data state (tags and discards)".
+   * - **Load checkpoints & experiment state**
+     - "Load the experiment state from hash <hash>", "Load the model weights from step 500".
+       "Load the experiment state from hash <hash> and the step 55".
+   * - **Hyper-parameter tuning**
+     - "Set the batch size to 32", "Increase the learning rate by 10%", "Change the dumping model ratio to 15",
+       "Change the evaluation ratio to 20".
    * - **Signal-history queries**
      - "Tag samples that never had a training loss below 0.5", "Discard samples
        whose loss was ever above 5", "Keep samples whose average training loss
@@ -524,8 +530,37 @@ can persist progress mid-session from a prompt.
 
    ``load_experiment`` and ``load_weights`` **replace live training state** in
    place (model weights, and for ``load_experiment`` also data and config).
-   Because this is destructive, Weights Studio asks you to confirm the reload in
-   a pop-up before it is applied.
+   This is destructive — the previous in-memory model/data/config is overwritten
+   — so issue these deliberately.
+
+Tuning hyperparameters
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The agent can change a training hyperparameter in the live (wrapped) HP config;
+the change is applied in place, so training picks it up on its next iteration.
+Use a semantic name (``batch_size``, ``learning_rate``, ``dump_ratio``,
+``eval_ratio``) or an exact dotted config path (e.g.
+``data.train_loader.batch_size``); the backend resolves the semantic name to the
+real config key and refuses if it can't find it (it never invents a new key).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 60 40
+
+   * - Prompt
+     - What happens
+   * - "Set the batch size to 32"
+     - Sets ``data.train_loader.batch_size = 32`` (absolute).
+   * - "Increase the learning rate by 10%"
+     - Multiplies the learning rate by 1.1 (relative "scale" op).
+   * - "Change the dumping model ratio to 15"
+     - Sets ``experiment_dump_to_train_steps_ratio = 15``.
+   * - "Change the evaluation ratio to 20"
+     - Sets ``eval_full_to_train_steps_ratio = 20``.
+
+The agent's reply reports the applied change and the previous value (e.g.
+*"set optimizer.lr = 0.0011 (was 0.001)"*), read back from the wrapped HP so you
+can confirm it took effect.
 
 Querying signal history (behavior over training)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -1002,6 +1002,49 @@ class TestAgentRstDocumentedPrompts(unittest.TestCase):
         self.assertEqual(ops[0]["function"], "action.load_weights", ops)
         self.assertEqual(int(ops[0].get("params", {}).get("step")), 500, ops)
 
+    def test_doc_load_experiment_and_weights_at_step(self):
+        # Compound: restore full experiment state from a hash (load_experiment
+        # loads the latest/max step by default) AND then pin the weights to a
+        # specific step. BOTH actions must be planned, in that order.
+        ops = self._query("Load the experiment state from hash a1b2c3d4e5f6 and the step 57")
+        fns = [op.get("function") for op in ops]
+        self.assertIn("action.load_experiment", fns, ops)
+        self.assertIn("action.load_weights", fns, ops)
+        # Restore first, then pin the step.
+        self.assertLess(fns.index("action.load_experiment"), fns.index("action.load_weights"), ops)
+        exp_op = next(op for op in ops if op["function"] == "action.load_experiment")
+        wts_op = next(op for op in ops if op["function"] == "action.load_weights")
+        self.assertIn("a1b2c3d4e5f6", str(exp_op.get("params", {}).get("hash", "")), ops)
+        self.assertEqual(int(wts_op.get("params", {}).get("step")), 57, ops)
+
+    # ---- Hyperparameter tuning (op-plan checks) ---------------------------------
+
+    def test_doc_set_batch_size(self):
+        ops = self._query("Set the batch size to 32")
+        self.assertEqual(ops[0]["function"], "action.set_hyperparam", ops)
+        p = ops[0].get("params", {})
+        self.assertIn(str(p.get("param", "")).lower().replace(" ", "_"),
+                      ("batch_size", "data.train_loader.batch_size"), ops)
+        self.assertEqual(float(p.get("value")), 32.0, ops)
+
+    def test_doc_increase_learning_rate_by_percent(self):
+        ops = self._query("Increase the learning rate by 10%")
+        self.assertEqual(ops[0]["function"], "action.set_hyperparam", ops)
+        p = ops[0].get("params", {})
+        # +10% is a relative "scale" by 1.1.
+        self.assertEqual(str(p.get("op")).lower(), "scale", ops)
+        self.assertAlmostEqual(float(p.get("value")), 1.1, places=3)
+
+    def test_doc_change_dumping_model_ratio(self):
+        ops = self._query("Change the dumping model ratio to 15")
+        self.assertEqual(ops[0]["function"], "action.set_hyperparam", ops)
+        self.assertEqual(float(ops[0]["params"].get("value")), 15.0, ops)
+
+    def test_doc_change_evaluation_ratio(self):
+        ops = self._query("Change the evaluation ratio to 20")
+        self.assertEqual(ops[0]["function"], "action.set_hyperparam", ops)
+        self.assertEqual(float(ops[0]["params"].get("value")), 20.0, ops)
+
     # ---- Signal-history query (op-plan check) -----------------------------------
 
     def test_doc_tag_samples_never_had_loss_below(self):

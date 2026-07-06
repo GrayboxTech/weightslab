@@ -112,6 +112,19 @@ preloading) is forced to run the full ``__getitem__`` pipeline — including
 image decode, resize, and augmentation — even though it only needs the label.
 On a large dataset this can cost minutes at startup.
 
+.. warning::
+
+   When ``include_images`` and ``include_labels`` are requested in separate
+   ``get_items`` calls (as in the pattern below), any *random* augmentation
+   (random crop, flip, etc.) must not be re-sampled independently on each
+   call — otherwise the transform applied to the image and the transform
+   applied to its annotations will diverge, silently misaligning boxes/masks
+   with the image they describe. Derive the augmentation deterministically
+   per sample (e.g. a seed keyed by ``uid``/``idx``), or sample it once and
+   cache it — for instance in ``metadata`` — so every subsequent
+   ``get_items`` call for that sample reuses the same transform instead of
+   drawing a new random one.
+
 Usage pattern:
 
 .. code-block:: python
@@ -192,7 +205,7 @@ Summary table
      - ``sig(out, tgt, batch_ids=ids)``
      - loss only
      - Large dataset, production, overlays on eval only
-   * - Standard + eval
+   * - Standard+
      - ``sig(out, tgt, batch_ids=ids, preds=preds, targets=tgt)``
      - loss + predictions + targets (eval step only)
      - Large dataset, overlay on studio-triggered eval passes

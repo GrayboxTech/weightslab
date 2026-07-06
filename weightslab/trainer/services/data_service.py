@@ -2392,6 +2392,197 @@ class DataService:
         except Exception as e:
             return f"Action: failed to load weights ({where}) from {exp_hash[:16]}: {e}"
 
+    # ------------------------------------------------------------------
+    # Hyperparameter tuning (agent action)
+    # ------------------------------------------------------------------
+    # Semantic name -> ordered candidate dotted paths in the HP config. The
+    # first candidate that ALREADY EXISTS is used (set_hyperparam auto-creates
+    # missing paths, so we must resolve to a real key rather than blindly set).
+    _HP_ALIASES = {
+        "batch_size": ["data.train_loader.batch_size", "data.batch_size", "batch_size"],
+        "learning_rate": ["optimizer.lr", "lr", "optimizer.learning_rate"],
+        "dump_ratio": ["experiment_dump_to_train_steps_ratio"],
+        "eval_ratio": ["eval_full_to_train_steps_ratio"],
+    }
+    # Wording -> canonical semantic name.
+    _HP_SYNONYMS = {
+        "batch_size": "batch_size", "batchsize": "batch_size", "batch": "batch_size",
+        "learning_rate": "learning_rate", "learningrate": "learning_rate",
+        "lr": "learning_rate", "learning_rate_lr": "learning_rate",
+        "dump_ratio": "dump_ratio", "dumping_model_ratio": "dump_ratio",
+        "dump_model_ratio": "dump_ratio", "checkpoint_ratio": "dump_ratio",
+        "model_dump_ratio": "dump_ratio",
+        "eval_ratio": "eval_ratio", "evaluation_ratio": "eval_ratio",
+        "eval_full_ratio": "eval_ratio",
+    }
+
+    @staticmethod
+    def _hp_read_path(hp, dotted):
+        """Read a dotted path from the HP Proxy/dict; None if absent."""
+        cur = hp
+        for part in str(dotted).split('.'):
+            if cur is None:
+                return None
+            try:
+                if hasattr(cur, "get"):
+                    cur = cur.get(part, None)
+                elif isinstance(cur, dict):
+                    cur = cur.get(part, None)
+                else:
+                    return None
+            except Exception:
+                return None
+        return cur
+
+    @classmethod
+    def _hp_path_exists(cls, hp, dotted):
+        """True only if every segment of the dotted path is actually present
+        (so we never resolve to a key set_hyperparam would have to invent)."""
+        cur = hp
+        for part in str(dotted).split('.'):
+            if cur is None:
+                return False
+            try:
+                present = part in cur
+            except Exception:
+                present = False
+            if not present:
+                return False
+            cur = cls._hp_read_path(cur, part)
+        return True
+
+    @classmethod
+    def _resolve_hp_path(cls, hp, param):
+        """Map a user-facing HP name (semantic word or dotted path) to an
+        existing dotted path in the live config, or None if it can't be found."""
+        if not param:
+            return None
+        param = str(param).strip()
+        # 1. An explicit dotted path that already exists wins.
+        if cls._hp_path_exists(hp, param):
+            return param
+        # 2. Semantic alias -> first existing candidate path.
+        key = param.lower().replace(" ", "_").replace("-", "_")
+        canonical = cls._HP_SYNONYMS.get(key)
+        for cand in cls._HP_ALIASES.get(canonical, []):
+            if cls._hp_path_exists(hp, cand):
+                return cand
+        # 3. Fallback: search the config tree for a leaf key equal to the last token.
+        leaf = key.split(".")[-1]
+        return cls._search_hp_leaf(hp, leaf)
+
+    @classmethod
+    def _search_hp_leaf(cls, hp, leaf, _prefix=""):
+        """Depth-first search for a leaf key exactly matching `leaf`; returns its
+        dotted path (shortest match), or None."""
+        try:
+            keys = list(hp.keys()) if hasattr(hp, "keys") else []
+        except Exception:
+            keys = []
+        # Prefer an exact match at this level.
+        for k in keys:
+            if str(k).lower() == leaf:
+                return f"{_prefix}{k}"
+        # Recurse into nested dicts.
+        best = None
+        for k in keys:
+            child = cls._hp_read_path(hp, k)
+            if isinstance(child, dict) or hasattr(child, "keys"):
+                found = cls._search_hp_leaf(child, leaf, _prefix=f"{_prefix}{k}.")
+                if found and (best is None or found.count(".") < best.count(".")):
+                    best = found
+        return best
+
+    @staticmethod
+    def _hp_scalarize(v):
+        """Snapshot a live HP value to a plain scalar. Top-level scalars come
+        back from the Proxy as a *live* _ValueProxy that would change under us
+        after set_hyperparam, so freeze it to a real int/float/str for the
+        'was X' message and for type inference."""
+        if v is None:
+            return None
+        # Use type() not isinstance(): a live _ValueProxy masquerades its
+        # __class__ as the wrapped builtin, so isinstance(v, int) is True and
+        # would let the live proxy through unfrozen. type() sees the real class.
+        if type(v) in (bool, int, float, str):
+            return v
+        if isinstance(v, dict) or hasattr(v, "keys"):
+            return v
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            try:
+                return str(v)
+            except Exception:
+                return v
+        return int(f) if f.is_integer() else f
+
+    @staticmethod
+    def _coerce_hp_value(new_value, current):
+        """Keep the value's type consistent with the existing one: integer HPs
+        (batch_size, ratios) stay integers; floats stay floats."""
+        try:
+            if isinstance(current, bool):
+                return bool(new_value)
+            if isinstance(current, int) and not isinstance(current, bool):
+                return int(round(float(new_value)))
+            if isinstance(current, float):
+                return float(new_value)
+            # Unknown/None current: infer from the new value.
+            f = float(new_value)
+            return int(f) if float(f).is_integer() else f
+        except (TypeError, ValueError):
+            return new_value
+
+    def _agent_set_hyperparam(self, param, op="set", value=None) -> str:
+        """Agent action: change a hyperparameter in the live (wrapped) HP config.
+
+        ``param`` is a semantic name (``batch_size``/``learning_rate``/
+        ``dump_ratio``/``eval_ratio``) or a dotted path; ``op`` is ``set`` (value
+        is the new absolute value) or ``scale`` (value is a multiplier, e.g. 1.1
+        for "+10%"). The change mutates the shared HP Proxy in place, so training
+        reads the new value on its next iteration."""
+        from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name
+
+        if not param:
+            return "Action: no hyperparameter specified."
+        if value is None:
+            return f"Action: no value given for hyperparameter '{param}'."
+
+        hp_name = resolve_hp_name()
+        hp = get_hyperparams(hp_name)
+        if hp is None:
+            return "Action: no hyperparameters are registered; cannot tune."
+
+        path = self._resolve_hp_path(hp, param)
+        if path is None:
+            return (f"Action: could not find hyperparameter '{param}' in the current config "
+                    "(try an exact dotted path like 'data.train_loader.batch_size').")
+
+        current = self._hp_scalarize(self._hp_read_path(hp, path))
+        op = str(op or "set").lower()
+        try:
+            if op in ("set", "=", "assign"):
+                new_value = value
+            elif op in ("scale", "multiply", "mul", "*", "increase", "decrease"):
+                if current is None:
+                    return f"Action: cannot scale '{path}' — it has no current value."
+                new_value = float(current) * float(value)
+            elif op in ("delta", "add", "increment", "+"):
+                if current is None:
+                    return f"Action: cannot adjust '{path}' — it has no current value."
+                new_value = float(current) + float(value)
+            else:
+                return f"Action: unknown hyperparameter op '{op}' (use 'set' or 'scale')."
+
+            new_value = self._coerce_hp_value(new_value, current)
+            set_hyperparam(name=hp_name, key_path=path, value=new_value)
+            # Verify against the wrapped HP (set_hyperparam mutates it in place).
+            confirmed = self._hp_scalarize(self._hp_read_path(get_hyperparams(hp_name), path))
+            return f"Action: set {path} = {confirmed} (was {current})."
+        except Exception as e:
+            return f"Action: failed to set hyperparameter '{param}': {e}"
+
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -2446,6 +2637,14 @@ class DataService:
                 return self._agent_load_weights(
                     step=params.get("step"),
                     exp_hash=params.get("hash") or params.get("exp_hash"),
+                )
+
+            # Set / scale a hyperparameter (batch size, learning rate, ratios, ...).
+            elif action_name in ("set_hyperparam", "set_hyperparameter", "set_hp", "tune_hyperparam"):
+                return self._agent_set_hyperparam(
+                    param=params.get("param") or params.get("name") or params.get("key_path"),
+                    op=params.get("op", "set"),
+                    value=params.get("value"),
                 )
 
             return f"Action triggered: {action_name} (Not implemented)"

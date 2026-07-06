@@ -100,6 +100,14 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
 
 .. toctree::
+   :maxdepth: 3
+   :caption: Examples
+   :hidden:
+
+   examples/index
+
+
+.. toctree::
    :maxdepth: 2
    :caption: Usage
    :hidden:
@@ -129,14 +137,6 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
    pytorch_lightning
    ultralytics
-
-
-.. toctree::
-   :maxdepth: 3
-   :caption: Examples
-   :hidden:
-
-   examples/index
 
 
 .. toctree::
