@@ -16,6 +16,8 @@ jobs:
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     outputs:
       is_main: ${{ steps.check.outputs.is_main }}
+      is_dev_release: ${{ steps.check.outputs.is_dev_release }}
+      should_run: ${{ steps.check.outputs.should_run }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,14 +31,32 @@ jobs:
           IS_ON_MAIN=$(git merge-base --is-ancestor "${TAG_COMMIT}" origin/main \
                        && echo "true" || echo "false")
           echo "is_main=${IS_ON_MAIN}" >> $GITHUB_OUTPUT
-          echo "Tag: ${GITHUB_REF_NAME}  commit: ${TAG_COMMIT}  on_main: ${IS_ON_MAIN}"
 
-  # ── Shared: run tests before main publish only ───────────────────────────
+          # Dev pre-release: a tag NOT on main whose name contains 'dev'
+          # (e.g. v1.3.1-dev0). Runs the full pipeline up to the TestPyPI install
+          # tests + a GitHub pre-release, then STOPS before the production PyPI
+          # publish. A tag off main WITHOUT 'dev' triggers nothing (should_run=false),
+          # so accidental/non-dev tags on dev never release.
+          IS_DEV_RELEASE=false
+          if [ "${IS_ON_MAIN}" != "true" ] && [[ "${GITHUB_REF_NAME}" == *dev* ]]; then
+            IS_DEV_RELEASE=true
+          fi
+          echo "is_dev_release=${IS_DEV_RELEASE}" >> $GITHUB_OUTPUT
+
+          if [ "${IS_ON_MAIN}" = "true" ] || [ "${IS_DEV_RELEASE}" = "true" ]; then
+            SHOULD_RUN=true
+          else
+            SHOULD_RUN=false
+          fi
+          echo "should_run=${SHOULD_RUN}" >> $GITHUB_OUTPUT
+          echo "Tag: ${GITHUB_REF_NAME}  commit: ${TAG_COMMIT}  on_main: ${IS_ON_MAIN}  dev_release: ${IS_DEV_RELEASE}  should_run: ${SHOULD_RUN}"
+
+  # ── Shared: run tests before any publish (main or dev pre-release) ────────
   test:
     name: Run Tests Before Release
     needs: detect-target
     runs-on: ubuntu-latest
-    if: ${{ needs.detect-target.outputs.is_main == 'true' }}
+    if: ${{ needs.detect-target.outputs.should_run == 'true' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -68,7 +88,7 @@ jobs:
     name: Build & Publish Dev Release (TestPyPI)
     needs: [detect-target,test]
     runs-on: ubuntu-latest
-    if: ${{ needs.detect-target.outputs.is_main == 'true' }}
+    if: ${{ needs.detect-target.outputs.should_run == 'true' }}
     permissions:
       contents: read
     outputs:
@@ -187,11 +207,11 @@ jobs:
           print('installed version:', m.version('weightslab'))
           "
 
-  # Only when note in main branch
+  # Only for a dev pre-release tag (off main, name contains 'dev').
   create-dev-release:
     name: Create GitHub Pre-Release
     needs: [detect-target, build-and-publish-dev-release, test-install-from-pip-dev-release]
-    if: ${{ needs.detect-target.outputs.is_main != 'true' }}
+    if: ${{ needs.detect-target.outputs.is_dev_release == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
