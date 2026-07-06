@@ -512,6 +512,20 @@ can persist progress mid-session from a prompt.
    * - "Save the current data state"
      - Snapshots the current per-sample tags and ``discarded`` flags (plus RNG
        state) as a data checkpoint.
+   * - "Load experiment state from hash <hash>"
+     - Restores a full saved experiment (model + weights + data + config) by its
+       hash, replacing the live state — the same reload the UI performs.
+   * - "Load the model weights from step 500"
+     - Loads only the model weights at a specific training step (leaving
+       architecture/config/data unchanged). Defaults to the current experiment
+       hash unless one is named.
+
+.. warning::
+
+   ``load_experiment`` and ``load_weights`` **replace live training state** in
+   place (model weights, and for ``load_experiment`` also data and config).
+   Because this is destructive, Weights Studio asks you to confirm the reload in
+   a pop-up before it is applied.
 
 Querying signal history (behavior over training)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

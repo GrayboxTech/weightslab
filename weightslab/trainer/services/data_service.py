@@ -2316,6 +2316,67 @@ class DataService:
         except Exception as e:
             return f"Action: failed to save data state: {e}"
 
+    def _agent_load_experiment(self, exp_hash) -> str:
+        """Agent action: load and apply a full experiment state (model +
+        weights + data + config) by its experiment hash, via the live
+        CheckpointManager's ``load_state`` (the same path the UI reload uses).
+        ``load_config=True`` so hyperparameters are restored too."""
+        if not exp_hash:
+            return ("Action: no experiment hash given; specify which state to load "
+                    "(e.g. 'load experiment state <hash>').")
+        cm = self._resolve_checkpoint_manager()
+        if cm is None or not hasattr(cm, "load_state"):
+            return "Action: no checkpoint manager available; cannot load experiment state."
+        exp_hash = str(exp_hash)
+        try:
+            ok = cm.load_state(exp_hash=exp_hash, load_config=True)
+            if ok:
+                return f"Action: loaded experiment state from {exp_hash[:16]} (model, weights, data, config)."
+            return f"Action: could not load experiment state {exp_hash[:16]} (hash not found?)."
+        except Exception as e:
+            return f"Action: failed to load experiment state {exp_hash[:16]}: {e}"
+
+    def _agent_load_weights(self, step=None, exp_hash=None) -> str:
+        """Agent action: load ONLY model weights (no architecture/config/data
+        change), optionally at a specific training ``step``. Defaults to the
+        current experiment hash when none is given."""
+        cm = self._resolve_checkpoint_manager()
+        if cm is None or not hasattr(cm, "load_state"):
+            return "Action: no checkpoint manager available; cannot load weights."
+
+        # Resolve the hash: explicit arg, else the current experiment.
+        if not exp_hash:
+            try:
+                exp_hash = (cm.get_current_experiment_hash()
+                            if hasattr(cm, "get_current_experiment_hash")
+                            else getattr(cm, "current_exp_hash", None))
+            except Exception:
+                exp_hash = getattr(cm, "current_exp_hash", None)
+        if not exp_hash:
+            return "Action: no experiment hash available to load weights from."
+        exp_hash = str(exp_hash)
+
+        target_step = None
+        if step is not None:
+            try:
+                target_step = int(step)
+            except (TypeError, ValueError):
+                return f"Action: invalid step '{step}'; expected an integer."
+
+        where = f"step {target_step}" if target_step is not None else "latest step"
+        try:
+            ok = cm.load_state(
+                exp_hash=exp_hash,
+                load_model=False, load_weights=True,
+                load_config=False, load_data=False,
+                target_step=target_step,
+            )
+            if ok:
+                return f"Action: loaded model weights ({where}) from {exp_hash[:16]}."
+            return f"Action: could not load weights ({where}) from {exp_hash[:16]}."
+        except Exception as e:
+            return f"Action: failed to load weights ({where}) from {exp_hash[:16]}: {e}"
+
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -2360,6 +2421,17 @@ class DataService:
             # Save the current data state (tags + discard flags) as a snapshot.
             elif action_name in ("save_data", "save_data_state", "dump_data"):
                 return self._agent_save_data_state()
+
+            # Load a full experiment state (model + weights + data [+ config]) by hash.
+            elif action_name in ("load_experiment", "load_state", "load_checkpoint"):
+                return self._agent_load_experiment(params.get("hash") or params.get("exp_hash"))
+
+            # Load only model weights (optionally at a specific training step).
+            elif action_name in ("load_weights", "load_model_weights"):
+                return self._agent_load_weights(
+                    step=params.get("step"),
+                    exp_hash=params.get("hash") or params.get("exp_hash"),
+                )
 
             return f"Action triggered: {action_name} (Not implemented)"
 

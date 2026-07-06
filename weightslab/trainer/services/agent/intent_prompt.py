@@ -40,6 +40,8 @@ Choose the `kind` based on the user's VERB and INTENT:
 | **Model Management** | "Freeze layer/neurons...", "Reset layer/neurons...", "Unfreeze layer/neurons..." | `model_action` |
 | **Save checkpoint** | "Save a checkpoint", "Dump the model weights", "Save the model (and its architecture)" | `action` (`action_name="save_checkpoint"`) |
 | **Save data state** | "Save the current data state", "Persist the tags and discards", "Snapshot the dataset state" | `action` (`action_name="save_data"`) |
+| **Load experiment** | "Load experiment state from hash <h>", "Restore the experiment <h>", "Go back to state <h>" | `action` (`action_name="load_experiment"`, `action_params={{"hash": "<h>"}}`) |
+| **Load weights** | "Load the model weights from step 500", "Roll back weights to step 500", "Load weights at step 500 from hash <h>" | `action` (`action_name="load_weights"`, `action_params={{"step": 500}}`) |
 | **History query** | "...that never had train loss below 0.5", "...whose loss was ever above 5", "min/max/mean loss OVER TRAINING" | `transform`/`keep` using `signal_history(...)` (see rule 10) |
 
 ---
@@ -84,8 +86,12 @@ Choose the `kind` based on the user's VERB and INTENT:
   - `model_query_expression`: Python expression over `layers_df` for aggregate model questions (e.g. `"layers_df['neurons_count'].sum()"`), for `model_info`.
   - `model_action_name`: `"freeze"`, `"reset"`, or `"unfreeze"`, for `model_action`. `"unfreeze"` only ever touches layers/neurons that are ALREADY frozen (it is implemented as re-applying freeze, which toggles); it is a no-op on anything not currently frozen.
   - `neuron_indices`: Optional list of specific neuron indices within the selected layer(s), for `model_action`. Omit to target whole layers.
-  - `action_name`: Name of an external action, for `kind="action"` (`primary_goal="action"`). Supported: `"save_checkpoint"` (dump model weights; add `action_params={{"architecture": true}}` to also save the model architecture) and `"save_data"` (snapshot the current data state — tags + discard flags).
-  - `action_params`: Optional dict of parameters for the action (e.g. `{{"architecture": true}}` for `save_checkpoint`).
+  - `action_name`: Name of an external action, for `kind="action"` (`primary_goal="action"`). Supported:
+    - `"save_checkpoint"` — dump model weights; add `action_params={{"architecture": true}}` to also save the model architecture.
+    - `"save_data"` — snapshot the current data state (tags + discard flags).
+    - `"load_experiment"` — load & apply a FULL saved experiment state (model + weights + data + config) by hash; REQUIRES `action_params={{"hash": "<exp_hash>"}}` (the hash the user gives).
+    - `"load_weights"` — load ONLY model weights, optionally at a specific step: `action_params={{"step": <int>}}` (and optionally `"hash": "<exp_hash>"`; defaults to the current experiment).
+  - `action_params`: Optional dict of parameters for the action (e.g. `{{"architecture": true}}`, `{{"hash": "abc123..."}}`, `{{"step": 500}}`).
 
 ---
 ---
@@ -665,6 +671,36 @@ User: "Save the current data state"
     {{
       "kind": "action",
       "action_name": "save_data"
+    }}
+  ]
+}}
+
+
+**Ex42: Load A Full Experiment State By Hash**
+User: "Load experiment state from hash a1b2c3d4e5f6"
+{{
+  "reasoning": "Restore a full saved experiment (model + weights + data + config) by its hash. The user supplied the hash, so pass it in action_params.",
+  "primary_goal": "action",
+  "steps": [
+    {{
+      "kind": "action",
+      "action_name": "load_experiment",
+      "action_params": {{ "hash": "a1b2c3d4e5f6" }}
+    }}
+  ]
+}}
+
+
+**Ex43: Load Model Weights At A Specific Step**
+User: "Load the model weights from step 500"
+{{
+  "reasoning": "Load ONLY the model weights at training step 500 (no architecture/config/data change). No hash given, so default to the current experiment.",
+  "primary_goal": "action",
+  "steps": [
+    {{
+      "kind": "action",
+      "action_name": "load_weights",
+      "action_params": {{ "step": 500 }}
     }}
   ]
 }}

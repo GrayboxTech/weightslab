@@ -992,6 +992,16 @@ class TestAgentRstDocumentedPrompts(unittest.TestCase):
         ops = self._query("Save the current data state")
         self.assertEqual(ops[0]["function"], "action.save_data", ops)
 
+    def test_doc_load_experiment_from_hash(self):
+        ops = self._query("Load experiment state from hash a1b2c3d4e5f6")
+        self.assertEqual(ops[0]["function"], "action.load_experiment", ops)
+        self.assertIn("a1b2c3d4e5f6", str(ops[0].get("params", {}).get("hash", "")), ops)
+
+    def test_doc_load_weights_at_step(self):
+        ops = self._query("Load the model weights from step 500")
+        self.assertEqual(ops[0]["function"], "action.load_weights", ops)
+        self.assertEqual(int(ops[0].get("params", {}).get("step")), 500, ops)
+
     # ---- Signal-history query (op-plan check) -----------------------------------
 
     def test_doc_tag_samples_never_had_loss_below(self):

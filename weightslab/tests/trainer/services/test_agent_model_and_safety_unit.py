@@ -1370,6 +1370,89 @@ class TestAgentSaveActions(unittest.TestCase):
         self.assertIn("no checkpoint manager", msg.lower())
 
 
+class TestAgentLoadActions(unittest.TestCase):
+    """action.load_experiment / action.load_weights dispatch to the live
+    CheckpointManager's load_state (full-state reload vs weights-only at step)."""
+
+    def _cm(self):
+        cm = MagicMock()
+        cm.current_exp_hash = "curhash"
+        cm.get_current_experiment_hash.return_value = "curhash"
+        cm.load_state.return_value = True
+        return cm
+
+    def _ds(self, cm):
+        ds = DataService.__new__(DataService)
+        ds._df_manager = None
+        ds.model_service = None
+        exp_ctx = SimpleNamespace(components={"checkpoint_manager": cm})
+        exp_ctx.ensure_components = lambda: None
+        ds._ctx = exp_ctx
+        return ds
+
+    def test_load_experiment_by_hash(self):
+        cm = self._cm()
+        ds = self._ds(cm)
+        msg = ds._apply_agent_operation(pd.DataFrame({"loss": [0.1]}),
+                                        "action.load_experiment", {"hash": "abc123def456"})
+        self.assertIn("loaded experiment state", msg.lower())
+        # Full-state reload restores config too.
+        _, kwargs = cm.load_state.call_args
+        self.assertEqual(kwargs.get("exp_hash"), "abc123def456")
+        self.assertTrue(kwargs.get("load_config"))
+
+    def test_load_experiment_without_hash_is_refused(self):
+        cm = self._cm()
+        ds = self._ds(cm)
+        msg = ds._apply_agent_operation(pd.DataFrame({"loss": [0.1]}), "action.load_experiment", {})
+        self.assertIn("no experiment hash", msg.lower())
+        cm.load_state.assert_not_called()
+
+    def test_load_experiment_not_found_reports_failure(self):
+        cm = self._cm()
+        cm.load_state.return_value = False
+        ds = self._ds(cm)
+        msg = ds._apply_agent_operation(pd.DataFrame({"loss": [0.1]}),
+                                        "action.load_experiment", {"hash": "deadbeef"})
+        self.assertIn("could not load", msg.lower())
+
+    def test_load_weights_at_step_weights_only(self):
+        cm = self._cm()
+        ds = self._ds(cm)
+        msg = ds._apply_agent_operation(pd.DataFrame({"loss": [0.1]}),
+                                        "action.load_weights", {"step": 500})
+        self.assertIn("step 500", msg)
+        _, kwargs = cm.load_state.call_args
+        self.assertEqual(kwargs.get("target_step"), 500)
+        self.assertTrue(kwargs.get("load_weights"))
+        self.assertFalse(kwargs.get("load_model"))
+        self.assertFalse(kwargs.get("load_config"))
+        self.assertFalse(kwargs.get("load_data"))
+
+    def test_load_weights_defaults_to_current_hash(self):
+        cm = self._cm()
+        ds = self._ds(cm)
+        ds._apply_agent_operation(pd.DataFrame({"loss": [0.1]}), "action.load_weights", {"step": 10})
+        _, kwargs = cm.load_state.call_args
+        self.assertEqual(kwargs.get("exp_hash"), "curhash")
+
+    def test_load_weights_explicit_hash(self):
+        cm = self._cm()
+        ds = self._ds(cm)
+        ds._apply_agent_operation(pd.DataFrame({"loss": [0.1]}),
+                                  "action.load_weights", {"step": 10, "hash": "otherhash"})
+        _, kwargs = cm.load_state.call_args
+        self.assertEqual(kwargs.get("exp_hash"), "otherhash")
+
+    def test_load_weights_invalid_step(self):
+        cm = self._cm()
+        ds = self._ds(cm)
+        msg = ds._apply_agent_operation(pd.DataFrame({"loss": [0.1]}),
+                                        "action.load_weights", {"step": "not_an_int"})
+        self.assertIn("invalid step", msg.lower())
+        cm.load_state.assert_not_called()
+
+
 class TestSignalHistoryHelper(unittest.TestCase):
     """signal_history(metric, reduce) exposes per-sample logger HISTORY to agent
     code, enabling "never/ever" queries the current-value dataframe can't answer."""
