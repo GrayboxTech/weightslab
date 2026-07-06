@@ -691,10 +691,14 @@ class LedgeredDataFrameManager:
                 if len(existing_idx) > 0:
                     # Widen any categorical target columns to object before assigning:
                     # writing a value outside a Categorical's category list raises
-                    # "Cannot setitem on a Categorical with a new category". The
-                    # _optimize_dataframe_memory pass below re-applies categorical dtypes.
+                    # "Cannot setitem on a Categorical with a new category". This
+                    # must include `origin` — re-registering rows whose (sample_id,
+                    # annotation_id) already exist under a NEW origin hits exactly
+                    # that error otherwise. The _optimize_dataframe_memory pass below
+                    # re-applies categorical dtypes (origin included), so widening
+                    # here is only transient and costs no memory afterward.
                     for col in all_cols:
-                        if col in self._df.columns and col != SampleStatsEx.ORIGIN and isinstance(self._df[col].dtype, pd.CategoricalDtype):
+                        if col in self._df.columns and isinstance(self._df[col].dtype, pd.CategoricalDtype):
                             self._df[col] = self._df[col].astype(object)
                     self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
 

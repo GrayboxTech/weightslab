@@ -1073,20 +1073,30 @@ def start_training(timeout: int = None) -> None:
         time.sleep(timeout)
     pause_ctrl.resume() # Ensure we're not paused if start_training is called after serve
 
-def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
+def serve(serving_cli: bool = True, serving_grpc: bool = False,
+          spawn_cli_client: bool = False, **kwargs) -> None:
     """Start WeightsLab services.
 
     Args:
         serving_cli: Start the interactive CLI server.
         serving_grpc: Start the gRPC server.
-        **kwargs: Extra server options passed to underlying backends.
+        spawn_cli_client: When ``serving_cli`` is True, also open the interactive
+            REPL in a new console window (the default, backward-compatible
+            behavior). Set to ``False`` to start the CLI server *headless* — it
+            still advertises its port, so you can attach on demand from any
+            terminal with ``weightslab cli`` (or ``weightslab cli --port <port>``).
+        **kwargs: Extra server options passed to underlying backends
+            (e.g. ``cli_host``, ``cli_port``, ``grpc_port``).
     """
 
     if serving_grpc:
         grpc_serve(**kwargs)
 
     if serving_cli:
-        cli_serve(**kwargs)
+        # The explicit parameter is the source of truth; drop any duplicate
+        # spawn_client passed through kwargs so we don't pass it twice.
+        kwargs.pop("spawn_client", None)
+        cli_serve(spawn_client=spawn_cli_client, **kwargs)
 
 
 def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:

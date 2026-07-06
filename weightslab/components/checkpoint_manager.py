@@ -82,7 +82,7 @@ class CheckpointManager:
     LOGGER_SNAPSHOT_CHUNK_SUFFIX = ".json.zst"
     LOGGER_SNAPSHOT_MANIFEST_FILE = "loggers.manifest.json"
 
-    def __init__(self, root_log_dir: str = 'root_experiment', load_model: bool = True, load_config: bool = True, load_data: bool = True):
+    def __init__(self, root_log_dir: str = 'root_experiment', load_model: bool = True, load_config: bool = False, load_data: bool = True):
         """Initialize the checkpoint manager.
 
         Args:
@@ -345,7 +345,7 @@ class CheckpointManager:
         except Exception as e:
             logger.warning(f"Failed to update manifest weight checkpoint: {e}")
 
-    def _bootstrap_latest_state(self, load_model: bool = True, load_config: bool = True, load_data: bool = True, force: bool = False):
+    def _bootstrap_latest_state(self, load_model: bool = True, load_config: bool = False, load_data: bool = True, force: bool = False):
         """If a current hash is known (or manifest has one), load and apply it.
 
         This enables auto-resume when instantiating the manager on an existing
@@ -1579,7 +1579,7 @@ class CheckpointManager:
                         exp_hash: str,
                         load_model: bool = True,
                         load_weights: bool = True,
-                        load_config: bool = True,
+                        load_config: bool = False,
                         load_data: bool = True,
                         target_step: Optional[int] = None,
                         force: bool = False
@@ -1821,7 +1821,7 @@ class CheckpointManager:
         force: bool = False,
         load_model: bool = True,
         load_weights: bool = True,
-        load_config: bool = True,
+        load_config: bool = False,
         load_data: bool = True,
         load_logger: bool = True,
         target_step: Optional[int] = None,

@@ -6,6 +6,9 @@ Tests all CLI commands to ensure they work correctly.
 import unittest
 import socket
 import time
+import json
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import sys
@@ -425,6 +428,96 @@ class TestCLIServer(unittest.TestCase):
 # sock.close()
 
 
+class TestCLIEndpointDiscovery(unittest.TestCase):
+    """Tests for `weightslab cli` endpoint discovery/resolution.
+
+    These drive the discovery file through a temp path (WEIGHTSLAB_CLI_FILE) so
+    they never touch the real ~/.weightslab/cli.json.
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self._discovery_file = os.path.join(self._tmpdir, "cli.json")
+        # Snapshot + control the env vars resolution depends on.
+        self._saved_env = {k: os.environ.get(k) for k in ("WEIGHTSLAB_CLI_FILE", "CLI_PORT", "CLI_HOST")}
+        os.environ["WEIGHTSLAB_CLI_FILE"] = self._discovery_file
+        os.environ.pop("CLI_PORT", None)
+        os.environ.pop("CLI_HOST", None)
+
+    def tearDown(self):
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        try:
+            if os.path.exists(self._discovery_file):
+                os.unlink(self._discovery_file)
+            os.rmdir(self._tmpdir)
+        except OSError:
+            pass
+
+    def test_explicit_port_wins(self):
+        # Even with a discovery file present, an explicit --port takes priority.
+        cli_backend._write_discovery_file("localhost", 55555)
+        host, port, source = cli_backend.resolve_cli_endpoint(cli_port=12345)
+        self.assertEqual(port, 12345)
+        self.assertEqual(source, "via --port")
+
+    def test_discovery_round_trip(self):
+        cli_backend._write_discovery_file("127.0.0.1", 61234)
+        info = cli_backend._read_discovery_file()
+        self.assertIsNotNone(info)
+        self.assertEqual(info["port"], 61234)
+        self.assertEqual(info["pid"], os.getpid())
+
+        host, port, source = cli_backend.resolve_cli_endpoint()
+        self.assertEqual(host, "127.0.0.1")
+        self.assertEqual(port, 61234)
+        self.assertEqual(source, "auto-discovered")
+
+    def test_no_discovery_no_env_returns_none(self):
+        host, port, source = cli_backend.resolve_cli_endpoint()
+        self.assertIsNone(port)
+        self.assertEqual(source, "none")
+
+    def test_env_cli_port_fallback(self):
+        os.environ["CLI_PORT"] = "62000"
+        host, port, source = cli_backend.resolve_cli_endpoint()
+        self.assertEqual(port, 62000)
+        self.assertEqual(source, "via CLI_PORT")
+
+    def test_clear_only_removes_own_advertisement(self):
+        # A file owned by a different pid must NOT be cleared by us.
+        Path(self._discovery_file).write_text(json.dumps({"host": "localhost", "port": 60001, "pid": -1}))
+        cli_backend._clear_discovery_file()
+        self.assertTrue(os.path.exists(self._discovery_file))
+        # Our own advertisement is cleared.
+        cli_backend._write_discovery_file("localhost", 60002)
+        cli_backend._clear_discovery_file()
+        self.assertFalse(os.path.exists(self._discovery_file))
+
+    def test_cli_serve_writes_discovery_file(self):
+        result = cli_serve(cli_host='127.0.0.1', cli_port=0, spawn_client=False)
+        try:
+            self.assertTrue(result['ok'])
+            info = cli_backend._read_discovery_file()
+            self.assertIsNotNone(info, "cli_serve should advertise its endpoint")
+            self.assertEqual(info['port'], result['port'])
+        finally:
+            sock = cli_backend._server_sock
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+            thread = cli_backend._server_thread
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=1.0)
+            cli_backend._server_sock = None
+            cli_backend._server_thread = None
+
+
 def run_tests():
     """Run all CLI tests."""
     # Create test suite
@@ -435,6 +528,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestCLISanitization))
     suite.addTests(loader.loadTestsFromTestCase(TestCLICommands))
     suite.addTests(loader.loadTestsFromTestCase(TestCLIServer))
+    suite.addTests(loader.loadTestsFromTestCase(TestCLIEndpointDiscovery))
     # suite.addTests(loader.loadTestsFromTestCase(TestCLIIntegration))
 
     # Run tests

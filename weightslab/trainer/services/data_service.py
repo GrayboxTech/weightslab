@@ -1,3 +1,4 @@
+import ast
 import io
 import time
 import logging
@@ -245,6 +246,46 @@ def is_protected_metadata_name(column_name: str) -> bool:
     return False
 
 
+class _BoolOpToBitwise(ast.NodeTransformer):
+    """AST transformer: rewrites `A and B` / `A or B` into `A & B` / `A | B`."""
+
+    def visit_BoolOp(self, node):
+        self.generic_visit(node)
+        op_cls = ast.BitAnd if isinstance(node.op, ast.And) else ast.BitOr
+        result = node.values[0]
+        for value in node.values[1:]:
+            result = ast.BinOp(left=result, op=op_cls(), right=value)
+        return ast.copy_location(result, node)
+
+
+_AND_OR_KEYWORD_RE = re.compile(r"\b(and|or)\b")
+
+
+def rewrite_boolean_keywords_to_bitwise(code: str) -> str:
+    """
+    Rewrites Python `and`/`or` boolean operators to their pandas-safe bitwise
+    equivalents (`&`/`|`) in a single-expression code string.
+
+    LLMs frequently write pandas boolean masks with Python's `and`/`or`
+    keywords (e.g. `(df['a'] > 1) and (df['b'] < 2)`), which raises "The
+    truth value of a Series/array is ambiguous" because `and`/`or` implicitly
+    call `bool()` on each operand — something a multi-row Series/array can
+    never satisfy. Rewriting via the AST (not string substitution) correctly
+    preserves operator precedence/parenthesization. Falls back to the
+    original code unchanged if it isn't a single parseable expression (e.g.
+    multi-statement snippets), so this is always safe to call.
+    """
+    if not code or not _AND_OR_KEYWORD_RE.search(code):
+        return code
+    try:
+        tree = ast.parse(code, mode="eval")
+        tree = _BoolOpToBitwise().visit(tree)
+        ast.fix_missing_locations(tree)
+        return ast.unparse(tree)
+    except Exception:
+        return code
+
+
 class DataService:
 
     """
@@ -255,6 +296,9 @@ class DataService:
 
     def __init__(self, ctx):
         self._ctx = ctx
+        # Set by ExperimentService after construction so the agent can invoke
+        # architecture ops (freeze/reset) in-process. None in standalone/tests.
+        self.model_service = None
         # Use MonitoredRLock so the gRPC watchdog can observe the holder thread
         # and how long the lock has been held, and interrupt it if needed.
         from weightslab.watchdog.lock_monitor import MonitoredRLock
@@ -1421,6 +1465,8 @@ class DataService:
                         thumbnail=b""
                     )
                 )
+                if num_classes is not None and num_classes < label_raw.max():
+                    logger.warning(f'Be aware that the num_classes infered is inferior to max value in the label')
 
                 # Per-sample class_names emission. KEPT because the studio has
                 # no dataset-level RPC (no GetClassNames / GetDatasetMetadata
@@ -2084,6 +2130,268 @@ class DataService:
 
         df.sort_values(inplace=True, **params)
 
+    @staticmethod
+    def _build_agent_eval_globals(df):
+        """
+        Builds the eval() globals used for agent-generated code (df.modify /
+        df.analyze), exposing `origin`/`sample_id` as plain Series whenever
+        they live in the index rather than as regular columns, plus a
+        reset_index view (`df_reset`). Returns (eval_globals, origin_series)
+        so callers can also patch a `df['origin']` backward-compat KeyError.
+        """
+        origin_series = None
+        if SampleStatsEx.ORIGIN.value in df.columns:
+            origin_series = df[SampleStatsEx.ORIGIN.value]
+        elif isinstance(df.index, pd.MultiIndex) and SampleStatsEx.ORIGIN.value in df.index.names:
+            origin_series = pd.Series(
+                df.index.get_level_values(SampleStatsEx.ORIGIN.value),
+                index=df.index,
+            )
+        elif df.index.name == SampleStatsEx.ORIGIN.value:
+            origin_series = pd.Series(df.index, index=df.index)
+
+        df_reset = safe_reset_index(df)
+        eval_globals = {"df": df, "df_reset": df_reset, "np": np, "pd": pd}
+        # Expose per-sample signal HISTORY (from the experiment logger's DuckDB
+        # store) to agent code, so prompts like "tag samples that never had
+        # train_loss below 0.5" work: signal_history('train_loss','min') >= 0.5.
+        # Returns a Series aligned to df.index (NaN where a sample has no history).
+        eval_globals["signal_history"] = (
+            lambda metric, reduce="min": DataService._reduce_signal_history_series(df, metric, reduce)
+        )
+        if origin_series is not None:
+            eval_globals[SampleStatsEx.ORIGIN.value] = origin_series
+
+        sample_id_series = None
+        if SampleStatsEx.SAMPLE_ID.value in df.columns:
+            sample_id_series = df[SampleStatsEx.SAMPLE_ID.value]
+        elif isinstance(df.index, pd.MultiIndex) and SampleStatsEx.SAMPLE_ID.value in df.index.names:
+            sample_id_series = pd.Series(
+                df.index.get_level_values(SampleStatsEx.SAMPLE_ID.value),
+                index=df.index,
+            )
+        elif df.index.name == SampleStatsEx.SAMPLE_ID.value:
+            sample_id_series = pd.Series(df.index, index=df.index)
+        if sample_id_series is not None:
+            eval_globals[SampleStatsEx.SAMPLE_ID.value] = sample_id_series
+
+        return eval_globals, origin_series
+
+    @staticmethod
+    def _eval_agent_code(code: str, eval_globals: dict, origin_series):
+        """
+        Evaluates agent-generated code with a backward-compat fallback: the
+        agent frequently emits `df['origin']` even when `origin` actually
+        lives in the index (a MultiIndex level rather than a column), which
+        raises a bare KeyError. When that specific KeyError occurs and an
+        origin Series is available, retry with `df['origin']` rewritten to
+        the plain `origin` name (exposed by `_build_agent_eval_globals`).
+        """
+        try:
+            return eval(code, eval_globals)
+        except KeyError as e:
+            if str(e).strip("'\"") == SampleStatsEx.ORIGIN.value and origin_series is not None:
+                patched_code = re.sub(
+                    r"df\[\s*['\"]origin['\"]\s*\]",
+                    SampleStatsEx.ORIGIN.value,
+                    code,
+                )
+                return eval(patched_code, eval_globals)
+            raise
+
+    @staticmethod
+    def _reduce_signal_history_series(df, metric: str, reduce: str = "min"):
+        """Per-sample reduction of a signal's full HISTORY, aligned to df.index.
+
+        Backs the ``signal_history(metric, reduce)`` helper exposed to agent code.
+        Reads the experiment logger's DuckDB per-sample store (append-only
+        ``(metric, hash, sample_id, step, value)``), reduces each sample's whole
+        time series (min/max/mean/count), and maps it back onto the current
+        dataframe rows by sample_id. Rows whose sample has no recorded history
+        get NaN — so, e.g., ``signal_history('train_loss','min') >= 0.5`` is
+        False for them (no evidence they stayed above 0.5), never a crash.
+
+        Only populated when signals were logged with ``save_signals(..., log=True)``;
+        with no logger / no history it returns an all-NaN Series (a safe no-op).
+        """
+        from weightslab.backend import ledgers
+
+        # Resolve each row's sample_id (column or index level).
+        sample_level = SampleStatsEx.SAMPLE_ID.value
+        if sample_level in df.columns:
+            sid_values = df[sample_level]
+        elif isinstance(df.index, pd.MultiIndex) and sample_level in (df.index.names or []):
+            sid_values = pd.Series(df.index.get_level_values(sample_level), index=df.index)
+        else:
+            sid_values = pd.Series(df.index, index=df.index)
+
+        empty = pd.Series(np.nan, index=df.index)
+
+        try:
+            logger_q = ledgers.get_logger()
+        except Exception:
+            logger_q = None
+        if logger_q is None or not hasattr(logger_q, "reduce_per_sample"):
+            return empty
+
+        try:
+            resolved = logger_q.resolve_graph_name(metric) if hasattr(logger_q, "resolve_graph_name") else metric
+        except Exception:
+            resolved = metric
+        if not resolved:
+            return empty
+
+        exp_hash = None
+        try:
+            cm = ledgers.get_checkpoint_manager()
+            if cm is not None and hasattr(cm, "get_current_experiment_hash"):
+                exp_hash = cm.get_current_experiment_hash()
+        except Exception:
+            exp_hash = None
+
+        try:
+            reduced = logger_q.reduce_per_sample(resolved, reduce=reduce, exp_hash=exp_hash)
+        except Exception as exc:
+            logger.debug(f"[Agent] signal_history('{metric}','{reduce}') failed: {exc}")
+            return empty
+        if not reduced:
+            return empty
+
+        mapped = sid_values.astype(str).map(reduced)
+        return pd.Series(pd.to_numeric(mapped, errors="coerce").to_numpy(), index=df.index)
+
+    def _resolve_checkpoint_manager(self):
+        """Fetch the live CheckpointManager: prefer the experiment context's
+        components, fall back to the global ledger. Returns None if unavailable."""
+        cm = None
+        try:
+            if getattr(self, "_ctx", None) is not None:
+                self._ctx.ensure_components()
+                cm = self._ctx.components.get("checkpoint_manager")
+        except Exception:
+            cm = None
+        if cm is None:
+            try:
+                from weightslab.backend.ledgers import get_checkpoint_manager
+                cm = get_checkpoint_manager()
+            except Exception:
+                cm = None
+        # A ledger miss yields a Proxy(None) placeholder; treat "no save method" as absent.
+        if cm is None or not hasattr(cm, "save_model_checkpoint"):
+            return None
+        return cm
+
+    def _agent_save_checkpoint(self, include_architecture: bool = False) -> str:
+        """Agent action: dump a model-weights checkpoint (and, if requested, the
+        model architecture) via the live CheckpointManager. Mirrors the manual
+        save path: ensure an experiment hash exists first, since every
+        ``save_*`` returns None when ``current_exp_hash`` is unset."""
+        cm = self._resolve_checkpoint_manager()
+        if cm is None:
+            return "Action: no checkpoint manager available; nothing was saved."
+        try:
+            if not getattr(cm, "current_exp_hash", None) and hasattr(cm, "update_experiment_hash"):
+                cm.update_experiment_hash()
+            saved = []
+            if cm.save_model_checkpoint(force_dump_pending=True, update_manifest=True):
+                saved.append("weights")
+            if include_architecture and hasattr(cm, "save_model_architecture"):
+                model = None
+                try:
+                    model = self._ctx.components.get("model") if getattr(self, "_ctx", None) else None
+                except Exception:
+                    model = None
+                if model is None:
+                    try:
+                        from weightslab.backend.ledgers import get_model
+                        model = get_model()
+                    except Exception:
+                        model = None
+                if model is not None and cm.save_model_architecture(model):
+                    saved.append("architecture")
+            if not saved:
+                return "Action: checkpoint save produced no output (is an experiment hash set?)."
+            return f"Action: saved model checkpoint ({' + '.join(saved)})."
+        except Exception as e:
+            return f"Action: failed to save checkpoint: {e}"
+
+    def _agent_save_data_state(self) -> str:
+        """Agent action: snapshot the current data state (per-sample tags +
+        discard flags + RNG) via the live CheckpointManager."""
+        cm = self._resolve_checkpoint_manager()
+        if cm is None or not hasattr(cm, "save_data_snapshot"):
+            return "Action: no checkpoint manager available; data state not saved."
+        try:
+            if not getattr(cm, "current_exp_hash", None) and hasattr(cm, "update_experiment_hash"):
+                cm.update_experiment_hash()
+            path = cm.save_data_snapshot(force_new_state=True)
+            if path:
+                return "Action: saved current data state (tags + discard flags)."
+            return "Action: data-state save produced no output (is an experiment hash set?)."
+        except Exception as e:
+            return f"Action: failed to save data state: {e}"
+
+    def _agent_load_experiment(self, exp_hash) -> str:
+        """Agent action: load and apply a full experiment state (model +
+        weights + data + config) by its experiment hash, via the live
+        CheckpointManager's ``load_state`` (the same path the UI reload uses).
+        ``load_config=True`` so hyperparameters are restored too."""
+        if not exp_hash:
+            return ("Action: no experiment hash given; specify which state to load "
+                    "(e.g. 'load experiment state <hash>').")
+        cm = self._resolve_checkpoint_manager()
+        if cm is None or not hasattr(cm, "load_state"):
+            return "Action: no checkpoint manager available; cannot load experiment state."
+        exp_hash = str(exp_hash)
+        try:
+            ok = cm.load_state(exp_hash=exp_hash, load_config=True)
+            if ok:
+                return f"Action: loaded experiment state from {exp_hash[:16]} (model, weights, data, config)."
+            return f"Action: could not load experiment state {exp_hash[:16]} (hash not found?)."
+        except Exception as e:
+            return f"Action: failed to load experiment state {exp_hash[:16]}: {e}"
+
+    def _agent_load_weights(self, step=None, exp_hash=None) -> str:
+        """Agent action: load ONLY model weights (no architecture/config/data
+        change), optionally at a specific training ``step``. Defaults to the
+        current experiment hash when none is given."""
+        cm = self._resolve_checkpoint_manager()
+        if cm is None or not hasattr(cm, "load_state"):
+            return "Action: no checkpoint manager available; cannot load weights."
+
+        # Resolve the hash: explicit arg, else the current experiment.
+        if not exp_hash:
+            try:
+                exp_hash = (cm.get_current_experiment_hash()
+                            if hasattr(cm, "get_current_experiment_hash")
+                            else getattr(cm, "current_exp_hash", None))
+            except Exception:
+                exp_hash = getattr(cm, "current_exp_hash", None)
+        if not exp_hash:
+            return "Action: no experiment hash available to load weights from."
+        exp_hash = str(exp_hash)
+
+        target_step = None
+        if step is not None:
+            try:
+                target_step = int(step)
+            except (TypeError, ValueError):
+                return f"Action: invalid step '{step}'; expected an integer."
+
+        where = f"step {target_step}" if target_step is not None else "latest step"
+        try:
+            ok = cm.load_state(
+                exp_hash=exp_hash,
+                load_model=False, load_weights=True,
+                load_config=False, load_data=False,
+                target_step=target_step,
+            )
+            if ok:
+                return f"Action: loaded model weights ({where}) from {exp_hash[:16]}."
+            return f"Action: could not load weights ({where}) from {exp_hash[:16]}."
+        except Exception as e:
+            return f"Action: failed to load weights ({where}) from {exp_hash[:16]}: {e}"
+
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -2120,15 +2428,35 @@ class DataService:
                 msg = self._compute_natural_sort_stats()
                 return f"Action: {msg}"
 
+            # Save a model checkpoint (weights; + architecture when requested).
+            elif action_name in ("save_checkpoint", "save_model", "checkpoint", "dump_model"):
+                include_arch = bool(params.get("architecture") or params.get("include_architecture"))
+                return self._agent_save_checkpoint(include_architecture=include_arch)
+
+            # Save the current data state (tags + discard flags) as a snapshot.
+            elif action_name in ("save_data", "save_data_state", "dump_data"):
+                return self._agent_save_data_state()
+
+            # Load a full experiment state (model + weights + data [+ config]) by hash.
+            elif action_name in ("load_experiment", "load_state", "load_checkpoint"):
+                return self._agent_load_experiment(params.get("hash") or params.get("exp_hash"))
+
+            # Load only model weights (optionally at a specific training step).
+            elif action_name in ("load_weights", "load_model_weights"):
+                return self._agent_load_weights(
+                    step=params.get("step"),
+                    exp_hash=params.get("hash") or params.get("exp_hash"),
+                )
+
             return f"Action triggered: {action_name} (Not implemented)"
 
         # --- 3. DATAFRAME MANIPULATION ---
-
         # A) Agent-driven df.apply_mask (for complex filters)
         if func == "df.apply_mask":
-            code = params.get("code", "")
+            code = rewrite_boolean_keywords_to_bitwise(params.get("code", ""))
             try:
-                mask = eval(code, {"df": df, "np": np, "pd": pd})
+                eval_globals, origin_series = self._build_agent_eval_globals(df)
+                mask = self._eval_agent_code(code, eval_globals, origin_series)
                 if isinstance(mask, (pd.Series, np.ndarray, list, pd.Index)):
                     if isinstance(mask, (list, pd.Index)) and not pd.api.types.is_bool_dtype(pd.Series(mask)):
                          kept = df.loc[mask]
@@ -2164,7 +2492,21 @@ class DataService:
         # C) Column Modification (Transform)
         if func == "df.modify":
             col = params.get("col")
-            code = params.get("code")
+            code = rewrite_boolean_keywords_to_bitwise(params.get("code"))
+
+            # Hard safety gate: the agent (and Quick Filters) may create NEW
+            # columns freely, but must never overwrite values already recorded
+            # in an existing column. Only the `discarded` deny-list flag and
+            # `tag:*` boolean columns are writable once they already exist.
+            if col in df.columns and col != SampleStatsEx.DISCARDED.value and not str(col).startswith("tag:"):
+                msg = (
+                    f"Safety Violation: '{col}' already holds recorded data and cannot be "
+                    "overwritten. Create a new column instead, or update tag:*/discarded "
+                    "control columns."
+                )
+                logger.warning(msg)
+                return msg
+
             try:
                 # 0. Safety Check: If target column exists, check compatibility
                 if col in df.columns:
@@ -2176,52 +2518,11 @@ class DataService:
                          pass
 
                 # 1. Evaluate the expression with safe context.
-                # Keep df as-is (no copy), but expose `origin` whether it is a column or an index level.
-                # Also provide a reset_index version for operations that need all data as columns.
-                origin_series = None
-                if SampleStatsEx.ORIGIN.value in df.columns:
-                    origin_series = df[SampleStatsEx.ORIGIN.value]
-                elif isinstance(df.index, pd.MultiIndex) and SampleStatsEx.ORIGIN.value in df.index.names:
-                    origin_series = pd.Series(
-                        df.index.get_level_values(SampleStatsEx.ORIGIN.value),
-                        index=df.index,
-                    )
-                elif df.index.name == SampleStatsEx.ORIGIN.value:
-                    origin_series = pd.Series(df.index, index=df.index)
-
-                # Provide both indexed and reset_index versions for flexibility
-                df_reset = safe_reset_index(df)
-                eval_globals = {"df": df, "df_reset": df_reset, "np": np, "pd": pd}
-                if origin_series is not None:
-                    eval_globals[SampleStatsEx.ORIGIN.value] = origin_series
-
-                # Also expose sample_id if it's in the index
-                sample_id_series = None
-                if SampleStatsEx.SAMPLE_ID.value in df.columns:
-                    sample_id_series = df[SampleStatsEx.SAMPLE_ID.value]
-                elif isinstance(df.index, pd.MultiIndex) and SampleStatsEx.SAMPLE_ID.value in df.index.names:
-                    sample_id_series = pd.Series(
-                        df.index.get_level_values(SampleStatsEx.SAMPLE_ID.value),
-                        index=df.index,
-                    )
-                elif df.index.name == SampleStatsEx.SAMPLE_ID.value:
-                    sample_id_series = pd.Series(df.index, index=df.index)
-                if sample_id_series is not None:
-                    eval_globals[SampleStatsEx.SAMPLE_ID.value] = sample_id_series
-
-                try:
-                    new_values = eval(code, eval_globals)
-                except KeyError as e:
-                    # Backward-compat: agent often emits df['origin'] even when origin is in index.
-                    if str(e).strip("'\"") == SampleStatsEx.ORIGIN.value and origin_series is not None:
-                        patched_code = re.sub(
-                            r"df\[\s*['\"]origin['\"]\s*\]",
-                            SampleStatsEx.ORIGIN.value,
-                            code,
-                        )
-                        new_values = eval(patched_code, eval_globals)
-                    else:
-                        raise
+                # Keep df as-is (no copy), but expose `origin`/`sample_id`
+                # whether they are columns or index levels, plus a
+                # reset_index view (df_reset) -- see _build_agent_eval_globals.
+                eval_globals, origin_series = self._build_agent_eval_globals(df)
+                new_values = self._eval_agent_code(code, eval_globals, origin_series)
 
                 # 2. Check for scalar vs series compatibility
                 # (Pandas handles most of this, but we ensure robustness)
@@ -2471,18 +2772,104 @@ class DataService:
                 logger.error(f"Op {func_name} failed: {e}")
                 return f"Failed to apply {func_name}: {e}"
 
+        # C2) Cleanup of agent-created scratch columns (is_temporary=True on a
+        # transform step). Only ever emitted by the agent itself for a column
+        # it just created in this same request, never by the LLM directly, so
+        # this cannot be used to delete pre-existing user data.
+        if func == "df.drop_column":
+            col = params.get("col")
+            if not col or col not in df.columns:
+                return f"No temporary column '{col}' to remove."
+            try:
+                df.drop(columns=[col], inplace=True)
+                if self._df_manager is not None:
+                    try:
+                        self._df_manager.drop_column(col)
+                    except Exception as e:
+                        logger.warning(f"Failed to drop temporary column '{col}' from ledger: {e}")
+                return f"Removed temporary column '{col}'"
+            except Exception as e:
+                logger.error(f"Failed to drop temporary column {col}: {e}")
+                return f"Failed to remove temporary column '{col}': {e}"
+
         # D) Analysis (Read-Only)
         if func == "df.analyze":
             code = params.get("code")
             if not code: return "No code provided"
             if "import " in code or "__" in code: return "Safety Violation"
+            code = rewrite_boolean_keywords_to_bitwise(code)
             try:
-                result = eval(code, {"df": df, "pd": pd, "np": np})
+                # Same eval context as df.modify: exposes `origin`/`sample_id`
+                # when they live in the index, plus the df['origin'] backward-
+                # compat fallback -- without this, "average loss" on a
+                # dataset where origin is an index level raised a bare
+                # `Analysis Error: 'origin'` KeyError.
+                eval_globals, origin_series = self._build_agent_eval_globals(df)
+                result = self._eval_agent_code(code, eval_globals, origin_series)
                 return f"Analysis Result: {result}"
             except Exception as e:
                 return f"Analysis Error: {e}"
 
+        # E) Model introspection / architecture management (from the agent's model_info/model_action)
+        if func in {"model.info", "model.error"}:
+            return params.get("text") or params.get("reason") or "No model information available."
+
+        if func in {"model.freeze", "model.reset"}:
+            return self._apply_model_action(func.replace("model.", ""), params)
+
         return "No operation applied"
+
+    # Maps agent model_action names to the existing ManipulateWeights op types
+    # (the exact same architecture ops the grid's freeze/reset controls use).
+    _MODEL_ACTION_OP_TYPES = {
+        "freeze": pb2.WeightOperationType.FREEZE,
+        "reset": pb2.WeightOperationType.REINITIALIZE,
+    }
+
+    def _apply_model_action(self, action: str, params: dict) -> str:
+        """
+        Apply a freeze/reset architecture op to the layer(s) the agent
+        resolved. Delegates to ModelService.ManipulateWeights so this reuses
+        the exact same code path (locking included) as the grid's freeze/reset
+        controls.
+        """
+        op_type = self._MODEL_ACTION_OP_TYPES.get(action)
+        if op_type is None:
+            return f"Unsupported model action: {action}"
+
+        layer_ids = params.get("layer_ids") or []
+        if not layer_ids:
+            return "No layers matched the given criteria; nothing was changed."
+
+        model_service = getattr(self, "model_service", None)
+        if model_service is None:
+            return "Model service is not available; cannot modify architecture."
+
+        neuron_ids = params.get("neuron_ids") or []
+        applied = []
+        for layer_id in layer_ids:
+            weight_op = pb2.WeightOperation(op_type=op_type, layer_id=int(layer_id))
+            if neuron_ids:
+                weight_op.neuron_ids.extend(
+                    pb2.NeuronId(layer_id=int(layer_id), neuron_id=int(n)) for n in neuron_ids
+                )
+            request = pb2.WeightsOperationRequest(weight_operation=weight_op)
+            response = model_service.ManipulateWeights(request, None)
+            if not response.success:
+                return f"Failed to apply '{action}' to layer {layer_id}: {response.message}"
+            applied.append(layer_id)
+
+        # Freeze/reset mutate per-neuron learning rates on the same model
+        # object, which the agent's cheap model-schema cache can't detect by
+        # identity — force it to rebuild so `frozen` flags aren't stale.
+        agent = getattr(self, "_agent", None)
+        if agent is not None:
+            try:
+                agent.invalidate_model_schema()
+            except Exception as exc:
+                logger.debug("invalidate_model_schema failed: %s", exc)
+
+        return f"Applied '{action}' to layer(s): {applied}"
 
     # ------------------------------------------------------------------
     # Lock watchdog helpers
@@ -3554,12 +3941,15 @@ class DataService:
                         self._slowUpdateInternals(force=True)
 
                         if self._all_datasets_df is None:
-                            self._all_datasets_df = self._pull_into_all_data_view_df() or pd.DataFrame()
+                            pulled = self._pull_into_all_data_view_df()
+                            self._all_datasets_df = pulled if pulled is not None else pd.DataFrame()
 
                         df = self._all_datasets_df # .copy() # Remove copy because memory waste and slowdown
                         messages = []
                         intent_type = pb2.INTENT_FILTER
                         analysis_result = ""
+                        schema_mutated = False
+                        _SCHEMA_MUTATING_FUNCS = {"df.modify", "df.drop_column"}
 
                         for op in operations:
                             func = op.get("function")
@@ -3567,10 +3957,14 @@ class DataService:
 
                             if params.get("__agent_reset__"):
                                 logger.debug("[ApplyDataQuery] Agent requested reset")
-                                df = self._pull_into_all_data_view_df() or pd.DataFrame()
+                                pulled = self._pull_into_all_data_view_df()
+                                df = pulled if pulled is not None else pd.DataFrame()
                                 self._is_filtered = False
                                 messages.append("Reset view")
                                 continue
+
+                            if func in _SCHEMA_MUTATING_FUNCS:
+                                schema_mutated = True
 
                             msg = self._apply_agent_operation(df, func, params)
                             messages.append(msg)
@@ -3587,6 +3981,14 @@ class DataService:
                             elif msg.startswith("Analysis Error:") or msg.startswith("Safety Violation:"):
                                 intent_type = pb2.INTENT_ANALYSIS
                                 analysis_result = msg
+
+                        # A request that both creates/drops a column AND asks an analysis
+                        # question in the same turn must still be reported as a FILTER
+                        # intent: the frontend only refreshes the grid/column list (via
+                        # GetMetaData) on INTENT_FILTER, so downgrading to INTENT_ANALYSIS
+                        # here would silently hide a real schema change from the UI.
+                        if schema_mutated:
+                            intent_type = pb2.INTENT_FILTER
 
                         final_message = " | ".join(messages) if messages else "No operation performed"
 
@@ -3632,11 +4034,14 @@ class DataService:
     def GetHistogram(self, request, context):
         """Server-side histogram binning of one column (typed RPC).
 
-        Bins the current all-data view by ROW ORDER into <= max_bins equal-
-        population bins; each bin carries {min,max,avg,count} over its finite
-        values plus a per-(origin,discarded) sub-bar breakdown. Returns typed
-        HistogramBin messages (no DataStat name-encoding). Empty bins are emitted
-        with count=0 and NaN stats so the client's positional bars stay aligned.
+        Numeric columns: bins the current all-data view by ROW ORDER into
+        <= max_bins equal-population bins; each bin carries {min,max,avg,count}
+        plus a per-(origin,discarded) sub-bar breakdown.
+
+        Categorical/string columns: counts occurrences per unique value and
+        returns CategoricalHistogramBar entries sorted by count descending.
+        The response carries is_categorical=True and categorical_bars instead
+        of bins (bins will be empty).
         """
         try:
             column = request.column or ""
@@ -3652,12 +4057,56 @@ class DataService:
                     success=False, message=f"column '{column}' not in view",
                     total_rows=n, bins=[])
 
-            bars = max(1, min(n, max_bins))
-            vals = pd.to_numeric(df[column], errors="coerce").to_numpy()
             origin = (df["origin"].astype(str).to_numpy() if "origin" in df.columns
                       else np.full(n, ""))
             disc = (df["discarded"].astype(bool).to_numpy() if "discarded" in df.columns
                     else np.zeros(n, bool))
+
+            # Detect whether column is categorical (string/object) or numeric.
+            col_series = df[column]
+            numeric_vals = pd.to_numeric(col_series, errors="coerce")
+            is_categorical = numeric_vals.isna().all() or (
+                col_series.dtype == object or
+                str(col_series.dtype) == "category" or
+                hasattr(col_series, "cat")
+            )
+            # A column that has a few non-NaN numeric values mixed with mostly
+            # NaN still counts as numeric; only treat as categorical when
+            # pd.to_numeric fails on all values.
+            if not is_categorical and numeric_vals.notna().sum() == 0:
+                is_categorical = True
+
+            if is_categorical:
+                # --- Categorical path ---
+                labels = col_series.astype(str).where(col_series.notna(), "")
+                gf = pd.DataFrame({"l": labels, "o": origin, "d": disc})
+                total_count = gf.groupby("l")["l"].count().rename("count")
+                sub_map: dict = {}
+                for (lbl, d, o), c in gf.groupby(["l", "d", "o"]).size().items():
+                    sub_map.setdefault(str(lbl), []).append(
+                        pb2.HistogramSubBar(origin=str(o), discarded=bool(d), count=int(c)))
+                cat_bars = [
+                    pb2.CategoricalHistogramBar(
+                        label=str(lbl),
+                        count=int(cnt),
+                        sub_bars=sub_map.get(str(lbl), []),
+                    )
+                    for lbl, cnt in total_count.sort_values(ascending=False).items()
+                ]
+                logger.info("[HistCat] column=%s rows=%d categories=%d",
+                            column, n, len(cat_bars))
+                return pb2.HistogramResponse(
+                    success=True,
+                    message=f"categorical histogram {column}: {len(cat_bars)} categories from {n} rows",
+                    total_rows=n,
+                    bins=[],
+                    is_categorical=True,
+                    categorical_bars=cat_bars,
+                )
+
+            # --- Numeric path (unchanged) ---
+            bars = max(1, min(n, max_bins))
+            vals = numeric_vals.to_numpy()
             edges = (np.arange(bars + 1) * n) // bars
             bin_of_row = np.searchsorted(edges, np.arange(n), side="right") - 1
             fin = np.isfinite(vals)
@@ -3687,7 +4136,7 @@ class DataService:
             return pb2.HistogramResponse(
                 success=True,
                 message=f"histogram {column}: {len(bins)} bins from {n} rows",
-                total_rows=n, bins=bins)
+                total_rows=n, bins=bins, is_categorical=False, categorical_bars=[])
         except Exception as e:
             logger.error("Error in GetHistogram: %s", str(e), exc_info=True)
             return pb2.HistogramResponse(

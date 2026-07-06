@@ -85,8 +85,8 @@ class ModelInterface(NetworkWithOps):
         super(ModelInterface, self).__init__()
 
         # Sanity check of the compute_dependencies and use_onnx flags
-        if compute_dependencies:
-            raise ValueError("compute_dependencies functionality is disabled for now and will be re-enabled in a future release. Please set compute_dependencies=False for now.")
+        # if compute_dependencies:
+            # raise ValueError("compute_dependencies functionality is disabled for now and will be re-enabled in a future release. Please set compute_dependencies=False for now.")
 
         # Reinit IDS when instanciating a new torch model
         NeuronWiseOperations().reset_id()
@@ -583,11 +583,20 @@ class ModelInterface(NetworkWithOps):
 
             # Create a new optimizer instance with the same class, but updated parameters and lr
             optimizer_class = type(opt.optimizer)
-            _optimizer = optimizer_class(
-                model.parameters(),
-                lr=lrs
-            )
 
+            try:
+                _optimizer = optimizer_class(
+                    model.parameters(),
+                    lr=lrs
+                )
+            except Exception:
+                if isinstance(lrs, list) and len(lrs) > 0:
+                    _optimizer = optimizer_class(
+                        model.parameters(),
+                        lr=lrs[0]
+                    )
+                else:
+                    logger.warning(f"Could not update optimizer {opt_name} due to missing learning rate. Skipping optimizer update.")
             wl.watch_or_edit(_optimizer, flag='optimizer')
 
     def _sync_dynamic_hyperparams(self):
