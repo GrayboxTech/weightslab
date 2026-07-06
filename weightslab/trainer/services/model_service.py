@@ -310,6 +310,16 @@ class ModelService:
     # -------------------------------------------------------------------------
     # Weight manipulation (architecture operations)
     # -------------------------------------------------------------------------
+    @staticmethod
+    def _abort_or_fail(context, message: str) -> None:
+        """Abort the gRPC call when a context is present, no-op otherwise.
+
+        Lets in-process callers (e.g. the agent) invoke ManipulateWeights
+        directly with ``context=None`` without crashing on a lock timeout.
+        """
+        if context is not None:
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, message)
+
     def ManipulateWeights(self, request, context):
         self._ctx.ensure_components()
 
@@ -343,7 +353,7 @@ class ModelService:
 
             if not try_acquire_rlock():
                 logger.error("[ManipulateWeights] weightslab_rlock timed out after %.0fs", _GRPC_LOCK_TIMEOUT_S)
-                context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, f"Training lock not acquired within {_GRPC_LOCK_TIMEOUT_S:.0f}s")
+                self._abort_or_fail(context, f"Training lock not acquired within {_GRPC_LOCK_TIMEOUT_S:.0f}s")
                 return pb2.WeightsOperationResponse(success=False, message="Lock timeout")
             try:
                 model.apply_architecture_op(
@@ -361,7 +371,7 @@ class ModelService:
 
                 if not try_acquire_rlock():
                     logger.error("[ManipulateWeights] weightslab_rlock timed out after %.0fs", _GRPC_LOCK_TIMEOUT_S)
-                    context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, f"Training lock not acquired within {_GRPC_LOCK_TIMEOUT_S:.0f}s")
+                    self._abort_or_fail(context, f"Training lock not acquired within {_GRPC_LOCK_TIMEOUT_S:.0f}s")
                     return pb2.WeightsOperationResponse(success=False, message="Lock timeout")
                 try:
                     model.apply_architecture_op(

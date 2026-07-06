@@ -33,7 +33,7 @@ class TestAgentServiceUnit(unittest.TestCase):
             pb2.InitializeAgentRequest(
                 api_key='sk-or-test',
                 provider=pb2.PROVIDER_OPENROUTER,
-                model='meta-llama/llama-3.3-70b-instruct',
+                model='~google/gemini-flash-latest',
             ),
             None,
         )
@@ -41,7 +41,7 @@ class TestAgentServiceUnit(unittest.TestCase):
         agent.initialize_with_cloud_key.assert_called_once_with(
             'sk-or-test',
             'openrouter',
-            'meta-llama/llama-3.3-70b-instruct',
+            '~google/gemini-flash-latest',
         )
         self.assertTrue(response.success)
         self.assertEqual(response.message, 'ok')

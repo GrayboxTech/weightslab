@@ -166,7 +166,7 @@ the agent as unconfigured and the input placeholder instructs the user to type
 3. Select a model from the available model list.
 4. Confirm to initialize the runtime connection.
 
-The default cloud model is ``meta-llama/llama-3.3-70b-instruct``.
+The default cloud model is ``~google/gemini-flash-latest``.
 
 Available agent commands
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -223,7 +223,7 @@ the agent as unconfigured and the input placeholder instructs the user to type
 3. Select a model from the available model list.
 4. Confirm to initialize the runtime connection.
 
-The default cloud model is ``meta-llama/llama-3.3-70b-instruct``.
+The default cloud model is ``~google/gemini-flash-latest``.
 
 Available agent commands
 ~~~~~~~~~~~~~~~~~~~~~~~~

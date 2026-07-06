@@ -33,6 +33,9 @@ class _FakeAgent:
         self._seen = (conditions, n)
         return "df['signals//train_loss'] > 0.2"
 
+    def _rewrite_origin_literals(self, code):
+        return code
+
 
 class _FakeChatModel:
     def __init__(self, *args, **kwargs):
@@ -51,7 +54,32 @@ class TestAgentPromptUnit(unittest.TestCase):
         self.assertIn("{row_count}", INTENT_PROMPT)
         self.assertIn("{schema}", INTENT_PROMPT)
         self.assertIn("{history}", INTENT_PROMPT)
+        self.assertIn("{model_schema}", INTENT_PROMPT)
         self.assertIn("Denylisting", INTENT_PROMPT)
+        # Model management + column-write safety guidance must be present.
+        self.assertIn("MODEL CONTEXT", INTENT_PROMPT)
+        self.assertIn("COLUMN WRITE SAFETY", INTENT_PROMPT)
+        self.assertIn("model_action", INTENT_PROMPT)
+        # Temporary/scratch column support and unfreeze must be documented.
+        self.assertIn("is_temporary", INTENT_PROMPT)
+        self.assertIn('"unfreeze"', INTENT_PROMPT)
+        # AND/OR condition-combination guidance must be documented.
+        self.assertIn("Condition Combination Logic", INTENT_PROMPT)
+        self.assertIn('"in"', INTENT_PROMPT)
+
+    def test_intent_prompt_formats_without_stray_braces(self):
+        # All JSON examples use doubled braces; a single stray brace would make
+        # .format() raise KeyError. This guards the many {{ }} examples.
+        rendered = INTENT_PROMPT.format(
+            schema="- [COL] `loss` (float64)",
+            row_count=3,
+            model_schema="- Layer `0` (`Conv2d` / conv): neurons_count=64",
+            history="None",
+        )
+        self.assertIn("loss", rendered)
+        self.assertIn("Conv2d", rendered)
+        # Doubled braces collapse to single braces in the rendered JSON examples.
+        self.assertIn('"kind": "model_info"', rendered)
 
     def test_agent_models_and_handlers(self):
         with unittest.mock.patch.dict(sys.modules, _install_agent_dependency_stubs(), clear=False):
@@ -137,7 +165,7 @@ class TestAgentPromptUnit(unittest.TestCase):
 
         with mock.patch.object(agent_mod, "ChatOpenAI", _FailingChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
             agent = agent_mod.DataManipulationAgent(ctx)
-            ok, message = agent.initialize_with_cloud_key("bad-key", "openrouter", "meta-llama/llama-3.3-70b-instruct")
+            ok, message = agent.initialize_with_cloud_key("bad-key", "openrouter", "~google/gemini-flash-latest")
 
         self.assertFalse(ok)
         self.assertIn("connectivity check failed", message)

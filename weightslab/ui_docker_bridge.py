@@ -137,6 +137,14 @@ commands:
                              --3d_det 3D LiDAR point-cloud detection example
                              --2d_det 2D LiDAR point-cloud detection example
 
+  cli Open an interactive terminal connected to a
+                           currently-running experiment (pause/resume, status,
+                           evaluate, agent query, etc.). Auto-discovers the
+                           running experiment; the experiment must be serving
+                           the CLI (e.g. wl.serve(serving_cli=True)).
+                             --port PORT connect to a specific CLI port
+                             --host HOST connect to a specific host (default: localhost)
+
 examples:
   weightslab se # one-time secure setup (then export WEIGHTSLAB_CERTS_DIR)
   weightslab se --force-certs # regenerate the certs
@@ -147,6 +155,8 @@ examples:
   weightslab start example --det # run the detection demo
   weightslab start example --3d_det # run the 3D LiDAR detection demo
   weightslab start example --2d_det # run the 2D LiDAR detection demo
+  weightslab cli # connect a terminal to the running experiment
+  weightslab cli --port 60000 # connect to a specific CLI port
 """
 
 
@@ -1028,6 +1038,25 @@ def example_start(args):
         sys.exit(result.returncode)
 
 
+def cli_connect(args):
+    """`weightslab cli [--port N] [--host H]`: open an interactive terminal
+    connected to a currently-running experiment's CLI server.
+
+    With no --port, auto-discovers the running experiment (the backend advertises
+    its actual port on startup). Pass --port to target a specific server.
+    """
+    try:
+        import weightslab.backend.cli as cli_backend
+    except Exception as exc:
+        logger.error(f"Could not load the WeightsLab CLI client: {exc}")
+        sys.exit(1)
+
+    port = getattr(args, "port", None)
+    host = getattr(args, "host", None)
+    exit_code = cli_backend.cli_connect(cli_port=port, cli_host=host)
+    sys.exit(exit_code)
+
+
 def _add_example_kind_flags(p: argparse.ArgumentParser) -> None:
     """Attach the mutually-exclusive example-kind flags (default: classification)."""
     group = p.add_mutually_exclusive_group()
@@ -1056,6 +1085,7 @@ def _build_parser() -> argparse.ArgumentParser:
         weightslab se [--force-certs]
         weightslab ui launch [--certs]
         weightslab start example [--cls|--seg|--det|--clus|--gen|--3d_det|--2d_det]
+        weightslab cli [--port PORT] [--host HOST]
     """
     parser = argparse.ArgumentParser(
         prog="weightslab",
@@ -1065,7 +1095,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     # metavar lists only the documented commands; the `example` alias is accepted
     # but intentionally omitted here (and help=SUPPRESS'd below) so it stays hidden.
-    sub = parser.add_subparsers(dest="command", metavar="{se,ui,start,help}")
+    sub = parser.add_subparsers(dest="command", metavar="{se,ui,start,cli,help}")
 
     # weightslab se [--force-certs] [certs_dir]
     se_parser = sub.add_parser("se", help="Set up the secure environment (TLS certs + gRPC auth token)")
@@ -1081,6 +1111,14 @@ def _build_parser() -> argparse.ArgumentParser:
     launch_ui_parser.add_argument('--certs', action='store_true', help='Generate (if missing) and use TLS certs + gRPC auth token (secured HTTPS). Default: unsecured HTTP.')
     launch_ui_parser.add_argument('certs_dir', nargs='?', default=None,
                                   help='Custom directory for certs/token (default: $WEIGHTSLAB_CERTS_DIR or ~/.weightslab-certs)')
+
+    # weightslab cli [--port N] [--host H]
+    cli_parser = sub.add_parser(
+        "cli", help="Open an interactive terminal connected to the running experiment")
+    cli_parser.add_argument('--port', type=int, default=None,
+                            help='CLI server port (default: auto-discover the running experiment)')
+    cli_parser.add_argument('--host', default=None,
+                            help='CLI server host (default: localhost)')
 
     # weightslab start example [--cls|--seg|--clus|--gen]
     start_parser = sub.add_parser("start", help="Start a bundled WeightsLab resource")
@@ -1101,15 +1139,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("help", help="Show this help message")
 
-    return parser, ui_parser, start_parser
+    return parser, ui_parser, start_parser, cli_parser
 
 
 def main():
-    parser, ui_parser, start_parser = _build_parser()
+    parser, ui_parser, start_parser, cli_parser = _build_parser()
     args = parser.parse_args()
 
     if args.command == "help" or args.command is None:
         parser.print_help()
+    elif args.command == "cli":
+        cli_connect(args)
     elif args.command == "se":
         ui_secure_environment(args)
     elif args.command == "ui":

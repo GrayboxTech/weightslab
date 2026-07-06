@@ -366,7 +366,7 @@ Supported YAML keys
      - ``11435``
      - Ollama HTTP port used by WeightsLab.
    * - ``agent.openrouter_model``
-     - ``meta-llama/llama-3.3-70b-instruct``
+     - ``~google/gemini-flash-latest``
      - Default OpenRouter model.
    * - ``agent.openrouter_base_url``
      - ``https://openrouter.ai/api/v1``
@@ -412,7 +412,7 @@ Use this mode when you want hosted models and interactive setup from Weights Stu
 
    agent:
      provider: openrouter
-     openrouter_model: meta-llama/llama-3.3-70b-instruct
+     openrouter_model: ~google/gemini-flash-latest
      fallback_to_local: false
 
 Recommended secret handling:
@@ -439,7 +439,7 @@ When using Weights Studio, the agent bar supports these runtime commands:
 Notes
 ^^^^^
 
-- The default OpenRouter model is ``meta-llama/llama-3.3-70b-instruct``.
+- The default OpenRouter model is ``~google/gemini-flash-latest``.
 - The model browser fetches the available models from OpenRouter using the
   configured API key.
 - Connection and model-change actions are recorded in the agent history as

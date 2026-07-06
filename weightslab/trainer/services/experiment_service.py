@@ -86,6 +86,9 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         self._ctx = ctx
         self.model_service = ModelService(ctx)
         self.data_service = DataService(ctx)
+        # Let the data-manipulation agent invoke architecture ops (freeze/reset)
+        # in-process, reusing the same code path as the ManipulateWeights RPC.
+        self.data_service.model_service = self.model_service
         self.agent_service = AgentService(self.data_service)
         # Per-instance in-flight counter for GetLatestLoggerData
         self._logger_data_in_flight = 0

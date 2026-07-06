@@ -752,5 +752,87 @@ class TestLoadSignalHistory(unittest.TestCase):
         self.assertIn(None, lg.get_signal_history()["loss"])
 
 
+class TestReducePerSample(unittest.TestCase):
+    """reduce_per_sample groups per_sample history BY sample_id and reduces each
+    sample's whole time series — the axis needed for "never/ever" history
+    queries (opposite of aggregate_per_sample_by_step, which averages across
+    samples per step)."""
+
+    def _seed(self):
+        lg = _lg()
+        lg.graph_names.add("train_loss")
+        # 3 samples, 3 steps each.
+        hist = {"0": [0.9, 0.6, 0.55], "1": [0.4, 0.3, 0.2], "2": [0.7, 0.5, 0.5]}
+        for step in range(3):
+            for sid, vals in hist.items():
+                lg._stage_sample_row("train_loss", "h1", sid, step, vals[step])
+        return lg
+
+    def test_min_per_sample(self):
+        lg = self._seed()
+        mins = lg.reduce_per_sample("train_loss", "min", exp_hash="h1")
+        self.assertAlmostEqual(mins["0"], 0.55, places=5)
+        self.assertAlmostEqual(mins["1"], 0.20, places=5)
+        self.assertAlmostEqual(mins["2"], 0.50, places=5)
+
+    def test_max_per_sample(self):
+        lg = self._seed()
+        maxs = lg.reduce_per_sample("train_loss", "max", exp_hash="h1")
+        self.assertAlmostEqual(maxs["0"], 0.90, places=5)
+        self.assertAlmostEqual(maxs["1"], 0.40, places=5)
+
+    def test_mean_per_sample(self):
+        lg = self._seed()
+        means = lg.reduce_per_sample("train_loss", "mean", exp_hash="h1")
+        self.assertAlmostEqual(means["1"], (0.4 + 0.3 + 0.2) / 3, places=5)
+
+    def test_never_below_threshold_query(self):
+        # "samples that never had train_loss below 0.5" == min over history >= 0.5.
+        lg = self._seed()
+        mins = lg.reduce_per_sample("train_loss", "min", exp_hash="h1")
+        never_below = sorted(s for s, v in mins.items() if v >= 0.5)
+        self.assertEqual(never_below, ["0", "2"])
+
+    def test_sample_ids_filter(self):
+        lg = self._seed()
+        subset = lg.reduce_per_sample("train_loss", "min", sample_ids=["1"], exp_hash="h1")
+        self.assertEqual(set(subset), {"1"})
+
+    def test_unknown_metric_returns_empty(self):
+        lg = self._seed()
+        self.assertEqual(lg.reduce_per_sample("does_not_exist", "min", exp_hash="h1"), {})
+
+    def test_invalid_reduce_raises(self):
+        lg = self._seed()
+        with self.assertRaises(ValueError):
+            lg.reduce_per_sample("train_loss", "median", exp_hash="h1")
+
+
+class TestResolveGraphName(unittest.TestCase):
+    """resolve_graph_name maps a user-facing metric name to a stored graph name."""
+
+    def _lg_with(self, *names):
+        lg = _lg()
+        for n in names:
+            lg.graph_names.add(n)
+        return lg
+
+    def test_exact_match(self):
+        lg = self._lg_with("train_loss", "val_loss")
+        self.assertEqual(lg.resolve_graph_name("train_loss"), "train_loss")
+
+    def test_case_insensitive(self):
+        lg = self._lg_with("Train_Loss")
+        self.assertEqual(lg.resolve_graph_name("train_loss"), "Train_Loss")
+
+    def test_substring_match(self):
+        lg = self._lg_with("train_mlt_loss/CE")
+        self.assertEqual(lg.resolve_graph_name("train_mlt_loss"), "train_mlt_loss/CE")
+
+    def test_no_match_returns_none(self):
+        lg = self._lg_with("train_loss")
+        self.assertIsNone(lg.resolve_graph_name("accuracy"))
+
+
 if __name__ == "__main__":
     unittest.main()
