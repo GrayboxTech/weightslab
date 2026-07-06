@@ -862,7 +862,11 @@ class CheckpointSystemTests(unittest.TestCase):
         uids_A_original = self.state['uids_a'] # Before model change
 
         print(f"Reloading state A (before model change) for verification: {hash_A_original[:16]}...")
-        success = self.chkpt_manager.load_state(exp_hash=hash_A_original)
+        # load_config=True so the checkpointed hyperparameters are restored into
+        # the ledger (this test verifies HP). Without it, load_state leaves the
+        # in-memory config untouched — and test_05 mutated batch_size to 1 to
+        # create branch E, so that stale value would leak in here.
+        success = self.chkpt_manager.load_state(exp_hash=hash_A_original, load_config=True)
         self.assertTrue(success, "State A should load successfully")
 
         # Verify HP and data are from checkpoint A
