@@ -29,6 +29,7 @@ Longer-term, we're building toward bringing dataset management, training, fine-t
 
 <div align="center">
   <img src="https://github.com/user-attachments/assets/adc00648-0720-432e-9d8f-1003e946c906" width="800" alt="WeightsLab Studio demo" />
+  <p><sub>WeightsLab Studio · <a href="https://bair.berkeley.edu/blog/2018/05/30/bdd/">BDD100K dataset</a></sub></p>
 </div>
 
 <br>
