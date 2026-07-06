@@ -8,7 +8,7 @@
   </a>
 </div>
 <div align="center">
-  <h3>Connect training signals back to the exact samples causing them</h3>
+  <h3>Trace training signals back to the exact samples causing them</h3>
   <p>Pause training, mine live loss signals to surface mislabels, class imbalance & outliers,<br>then curate your image, video & LiDAR data, without restarting.</p>
 </div>
 
