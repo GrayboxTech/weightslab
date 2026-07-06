@@ -73,17 +73,13 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       All environment variables for WeightsLab and Weights Studio with defaults and explanations.
 
-<<<<<<< HEAD
-   .. grid-item-card:: gRPC Communication
-=======
-   .. grid-item-card:: 🤖 AI Agent
+   .. grid-item-card:: AI Agent
       :link: agent
       :link-type: doc
 
-      Drive data tagging/discarding and model freeze/reset with natural language.
+      Drive UI actions (sort, dump, load), data analysis, tagging/discarding, and model freeze/reset with natural language.
 
-   .. grid-item-card:: 📡 gRPC Communication
->>>>>>> 9101ee6db1e357de8f1362a8d5f834faa0828956
+   .. grid-item-card:: gRPC Communication
       :link: grpc/index
       :link-type: doc
 
