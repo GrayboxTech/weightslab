@@ -16,7 +16,7 @@ from torchvision import transforms as T
 
 from weightslab.components.tracking import TrackingMode
 from weightslab.backend.model_interface import ModelInterface
-from weightslab.baseline_models.pytorch.models import FashionCNN as CNN
+from weightslab.examples.utils.baseline_models.pytorch.models import FashionCNN as CNN
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 
 

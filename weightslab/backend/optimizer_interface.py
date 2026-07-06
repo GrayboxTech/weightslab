@@ -163,7 +163,7 @@ class OptimizerInterface:
 
 if __name__ == "__main__":
     print('Hello World')
-    from weightslab.baseline_models.pytorch.models import FashionCNN
+    from weightslab.examples.utils.baseline_models.pytorch.models import FashionCNN
 
     # 0. Init. variables
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
