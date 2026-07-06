@@ -27,6 +27,12 @@ Longer-term, we're building toward bringing dataset management, training, fine-t
 
 <br>
 
+<div align="center">
+  <img src="https://github.com/user-attachments/assets/adc00648-0720-432e-9d8f-1003e946c906" width="800" alt="WeightsLab Studio demo" />
+</div>
+
+<br>
+
 Most data problems are invisible until your model tells you: through loss spikes, poor generalization, or silent underperformance. WeightsLab connects those training signals back to the exact samples causing them.
 
 **Wrap your training script with the SDK** to capture per-sample signals live.  
@@ -35,11 +41,6 @@ Most data problems are invisible until your model tells you: through loss spikes
 - **Detect** - Surface mislabels, outliers & class imbalance using live loss signals 
 - **Curate** - Discard bad samples, create data subsets, rebalance distributions 
 - **Continue** - Resume training on your cleaned dataset, no restart required 
-
-<br>
-
- → `give it a star ⭐`
-
 <br>
 
 ## Quickstart 
