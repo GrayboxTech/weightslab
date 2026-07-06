@@ -230,6 +230,88 @@ Keep the process alive so background services continue running.
   move tracked torch objects to CPU and release cached CUDA memory, so an idle
   serving process (e.g. between training runs) doesn't hold GPU memory.
 
+Watched signals via ``watch_or_edit``
+-------------------------------------
+
+The most common way to create a signal is to **wrap a loss or metric** with
+``wl.watch_or_edit(obj, flag="loss" | "metric" | "signal", ...)``. Unlike the
+manual ``save_signals`` / ``save_instance_signals`` calls documented below, the
+wrapper hooks the object's ``forward`` (losses / ``nn.Module``) or ``compute``
+(``torchmetrics``) method so that **every call during training computes, logs,
+and persists** the values automatically — you never call ``save_*`` yourself.
+
+**Signature**
+
+.. code-block:: python
+
+   watched = wl.watch_or_edit(
+       loss_or_metric,
+       flag="loss",               # "loss"/"criterion" (forward) | "metric" (compute) | "signal"
+       signal_name="train/loss",  # or name=...; stored as a signals//<name> column
+       per_sample=True,           # one value per sample  -> sample row (annotation_id 0)
+       per_instance=False,        # one value per instance -> (sample_id, annotation_id >= 1)
+       log=True,                  # also plot the step-aggregated curve in Weights Studio
+   )
+
+**How it works**
+
+- **Naming** — the signal name comes from ``signal_name`` (preferred) or ``name``;
+  it is stored as a ``signals//<name>`` column and shown in the studio.
+- **Per-call save** — call the wrapped object as usual and pass ``batch_ids=`` so
+  each value maps to its sample::
+
+     loss = watched(preds, targets, batch_ids=ids)
+
+  Use ``reduction="none"`` on the loss so it returns one value per sample
+  (``[B]``) instead of a pre-reduced scalar.
+- **Routing** — ``per_sample=True`` saves on the sample row (``annotation_id 0``)
+  via ``save_signals``; ``per_instance=True`` saves flat per-instance values at
+  ``(sample_id, annotation_id >= 1)`` via ``save_instance_signals``, with the
+  instance→sample map taken from a ``batch_idx=`` keyword, a list ``targets``, or
+  the ledger. See :ref:`per-sample vs per-instance <per-instance-signals>`.
+- **Aggregate curve** — ``log`` defaults to ``True``, publishing the
+  step-aggregated mean as a metric curve; set ``log=False`` to store per-sample
+  values without a dashboard curve.
+- **Return value** — the wrapped call returns the loss/metric output unchanged (a
+  tensor for per-sample losses, so you can ``.backward()`` on it; a dict for
+  per-instance detection losses, where you ``backward()`` on ``out["batch"]``).
+  The caller variable is rebound in place, so the object keeps working exactly as
+  before while WeightsLab observes it.
+
+**Typical usage**
+
+.. code-block:: python
+
+   import torch.nn as nn
+   import weightslab as wl
+
+   # Per-sample training loss (plotted): reduction="none" -> one value per sample
+   train_loss = wl.watch_or_edit(
+       nn.CrossEntropyLoss(reduction="none"),
+       flag="loss", signal_name="train_loss/sample", per_sample=True, log=True,
+   )
+
+   # Per-sample eval loss: values stored per sample, but no dashboard curve
+   test_loss = wl.watch_or_edit(
+       nn.CrossEntropyLoss(reduction="none"),
+       flag="loss", signal_name="test_loss/sample", per_sample=True, log=False,
+   )
+
+   for inputs, ids, targets, _ in train_loader:
+       with wl.guard_training_context:
+           preds = model(inputs)
+           loss = train_loss(preds, targets, batch_ids=ids).mean()
+           loss.backward()
+
+.. note::
+
+   ``watch_or_edit`` also applies backend **discard masking** automatically
+   (samples discarded from the UI/CLI are zero-weighted in the wrapped loss) and
+   drives any dynamic ``@wl.signal(subscribe_to=...)`` subscribers of this signal.
+   Use the :func:`signal` decorator below for custom or derived (dynamic) signals,
+   and the lower-level ``save_signals`` / ``save_instance_signals`` only when you
+   compute values outside a wrapped loss/metric.
+
 signal
 ------
 

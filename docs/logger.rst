@@ -19,6 +19,37 @@ Start services
 
    wl.serve(serving_cli=True, serving_grpc=True)
 
+Wrap losses and metrics as signals
+-----------------------------------
+
+The simplest way to produce signals is to wrap a loss or metric with
+``wl.watch_or_edit``. It hooks the object's ``forward`` (losses) or ``compute``
+(``torchmetrics``) method, so **every call computes, logs, and persists**
+per-sample values automatically — no manual ``save_signals`` needed.
+
+.. code-block:: python
+
+   import torch.nn as nn
+   import weightslab as wl
+
+   # reduction="none" -> one value per sample; log=True also plots the curve
+   train_loss = wl.watch_or_edit(
+       nn.CrossEntropyLoss(reduction="none"),
+       flag="loss", signal_name="train_loss/CE", per_sample=True, log=True,
+   )
+
+   for inputs, ids, targets, _ in train_loader:
+       with wl.guard_training_context:
+           preds = model(inputs)
+           loss = train_loss(preds, targets, batch_ids=ids).mean()
+           loss.backward()
+
+Pass ``batch_ids=`` so each value maps to its sample. Use ``per_instance=True``
+for per-annotation values (detection / segmentation). The signal name comes from
+``signal_name`` (or ``name``) and is stored as a ``signals//<name>`` column; set
+``log=False`` to persist per-sample values without a dashboard curve. See
+:doc:`user_functions` for the full wrapper reference.
+
 Custom signals
 --------------
 
