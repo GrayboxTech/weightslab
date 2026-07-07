@@ -185,10 +185,14 @@ class ExperimentContext:
             try:
                 chkpt_m = self._components.get("checkpoint_manager")
                 if chkpt_m and hasattr(chkpt_m, "get_last_checkpoint_hash"):
-                    last_hash = chkpt_m.get_current_experiment_hash()
+                    resolved = chkpt_m.get_current_experiment_hash()
+                    if resolved:
+                        last_hash = resolved
             except Exception:
                 pass
-            return "..." + last_hash[6:8] + "..." + last_hash[14:16] + "..." + last_hash[-2:]
+            # Return the full hash; the UI groups it into readable 8-char
+            # dash-separated segments (no masking/truncation).
+            return last_hash
 
         def _get_model_age():
             # Get model age from model if available (e.g. via get_age() or current_step), otherwise return -1

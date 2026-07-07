@@ -13,7 +13,7 @@ from torchvision import datasets, transforms
 from torch.utils.data import Dataset
 from torchmetrics.classification import Accuracy
 
-from weightslab.baseline_models.pytorch.models import FashionCNN as CNN
+from weightslab.examples.utils.baseline_models.pytorch.models import FashionCNN as CNN
 from weightslab.components.global_monitoring import (
     guard_training_context,
     guard_testing_context

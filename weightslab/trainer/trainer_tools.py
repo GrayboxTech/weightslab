@@ -121,6 +121,8 @@ def get_neuron_representations(layer) -> Iterable[pb2.NeuronStatistics]:
     neuron_representations = []
     if not layer:
         return None
+    if not hasattr(layer, 'out_neurons') or layer.out_neurons is None:
+        return []
 
     for neuron_idx in range(layer.out_neurons):
         # SAFEGUARD: Ensure trackers are available

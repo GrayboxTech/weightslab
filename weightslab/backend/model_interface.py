@@ -85,8 +85,8 @@ class ModelInterface(NetworkWithOps):
         super(ModelInterface, self).__init__()
 
         # Sanity check of the compute_dependencies and use_onnx flags
-        if compute_dependencies:
-            raise ValueError("compute_dependencies functionality is disabled for now and will be re-enabled in a future release. Please set compute_dependencies=False for now.")
+        # if compute_dependencies:
+            # raise ValueError("compute_dependencies functionality is disabled for now and will be re-enabled in a future release. Please set compute_dependencies=False for now.")
 
         # Reinit IDS when instanciating a new torch model
         NeuronWiseOperations().reset_id()
@@ -583,11 +583,20 @@ class ModelInterface(NetworkWithOps):
 
             # Create a new optimizer instance with the same class, but updated parameters and lr
             optimizer_class = type(opt.optimizer)
-            _optimizer = optimizer_class(
-                model.parameters(),
-                lr=lrs
-            )
 
+            try:
+                _optimizer = optimizer_class(
+                    model.parameters(),
+                    lr=lrs
+                )
+            except Exception:
+                if isinstance(lrs, list) and len(lrs) > 0:
+                    _optimizer = optimizer_class(
+                        model.parameters(),
+                        lr=lrs[0]
+                    )
+                else:
+                    logger.warning(f"Could not update optimizer {opt_name} due to missing learning rate. Skipping optimizer update.")
             wl.watch_or_edit(_optimizer, flag='optimizer')
 
     def _sync_dynamic_hyperparams(self):
@@ -663,7 +672,7 @@ class ModelInterface(NetworkWithOps):
 
     def eval(self):
         try:
-            return super().eval()
+            return self.model.eval()
         except (RuntimeError, Exception):
             logger.warning(
                 f"[{self.__class__.__name__}]: Caught RuntimeError during eval(): {Exception}. \
@@ -673,7 +682,7 @@ class ModelInterface(NetworkWithOps):
 
     def train(self, mode: bool = True):
         try:
-            return super().train(mode=mode)
+            return self.model.train(mode=mode)
         except (RuntimeError, Exception):
             logger.warning(
                 f"[{self.__class__.__name__}]: Caught RuntimeError during train(): {Exception}. \
@@ -691,7 +700,7 @@ class ModelInterface(NetworkWithOps):
         Returns:
             bool: `True` if the model is in training mode, `False` otherwise.
         """
-        return self.training
+        return self.training if not hasattr(self.model, 'training') else self.model.training
 
     def monkey_patching(self):
         """

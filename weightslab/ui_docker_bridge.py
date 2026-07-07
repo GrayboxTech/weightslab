@@ -25,6 +25,33 @@ _CERTS_DIR_IN_ORIGINAL_ENV: bool = "WEIGHTSLAB_CERTS_DIR" in os.environ
 _FRONTEND_IMAGE = "graybx/weightslab"
 _STACK_CONTAINERS = ("weights_studio_envoy", "weights_studio_frontend")
 
+# Default frontend image repo (no tag) and tag. Overridable per-launch via the
+# `--image/-i` and `--version/-v` flags on `weightslab ui launch`, which are
+# passed to docker compose through the WS_FRONTEND_IMAGE env var (see the
+# `${WS_FRONTEND_IMAGE:-...}` substitution in docker-compose.yml).
+_DEFAULT_FRONTEND_REPO = "graybx/weightslab"
+_DEFAULT_FRONTEND_TAG = "latest"
+
+
+def _resolve_frontend_image(image_arg=None, version_arg=None) -> str:
+    """Return the full ``repo:tag`` frontend image ref from the CLI flags.
+
+    ``image_arg`` is the repo (e.g. ``guillaumep2705/weightslab``) and may itself
+    carry a tag; ``version_arg`` is the tag (e.g. ``latest`` or ``v1.2.3``). An
+    explicit ``--version`` always wins over any tag embedded in ``--image``.
+    Falls back to ``graybx/weightslab:latest`` when neither is given.
+    """
+    image = image_arg or _DEFAULT_FRONTEND_REPO
+    # A ':' in the last path segment is a tag (not a registry port like host:5000/img).
+    last_segment = image.rsplit("/", 1)[-1]
+    has_tag = ":" in last_segment
+    if version_arg:
+        repo = image.rsplit(":", 1)[0] if has_tag else image
+        return f"{repo}:{version_arg}"
+    if has_tag:
+        return image
+    return f"{image}:{_DEFAULT_FRONTEND_TAG}"
+
 # Cached Docker Compose base command. Resolved once per process to either the
 # v2 plugin (``["docker", "compose"]``) or the legacy v1 standalone binary
 # (``["docker-compose"]``) — see _detect_compose_cmd(). None until first probe.
@@ -137,44 +164,56 @@ commands:
                              --3d_det 3D LiDAR point-cloud detection example
                              --2d_det 2D LiDAR point-cloud detection example
 
+  cli Open an interactive terminal connected to a
+                           currently-running experiment (pause/resume, status,
+                           evaluate, agent query, etc.). Auto-discovers the
+                           running experiment; the experiment must be serving
+                           the CLI (e.g. wl.serve(serving_cli=True)).
+                             --port PORT connect to a specific CLI port
+                             --host HOST connect to a specific host (default: localhost)
+
 examples:
   weightslab se # one-time secure setup (then export WEIGHTSLAB_CERTS_DIR)
   weightslab se --force-certs # regenerate the certs
   weightslab ui launch # clean + launch (unsecured HTTP, default)
   weightslab ui launch --certs # secured launch (HTTPS + gRPC auth)
+  weightslab ui launch -i guillaumep2705/weightslab # pull frontend from a custom repo (latest)
+  weightslab ui launch -i guillaumep2705/weightslab -v v1.2.3 # pin a specific version/tag
   weightslab start example # run the classification demo (default)
   weightslab start example --seg # run the segmentation demo
   weightslab start example --det # run the detection demo
   weightslab start example --3d_det # run the 3D LiDAR detection demo
   weightslab start example --2d_det # run the 2D LiDAR detection demo
+  weightslab cli # connect a terminal to the running experiment
+  weightslab cli --port 60000 # connect to a specific CLI port
 """
 
 
 def _get_compose_file():
     """Return the path to the bundled docker-compose.yml."""
-    # return files("weightslab.ui.docker") / "docker-compose.yml"
-    return Path(__file__).parent / 'ui' / 'docker' / 'docker-compose.yml'
+    # return files("weightslab.docker.docker") / "docker-compose.yml"
+    return Path(__file__).parent / 'docker' / 'docker' / 'docker-compose.yml'
 
 
 def _get_envoy_config():
     """Return the path to the bundled envoy.yaml."""
-    # return files("weightslab.ui.envoy") / "envoy.yaml"
-    return Path(__file__).parent / 'ui' / 'docker' / 'envoy.yaml'
+    # return files("weightslab.docker.envoy") / "envoy.yaml"
+    return Path(__file__).parent / 'docker' / 'docker' / 'envoy.yaml'
 
 
 def _get_bootstrap_script() -> Path:
     """Get the bootstrap-secure.ps1 script path."""
-    return Path(__file__).parent / 'ui' / 'docker' / 'utils' / 'build-and-deploy.sh'
+    return Path(__file__).parent / 'docker' / 'docker' / 'utils' / 'build-and-deploy.sh'
 
 
 def _get_cert_script() -> Path:
     """Get the generate-certs-auth-token.sh script path."""
-    return Path(__file__).parent / 'ui' / 'docker' / 'utils' / 'generate-certs-auth-token.sh'
+    return Path(__file__).parent / 'docker' / 'docker' / 'utils' / 'generate-certs-auth-token.sh'
 
 
 def _get_cert_script_ps1() -> Path:
     """Get the generate-certs-auth-token.ps1 script path."""
-    return Path(__file__).parent / 'ui' / 'docker' / 'utils' / 'generate-certs-auth-token.ps1'
+    return Path(__file__).parent / 'docker' / 'docker' / 'utils' / 'generate-certs-auth-token.ps1'
 
 
 def _is_windows() -> bool:
@@ -212,7 +251,7 @@ def _ensure_scripts_executable() -> None:
     """
     if _is_windows():
         return
-    ui_dir = Path(__file__).parent / 'ui'
+    ui_dir = Path(__file__).parent / 'docker'
     try:
         scripts = list(ui_dir.rglob('*.sh'))
     except OSError as exc:
@@ -288,8 +327,13 @@ def _check_docker():
         )
     except subprocess.CalledProcessError:
         logger.error(
+            "\n"
+            "============================================================="
+            "============================================================="
             "Docker is installed but the daemon is not running.\n"
-            "Start it with: Docker Desktop or 'sudo systemctl start docker'"
+            "Start it with: Docker Desktop or 'sudo systemctl start docker'."
+            "============================================================="
+            "\n"
         )
         sys.exit(1)
 
@@ -676,7 +720,7 @@ def _remove_docker_image(image: str) -> None:
     )
 
 
-def _clean_stale_docker_resources() -> None:
+def _clean_stale_docker_resources(frontend_image: str = _FRONTEND_IMAGE) -> None:
     """Remove leftover weightslab / weights_studio Docker state before a launch.
 
     Stale containers, the compose network, anonymous volumes, a cached frontend
@@ -684,6 +728,10 @@ def _clean_stale_docker_resources() -> None:
     launch (an old image served instead of a rebuild, or an empty cert mount
     that crashes Envoy). This is scoped STRICTLY to weightslab/weights_studio
     resources — it never runs a global ``docker system prune``.
+
+    ``frontend_image`` is the repo (optionally ``repo:tag``) whose cached copy is
+    dropped so ``up --pull always`` fetches a fresh one — pass the resolved value
+    when ``--image/--version`` point at a non-default repo.
     """
     logger.info("Cleaning stale Docker resources (weightslab/weights_studio only)...")
     compose_file = _get_compose_file()
@@ -703,7 +751,7 @@ def _clean_stale_docker_resources() -> None:
         )
 
     # 3. Drop the cached frontend image so a fresh one is built/pulled.
-    _remove_docker_image(_FRONTEND_IMAGE)
+    _remove_docker_image(frontend_image)
 
     # 4. Remove the generated .env so stale values don't leak into compose.
     env_file = Path(compose_file).parent / ".env"
@@ -728,6 +776,8 @@ def ui_launch(args):
       --force-certs with --certs, regenerate certificates even if they exist
       --no-clean skip the stale Docker resource cleanup step
       --dev use the dev compose overlay
+      -i/--image frontend image repo to run/pull (default: graybx/weightslab)
+      -v/--version frontend image tag/version to pull (default: latest)
     """
     try:
         from weightslab.utils.telemetry import ping_ui_launch
@@ -745,6 +795,17 @@ def ui_launch(args):
     force_certs = getattr(args, "force_certs", False)
     no_clean = getattr(args, "no_clean", False)
     certs_dir_arg = getattr(args, "certs_dir", None)
+
+    # Resolve which frontend image to run. docker compose reads it via the
+    # WS_FRONTEND_IMAGE env var (see `${WS_FRONTEND_IMAGE:-...}` in the compose
+    # file); export it so both `up --pull always` below and the stale-image
+    # cleanup target the same repo/tag.
+    frontend_image = _resolve_frontend_image(
+        getattr(args, "image", None), getattr(args, "version", None)
+    )
+    os.environ["WS_FRONTEND_IMAGE"] = frontend_image
+    frontend_repo = frontend_image.rsplit(":", 1)[0] if ":" in frontend_image.rsplit("/", 1)[-1] else frontend_image
+    logger.info(f"Using frontend image: {frontend_image}")
 
     # A custom certs dir (positional arg) takes precedence over the env var /
     # default. Otherwise fall back to $WEIGHTSLAB_CERTS_DIR or ~/.weightslab-certs.
@@ -787,7 +848,7 @@ def ui_launch(args):
     if no_clean:
         logger.info("Skipping stale Docker resource cleanup (--no-clean)")
     else:
-        _clean_stale_docker_resources()
+        _clean_stale_docker_resources(frontend_repo)
 
     # Single source of truth: the deploy pipeline (build-and-deploy.sh + the
     # compose `auto` logic) derives TLS/auth solely from cert-file presence in
@@ -807,7 +868,7 @@ def ui_launch(args):
             logger.info(f"Converted path to Unix-style: {certs_dir_str}")
 
         # Calculate WEIGHTSLAB_ROOT (parent of weightslab package)
-        weightslab_root = str(Path(__file__).parent.parent)
+        weightslab_root = str(Path(__file__).parent)
         if _is_windows() and '\\' in weightslab_root:
             weightslab_root = _convert_to_git_bash_path(weightslab_root)
 
@@ -1023,6 +1084,25 @@ def example_start(args):
         sys.exit(result.returncode)
 
 
+def cli_connect(args):
+    """`weightslab cli [--port N] [--host H]`: open an interactive terminal
+    connected to a currently-running experiment's CLI server.
+
+    With no --port, auto-discovers the running experiment (the backend advertises
+    its actual port on startup). Pass --port to target a specific server.
+    """
+    try:
+        import weightslab.backend.cli as cli_backend
+    except Exception as exc:
+        logger.error(f"Could not load the WeightsLab CLI client: {exc}")
+        sys.exit(1)
+
+    port = getattr(args, "port", None)
+    host = getattr(args, "host", None)
+    exit_code = cli_backend.cli_connect(cli_port=port, cli_host=host)
+    sys.exit(exit_code)
+
+
 def _add_example_kind_flags(p: argparse.ArgumentParser) -> None:
     """Attach the mutually-exclusive example-kind flags (default: classification)."""
     group = p.add_mutually_exclusive_group()
@@ -1051,6 +1131,7 @@ def _build_parser() -> argparse.ArgumentParser:
         weightslab se [--force-certs]
         weightslab ui launch [--certs]
         weightslab start example [--cls|--seg|--det|--clus|--gen|--3d_det|--2d_det]
+        weightslab cli [--port PORT] [--host HOST]
     """
     parser = argparse.ArgumentParser(
         prog="weightslab",
@@ -1060,7 +1141,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     # metavar lists only the documented commands; the `example` alias is accepted
     # but intentionally omitted here (and help=SUPPRESS'd below) so it stays hidden.
-    sub = parser.add_subparsers(dest="command", metavar="{se,ui,start,help}")
+    sub = parser.add_subparsers(dest="command", metavar="{se,ui,start,cli,help}")
 
     # weightslab se [--force-certs] [certs_dir]
     se_parser = sub.add_parser("se", help="Set up the secure environment (TLS certs + gRPC auth token)")
@@ -1074,8 +1155,21 @@ def _build_parser() -> argparse.ArgumentParser:
     launch_ui_parser = ui_sub.add_parser(
         "launch", help="Clean stale Docker state, then launch the UI (unsecured by default; --certs for TLS)")
     launch_ui_parser.add_argument('--certs', action='store_true', help='Generate (if missing) and use TLS certs + gRPC auth token (secured HTTPS). Default: unsecured HTTP.')
+    launch_ui_parser.add_argument('-i', '--image', default=None,
+                                  help='Frontend image repo to run/pull (default: graybx/weightslab). '
+                                       'e.g. guillaumep2705/weightslab')
+    launch_ui_parser.add_argument('-v', '--version', default=None,
+                                  help='Frontend image tag/version to pull (default: latest). e.g. v1.2.3')
     launch_ui_parser.add_argument('certs_dir', nargs='?', default=None,
                                   help='Custom directory for certs/token (default: $WEIGHTSLAB_CERTS_DIR or ~/.weightslab-certs)')
+
+    # weightslab cli [--port N] [--host H]
+    cli_parser = sub.add_parser(
+        "cli", help="Open an interactive terminal connected to the running experiment")
+    cli_parser.add_argument('--port', type=int, default=None,
+                            help='CLI server port (default: auto-discover the running experiment)')
+    cli_parser.add_argument('--host', default=None,
+                            help='CLI server host (default: localhost)')
 
     # weightslab start example [--cls|--seg|--clus|--gen]
     start_parser = sub.add_parser("start", help="Start a bundled WeightsLab resource")
@@ -1096,15 +1190,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("help", help="Show this help message")
 
-    return parser, ui_parser, start_parser
+    return parser, ui_parser, start_parser, cli_parser
 
 
 def main():
-    parser, ui_parser, start_parser = _build_parser()
+    parser, ui_parser, start_parser, cli_parser = _build_parser()
     args = parser.parse_args()
 
     if args.command == "help" or args.command is None:
         parser.print_help()
+    elif args.command == "cli":
+        cli_connect(args)
     elif args.command == "se":
         ui_secure_environment(args)
     elif args.command == "ui":

@@ -23,6 +23,8 @@ import json
 import sys
 import os
 import time
+import atexit
+from pathlib import Path
 from typing import Optional, Any
 
 from weightslab.backend.ledgers import GLOBAL_LEDGER, resolve_hp_name, Proxy, set_hyperparam, list_hyperparams
@@ -199,7 +201,7 @@ def _handle_command(cmd: str) -> Any:
                     'check agent': 'agent status',
                     'initialize openrouter': 'agent init --api-key sk-or-... --model openai/gpt-4o-mini --timeout 20',
                     'list available models': 'agent models',
-                    'switch model': 'agent model meta-llama/llama-3.3-70b-instruct',
+                    'switch model': 'agent model ~google/gemini-flash-latest',
                     'query the agent': 'agent query discard all samples with loss > 5 and tag them as hard_examples',
                     'query shortcut': 'ask tag train samples with loss > 1.2 as goldset',
                 }
@@ -1063,6 +1065,117 @@ def _server_loop_sock(srv: socket.socket):
             pass
 
 
+# ----------------------------------------------------------------------------
+# Endpoint discovery
+# ----------------------------------------------------------------------------
+# The CLI server binds to an OS-assigned (ephemeral) port by default and may
+# auto-increment on collision, so a fresh terminal can't guess where it landed.
+# On startup the server writes its actual host/port/pid to a small discovery
+# file; `weightslab cli` (with no --port) reads it to auto-connect to the
+# currently-running experiment.
+_DEFAULT_CLI_HOST = 'localhost'
+
+
+def _cli_discovery_path() -> Path:
+    """Path of the file the running experiment uses to advertise its CLI port.
+
+    Overridable via WEIGHTSLAB_CLI_FILE (used by tests); defaults to
+    ~/.weightslab/cli.json.
+    """
+    override = os.environ.get('WEIGHTSLAB_CLI_FILE')
+    if override:
+        return Path(override)
+    return Path.home() / '.weightslab' / 'cli.json'
+
+
+def _write_discovery_file(host: str, port: int) -> None:
+    """Advertise the live CLI endpoint so `weightslab cli` can find it."""
+    try:
+        path = _cli_discovery_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            'host': host,
+            'port': int(port),
+            'pid': os.getpid(),
+            'time': time.time(),
+        }))
+    except Exception:
+        logger.debug("Could not write CLI discovery file", exc_info=True)
+
+
+def _clear_discovery_file() -> None:
+    """Remove the discovery file, but only if it still points at this process,
+    so we never delete a newer experiment's advertisement."""
+    try:
+        path = _cli_discovery_path()
+        if not path.exists():
+            return
+        data = json.loads(path.read_text())
+        if data.get('pid') == os.getpid():
+            path.unlink()
+    except Exception:
+        logger.debug("Could not clear CLI discovery file", exc_info=True)
+
+
+def _read_discovery_file() -> Optional[dict]:
+    """Return the advertised {host, port, pid, time} dict, or None if absent/unreadable."""
+    try:
+        path = _cli_discovery_path()
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text())
+        if isinstance(data, dict) and data.get('port'):
+            return data
+    except Exception:
+        logger.debug("Could not read CLI discovery file", exc_info=True)
+    return None
+
+
+def resolve_cli_endpoint(cli_port: Optional[int] = None,
+                         cli_host: Optional[str] = None) -> "tuple[str, Optional[int], str]":
+    """Resolve which (host, port) `weightslab cli` should connect to.
+
+    Priority: explicit --port/--host > auto-discovered running experiment >
+    CLI_PORT/CLI_HOST env vars. Returns (host, port, source); port is None when
+    nothing could be resolved so the caller can print actionable guidance.
+    """
+    env_host = os.environ.get('CLI_HOST')
+
+    if cli_port is not None:
+        return (cli_host or env_host or _DEFAULT_CLI_HOST, int(cli_port), 'via --port')
+
+    info = _read_discovery_file()
+    if info:
+        return (cli_host or info.get('host') or _DEFAULT_CLI_HOST, int(info['port']), 'auto-discovered')
+
+    env_port = os.environ.get('CLI_PORT')
+    if env_port:
+        try:
+            return (cli_host or env_host or _DEFAULT_CLI_HOST, int(env_port), 'via CLI_PORT')
+        except ValueError:
+            pass
+
+    return (cli_host or env_host or _DEFAULT_CLI_HOST, None, 'none')
+
+
+def cli_connect(cli_port: Optional[int] = None, cli_host: Optional[str] = None) -> int:
+    """Entry point for `weightslab cli`: resolve the running experiment's CLI
+    endpoint and start the interactive REPL client. Returns a process exit code.
+    """
+    host, port, source = resolve_cli_endpoint(cli_port, cli_host)
+    if port is None:
+        print(
+            "No running WeightsLab experiment CLI was found.\n"
+            "  - Make sure your experiment is serving the CLI, e.g. "
+            "wl.serve(serving_cli=True) (optionally CLI_PORT=<port>).\n"
+            "  - Or connect explicitly: weightslab cli --port <port>"
+        )
+        return 1
+    print(f"Connecting to WeightsLab experiment CLI at {host}:{port} ({source})...")
+    cli_client_main(host, port)
+    return 0
+
+
 def cli_serve(cli_host: str = 'localhost', cli_port: int = 0, *, spawn_client: bool = True, **_):
     """
         Start the CLI server and optionally open a client in a new console.
@@ -1082,10 +1195,14 @@ def cli_serve(cli_host: str = 'localhost', cli_port: int = 0, *, spawn_client: b
     cli_port = int(os.environ.get('CLI_PORT', cli_port))
 
     if _server_thread is not None and _server_thread.is_alive():
+        host = _server_host or cli_host
+        port = int(_server_port or cli_port)
+        # Refresh the advertisement in case the file was removed/stale.
+        _write_discovery_file(host, port)
         return {
             'ok': True,
-            'host': _server_host or cli_host,
-            'port': int(_server_port or cli_port),
+            'host': host,
+            'port': port,
             'already_running': True,
         }
 
@@ -1146,6 +1263,13 @@ def cli_serve(cli_host: str = 'localhost', cli_port: int = 0, *, spawn_client: b
         "cli_port": cli_port,
         "actual_port": actual_port
     })
+
+    # Advertise the actual endpoint so a separate terminal can `weightslab cli`
+    # (no port needed) and auto-connect to this running experiment. Cleaned up
+    # on process exit (only if the file still points at us).
+    _write_discovery_file(cli_host, actual_port)
+    atexit.register(_clear_discovery_file)
+
     # wait briefly for server to come up
     time.sleep(0.05)
 
