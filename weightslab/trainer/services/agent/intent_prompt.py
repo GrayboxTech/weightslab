@@ -43,6 +43,7 @@ Choose the `kind` based on the user's VERB and INTENT:
 | **Load experiment** | "Load experiment state from hash <h>", "Restore the experiment <h>", "Go back to state <h>" | `action` (`action_name="load_experiment"`, `action_params={{"hash": "<h>"}}`) |
 | **Load weights** | "Load the model weights from step 500", "Roll back weights to step 500", "Load weights at step 500 from hash <h>" | `action` (`action_name="load_weights"`, `action_params={{"step": 500}}`) |
 | **Tune hyperparameter** | "Set the batch size to 32", "Increase the learning rate by 10%", "Change the dumping model ratio to 15", "Change the evaluation ratio to 20" | `action` (`action_name="set_hyperparam"`; see rule 11) |
+| **Config question (READ-ONLY)** | "Show me the root log dir", "What is the batch size?", "Display the whole configuration", "Show the config" | `action` (`action_name="show_config"`; `action_params={{"param": "<key>"}}` for one value, omit for the whole config) |
 | **History query** | "...that never had train loss below 0.5", "...whose loss was ever above 5", "min/max/mean loss OVER TRAINING" | `transform`/`keep` using `signal_history(...)` (see rule 10) |
 
 ---
@@ -98,6 +99,7 @@ Choose the `kind` based on the user's VERB and INTENT:
     - `"load_experiment"` — load & apply a FULL saved experiment state (model + weights + data + config) by hash; REQUIRES `action_params={{"hash": "<exp_hash>"}}` (the hash the user gives).
     - `"load_weights"` — load ONLY model weights, optionally at a specific step: `action_params={{"step": <int>}}` (and optionally `"hash": "<exp_hash>"`; defaults to the current experiment).
     - `"set_hyperparam"` — change a training hyperparameter: `action_params={{"param": "<name-or-dotted-path>", "op": "<set|scale>", "value": <number>}}` (see rule 11).
+    - `"show_config"` — READ-ONLY: display the experiment configuration. Omit `action_params` to dump the whole config, or pass `action_params={{"param": "<key-or-dotted-path>"}}` to show a single value (e.g. `"root_log_dir"`, `"batch_size"`). Never modifies anything — use it for any "show/what is/display the config/setting" question.
   - `action_params`: Optional dict of parameters for the action (e.g. `{{"architecture": true}}`, `{{"hash": "abc123..."}}`, `{{"step": 500}}`, `{{"param": "batch_size", "op": "set", "value": 32}}`).
 
 ---
@@ -788,6 +790,35 @@ User: "Change the evaluation ratio to 20"
       "kind": "action",
       "action_name": "set_hyperparam",
       "action_params": {{ "param": "eval_ratio", "op": "set", "value": 20 }}
+    }}
+  ]
+}}
+
+
+**Ex49: Show A Single Config Value (READ-ONLY)**
+User: "Show me the root log dir"
+{{
+  "reasoning": "Read-only config question about a single setting. Use show_config with the requested key; do NOT modify anything.",
+  "primary_goal": "action",
+  "steps": [
+    {{
+      "kind": "action",
+      "action_name": "show_config",
+      "action_params": {{ "param": "root_log_dir" }}
+    }}
+  ]
+}}
+
+
+**Ex50: Display The Whole Configuration (READ-ONLY)**
+User: "Display the whole configuration"
+{{
+  "reasoning": "Read-only request to dump the entire experiment configuration. Use show_config with no param.",
+  "primary_goal": "action",
+  "steps": [
+    {{
+      "kind": "action",
+      "action_name": "show_config"
     }}
   ]
 }}

@@ -562,6 +562,27 @@ The agent's reply reports the applied change and the previous value (e.g.
 *"set optimizer.lr = 0.0011 (was 0.001)"*), read back from the wrapped HP so you
 can confirm it took effect.
 
+Inspecting the configuration (read-only)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+You can also *ask about* the configuration without changing anything. This is
+strictly read-only — it only ever reports values, and (unlike tuning above) it
+never writes.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 60 40
+
+   * - Prompt
+     - What happens
+   * - "Display the whole configuration" / "Show the config"
+     - Prints the entire experiment configuration (pretty-printed; long configs
+       are truncated with a hint to ask for a specific key).
+   * - "Show me the root log dir"
+     - Reports a single value (``root_log_dir``) from the config.
+   * - "What is the batch size?"
+     - Reports the resolved value (e.g. ``data.train_loader.batch_size``).
+
 Querying signal history (behavior over training)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

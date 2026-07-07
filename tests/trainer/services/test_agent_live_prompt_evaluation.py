@@ -1045,6 +1045,20 @@ class TestAgentRstDocumentedPrompts(unittest.TestCase):
         self.assertEqual(ops[0]["function"], "action.set_hyperparam", ops)
         self.assertEqual(float(ops[0]["params"].get("value")), 20.0, ops)
 
+    # ---- Config inspection, read-only (op-plan checks) --------------------------
+
+    def test_doc_show_root_log_dir(self):
+        ops = self._query("Show me the root log dir")
+        self.assertEqual(ops[0]["function"], "action.show_config", ops)
+        # Targets a single key referencing the root log dir.
+        self.assertIn("root", str(ops[0].get("params", {}).get("param", "")).lower(), ops)
+
+    def test_doc_show_whole_configuration(self):
+        ops = self._query("Display the whole configuration")
+        self.assertEqual(ops[0]["function"], "action.show_config", ops)
+        # Whole-config dump -> no specific key.
+        self.assertFalse(ops[0].get("params", {}).get("param"), ops)
+
     # ---- Signal-history query (op-plan check) -----------------------------------
 
     def test_doc_tag_samples_never_had_loss_below(self):
