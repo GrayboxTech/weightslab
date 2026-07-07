@@ -98,6 +98,14 @@ BATCH = 64
 LR = 0.01
 MEASURE_STEPS = 50  # steps used for the per-step overhead breakdown
 
+# The ledger flushes to storage every this-many buffered rows. This is the
+# single biggest overhead knob: the default (100) flushes every ~1.5 steps at
+# batch 64, which dominates the per-step cost. Set it well above the batch size
+# so the ledger flushes only a few times per epoch. A value <= batch size is a
+# landmine — it flushes mid-batch, every step. (Here: ~batch*128, a handful of
+# flushes over the run.)
+LEDGER_FLUSH_MAX_ROWS = 8192
+
 # The one metric everything subscribes to. It is the ``signal_name`` of the
 # watched loss below, and the ``subscribe_to`` of every live @wl.signal.
 LOSS_SIGNAL = "train/loss_sample"
@@ -351,6 +359,7 @@ def train(outdir, data_root, device):
         "root_log_dir": log_dir,
         "serving_grpc": False,   # headless: no gRPC / CLI control plane
         "serving_cli": False,
+        "ledger_flush_max_rows": LEDGER_FLUSH_MAX_ROWS,  # see note above
         # Declare the loader here too, otherwise WeightsLab's config sync
         # resets batch_size to its default. Keys map to loader kwargs.
         "data": {"train_loader": {"batch_size": BATCH, "shuffle": True}},
