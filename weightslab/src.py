@@ -78,18 +78,28 @@ _EVAL_WORKER_LOCK = threading.Lock()
 _EVAL_WORKER_THREAD: Optional[threading.Thread] = None
 
 
+class StaleSignalError(RuntimeError):
+    """Raised when a signal ingests another signal that is not *fresh* — i.e. the
+    ingested signal has no value at the current step (it was not logged, or was
+    written after the trigger this step). See ``SignalContext.latest`` /
+    ``BatchSignalContext.latest`` (``require_fresh=True``) and
+    ``@wl.signal(ingests=[...])``."""
+    pass
+
+
 class SignalContext:
     """
     Unified context object for WeightsLab signals.
     Carries all available metadata for a single sample during computation.
     """
-    def __init__(self, sample_id, dataframe, data=None, subscribed_value=None, logger=None, origin=None):
+    def __init__(self, sample_id, dataframe, data=None, subscribed_value=None, logger=None, origin=None, step=None):
         self.sample_id = sample_id
         self.dataframe = dataframe
         self.data = data
         self.subscribed_value = subscribed_value
         self.logger = logger
         self.origin = origin
+        self.step = step          # step the trigger fired at (for freshness checks)
 
     @property
     def image(self) -> Optional[np.ndarray]:
@@ -163,13 +173,23 @@ class SignalContext:
         """True if running during training (triggered by a metric)."""
         return self.subscribed_value is not None
 
-    def latest(self, signal_name, default=float("nan")):
+    def latest(self, signal_name, default=float("nan"), require_fresh=False):
         """Most recent value of ANOTHER signal for THIS sample. Lets a signal
         ingest several other signals: read each with ``ctx.latest(name)`` and
-        combine. Returns *default* if the signal has no value yet."""
+        combine. Returns *default* if the signal has no value yet.
+
+        With ``require_fresh=True`` this raises if the ingested signal has no
+        value at the current step (``self.step``) — i.e. it was not logged, or
+        was written after (not before) the trigger this step.
+        """
         if self.logger is None:
             return default
         rows = self.logger.query_per_sample(signal_name, sample_ids=[self.sample_id])
+        if require_fresh and (not rows or self.step is None or rows[-1][1] != self.step):
+            raise StaleSignalError(
+                f"ingested signal '{signal_name}' is not fresh at step {self.step} for "
+                f"sample {self.sample_id} (log it with log=True and write it BEFORE the "
+                f"subscribing signal fires).")
         return rows[-1][2] if rows else default   # rows ordered by seq -> last is newest
 
 
@@ -183,12 +203,13 @@ class BatchSignalContext:
     (:meth:`history` runs a single query for the whole batch instead of one query
     per sample), which is where the large speed-ups come from.
     """
-    def __init__(self, sample_ids, subscribed_values, logger=None, dataframe=None, origin=None):
+    def __init__(self, sample_ids, subscribed_values, logger=None, dataframe=None, origin=None, step=None):
         self.sample_ids = [int(s) for s in sample_ids]          # length B
         self.subscribed_values = np.asarray(subscribed_values, dtype=float)  # (B,)
         self.logger = logger
         self.dataframe = dataframe
         self.origin = origin
+        self.step = step          # step the trigger fired at (for freshness checks)
 
     def history(self, signal_name):
         """Per-sample history of *signal_name* for every sample in the batch, in
@@ -202,17 +223,29 @@ class BatchSignalContext:
             out.setdefault(int(sid), []).append(val)   # rows already ordered by seq (= step order)
         return out
 
-    def latest(self, signal_name, default=float("nan")):
+    def latest(self, signal_name, default=float("nan"), require_fresh=False):
         """Most recent value of ANOTHER signal for each sample in the batch, in a
         single batched query. ``(B,)`` array aligned to ``self.sample_ids``. Use
         this to build a signal that ingests several other signals — call it once
         per input signal, then combine the arrays with vector ops.
+
+        With ``require_fresh=True`` this raises unless EVERY sample has a value of
+        *signal_name* at the current step (``self.step``) — catching a stale
+        ingest (input not logged, or written after the trigger this step).
         """
         last = {}
         if self.logger is not None:
             for sid, step, val, _ in self.logger.query_per_sample(signal_name, sample_ids=self.sample_ids):
-                last[int(sid)] = val   # rows ordered by seq -> last assignment wins
-        return np.array([last.get(s, default) for s in self.sample_ids], dtype=float)
+                last[int(sid)] = (step, val)   # rows ordered by seq -> last assignment wins
+        if require_fresh:
+            stale = [s for s in self.sample_ids
+                     if s not in last or self.step is None or last[s][0] != self.step]
+            if stale:
+                raise StaleSignalError(
+                    f"ingested signal '{signal_name}' is not fresh at step {self.step} for "
+                    f"{len(stale)}/{len(self.sample_ids)} sample(s) (e.g. {stale[:3]}). Log it "
+                    f"with log=True and write it BEFORE the subscribing signal fires.")
+        return np.array([last.get(s, (None, default))[1] for s in self.sample_ids], dtype=float)
 
 
 # #####################################################################################################################
@@ -677,6 +710,8 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                          continue
 
                      try:
+                         _lg = ledgers.get_logger()
+                         ingests = meta.get('ingests') or []
                          if meta.get('batched'):
                              # Vectorized path: build ONE context for the whole
                              # batch and call the signal once. It returns a length-B
@@ -685,14 +720,26 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                              bctx = BatchSignalContext(
                                  sample_ids=[int(u) for u in ids_np],
                                  subscribed_values=[float(v) for v in val_vec],
-                                 logger=ledgers.get_logger(),
+                                 logger=_lg,
                                  dataframe=df_proxy,
                                  origin=kwargs.get('origin', 'train'),
+                                 step=step,
                              )
+                             # Enforce that declared ingested signals are fresh.
+                             for dep in ingests:
+                                 bctx.latest(dep, require_fresh=True)
                              res = func(bctx)
                              res = res.tolist() if hasattr(res, 'tolist') else list(res)
                              signal_value = [float(x) for x in res]
                          else:
+                             # Validate declared ingests once for the whole batch.
+                             if ingests:
+                                 _vctx = BatchSignalContext(
+                                     sample_ids=[int(u) for u in ids_np],
+                                     subscribed_values=[float(v) for v in val_vec],
+                                     logger=_lg, step=step)
+                                 for dep in ingests:
+                                     _vctx.latest(dep, require_fresh=True)
                              batch_res = {}
                              for i, uid in enumerate(ids_np):
                                  # Generic 'value' argument
@@ -702,9 +749,10 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                                  ctx = SignalContext(
                                      sample_id=int(uid),
                                      subscribed_value=val,
-                                     logger=ledgers.get_logger(),
+                                     logger=_lg,
                                      dataframe=df_proxy,
-                                     origin=kwargs.get('origin', 'train')
+                                     origin=kwargs.get('origin', 'train'),
+                                     step=step,
                                  )
                                  try:
                                      res = func(ctx) # Compute per sample result with unified context
@@ -718,6 +766,8 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                          if dynamic_updates and meta.get('log', True):
                              logger.debug(f"Dynamic updates computed for signal '{reg_name}': {list(dynamic_updates.keys())}")
                              _log_signal(sum(signal_value)/len(signal_value), signal_value, name, step=step, **kwargs) # Log custom subscribed signals
+                     except StaleSignalError:
+                         raise  # correctness enforcement: surface, don't swallow
                      except Exception as e:
                          logger.debug(f"Dynamic signal {name} failed: {e}")
                          pass # User function error, skip
