@@ -71,6 +71,93 @@ logger = logging.getLogger(__name__)
 DATAFRAME_M = None
 # Global registry for custom signals
 _REGISTERED_SIGNALS = {}
+_REACTIVE_FIRED = {}   # signal_name -> step it last fired at (per-step dedup)
+
+
+def _gather_inputs_fresh(lg, inputs, ids, step):
+    """Return ``{name: (B,) array}`` if EVERY input signal has a value at *step*
+    for EVERY sample id, else ``None`` (not all inputs present yet)."""
+    cols = {}
+    for inp in inputs:
+        last = {}
+        for sid, s, val, _ in lg.query_per_sample(inp, sample_ids=ids):
+            last[int(sid)] = (s, val)
+        for sid in ids:
+            if sid not in last or last[sid][0] != step:
+                return None
+        cols[inp] = np.array([last[sid][1] for sid in ids], dtype=float)
+    return cols
+
+
+def _react_dependents(seed_names, batch_ids, step, origin='train'):
+    """Reactive signal firing. When the signals in *seed_names* were just logged,
+    fire any ``@wl.signal(inputs=[...])`` whose inputs are now ALL present at
+    *step* — order-independently, regardless of which input arrived last. Each
+    fired signal is itself a seed (chaining) and fires at most once per step.
+    Inputs are read from the logger, so ingested signals must be logged."""
+    if batch_ids is None:
+        return
+    try:
+        ids = [int(u) for u in (batch_ids.detach().cpu().numpy()
+                                if hasattr(batch_ids, 'detach') else batch_ids)]
+    except Exception:
+        return
+    lg = get_logger()
+    if lg is None:
+        return
+    try:
+        df_proxy = get_dataframe()
+    except Exception:
+        df_proxy = None
+
+    def dependents_of(nm):
+        for name, func in list(_REGISTERED_SIGNALS.items()):
+            meta = getattr(func, '_wl_signal_meta', {})
+            inputs = meta.get('inputs')
+            if inputs and nm in inputs:
+                yield name, func, meta, inputs
+
+    queue = list(seed_names)
+    while queue:
+        logged = queue.pop()
+        for name, func, meta, inputs in dependents_of(logged):
+            if _REACTIVE_FIRED.get(name) == step:
+                continue
+            every = meta.get('compute_every_n_steps', 1) or 1
+            if step % every != 0:
+                continue
+            cols = _gather_inputs_fresh(lg, inputs, ids, step)
+            if cols is None:
+                continue  # inputs not all fresh yet — a later log will re-trigger
+            _REACTIVE_FIRED[name] = step
+            try:
+                if meta.get('batched'):
+                    bctx = BatchSignalContext(sample_ids=ids, subscribed_values=cols[inputs[0]],
+                                              logger=lg, dataframe=df_proxy, origin=origin, step=step)
+                    bctx.inputs = cols
+                    res = func(bctx)
+                    vals = res.tolist() if hasattr(res, 'tolist') else list(res)
+                else:
+                    vals = []
+                    for i, sid in enumerate(ids):
+                        ctx = SignalContext(sample_id=sid, subscribed_value=float(cols[inputs[0]][i]),
+                                            logger=lg, dataframe=df_proxy, origin=origin, step=step)
+                        ctx.inputs = {k: float(cols[k][i]) for k in cols}
+                        vals.append(func(ctx))
+                vals = [float(x) for x in vals]
+            except StaleSignalError:
+                raise
+            except Exception as e:
+                logger.debug(f"reactive signal '{name}' failed: {e}")
+                continue
+            # Persist (log so downstream reactive signals can read it). _react=False:
+            # the queue below drives chaining, avoiding re-entrant dispatch.
+            try:
+                save_signals(signals={name: vals}, batch_ids=ids,
+                             log=meta.get('log', True), _react=False)
+            except Exception as e:
+                logger.debug(f"reactive persist '{name}' failed: {e}")
+            queue.append(name)   # its value may satisfy further reactive signals
 
 # Evaluation function registered via the @wl.eval_fn decorator.
 _REGISTERED_EVAL_FN: Optional[Any] = None
@@ -796,6 +883,16 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
             log=False # Already logged above, no need to log again in save_signals; set to False to avoid duplicate logging if save_signals is called separately without logging
         )
 
+    # Reactive signals: the watched metric was just logged (above), so it may
+    # satisfy an inputs=[...] signal that depends on it.
+    if not per_instance and batch_ids is not None:
+        try:
+            _react_dependents([reg_name], batch_ids, step, origin or 'train')
+        except StaleSignalError:
+            raise
+        except Exception as e:
+            logger.debug(f"reactive dispatch after {reg_name} failed: {e}")
+
     # Return the original output (dict for per-instance losses so caller can
     # use out['batch'] for backward, tensor for standard per-sample losses).
     return out_original if isinstance(out_original, dict) else out
@@ -1274,6 +1371,13 @@ def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, 
         func._wl_signal_meta = kwargs
         func._wl_signal_meta['subscribe_to'] = subscribe_to
         func._wl_signal_meta['compute_every_n_steps'] = compute_every_n_steps
+        # Reactive dependency set. ``inputs=[...]`` is the unified form: the signal
+        # fires when ALL its inputs are present at a step, order-independently
+        # (subsumes subscribe_to + ingests). A single-input signal is the alias
+        # ``inputs=["x"]`` == ``subscribe_to="x"``. Signals that use the legacy
+        # ``subscribe_to`` keyword instead stay on the legacy dispatch.
+        _inp = kwargs.get('inputs')
+        func._wl_signal_meta['inputs'] = list(_inp) if _inp else None
         func._wl_signal_name = reg_name
 
         return func
@@ -1719,7 +1823,8 @@ def save_signals(
     targets: th.Tensor | np.ndarray | dict = None,
     preds: th.Tensor | np.ndarray | dict = None,
     step: int | None = None,
-    log: bool = False
+    log: bool = False,
+    _react: bool = True,
 ):
     """Save **per-sample** statistics to the tracked dataset.
 
@@ -1866,6 +1971,18 @@ def save_signals(
         losses=losses_data,
         step=step
     )
+
+    # Reactive signals: these just-logged signals may satisfy an inputs=[...]
+    # signal. Only logged (queryable) signals can be inputs. _react=False on the
+    # reactive persist path prevents re-entrant dispatch.
+    if _react and log and isinstance(signals, dict):
+        try:
+            _react_dependents(list(signals.keys()), batch_ids, step,
+                              get_active_origin() or 'train')
+        except StaleSignalError:
+            raise
+        except Exception as e:
+            logger.debug(f"reactive dispatch after save_signals failed: {e}")
 
 
 def save_instance_signals(
