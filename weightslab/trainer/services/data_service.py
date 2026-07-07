@@ -4339,18 +4339,29 @@ class DataService:
                     else np.zeros(n, bool))
 
             # Detect whether column is categorical (string/object) or numeric.
+            # A column is numeric if ANY value coerces to a finite number — even
+            # when the pandas dtype is ``object`` (e.g. a loss column holding
+            # floats mixed with None/NaN for samples that have no value yet).
+            # None/NaN are MISSING data, not a category, so they must never turn
+            # a numeric column into a categorical one (which would surface them
+            # as a spurious "unset" bar). We therefore treat as categorical only
+            # a genuine pandas ``category`` dtype, or a column whose values do
+            # not coerce to any numeric value at all (pure strings).
             col_series = df[column]
             numeric_vals = pd.to_numeric(col_series, errors="coerce")
-            is_categorical = numeric_vals.isna().all() or (
-                col_series.dtype == object or
-                str(col_series.dtype) == "category" or
-                hasattr(col_series, "cat")
+            is_category_dtype = (
+                str(col_series.dtype) == "category" or hasattr(col_series, "cat")
             )
-            # A column that has a few non-NaN numeric values mixed with mostly
-            # NaN still counts as numeric; only treat as categorical when
-            # pd.to_numeric fails on all values.
-            if not is_categorical and numeric_vals.notna().sum() == 0:
-                is_categorical = True
+            # A genuine numeric dtype (float/int/bool) is ALWAYS numeric — even
+            # when every value is NaN (e.g. a loss column no sample has filled
+            # yet). Such a column yields an empty numeric histogram, never a
+            # spurious "unset" categorical bar.
+            is_numeric_dtype = (
+                pd.api.types.is_numeric_dtype(col_series) and not is_category_dtype
+            )
+            is_categorical = (not is_numeric_dtype) and (
+                is_category_dtype or not bool(numeric_vals.notna().any())
+            )
 
             if is_categorical:
                 # --- Categorical path ---
