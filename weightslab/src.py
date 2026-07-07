@@ -14,6 +14,7 @@ import inspect
 import tempfile
 import functools
 import threading
+import queue as _queue
 import traceback
 import numpy as np
 import torch as th
@@ -75,17 +76,20 @@ _REACTIVE_FIRED = {}   # signal_name -> step it last fired at (per-step dedup)
 
 
 def _gather_inputs_fresh(lg, inputs, ids, step):
-    """Return ``{name: (B,) array}`` if EVERY input signal has a value at *step*
-    for EVERY sample id, else ``None`` (not all inputs present yet)."""
+    """Return ``{name: (B,) array}`` if EVERY input signal has a value AT *step*
+    for EVERY sample id, else ``None``. Selects the value logged *at* `step`
+    (not merely the latest) so a lagging signal-worker job for an older step
+    still gathers that step's inputs correctly."""
     cols = {}
     for inp in inputs:
-        last = {}
+        at = {}
         for sid, s, val, _ in lg.query_per_sample(inp, sample_ids=ids):
-            last[int(sid)] = (s, val)
+            if s == step:
+                at[int(sid)] = val
         for sid in ids:
-            if sid not in last or last[sid][0] != step:
+            if sid not in at:
                 return None
-        cols[inp] = np.array([last[sid][1] for sid in ids], dtype=float)
+        cols[inp] = np.array([at[sid] for sid in ids], dtype=float)
     return cols
 
 
@@ -153,11 +157,76 @@ def _react_dependents(seed_names, batch_ids, step, origin='train'):
             # Persist (log so downstream reactive signals can read it). _react=False:
             # the queue below drives chaining, avoiding re-entrant dispatch.
             try:
-                save_signals(signals={name: vals}, batch_ids=ids,
+                # step=step (not the live model step): attribute the derived
+                # value to the step it was derived from. Critical when the signal
+                # worker lags behind training, else chained signals can't find it.
+                save_signals(signals={name: vals}, batch_ids=ids, step=step,
                              log=meta.get('log', True), _react=False)
             except Exception as e:
                 logger.debug(f"reactive persist '{name}' failed: {e}")
             queue.append(name)   # its value may satisfy further reactive signals
+
+
+# --- optional signal-worker thread: run reactive dispatch off the train thread -
+_SIGNAL_WORKER = {"q": None, "thread": None}
+
+
+def _signal_worker_enabled():
+    try:
+        return bool(get_hyperparams().get("ledger_signal_worker", False))
+    except Exception:
+        return False
+
+
+def _ensure_signal_worker():
+    if _SIGNAL_WORKER["thread"] is not None and _SIGNAL_WORKER["thread"].is_alive():
+        return _SIGNAL_WORKER["q"]
+    q = _queue.Queue()
+
+    def _worker():
+        while True:
+            job = q.get()
+            if job is None:
+                q.task_done()
+                break
+            seed_names, ids, step, origin = job
+            try:
+                _react_dependents(seed_names, ids, step, origin)
+            except Exception as e:
+                logger.debug(f"signal worker job failed: {e}")
+            finally:
+                q.task_done()
+
+    t = threading.Thread(target=_worker, name="WL-Signal-Worker", daemon=True)
+    t.start()
+    _SIGNAL_WORKER["q"] = q
+    _SIGNAL_WORKER["thread"] = t
+    return q
+
+
+def _dispatch_or_enqueue(seed_names, batch_ids, step, origin):
+    """Reactive dispatch: inline on the train thread, or handed to the signal
+    worker thread when ``ledger_signal_worker`` is set. The seed signals are
+    already logged synchronously, so the worker only defers the derived compute
+    + persistence — the inputs it reads are already in the ledger."""
+    if not _signal_worker_enabled():
+        _react_dependents(seed_names, batch_ids, step, origin)
+        return
+    try:
+        ids = [int(u) for u in (batch_ids.detach().cpu().numpy()
+                                if hasattr(batch_ids, 'detach') else batch_ids)]
+    except Exception:
+        return
+    _ensure_signal_worker().put((list(seed_names), ids, step, origin))
+
+
+def drain_signals():
+    """Block until the signal-worker thread has processed all queued reactive
+    jobs. Called automatically by :func:`write_dataframe`; call it manually
+    before reading signals mid-run when ``ledger_signal_worker`` is enabled."""
+    q = _SIGNAL_WORKER["q"]
+    if q is not None:
+        q.join()
 
 # Evaluation function registered via the @wl.eval_fn decorator.
 _REGISTERED_EVAL_FN: Optional[Any] = None
@@ -887,7 +956,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     # satisfy an inputs=[...] signal that depends on it.
     if not per_instance and batch_ids is not None:
         try:
-            _react_dependents([reg_name], batch_ids, step, origin or 'train')
+            _dispatch_or_enqueue([reg_name], batch_ids, step, origin or 'train')
         except StaleSignalError:
             raise
         except Exception as e:
@@ -1888,8 +1957,10 @@ def save_signals(
     if DATAFRAME_M is None:
         DATAFRAME_M = get_dataframe()
 
-    # Get current model step
-    step = _get_step(step=step)
+    # Honor an explicit step (as documented); only infer from the model when it
+    # is omitted. Reactive backfill on the signal-worker thread depends on this —
+    # it logs derived values at the job's step, not the live (ahead) model step.
+    step = step if step is not None else _get_step()
 
     # Log if requested for each signals
     if log:
@@ -1977,8 +2048,8 @@ def save_signals(
     # reactive persist path prevents re-entrant dispatch.
     if _react and log and isinstance(signals, dict):
         try:
-            _react_dependents(list(signals.keys()), batch_ids, step,
-                              get_active_origin() or 'train')
+            _dispatch_or_enqueue(list(signals.keys()), batch_ids, step,
+                                 get_active_origin() or 'train')
         except StaleSignalError:
             raise
         except Exception as e:
@@ -3800,6 +3871,10 @@ def write_dataframe(
     import json as _json
     import os as _os
     import hashlib as _hashlib
+
+    # If reactive signals run on the worker thread, process every queued job
+    # before reading, so the report includes the latest steps' derived signals.
+    drain_signals()
 
     logger.debug(
         "write_dataframe called: path=%r, format=%r, columns=%r, "
