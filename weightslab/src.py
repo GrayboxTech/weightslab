@@ -163,6 +163,15 @@ class SignalContext:
         """True if running during training (triggered by a metric)."""
         return self.subscribed_value is not None
 
+    def latest(self, signal_name, default=float("nan")):
+        """Most recent value of ANOTHER signal for THIS sample. Lets a signal
+        ingest several other signals: read each with ``ctx.latest(name)`` and
+        combine. Returns *default* if the signal has no value yet."""
+        if self.logger is None:
+            return default
+        rows = self.logger.query_per_sample(signal_name, sample_ids=[self.sample_id])
+        return rows[-1][2] if rows else default   # rows ordered by seq -> last is newest
+
 
 class BatchSignalContext:
     """Batched context for a vectorized ``@wl.signal(batched=True)``.
@@ -192,6 +201,18 @@ class BatchSignalContext:
         for sid, step, val, _ in self.logger.query_per_sample(signal_name, sample_ids=self.sample_ids):
             out.setdefault(int(sid), []).append(val)   # rows already ordered by seq (= step order)
         return out
+
+    def latest(self, signal_name, default=float("nan")):
+        """Most recent value of ANOTHER signal for each sample in the batch, in a
+        single batched query. ``(B,)`` array aligned to ``self.sample_ids``. Use
+        this to build a signal that ingests several other signals — call it once
+        per input signal, then combine the arrays with vector ops.
+        """
+        last = {}
+        if self.logger is not None:
+            for sid, step, val, _ in self.logger.query_per_sample(signal_name, sample_ids=self.sample_ids):
+                last[int(sid)] = val   # rows ordered by seq -> last assignment wins
+        return np.array([last.get(s, default) for s in self.sample_ids], dtype=float)
 
 
 # #####################################################################################################################
