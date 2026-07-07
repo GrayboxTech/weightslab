@@ -164,6 +164,36 @@ class SignalContext:
         return self.subscribed_value is not None
 
 
+class BatchSignalContext:
+    """Batched context for a vectorized ``@wl.signal(batched=True)``.
+
+    Instead of one :class:`SignalContext` per sample, a batched signal receives
+    the whole batch at once: ``sample_ids`` and ``subscribed_values`` are arrays
+    of length B, so the signal computes over all samples with vector ops and
+    returns one array of length B. It also exposes **batched** ledger reads
+    (:meth:`history` runs a single query for the whole batch instead of one query
+    per sample), which is where the large speed-ups come from.
+    """
+    def __init__(self, sample_ids, subscribed_values, logger=None, dataframe=None, origin=None):
+        self.sample_ids = [int(s) for s in sample_ids]          # length B
+        self.subscribed_values = np.asarray(subscribed_values, dtype=float)  # (B,)
+        self.logger = logger
+        self.dataframe = dataframe
+        self.origin = origin
+
+    def history(self, signal_name):
+        """Per-sample history of *signal_name* for every sample in the batch, in
+        a SINGLE ledger query. Returns ``{sample_id: [values in step order]}``
+        (empty list for samples with no history yet)."""
+        out = {s: [] for s in self.sample_ids}
+        if self.logger is None:
+            return out
+        # query_per_sample accepts a list of ids -> one scan for the whole batch.
+        for sid, step, val, _ in self.logger.query_per_sample(signal_name, sample_ids=self.sample_ids):
+            out.setdefault(int(sid), []).append(val)   # rows already ordered by seq (= step order)
+        return out
+
+
 # #####################################################################################################################
 # WEIGHTSLAB INTERNAL FUNCTIONS FOR LOGGING, SIGNAL EXTRACTION, WRAPPING, ETC. (not typically called directly by users)
 # #####################################################################################################################
@@ -626,27 +656,43 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                          continue
 
                      try:
-                         batch_res = {}
-                         for i, uid in enumerate(ids_np):
-                             # Generic 'value' argument
-                             val = float(val_vec[i])
-
-                             # Unified Context Pattern
-                             ctx = SignalContext(
-                                 sample_id=int(uid),
-                                 subscribed_value=val,
+                         if meta.get('batched'):
+                             # Vectorized path: build ONE context for the whole
+                             # batch and call the signal once. It returns a length-B
+                             # array. Avoids B Python calls + B SignalContext allocs,
+                             # and lets the signal do batched ledger reads.
+                             bctx = BatchSignalContext(
+                                 sample_ids=[int(u) for u in ids_np],
+                                 subscribed_values=[float(v) for v in val_vec],
                                  logger=ledgers.get_logger(),
                                  dataframe=df_proxy,
-                                 origin=kwargs.get('origin', 'train')
+                                 origin=kwargs.get('origin', 'train'),
                              )
-                             try:
-                                 res = func(ctx) # Compute per sample result with unified context
-                             except TypeError:
-                                 # Fallback for legacy subscriber functions
-                                 res = func(sample_id=int(uid), value=val, dataframe=df_proxy)
+                             res = func(bctx)
+                             res = res.tolist() if hasattr(res, 'tolist') else list(res)
+                             signal_value = [float(x) for x in res]
+                         else:
+                             batch_res = {}
+                             for i, uid in enumerate(ids_np):
+                                 # Generic 'value' argument
+                                 val = float(val_vec[i])
 
-                             batch_res[uid] = res
-                         signal_value = list(batch_res.values())
+                                 # Unified Context Pattern
+                                 ctx = SignalContext(
+                                     sample_id=int(uid),
+                                     subscribed_value=val,
+                                     logger=ledgers.get_logger(),
+                                     dataframe=df_proxy,
+                                     origin=kwargs.get('origin', 'train')
+                                 )
+                                 try:
+                                     res = func(ctx) # Compute per sample result with unified context
+                                 except TypeError:
+                                     # Fallback for legacy subscriber functions
+                                     res = func(sample_id=int(uid), value=val, dataframe=df_proxy)
+
+                                 batch_res[uid] = res
+                             signal_value = list(batch_res.values())
                          dynamic_updates[name] = signal_value
                          if dynamic_updates and meta.get('log', True):
                              logger.debug(f"Dynamic updates computed for signal '{reg_name}': {list(dynamic_updates.keys())}")
