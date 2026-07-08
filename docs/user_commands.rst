@@ -26,7 +26,7 @@ so it's available anywhere the package is installed — no ``python -m`` needed.
 
 .. code-block:: text
 
-   weightslab {se,ui,start,cli,help} ...
+   weightslab {se,ui,start,cli,tunnel,help} ...
 
 Running ``weightslab``, ``weightslab -h`` / ``--help``, or ``weightslab help``
 with no further arguments prints the banner and this same command summary.
@@ -44,6 +44,8 @@ with no further arguments prints the banner and this same command summary.
      - Run a bundled PyTorch example in the foreground.
    * - ``weightslab cli``
      - Open an interactive console connected to a running experiment.
+   * - ``weightslab tunnel``
+     - Forward a remote gRPC backend (e.g. a Colab run) to a local port so the UI can reach it.
    * - ``weightslab help``
      - Show the help/banner (same as no command, or ``-h``).
 
@@ -211,6 +213,75 @@ no arguments).
    weightslab cli                    # auto-discover the running experiment
    weightslab cli --port 60000       # connect to a specific port
    weightslab cli --host 10.0.0.5 --port 60000
+
+weightslab tunnel
+~~~~~~~~~~~~~~~~~~
+
+**Syntax**
+
+.. code-block:: bash
+
+   weightslab tunnel [ENDPOINT] [--listen-port N] [--listen-host H] [--remote-port N]
+
+Forwards a **remote** gRPC training backend to a **local** TCP port so the
+Weights Studio UI — whose Envoy proxy dials ``localhost:50051`` — connects to
+it as if it were local. This is what lets you **train on a remote machine (e.g.
+Google Colab) and watch it live in Studio running on your laptop**: Colab has no
+Docker daemon, so you run the UI locally and bridge the remote backend to it.
+
+It is a raw byte forwarder (no protocol parsing) because the browser speaks
+gRPC-Web to Envoy and Envoy speaks native HTTP/2 gRPC to its upstream — those
+HTTP/2 frames must pass through untouched. Two consequences:
+
+- The remote tunnel must be **raw TCP** (e.g. ``ngrok tcp 50051``), *not* an
+  HTTP/gRPC-Web tunnel.
+- The backend must run **plaintext** — the default ``weightslab ui launch``
+  (no ``--certs``) — so no TLS terminates mid-path.
+
+**Arguments**
+
+- ``ENDPOINT`` *(positional, optional)* — the remote backend as ``host:port``
+  (e.g. ``0.tcp.ngrok.io:12345``); a ``tcp://`` prefix is accepted and
+  stripped. Default: the ``WEIGHTSLAB_TUNNEL_ENDPOINT`` environment variable, so
+  a bare ``weightslab tunnel`` works once that is exported.
+- ``--listen-port``, ``-p`` *(int)* — local port to expose. Default: **50051**
+  (the port the bundled Envoy upstream dials — leave it unless you changed
+  ``GRPC_BACKEND_PORT``).
+- ``--listen-host`` *(str)* — interface to bind. Default: **auto** —
+  ``127.0.0.1`` on Windows/macOS (Docker Desktop reaches host loopback via
+  ``host.docker.internal``), ``0.0.0.0`` on Linux (compose ``host-gateway``
+  resolves to the bridge IP, which cannot reach a loopback-only listener).
+- ``--remote-port`` *(int)* — the remote port, when ``ENDPOINT`` has only a
+  host and no ``:port``.
+
+**Examples**
+
+.. code-block:: bash
+
+   weightslab tunnel 0.tcp.ngrok.io:12345         # bridge remote backend -> localhost:50051
+   weightslab tunnel tcp://0.tcp.ngrok.io:12345   # tcp:// prefix is fine
+   weightslab tunnel                              # uses $WEIGHTSLAB_TUNNEL_ENDPOINT
+   weightslab tunnel host.example.com --remote-port 50051
+   weightslab tunnel host:50051 -p 50055          # expose locally on a different port
+
+**Typical workflow** (Colab backend, local UI):
+
+.. code-block:: bash
+
+   # 1) In Colab: expose the training backend over raw TCP (prints host:port)
+   #    from pyngrok import ngrok; ngrok.connect(50051, "tcp")
+
+   # 2) On your machine, in two terminals:
+   weightslab ui launch                           # plaintext HTTP (default)
+   weightslab tunnel 0.tcp.ngrok.io:12345         # the host:port ngrok printed
+
+   # 3) Open http://localhost:5173 — Studio streams live from Colab.
+
+The command probes the remote on startup (warning, not fatal, if it isn't up
+yet), re-resolves the endpoint per connection (so a changing tunnel IP is picked
+up), and runs until ``Ctrl+C``. See the classification Colab notebook
+(``examples/Notebooks/PyTorch/ws-classification.ipynb``) for the end-to-end
+setup.
 
 .. _cli-console:
 
