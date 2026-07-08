@@ -233,8 +233,10 @@ It is a raw byte forwarder (no protocol parsing) because the browser speaks
 gRPC-Web to Envoy and Envoy speaks native HTTP/2 gRPC to its upstream — those
 HTTP/2 frames must pass through untouched. Two consequences:
 
-- The remote tunnel must be **raw TCP** (e.g. ``ngrok tcp 50051``), *not* an
-  HTTP/gRPC-Web tunnel.
+- The remote tunnel must be **raw TCP**, *not* an HTTP/gRPC-Web tunnel. A
+  zero-signup option is `bore <https://github.com/ekzhang/bore>`_ with its free
+  public relay: ``bore local 50051 --to bore.pub`` (prints ``bore.pub:<port>``).
+  ``ngrok tcp 50051`` also works but now requires a credit card on the free tier.
 - The backend must run **plaintext** — the default ``weightslab ui launch``
   (no ``--certs``) — so no TLS terminates mid-path.
 
@@ -258,8 +260,8 @@ HTTP/2 frames must pass through untouched. Two consequences:
 
 .. code-block:: bash
 
-   weightslab tunnel 0.tcp.ngrok.io:12345         # bridge remote backend -> localhost:50051
-   weightslab tunnel tcp://0.tcp.ngrok.io:12345   # tcp:// prefix is fine
+   weightslab tunnel bore.pub:12345               # bridge remote backend -> localhost:50051
+   weightslab tunnel tcp://bore.pub:12345         # tcp:// prefix is fine
    weightslab tunnel                              # uses $WEIGHTSLAB_TUNNEL_ENDPOINT
    weightslab tunnel host.example.com --remote-port 50051
    weightslab tunnel host:50051 -p 50055          # expose locally on a different port
@@ -268,12 +270,12 @@ HTTP/2 frames must pass through untouched. Two consequences:
 
 .. code-block:: bash
 
-   # 1) In Colab: expose the training backend over raw TCP (prints host:port)
-   #    from pyngrok import ngrok; ngrok.connect(50051, "tcp")
+   # 1) In Colab: expose the training backend over raw TCP (prints bore.pub:<port>)
+   #    !bore local 50051 --to bore.pub
 
    # 2) On your machine, in two terminals:
    weightslab ui launch                           # plaintext HTTP (default)
-   weightslab tunnel 0.tcp.ngrok.io:12345         # the host:port ngrok printed
+   weightslab tunnel bore.pub:12345               # the host:port bore printed
 
    # 3) Open http://localhost:5173 — Studio streams live from Colab.
 

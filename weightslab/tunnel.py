@@ -1,8 +1,8 @@
 """Raw-TCP tunnel client for Weights Studio.
 
 Exposes a *remote* gRPC training backend — e.g. a Google Colab run sitting behind
-an ``ngrok tcp 50051`` tunnel — on a **local** port, so the bundled Weights Studio
-Docker stack connects to it as if it were local. The stack's Envoy proxy dials
+a raw-TCP tunnel — on a **local** port, so the bundled Weights Studio Docker
+stack connects to it as if it were local. The stack's Envoy proxy dials
 ``localhost:50051`` (see the ``grpc_service`` upstream in the bundled envoy
 config), so making the remote backend appear there needs no change to the UI at
 all: just run ``weightslab ui launch`` and this tunnel side by side.
@@ -11,9 +11,10 @@ Why a *raw* byte forwarder (no protocol parsing): the browser speaks gRPC-Web to
 Envoy, and Envoy speaks native HTTP/2 gRPC to its upstream. Those HTTP/2 frames
 must pass through byte-for-byte — anything that re-frames them (an HTTP/1 proxy,
 a gRPC-Web tunnel) breaks the connection. So this shuttles bytes both ways and
-leaves the protocol untouched. The matching remote tunnel (``ngrok tcp``) must
-likewise be raw TCP, and the backend must run **plaintext** (the default
-``weightslab ui launch`` — no ``--certs``) so no TLS terminates mid-path.
+leaves the protocol untouched. The matching remote tunnel must likewise be raw
+TCP — ``bore local 50051 --to bore.pub`` (zero-signup) or ``ngrok tcp 50051``
+(needs a card on the free tier) — and the backend must run **plaintext** (the
+default ``weightslab ui launch`` — no ``--certs``) so no TLS terminates mid-path.
 """
 
 import logging
@@ -143,8 +144,8 @@ def run_tunnel(remote_host: str, remote_port: int,
     except OSError as exc:
         logger.warning(
             f"Remote {remote_host}:{remote_port} not reachable yet ({exc}). "
-            "Starting anyway — is the Colab training cell running with the ngrok "
-            "tunnel up?"
+            "Starting anyway — is the Colab training cell running with the tunnel "
+            "(e.g. bore) up?"
         )
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -193,8 +194,8 @@ def tunnel_connect(args) -> None:
         logger.error(
             "No endpoint given. Pass it as an argument or set "
             f"{_ENDPOINT_ENV_VAR}.\n"
-            "  e.g. weightslab tunnel 0.tcp.ngrok.io:12345\n"
-            f"  or   export {_ENDPOINT_ENV_VAR}=0.tcp.ngrok.io:12345 && weightslab tunnel"
+            "  e.g. weightslab tunnel bore.pub:12345\n"
+            f"  or   export {_ENDPOINT_ENV_VAR}=bore.pub:12345 && weightslab tunnel"
         )
         sys.exit(2)
 

@@ -178,7 +178,7 @@ commands:
                            stack — whose Envoy dials localhost:50051 — reaches
                            it. Run alongside `weightslab ui launch`. Raw TCP, so
                            the backend must be plaintext (default launch).
-                             ENDPOINT remote host:port (e.g. 0.tcp.ngrok.io:12345)
+                             ENDPOINT remote host:port (e.g. bore.pub:12345)
                                              (default: $WEIGHTSLAB_TUNNEL_ENDPOINT)
                              --listen-port N local port to expose (default 50051)
                              --listen-host H interface to bind (default: auto)
@@ -198,7 +198,7 @@ examples:
   weightslab start example --2d_det # run the 2D LiDAR detection demo
   weightslab cli # connect a terminal to the running experiment
   weightslab cli --port 60000 # connect to a specific CLI port
-  weightslab tunnel 0.tcp.ngrok.io:12345 # expose a remote (Colab) backend at localhost:50051 for the UI
+  weightslab tunnel bore.pub:12345 # expose a remote (Colab) backend at localhost:50051 for the UI
 """
 
 
@@ -1191,7 +1191,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "to a local port for the UI")
     tunnel_parser.add_argument(
         'endpoint', nargs='?', default=None,
-        help="Remote backend endpoint host:port (e.g. 0.tcp.ngrok.io:12345). "
+        help="Remote backend endpoint host:port (e.g. bore.pub:12345). "
              "A tcp:// prefix is accepted. Default: $WEIGHTSLAB_TUNNEL_ENDPOINT.")
     tunnel_parser.add_argument(
         '--listen-port', '-p', type=int, default=DEFAULT_LISTEN_PORT,
