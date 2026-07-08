@@ -2423,14 +2423,14 @@ class LedgeredDataFrameManager:
             self._buffer = {}
 
         if buffered:
-            logger.info(f"Flushing {len(buffered)} buffered records to DataFrame (non-blocking).")
+            logger.debug(f"Flushing {len(buffered)} buffered records to DataFrame (non-blocking).")
             self._apply_buffer_records_nonblocking(buffered)
-            logger.info(f"Applied {len(buffered)} buffered records to DataFrame (non-blocking).")
+            logger.debug(f"Applied {len(buffered)} buffered records to DataFrame (non-blocking).")
 
         # Always check H5 flush even when buffer was empty (pending rows must drain too).
-        logger.info(f"Checking if flush to H5 is needed (non-blocking). Pending count: {len(self._pending)}.")
+        logger.debug(f"Checking if flush to H5 is needed (non-blocking). Pending count: {len(self._pending)}.")
         self._flush_to_h5_if_needed(force=force)
-        logger.info(f"Completed non-blocking flush check. Pending count after flush: {len(self._pending)}.")
+        logger.debug(f"Completed non-blocking flush check. Pending count after flush: {len(self._pending)}.")
 
     def flush(self):
         """Blocking flush: buffer → DF → H5.
@@ -2446,14 +2446,14 @@ class LedgeredDataFrameManager:
 
         # Step 2: apply to DF (blocking _lock acquisition; outside buffer lock).
         if buffered:
-            logger.info(f"Flushing {len(buffered)} buffered records to DataFrame.")
+            logger.debug(f"Flushing {len(buffered)} buffered records to DataFrame.")
             self._apply_buffer_records(buffered)
-            logger.info(f"Applied {len(buffered)} buffered records to DataFrame.")
+            logger.debug(f"Applied {len(buffered)} buffered records to DataFrame.")
 
         # Step 3: flush DF → H5 (outside buffer lock).
-        logger.info(f"Checking if flush to H5 is needed. Pending count: {len(self._pending)}.")
+        logger.debug(f"Checking if flush to H5 is needed. Pending count: {len(self._pending)}.")
         self._flush_to_h5_if_needed(force=True, blocking=True)
-        logger.info(f"Completed flush. Pending count after flush: {len(self._pending)}.")
+        logger.debug(f"Completed flush. Pending count after flush: {len(self._pending)}.")
 
 # Create global instance with config-driven parameters
 def create_ledger_manager():

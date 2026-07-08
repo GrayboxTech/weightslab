@@ -1074,7 +1074,8 @@ def start_training(timeout: int = None) -> None:
     pause_ctrl.resume() # Ensure we're not paused if start_training is called after serve
 
 def serve(serving_cli: bool = True, serving_grpc: bool = False,
-          spawn_cli_client: bool = False, **kwargs) -> None:
+          spawn_cli_client: bool = False, serving_bore: bool = False,
+          bore_port: int = None, **kwargs):
     """Start WeightsLab services.
 
     Args:
@@ -1085,18 +1086,55 @@ def serve(serving_cli: bool = True, serving_grpc: bool = False,
             behavior). Set to ``False`` to start the CLI server *headless* — it
             still advertises its port, so you can attach on demand from any
             terminal with ``weightslab cli`` (or ``weightslab cli --port <port>``).
+        serving_bore: Expose the gRPC backend to the internet via a zero-signup
+            `bore <https://github.com/ekzhang/bore>`_ raw-TCP relay, so a Weights
+            Studio running on another machine can reach it (e.g. training in
+            Google Colab, UI on your laptop). Prints the public endpoint and the
+            two commands to run locally (``weightslab ui launch`` +
+            ``weightslab tunnel <endpoint>``). Implies a gRPC backend. Uses the
+            shared public relay ``bore.pub`` — the random port is the only thing
+            guarding it, so keep it to non-sensitive demos.
+        bore_port: Port to expose when ``serving_bore`` is set. Defaults to the
+            gRPC port (``grpc_port`` kwarg, else ``$GRPC_BACKEND_PORT``, else
+            50051).
         **kwargs: Extra server options passed to underlying backends
             (e.g. ``cli_host``, ``cli_port``, ``grpc_port``).
+
+    Returns:
+        The public ``host:port`` bore endpoint string when ``serving_bore`` is
+        set and the tunnel came up, otherwise ``None``.
     """
 
     if serving_grpc:
         grpc_serve(**kwargs)
+
+    bore_endpoint = None
+    if serving_bore:
+        from weightslab.tunnel import serve_bore
+        port = (bore_port
+                or kwargs.get("grpc_port")
+                or int(os.getenv("GRPC_BACKEND_PORT", 50051)))
+        if not serving_grpc:
+            logger.warning(
+                "serving_bore=True but serving_grpc=False — the tunnel will have "
+                "no gRPC backend to expose. Set serving_grpc=True."
+            )
+        bore_endpoint = serve_bore(port=port)
+        if bore_endpoint:
+            print("=" * 60)
+            print(f" Backend exposed via bore at: {bore_endpoint}")
+            print(" On your local machine (Docker running), run:")
+            print("     weightslab ui launch")
+            print(f"     weightslab tunnel {bore_endpoint}")
+            print("=" * 60)
 
     if serving_cli:
         # The explicit parameter is the source of truth; drop any duplicate
         # spawn_client passed through kwargs so we don't pass it twice.
         kwargs.pop("spawn_client", None)
         cli_serve(spawn_client=spawn_cli_client, **kwargs)
+
+    return bore_endpoint
 
 
 def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
@@ -3190,6 +3228,7 @@ def write_history(
     experiment_hash: str | None = None,
     sample_id=None,
     instance_id=None,
+    verbose: bool = False,
 ) -> str:
     """Dump signal history to *path* as JSON or CSV.
 
@@ -3266,6 +3305,10 @@ def write_history(
         sample_id, instance_id,
     )
 
+    # Progress lines are INFO only when verbose; otherwise DEBUG (quiet by
+    # default so periodic exports don't spam a training log).
+    _log = logger.info if verbose else logger.debug
+
     _lg = get_logger()
     if _lg is None:
         logger.warning(
@@ -3287,7 +3330,7 @@ def write_history(
             logger.debug("write_history: failed to resolve root_log_dir (%s); "
                          "falling back to current directory.", _e)
             path = "."
-        logger.info("write_history: no path given, using output directory %r.", path)
+        _log("write_history: no path given, using output directory %r.", path)
 
     fmt = format.lower().strip()
 
@@ -3332,7 +3375,7 @@ def write_history(
     write_sample = _type in ("all", "sample")
     write_instance = _type in ("all", "instance")
 
-    logger.info(
+    _log(
         "write_history: resolved filters → type=%r, experiment_hash=%s, "
         "graph_name=%s, sample_id=%s, instance_id=%s",
         _type,
@@ -3357,10 +3400,10 @@ def write_history(
         )
         _phash = _hashlib.md5(str(_params_key).encode()).hexdigest()[:8]
         path = _os.path.join(path, f"{_phash}_history.{fmt}")
-        logger.info("write_history: auto-generated filename %r (params hash "
-                    "%s).", _os.path.basename(path), _phash)
+        _log("write_history: auto-generated filename %r (params hash "
+             "%s).", _os.path.basename(path), _phash)
     _os.makedirs(_os.path.dirname(_os.path.abspath(path)), exist_ok=True)
-    logger.info("write_history: output file → %s", _os.path.abspath(path))
+    _log("write_history: output file → %s", _os.path.abspath(path))
 
     global_rows: list = []
     sample_rows: list = []
@@ -3474,7 +3517,7 @@ def write_history(
         )
 
     _total = len(global_rows) + len(sample_rows) + len(instance_rows)
-    logger.info(
+    _log(
         "write_history: wrote %d row(s) (global=%d, sample=%d, instance=%d) "
         "as %s to %s",
         _total, len(global_rows), len(sample_rows), len(instance_rows),
@@ -3497,6 +3540,7 @@ def write_dataframe(
     columns=None,
     sample_id=None,
     instance_id=None,
+    verbose: bool = False,
 ) -> str:
     """Dump the WeightsLab sample dataframe to *path* as JSON or CSV.
 
@@ -3573,6 +3617,9 @@ def write_dataframe(
         path, format, columns, sample_id, instance_id,
     )
 
+    # INFO only when verbose; DEBUG otherwise (quiet periodic exports).
+    _log = logger.info if verbose else logger.debug
+
     _dm = get_dataframe()
     if _dm is None:
         logger.warning(
@@ -3592,7 +3639,7 @@ def write_dataframe(
             logger.debug("write_dataframe: failed to resolve root_log_dir (%s); "
                          "falling back to current directory.", _e)
             path = "."
-        logger.info("write_dataframe: no path given, using output directory %r.", path)
+        _log("write_dataframe: no path given, using output directory %r.", path)
 
     fmt = format.lower().strip()
 
@@ -3611,7 +3658,7 @@ def write_dataframe(
     if columns is not None and not (isinstance(columns, str) and columns.lower() == "all"):
         _col_filter = [columns] if isinstance(columns, str) else list(columns)
 
-    logger.info(
+    _log(
         "write_dataframe: resolved filters → columns=%s, sample_id=%s, instance_id=%s",
         _col_filter if _col_filter is not None else "<all>",
         _sid_filter if _sid_filter is not None else "<all>",
@@ -3629,10 +3676,10 @@ def write_dataframe(
         )
         _phash = _hashlib.md5(str(_params_key).encode()).hexdigest()[:8]
         path = _os.path.join(path, f"{_phash}_dataframe.{fmt}")
-        logger.info("write_dataframe: auto-generated filename %r (params hash %s).",
-                    _os.path.basename(path), _phash)
+        _log("write_dataframe: auto-generated filename %r (params hash %s).",
+             _os.path.basename(path), _phash)
     _os.makedirs(_os.path.dirname(_os.path.abspath(path)), exist_ok=True)
-    logger.info("write_dataframe: output file → %s", _os.path.abspath(path))
+    _log("write_dataframe: output file → %s", _os.path.abspath(path))
 
     # Flush pending buffer to H5 before reading
     try:

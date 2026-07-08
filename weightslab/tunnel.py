@@ -19,7 +19,9 @@ default ``weightslab ui launch`` — no ``--certs``) so no TLS terminates mid-pa
 
 import logging
 import os
+import re
 import socket
+import subprocess
 import sys
 import threading
 
@@ -28,6 +30,15 @@ logger = logging.getLogger(__name__)
 # Env var read as the default ENDPOINT so a bare ``weightslab tunnel`` works
 # once it is exported (e.g. the notebook can print `export WEIGHTSLAB_TUNNEL_ENDPOINT=...`).
 _ENDPOINT_ENV_VAR = "WEIGHTSLAB_TUNNEL_ENDPOINT"
+
+# `bore` (https://github.com/ekzhang/bore) — the zero-signup raw-TCP relay used
+# by the ``serving_bore`` path of ``wl.serve`` to expose a training backend
+# (e.g. from Colab) to the internet so a local Weights Studio can reach it.
+_BORE_VERSION = "v0.6.0"
+_BORE_RELAY = "bore.pub"
+# Keep spawned bore processes referenced so they are not garbage-collected
+# (which would close their pipes and drop the tunnel) while the kernel lives.
+_BORE_PROCS = []
 
 # The local port the bundled Envoy upstream dials (GRPC_BACKEND_PORT default).
 # Binding here makes a remote backend look local to the UI stack.
@@ -210,3 +221,129 @@ def tunnel_connect(args) -> None:
     listen_port = getattr(args, "listen_port", None) or DEFAULT_LISTEN_PORT
     rc = run_tunnel(host, port, listen_host=listen_host, listen_port=listen_port)
     sys.exit(rc or 0)
+
+
+# ---------------------------------------------------------------------------
+# Server side: expose a LOCAL backend port to the internet via a bore relay.
+# This is the counterpart of the client above — it runs on the training host
+# (e.g. Colab) and is what ``wl.serve(serving_bore=True)`` drives.
+# ---------------------------------------------------------------------------
+
+def _bore_asset(version: str):
+    """Return ``(asset_filename, archive_kind)`` for the running platform."""
+    import platform
+
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    arch = {"x86_64": "x86_64", "amd64": "x86_64",
+            "aarch64": "aarch64", "arm64": "aarch64"}.get(machine)
+    if system == "linux" and arch:
+        return f"bore-{version}-{arch}-unknown-linux-musl.tar.gz", "tar"
+    if system == "darwin" and arch:
+        return f"bore-{version}-{arch}-apple-darwin.tar.gz", "tar"
+    if system == "windows":
+        return f"bore-{version}-x86_64-pc-windows-msvc.zip", "zip"
+    raise RuntimeError(
+        f"No prebuilt bore binary for {system}/{machine}. "
+        "Install bore manually (https://github.com/ekzhang/bore) and put it on PATH."
+    )
+
+
+def _ensure_bore(version: str = _BORE_VERSION) -> str:
+    """Return a path to a runnable ``bore`` binary, downloading it if needed.
+
+    Prefers a ``bore`` already on PATH; otherwise downloads the release asset
+    for this platform into ``~/.weightslab/bin`` and caches it there.
+    """
+    import shutil
+    from pathlib import Path
+
+    on_path = shutil.which("bore")
+    if on_path:
+        return on_path
+
+    cache = Path.home() / ".weightslab" / "bin"
+    cache.mkdir(parents=True, exist_ok=True)
+    exe = cache / ("bore.exe" if sys.platform == "win32" else "bore")
+    if exe.exists():
+        return str(exe)
+
+    import tarfile
+    import tempfile
+    import urllib.request
+    import zipfile
+
+    asset, kind = _bore_asset(version)
+    url = f"https://github.com/ekzhang/bore/releases/download/{version}/{asset}"
+    logger.info(f"Downloading bore {version} ({asset})...")
+    tmp = Path(tempfile.mkdtemp())
+    archive = tmp / asset
+    urllib.request.urlretrieve(url, archive)
+    if kind == "tar":
+        with tarfile.open(archive) as t:
+            t.extractall(tmp)
+    else:
+        with zipfile.ZipFile(archive) as z:
+            z.extractall(tmp)
+
+    found = None
+    for p in tmp.rglob("bore*"):
+        if p.is_file() and p.suffix in ("", ".exe"):
+            found = p
+            break
+    if found is None:
+        raise RuntimeError(f"bore binary not found inside {asset}")
+    shutil.copy2(found, exe)
+    if sys.platform != "win32":
+        os.chmod(exe, 0o755)
+    return str(exe)
+
+
+def serve_bore(port: int = DEFAULT_LISTEN_PORT, relay: str = _BORE_RELAY,
+               version: str = _BORE_VERSION, timeout: float = 30.0):
+    """Expose local ``port`` to the internet over a raw-TCP bore relay.
+
+    Downloads the bore client if needed, starts ``bore local <port> --to
+    <relay>`` in the background, and returns the public endpoint string (e.g.
+    ``"bore.pub:53984"``), or ``None`` if no endpoint was reported within
+    ``timeout`` seconds. Non-blocking beyond that initial handshake — the tunnel
+    keeps running in the background for the life of the process.
+
+    Security note: the public relay (``bore.pub``) is shared; the random remote
+    port is the only thing guarding the endpoint. Fine for a demo, not for
+    sensitive data.
+    """
+    try:
+        bore = _ensure_bore(version)
+    except Exception as exc:  # download / platform failure — non-fatal for serve()
+        logger.warning(f"Could not set up bore tunnel: {exc}")
+        return None
+
+    proc = subprocess.Popen(
+        [bore, "local", str(port), "--to", relay],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+    )
+    _BORE_PROCS.append(proc)
+
+    result = {"endpoint": None}
+    found = threading.Event()
+    relay_re = re.compile(re.escape(relay) + r":(\d+)")
+
+    def _read():
+        # One reader thread both captures the endpoint and keeps draining the
+        # pipe afterwards, so it never fills and stalls the tunnel.
+        for line in proc.stdout:
+            if result["endpoint"] is None:
+                m = relay_re.search(line)
+                if m:
+                    result["endpoint"] = f"{relay}:{m.group(1)}"
+                    found.set()
+
+    threading.Thread(target=_read, daemon=True).start()
+    found.wait(timeout)
+    if result["endpoint"] is None:
+        logger.warning(
+            f"bore did not report an endpoint within {timeout:.0f}s "
+            "(is the relay reachable?)."
+        )
+    return result["endpoint"]

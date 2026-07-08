@@ -279,6 +279,13 @@ HTTP/2 frames must pass through untouched. Two consequences:
 
    # 3) Open http://localhost:5173 — Studio streams live from Colab.
 
+.. note::
+
+   Step 1 can be done for you: call ``wl.serve(serving_grpc=True,
+   serving_bore=True)`` in the training script. It downloads ``bore``, opens the
+   relay, and prints the exact ``weightslab tunnel bore.pub:<port>`` line to run
+   on your machine — see ``serve`` in :doc:`user_functions`.
+
 The command probes the remote on startup (warning, not fatal, if it isn't up
 yet), re-resolves the endpoint per connection (so a changing tunnel IP is picked
 up), and runs until ``Ctrl+C``. See the classification Colab notebook
