@@ -101,3 +101,12 @@ filter by pair distance to find the hardest negatives.
 
       weightslab ui launch           # 1. deploy the studio
       weightslab start example --gen # 2. start the generation / anomaly demo
+
+
+.. raw:: html
+
+   <div style="text-align:right; margin-top:2rem;">
+     <a href="https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/PyTorch/ws-generation.ipynb" target="_blank" rel="noopener noreferrer">
+       <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab">
+     </a>
+   </div>

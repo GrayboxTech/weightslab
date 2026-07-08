@@ -208,3 +208,12 @@ Workflow in the studio
 
    To run the full loss-shape example (with the ``@wl.signal(subscribe_to=...)``
    classifier active), use the direct path above.
+
+
+.. raw:: html
+
+   <div style="text-align:right; margin-top:2rem;">
+     <a href="https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/Usecases/ws-segmentation-loss-shapes.ipynb" target="_blank" rel="noopener noreferrer">
+       <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab">
+     </a>
+   </div>
