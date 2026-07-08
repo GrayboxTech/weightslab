@@ -159,6 +159,7 @@ ones when debugging:
 | `ENABLE_DATA_EXPLORATION` | `1` | `0`/`false` removes the data grid + metadata/details panel and stops the data/metadata auto-refresh. |
 | `ENABLE_HYPERPARAMETERS_OPTIMIZATION` | `1` | `0`/`false` removes the Hyperparameters section, makes HP inputs read-only, and stops the HP poll. |
 | `ENABLE_AGENT` | `1` | `0`/`false` removes the agent chat bar + history panel and stops the agent health poll. |
+| `ENABLE_NOTEBOOK` | `1` | `0`/`false` removes the notebook button (left of the logo) + notebook window. The notebook runs Python in a shared in-process kernel against the live experiment (`df`, model, checkpoints), persisted as `notebook.ipynb` under `root_log_dir`; `>`-prefixed cells ask the agent to propose code. |
 
 > **VITE_ vs WS_/BB_/ENABLE_:** `VITE_*` variables are baked at **build time**
 > (changing them needs a rebuild). `WS_*` / `BB_*` / `ENABLE_*` are injected at

@@ -1070,6 +1070,14 @@ enabled**; set it to ``0`` / ``false`` / ``no`` / ``off`` (any case) to disable.
      - When disabled, removes the agent chat input bar (and its send button) and
        the chat-history panel, and stops the agent health-check poll. Dev-server
        fallback: ``VITE_ENABLE_AGENT``.
+   * - ``ENABLE_NOTEBOOK``
+     - ``1``
+     - When disabled, removes the notebook button (left of the logo) and the
+       notebook window. The notebook is a Jupyter-like panel that runs Python in a
+       shared in-process kernel against the live experiment (``df``, model,
+       checkpoints); cells starting with ``>`` ask the agent to propose code. The
+       notebook document is persisted as ``notebook.ipynb`` under the experiment
+       ``root_log_dir``. Dev-server fallback: ``VITE_ENABLE_NOTEBOOK``.
 
 .. note::
 

@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 
 # Ensure intent_prompt is accessible
 from .intent_prompt import INTENT_PROMPT
+from .notebook_prompt import NOTEBOOK_CODE_PROMPT
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.trainer.trainer_tools import get_layer_representations
 
@@ -1867,3 +1868,91 @@ class DataManipulationAgent:
 
         _LOGGER.info(f"[Agent] Query total wall time: {time.perf_counter() - _query_t0:.2f}s (no provider succeeded)")
         return [{"function": "out_of_scope", "params": {"reason": error_msg}}]
+
+    # ------------------------------------------------------------------
+    # Notebook code generation
+    # ------------------------------------------------------------------
+
+    def _compact_schema_for_prompt(self) -> str:
+        """Return a short "- `col` (dtype)" listing of the live dataframe columns.
+
+        Reuses the cached schema built for query() so notebook code-gen does not
+        pay a second full stats pass.
+        """
+        try:
+            self._setup_schema()
+            meta = (self.df_schema or {}).get("metadata", {})
+            lines = [f"- `{col}` ({info.get('dtype', '?')})" for col, info in meta.items()]
+            return "\n".join(lines) if lines else "(no dataframe columns available yet)"
+        except Exception as exc:
+            _LOGGER.debug("notebook schema build failed: %s", exc)
+            return "(dataframe schema unavailable)"
+
+    @staticmethod
+    def _extract_code_and_explanation(text: str):
+        """Split an LLM reply into (code, explanation).
+
+        Prefers a fenced ```python block; falls back to the first generic fence,
+        then to treating the whole reply as code when no fence is present.
+        """
+        if text is None:
+            return "", ""
+        fence = re.search(r"```(?:python|py)?\s*\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
+        if fence:
+            code = fence.group(1).strip()
+            explanation = (text[:fence.start()] + text[fence.end():]).strip()
+            return code, explanation
+        return text.strip(), ""
+
+    def generate_code(self, prompt: str, context_code: str = ""):
+        """Propose Python for a notebook cell from a natural-language ``prompt``.
+
+        This does NOT execute anything and does NOT touch the intent pipeline; it
+        only asks the active LLM provider for runnable code. Returns a
+        ``(code, explanation)`` tuple. Raises RuntimeError when no provider is
+        configured so the service can report a clean error.
+        """
+        if not self.is_available():
+            raise RuntimeError(
+                "Agent not configured. Initialize a provider with /init (or run a "
+                "local Ollama server) before using \">\" notebook cells."
+            )
+
+        system_prompt = NOTEBOOK_CODE_PROMPT.format(
+            schema=self._compact_schema_for_prompt(),
+            context_code=(context_code or "(none)").strip(),
+        )
+        # Escape braces the same way _query_langchain does so ChatPromptTemplate
+        # does not treat stray { } in the schema/context as template variables.
+        escaped_sys = system_prompt.replace("{", "{{").replace("}", "}}")
+        chat_prompt = ChatPromptTemplate.from_messages(
+            [("system", escaped_sys), ("human", "{instruction}")]
+        )
+
+        order = [self.preferred_provider]
+        if self.fallback_to_local and self.preferred_provider != "ollama":
+            order.append("ollama")
+
+        last_error = None
+        for provider in order:
+            chain = getattr(self, f"chain_{provider}", None)
+            if chain is None:
+                continue
+            try:
+                response = (chat_prompt | chain).invoke({"instruction": prompt})
+                text = getattr(response, "content", None)
+                if text is None:
+                    text = str(response)
+                code, explanation = self._extract_code_and_explanation(text)
+                self.history.append(f"User (notebook): {prompt}")
+                self.history.append("Action: proposed notebook code")
+                return code, explanation
+            except Exception as exc:
+                last_error = exc
+                _LOGGER.warning("[notebook code-gen] provider %s failed: %s", provider, exc)
+                continue
+
+        raise RuntimeError(
+            f"Code generation failed: {last_error}" if last_error
+            else "Code generation failed: no provider produced a response."
+        )

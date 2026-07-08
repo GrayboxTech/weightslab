@@ -404,6 +404,26 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         return self._exp_service.agent_service.ResetAgent(request, context)
 
     # -------------------------------------------------------------------------
+    # Notebook (shared in-process kernel)
+    # -------------------------------------------------------------------------
+    def RunNotebookCell(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.RunNotebookCell(cell_id={request.cell_id!r})")
+        # Server-streaming RPC: delegate the generator directly.
+        return self._exp_service.notebook_service.RunNotebookCell(request, context)
+
+    def GetNotebook(self, request, context):
+        logger.debug("\nExperimentServiceServicer.GetNotebook()")
+        return self._exp_service.notebook_service.GetNotebook(request, context)
+
+    def SaveNotebook(self, request, context):
+        logger.debug("\nExperimentServiceServicer.SaveNotebook()")
+        return self._exp_service.notebook_service.SaveNotebook(request, context)
+
+    def GenerateNotebookCode(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.GenerateNotebookCode(prompt={request.prompt!r})")
+        return self._exp_service.notebook_service.GenerateNotebookCode(request, context)
+
+    # -------------------------------------------------------------------------
     # Logger data sync for WeightsStudio
     # -------------------------------------------------------------------------
     def GetLatestLoggerData(self, request, context):

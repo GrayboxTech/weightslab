@@ -17,6 +17,7 @@ from weightslab.backend.audit_logger import AuditLogger
 from weightslab.trainer.services.model_service import ModelService
 from weightslab.trainer.services.data_service import DataService
 from weightslab.trainer.services.agent_service import AgentService
+from weightslab.trainer.services.notebook_service import NotebookService
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.components.evaluation_controller import eval_controller
 
@@ -90,6 +91,9 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         # in-process, reusing the same code path as the ManipulateWeights RPC.
         self.data_service.model_service = self.model_service
         self.agent_service = AgentService(self.data_service)
+        # Shared in-process notebook kernel (studio UI). Reuses the data service
+        # for the live dataframe view and the agent for "> ..." code generation.
+        self.notebook_service = NotebookService(self.data_service, root_log_dir)
         # Per-instance in-flight counter for GetLatestLoggerData
         self._logger_data_in_flight = 0
         self._logger_data_counter_lock = threading.Lock()

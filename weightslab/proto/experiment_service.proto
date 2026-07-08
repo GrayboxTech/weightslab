@@ -35,6 +35,17 @@ service ExperimentService {
   rpc GetAgentModels (GetAgentModelsRequest) returns (GetAgentModelsResponse);
   rpc ResetAgent (Empty) returns (ResetAgentResponse);
 
+  // Notebook (shared in-process Python kernel for the studio UI). Cell output is
+  // server-streamed in chunks (stdout / stderr / result / image), mirroring
+  // GetPointCloud, so long-running cells report incrementally.
+  rpc RunNotebookCell (RunNotebookCellRequest) returns (stream NotebookCellChunk);
+  // Load the persisted notebook from root_log_dir (writes a default on first use).
+  rpc GetNotebook (Empty) returns (NotebookResponse);
+  // Persist the notebook JSON back under root_log_dir.
+  rpc SaveNotebook (SaveNotebookRequest) returns (SaveNotebookResponse);
+  // Ask the agent to propose Python code for a notebook cell ("> ..." cells).
+  rpc GenerateNotebookCode (GenerateNotebookCodeRequest) returns (GenerateNotebookCodeResponse);
+
   // Checkpoint restore
   rpc RestoreCheckpoint (RestoreCheckpointRequest) returns (RestoreCheckpointResponse);
 
@@ -595,4 +606,57 @@ message CancelEvaluationRequest {
 message CancelEvaluationResponse {
   bool success = 1;
   string message = 2;
+}
+
+// --- Notebook ---
+message RunNotebookCellRequest {
+  string code = 1;       // Python source of the cell to execute.
+  string cell_id = 2;    // Client-side identifier, echoed back for correlation.
+}
+
+// Marks the end of a cell run, after all output chunks have been streamed.
+message NotebookCellDone {
+  int32 exec_count = 1;  // Monotonic execution counter of the shared kernel.
+  bool ok = 2;           // False when the cell raised (see error_traceback).
+}
+
+// One incremental piece of a running cell's output.
+message NotebookCellChunk {
+  string cell_id = 1;
+  oneof payload {
+    string stdout = 2;
+    string stderr = 3;
+    string result_text = 4;       // repr() of the last expression, if any.
+    bytes image_png = 5;          // A matplotlib figure encoded as PNG.
+    string error_traceback = 6;   // Formatted traceback when the cell raised.
+    NotebookCellDone done = 7;    // Always the final chunk of a run.
+  }
+}
+
+message NotebookResponse {
+  string ipynb_json = 1;  // The notebook as ipynb (nbformat v4) JSON.
+  bool existed = 2;       // False when a default template was just created.
+  string path = 3;        // Absolute path of the notebook under root_log_dir.
+}
+
+message SaveNotebookRequest {
+  string ipynb_json = 1;
+}
+
+message SaveNotebookResponse {
+  bool ok = 1;
+  string path = 2;
+  string error = 3;
+}
+
+message GenerateNotebookCodeRequest {
+  string prompt = 1;         // The user's instruction (text after the leading ">").
+  string context_code = 2;   // Optional surrounding notebook code for context.
+}
+
+message GenerateNotebookCodeResponse {
+  string code = 1;         // Proposed Python for the cell.
+  string explanation = 2;  // Short natural-language explanation.
+  bool ok = 3;
+  string error = 4;
 }
