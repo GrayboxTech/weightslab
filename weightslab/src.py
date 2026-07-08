@@ -652,7 +652,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                              logger.debug(f"Dynamic updates computed for signal '{reg_name}': {list(dynamic_updates.keys())}")
                              _log_signal(sum(signal_value)/len(signal_value), signal_value, name, step=step, **kwargs) # Log custom subscribed signals
                      except Exception as e:
-                         logger.debug(f"Dynamic signal {name} failed: {e}")
+                         logger.error(f"Dynamic signal {name} failed: {e}")
                          pass # User function error, skip
 
     # Save statistics if requested and applicable.
