@@ -277,11 +277,41 @@ body[data-theme="dark"] .wl-only-dark {
   margin-bottom: 1rem;
 }
 
+.wl-eg-cardwrap {
+  position: relative;
+  display: flex;
+}
+
+.wl-eg-cardwrap > .wl-eg-card {
+  flex: 1;
+}
+
+/* "Open in Colab" badge, pinned bottom-right, above the card link. */
+.wl-eg-colab {
+  position: absolute;
+  right: 1rem;
+  bottom: 0.85rem;
+  z-index: 2;
+  line-height: 0;
+  border-radius: 4px;
+  transition: transform 0.12s;
+}
+
+.wl-eg-colab:hover {
+  transform: translateY(-1px);
+}
+
+.wl-eg-colab img {
+  height: 20px;
+  display: block;
+}
+
 .wl-eg-card {
   display: flex;
   flex-direction: column;
   gap: 0.55rem;
-  padding: 1.1rem 1.2rem 1rem;
+  /* extra bottom padding leaves room for the Colab badge */
+  padding: 1.1rem 1.2rem 2.6rem;
   border: 1.5px solid var(--color-background-border);
   border-radius: 0.65rem;
   background: var(--color-background-secondary);
