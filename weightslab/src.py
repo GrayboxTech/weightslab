@@ -578,9 +578,21 @@ def _extract_scalar_from_tensor(batch_scalar: th.Tensor | np.ndarray, out: th.Te
                     batch_scalar = _tmp
                 except Exception:
                     pass
-            # Merged batch scalar with ids
+            # Merged batch scalar with ids. Vectorize the tensor->python
+            # conversion: one .tolist() (a single device sync) instead of a
+            # per-element .item() in a comprehension (B device syncs + B python
+            # calls). This is on the per-step hot path — profiling showed the
+            # per-element version was a top self-time cost.
             if isinstance(batch_scalar, (th.Tensor, np.ndarray)) and ids is not None and len(batch_scalar) == len(ids):
-                batch_scalar = {ids[i].item() if isinstance(ids, th.Tensor) else ids[i]: batch_scalar[i].item() for i in range(len(batch_scalar))}
+                _vals = (batch_scalar.detach().cpu().tolist() if isinstance(batch_scalar, th.Tensor)
+                         else np.asarray(batch_scalar).tolist())
+                if isinstance(ids, th.Tensor):
+                    _keys = ids.detach().cpu().tolist()
+                elif isinstance(ids, np.ndarray):
+                    _keys = ids.tolist()
+                else:
+                    _keys = list(ids)
+                batch_scalar = dict(zip(_keys, _vals))
         # 2. Otherwise fall back to extracting from 'out'
         elif out is not None:
             if isinstance(out, th.Tensor):

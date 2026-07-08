@@ -194,7 +194,13 @@ class LoggerQueue:
             self._flush_stage()
 
     def _flush_stage(self) -> None:
-        """Bulk-insert all staged rows into DuckDB and clear the buffers."""
+        """Bulk-insert all staged rows into DuckDB and clear the buffers.
+
+        Uses ``register(pandas view) -> INSERT SELECT -> unregister``: this is
+        DuckDB's fast vectorized bulk-insert path. (A row-wise ``executemany``
+        from the staging tuples was measured ~6x SLOWER — DuckDB binds each row
+        individually — so despite the register/unregister showing up in profiles,
+        this stays the right approach for bulk.)"""
         with self._lock:
             if self._stage_signals:
                 df = pd.DataFrame(self._stage_signals, columns=_SIGNAL_COLS)
@@ -804,10 +810,44 @@ class LoggerQueue:
 
     def _query_per_sample_at_step_uncached(self, graph_name, ids_key, step, exp_hash, _version):
         """DuckDB read behind :meth:`query_per_sample_at_step`. ``_version`` is a
-        cache-key discriminant only. Returns an immutable tuple."""
+        cache-key discriminant only. Returns an immutable tuple.
+
+        Fast path: the value at *step* was almost always just staged this step
+        and is still in the in-memory staging buffer (not yet flushed to DuckDB).
+        The reactive gather reads exactly this — the current step's value — so
+        scanning the small staging list lets us skip the expensive
+        flush -> register(pandas) -> INSERT -> unregister -> SELECT round-trip
+        entirely (profiling showed that DuckDB dance is ~a third of per-step
+        cost). We only fall through to DuckDB when some requested id is NOT in
+        the buffer (a mid-step flush moved it, or it's an older step)."""
+        step = int(step)
         with self._lock:
+            if ids_key is not None:
+                ids_set = set(ids_key)
+                at = {}
+                # Scan the staging buffer from the end: it's append-ordered by
+                # seq (== non-decreasing step), so the target step's rows are
+                # near the tail. Grab the latest value per id (first seen going
+                # backwards wins) and stop as soon as all ids are found; break
+                # out entirely once we pass below `step` (no earlier row can
+                # match). Touches ~one batch of rows, not the whole 8k buffer.
+                for row in reversed(self._stage_sample):
+                    s = row[3]
+                    if s < step:
+                        break
+                    if s == step and row[0] == graph_name \
+                            and (exp_hash is None or row[1] == exp_hash):
+                        sid = row[2]
+                        if sid in ids_set and sid not in at:
+                            at[sid] = row[4]
+                            if len(at) == len(ids_set):
+                                break
+                if len(at) == len(ids_set):
+                    return tuple((sid, float(val)) for sid, val in at.items())
+
+            # Fallback: not fully in the staging buffer -> flush + query DuckDB.
             self._flush_stage()
-            params = [graph_name, int(step)]
+            params = [graph_name, step]
             sql = "SELECT sample_id, value FROM per_sample WHERE metric_name = ? AND step = ?"
             sql += self._hash_filter(exp_hash, params)
             if ids_key is not None:
