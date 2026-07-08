@@ -323,6 +323,7 @@ signal
        name: str,
        subscribe_to: str,
        compute_every_n_steps: int = 1,
+       min_step: int = 0,
        include_history: bool = False,
        include_history_metadata: bool = False
    )
@@ -345,6 +346,11 @@ sorting and root-cause analysis in the studio).
   ``ctx.subscribed_value``. If omitted, the signal is **static**.
 - ``compute_every_n_steps``: throttle for dynamic signals (e.g. ``10`` = compute
   on every 10th step the subscribed metric is produced).
+- ``min_step``: minimum training step before a dynamic signal starts firing.
+  While ``current_step < min_step`` the signal is skipped. Defaults to ``0``
+  (fire from the start). Use it when a signal needs enough history to be
+  meaningful — e.g. a loss-shape classifier that should only run once each
+  sample has a trajectory (``min_step=505``).
 
 **Static vs dynamic**
 

@@ -620,6 +620,12 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                  for name, func in subscribers:
                      meta = getattr(func, '_wl_signal_meta', {})
                      compute_every = meta.get('compute_every_n_steps', 1)
+                     min_step = meta.get('min_step', 0)
+
+                     # Warm-up gate: don't fire until we've reached min_step
+                     # (e.g. a signal that needs enough per-sample history).
+                     if current_step < min_step:
+                         continue
 
                      # Frequency Check
                      if current_step % compute_every != 0:
@@ -1192,7 +1198,8 @@ def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
         logger.info("Shutting down WeightsLab services.")
 
 
-def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, **kwargs):
+def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1,
+           min_step: int = 0, **kwargs):
     """
     Decorator that registers a custom signal function.
 
@@ -1204,6 +1211,12 @@ def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, 
         name: Public signal name. Defaults to decorated function name.
         subscribe_to: Optional signal/metric name this signal reacts to.
         compute_every_n_steps: Frequency for dynamic computation.
+        min_step: Minimum training step before a subscribed (dynamic) signal
+            starts firing. The signal is skipped while ``current_step <
+            min_step``. Defaults to ``0`` (fire from the start). Useful when a
+            signal needs enough history to be meaningful — e.g. a loss-shape
+            classifier that should only run once each sample has a trajectory
+            (``min_step=505``).
         **kwargs: Additional signal metadata stored in the ledger.
 
     Returns:
@@ -1213,7 +1226,8 @@ def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, 
         @wl.signal(name="blue_pixels")
         def compute_blue(sample, **kwargs): ...
 
-        @wl.signal(name="weighted_loss", subscribe_to="train_loss", compute_every_n_steps=10)
+        @wl.signal(name="weighted_loss", subscribe_to="train_loss",
+                   compute_every_n_steps=10, min_step=505)
         def compute_weighted(value, sample_id, **kwargs): ...
     """
     def decorator(func):
@@ -1226,6 +1240,7 @@ def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, 
         func._wl_signal_meta = kwargs
         func._wl_signal_meta['subscribe_to'] = subscribe_to
         func._wl_signal_meta['compute_every_n_steps'] = compute_every_n_steps
+        func._wl_signal_meta['min_step'] = min_step
         func._wl_signal_name = reg_name
 
         return func
