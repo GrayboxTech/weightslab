@@ -1073,6 +1073,24 @@ def start_training(timeout: int = None) -> None:
         time.sleep(timeout)
     pause_ctrl.resume() # Ensure we're not paused if start_training is called after serve
 
+
+def _running_in_notebook() -> bool:
+    """True when running inside a Jupyter notebook kernel or Google Colab.
+
+    Distinguishes a notebook kernel (``ZMQInteractiveShell``) / Colab from a
+    plain script or a terminal IPython session, so we only nudge users who can't
+    reach a locally-launched Weights Studio without a tunnel.
+    """
+    if "google.colab" in sys.modules:
+        return True
+    try:
+        from IPython import get_ipython
+        shell = get_ipython()
+        return shell is not None and shell.__class__.__name__ == "ZMQInteractiveShell"
+    except Exception:
+        return False
+
+
 def serve(serving_cli: bool = True, serving_grpc: bool = False,
           spawn_cli_client: bool = False, serving_bore: bool = False,
           bore_port: int = None, **kwargs):
@@ -1080,7 +1098,9 @@ def serve(serving_cli: bool = True, serving_grpc: bool = False,
 
     Args:
         serving_cli: Start the interactive CLI server.
-        serving_grpc: Start the gRPC server.
+        serving_grpc: Start the gRPC server. In a notebook/Colab, if this is on
+            but ``serving_bore`` is off, a warning suggests ``serving_bore=True``
+            (the UI runs on your own machine and needs a tunnel to reach here).
         spawn_cli_client: When ``serving_cli`` is True, also open the interactive
             REPL in a new console window (the default, backward-compatible
             behavior). Set to ``False`` to start the CLI server *headless* — it
@@ -1107,6 +1127,17 @@ def serve(serving_cli: bool = True, serving_grpc: bool = False,
 
     if serving_grpc:
         grpc_serve(**kwargs)
+
+    # In a notebook/Colab the backend has no local Weights Studio to talk to
+    # (the UI runs on the user's own machine). Nudge them to open a tunnel.
+    if serving_grpc and not serving_bore and _running_in_notebook():
+        logger.warning(
+            "Running in a notebook/Colab with serving_grpc=True but "
+            "serving_bore=False. Weights Studio runs on your OWN machine and "
+            "cannot reach this backend directly. Pass serving_bore=True to open "
+            "a tunnel and sync with the UI: wl.serve(serving_grpc=True, "
+            "serving_bore=True)."
+        )
 
     bore_endpoint = None
     if serving_bore:
