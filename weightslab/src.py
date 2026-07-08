@@ -79,13 +79,16 @@ def _gather_inputs_fresh(lg, inputs, ids, step):
     """Return ``{name: (B,) array}`` if EVERY input signal has a value AT *step*
     for EVERY sample id, else ``None``. Selects the value logged *at* `step`
     (not merely the latest) so a lagging signal-worker job for an older step
-    still gathers that step's inputs correctly."""
+    still gathers that step's inputs correctly.
+
+    Uses the ledger's value-at-step read (``query_per_sample_at_step``), which
+    returns O(batch) rows for the firing step rather than the full per-sample
+    history — so the gather stays flat as training accumulates steps. Repeated
+    reads of the same input across dependents (10 signals all reading the loss)
+    are collapsed by the ledger's per-signal, step-scoped query cache."""
     cols = {}
     for inp in inputs:
-        at = {}
-        for sid, s, val, _ in lg.query_per_sample(inp, sample_ids=ids):
-            if s == step:
-                at[int(sid)] = val
+        at = {int(sid): val for sid, val in lg.query_per_sample_at_step(inp, ids, step)}
         for sid in ids:
             if sid not in at:
                 return None
@@ -99,6 +102,7 @@ def _react_dependents(seed_names, batch_ids, step, origin='train'):
     *step* — order-independently, regardless of which input arrived last. Each
     fired signal is itself a seed (chaining) and fires at most once per step.
     Inputs are read from the logger, so ingested signals must be logged."""
+    _warn_on_signal_cycles()  # lazy, once/process — fires even with no wl.serve
     if batch_ids is None:
         return
     try:
@@ -165,6 +169,67 @@ def _react_dependents(seed_names, batch_ids, step, origin='train'):
             except Exception as e:
                 logger.debug(f"reactive persist '{name}' failed: {e}")
             queue.append(name)   # its value may satisfy further reactive signals
+
+
+def _detect_signal_cycles():
+    """Find circular dependencies in the reactive ``inputs`` graph.
+
+    Returns a list of cycles, each a list of signal names ending where it began
+    (e.g. ``['sig/X', 'sig/Y', 'sig/X']``). Only edges to OTHER registered
+    ``@wl.signal`` names are followed — base metrics (the watched loss, a plain
+    logged signal) are leaves, never part of a cycle. A signal in a cycle can
+    never fire (its inputs are never all fresh), so surfacing these turns a
+    silent no-fire into a diagnostic."""
+    graph = {}
+    for name, func in _REGISTERED_SIGNALS.items():
+        meta = getattr(func, '_wl_signal_meta', {})
+        inputs = meta.get('inputs') or []
+        graph[name] = [dep for dep in inputs if dep in _REGISTERED_SIGNALS]  # depends-on edges
+    WHITE, GREY, BLACK = 0, 1, 2
+    color = {n: WHITE for n in graph}
+    stack, cycles, seen = [], [], set()
+
+    def dfs(n):
+        color[n] = GREY
+        stack.append(n)
+        for dep in graph.get(n, ()):
+            if color.get(dep) == GREY:                 # back-edge → cycle
+                cyc = stack[stack.index(dep):] + [dep]
+                key = frozenset(cyc)
+                if key not in seen:
+                    seen.add(key)
+                    cycles.append(cyc)
+            elif color.get(dep) == WHITE:
+                dfs(dep)
+        stack.pop()
+        color[n] = BLACK
+
+    for n in graph:
+        if color[n] == WHITE:
+            dfs(n)
+    return cycles
+
+
+_SIGNAL_CYCLE_CHECKED = False
+
+
+def _warn_on_signal_cycles(force=False):
+    """Log a warning for each circular dependency in the reactive signal graph.
+    Idempotent (runs its scan at most once per process unless *force*). Triggered
+    from BOTH :func:`start_training` (early, before the first step) and lazily on
+    the first reactive dispatch — so it fires even in a headless SDK run that
+    never calls ``wl.serve``/``wl.start_training``. Warns rather than raises — the
+    cyclic signals simply stay dark while everything else trains normally."""
+    global _SIGNAL_CYCLE_CHECKED
+    if _SIGNAL_CYCLE_CHECKED and not force:
+        return
+    _SIGNAL_CYCLE_CHECKED = True
+    for cyc in _detect_signal_cycles():
+        logger.warning(
+            "WeightsLab reactive signals: circular dependency %s — these signals "
+            "will NEVER fire (each waits on the other's value, which never becomes "
+            "fresh). Break the cycle in their @wl.signal(inputs=[...]).",
+            " -> ".join(cyc))
 
 
 # --- optional signal-worker thread: run reactive dispatch off the train thread -
@@ -1351,6 +1416,7 @@ def start_training(timeout: int = None) -> None:
         timeout: Maximum number of seconds to keep running. If ``None``, runs
             until interrupted.
     """
+    _warn_on_signal_cycles()  # surface circular reactive-signal deps (warn, don't raise)
     if timeout is not None and isinstance(timeout, int) and timeout > 0:
         logger.info(f"Starting WeightsLab training mode with a timeout of {timeout} seconds.")
         time.sleep(timeout)
