@@ -24,7 +24,7 @@ from torchvision import datasets, transforms
 from torch.utils.data import Dataset
 
 import weightslab as wl
-from weightslab.baseline_models.pytorch.models import FashionCNN as CNN
+from weightslab.examples.utils.baseline_models.pytorch.models import FashionCNN as CNN
 from weightslab.components.global_monitoring import (
     guard_training_context,
     guard_testing_context
@@ -239,7 +239,6 @@ if __name__ == "__main__":
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
-        defaults=parameters,
         poll_interval=1.0,
     )
 
@@ -357,14 +356,13 @@ if __name__ == "__main__":
 
     # Start WeightsLab services (gRPC only, no CLI)
     wl.serve(
-        serving_grpc=parameters.get("serving_grpc", False),
-        serving_cli=parameters.get("serving_cli", False),
+        serving_grpc=parameters.get("serving_grpc", False)
     )
 
     print("=" * 60)
     print(" STARTING TRAINING")
     print(f" Evaluation every {eval_full_to_train_steps_ratio} steps")
-    print(f"� Dataset splits: train={len(_train_dataset)}, test={len(_test_dataset)}")
+    print(f" Dataset splits: train={len(_train_dataset)}, test={len(_test_dataset)}")
     print(f" Logs will be saved to: {log_dir}")
     print("=" * 60 + "\n")
 

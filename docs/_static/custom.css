@@ -141,3 +141,444 @@ body[data-theme="dark"] .wl-only-dark {
   background: var(--color-background-primary);
   color: var(--color-foreground-primary);
 }
+
+/* Hide Furo's native theme-toggle buttons everywhere — only the topnav toggle is used */
+.theme-toggle {
+  display: none !important;
+}
+
+/* ── Sidebar brand: colored WeightsLab name ─────────────────────────────── */
+.wl-brand-name {
+  display: block;
+  font-family: "Montserrat", sans-serif;
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  margin-top: 0.35rem;
+  color: var(--color-foreground-primary);
+}
+
+.wl-brand-w {
+  color: #d63333;
+  font-weight: 700;
+}
+
+.wl-brand-l {
+  color: #2d9e3f;
+  font-weight: 700;
+}
+
+/* ── GitHub link below the brand ────────────────────────────────────────── */
+.wl-github-link {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.6rem;
+  margin: 0.4rem 0.5rem 0.6rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--color-background-border);
+  background: var(--color-background-secondary);
+  color: var(--color-foreground-secondary);
+  text-decoration: none;
+  font-size: 0.82rem;
+  font-weight: 600;
+  transition: background 0.15s, color 0.15s;
+}
+
+.wl-github-link:hover {
+  background: var(--color-background-hover);
+  color: var(--color-foreground-primary);
+  text-decoration: none;
+}
+
+.wl-gh-icon {
+  flex-shrink: 0;
+}
+
+.wl-stars-badge {
+  margin-left: auto;
+  font-size: 0.78rem;
+  opacity: 0.75;
+}
+
+/* ── Examples gallery ────────────────────────────────────────────────────── */
+
+/* Toolbar: search left + filter pills right */
+.wl-eg-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1.6rem 0 1.8rem;
+  flex-wrap: wrap;
+}
+
+.wl-eg-search-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 200px;
+  margin: 0;
+}
+
+.wl-eg-search-icon {
+  position: absolute;
+  left: 0.85rem;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1.05rem;
+  height: 1.05rem;
+  color: var(--color-foreground-muted);
+  pointer-events: none;
+}
+
+.wl-eg-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.65rem 1rem 0.65rem 2.5rem;
+  border: 1.5px solid var(--color-background-border);
+  border-radius: 0.55rem;
+  background: var(--color-background-secondary);
+  color: var(--color-foreground-primary);
+  font-family: inherit;
+  font-size: 0.95rem;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.wl-eg-search-input:focus {
+  border-color: var(--color-brand-primary, #5f7393);
+  box-shadow: 0 0 0 3px rgba(95, 115, 147, 0.15);
+}
+
+.wl-eg-search-input::placeholder {
+  color: var(--color-foreground-muted);
+  opacity: 0.7;
+}
+
+/* ── Section groupings ───────────────────────────────────────────────────── */
+.wl-eg-section {
+  margin-bottom: 2.4rem;
+}
+
+.wl-eg-section-title {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 1rem;
+  font-size: 1.15rem;
+  font-weight: 700;
+  border: none;
+  padding: 0;
+}
+
+.wl-eg-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+  gap: 1.1rem;
+  margin-bottom: 1rem;
+}
+
+.wl-eg-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 1.1rem 1.2rem 1rem;
+  border: 1.5px solid var(--color-background-border);
+  border-radius: 0.65rem;
+  background: var(--color-background-secondary);
+  color: var(--color-foreground-primary);
+  text-decoration: none;
+  transition: box-shadow 0.15s, border-color 0.15s, transform 0.12s;
+}
+
+.wl-eg-card:visited {
+  color: var(--color-foreground-primary);
+}
+
+.wl-eg-card:hover,
+.wl-eg-card:visited:hover {
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.1);
+  border-color: var(--color-brand-primary, #5f7393);
+  transform: translateY(-2px);
+  text-decoration: none;
+  color: var(--color-foreground-primary);
+}
+
+.wl-eg-title {
+  margin: 0;
+  font-size: 0.97rem;
+  font-weight: 700;
+  font-family: "Montserrat", sans-serif;
+  color: var(--color-foreground-primary);
+  line-height: 1.3;
+}
+
+.wl-eg-desc {
+  margin: 0;
+  font-size: 0.84rem;
+  color: var(--color-foreground-secondary);
+  line-height: 1.55;
+  flex: 1;
+}
+
+.wl-eg-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.25rem;
+}
+
+.wl-eg-tag {
+  display: inline-block;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 500;
+  background: var(--color-background-hover, rgba(100,100,100,0.1));
+  color: var(--color-foreground-secondary);
+  border: 1px solid var(--color-background-border);
+}
+
+.wl-eg-badge {
+  display: inline-block;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: #fff;
+  width: fit-content;
+}
+
+.wl-eg-badge--pytorch    { background: #de4e20; }
+.wl-eg-badge--lightning  { background: #7b2bdb; }
+.wl-eg-badge--ultralytics{ background: #0a9e4e; }
+.wl-eg-badge--usecase    { background: #c07a12; }
+
+.wl-eg-empty {
+  text-align: center;
+  color: var(--color-foreground-muted);
+  font-size: 0.92rem;
+  padding: 2rem 0;
+}
+
+/* ── Gallery filter pills ────────────────────────────────────────────────── */
+.wl-eg-filters {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.wl-eg-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.3rem 0.75rem;
+  border-radius: 999px;
+  border: 1.5px solid var(--color-background-border);
+  background: transparent;
+  color: var(--color-foreground-secondary);
+  font-family: "Montserrat", sans-serif;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.13s, color 0.13s, border-color 0.13s;
+}
+
+.wl-eg-filter-btn:hover {
+  background: var(--color-background-hover, rgba(100,100,100,0.08));
+  color: var(--color-foreground-primary);
+}
+
+/* Active state — "All" */
+.wl-eg-filter-btn.wl-eg-filter--active {
+  background: var(--color-foreground-primary);
+  color: var(--color-background-primary);
+  border-color: var(--color-foreground-primary);
+}
+
+/* Active state — per framework color */
+.wl-eg-filter-btn[data-color="pytorch"].wl-eg-filter--active    { background:#de4e20; border-color:#de4e20; color:#fff; }
+.wl-eg-filter-btn[data-color="lightning"].wl-eg-filter--active   { background:#7b2bdb; border-color:#7b2bdb; color:#fff; }
+.wl-eg-filter-btn[data-color="ultralytics"].wl-eg-filter--active { background:#0a9e4e; border-color:#0a9e4e; color:#fff; }
+.wl-eg-filter-btn[data-color="usecase"].wl-eg-filter--active     { background:#c07a12; border-color:#c07a12; color:#fff; }
+
+/* ── Top navigation bar (weco.ai style) ─────────────────────────────────── */
+.wl-topnav {
+  width: 100%;
+  border-bottom: 1px solid var(--color-background-border);
+  background: var(--color-background-primary);
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 300;
+}
+
+/* Push Furo's page below the fixed nav */
+.page {
+  padding-top: 2.7rem;
+}
+
+
+.wl-topnav-inner {
+  display: flex;
+  align-items: center;
+  position: relative;
+  max-width: 100%;
+  padding: 0 1.2rem;
+  height: 2.7rem;
+}
+
+/* The menu: right column, flex-end aligned */
+.wl-topnav-menu {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+
+/* Base pill button */
+.wl-topnav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  padding: 0.32rem 0.82rem;
+  border-radius: 0.45rem;
+  border: 1.5px solid transparent;
+  font-size: 0.865rem;
+  font-weight: 600;
+  font-family: "Montserrat", sans-serif;
+  color: var(--color-foreground-secondary);
+  background: transparent;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.13s, color 0.13s, border-color 0.13s;
+  line-height: 1;
+}
+
+.wl-topnav-btn:visited {
+  color: var(--color-foreground-secondary);
+}
+
+.wl-topnav-btn:hover,
+.wl-topnav-btn:visited:hover {
+  background: var(--color-background-hover, rgba(100,100,100,0.08));
+  color: var(--color-foreground-primary);
+  border-color: transparent;
+  text-decoration: none;
+}
+
+/* Outlined variant (Site / external / GitHub) */
+.wl-topnav-btn--outline {
+  border-color: var(--color-background-border);
+}
+
+.wl-topnav-btn--outline:visited {
+  color: var(--color-foreground-secondary);
+}
+
+.wl-topnav-btn--outline:hover {
+  border-color: var(--color-foreground-muted, rgba(100,100,100,0.35));
+}
+
+/* Icon-only variant (theme toggle) */
+.wl-topnav-btn--icon {
+  padding: 0.32rem 0.45rem;
+  color: var(--color-foreground-primary);
+}
+
+.wl-topnav-ext-icon {
+  width: 0.7rem;
+  height: 0.7rem;
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+
+.wl-topnav-stars {
+  font-size: 0.78rem;
+  font-weight: 600;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
+/* Theme toggle icon visibility */
+.wl-topnav-theme .wl-ti-light,
+.wl-topnav-theme .wl-ti-dark {
+  display: none;
+  line-height: 0;
+}
+
+.wl-topnav-theme .wl-ti-light svg,
+.wl-topnav-theme .wl-ti-dark  svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  display: block;
+  color: var(--color-foreground-primary);
+}
+
+body[data-theme="light"] .wl-topnav-theme .wl-ti-light { display: inline-flex; }
+body[data-theme="dark"]  .wl-topnav-theme .wl-ti-dark  { display: inline-flex; }
+
+/* Push Furo's mobile-header below our fixed topnav */
+@media (max-width: 82em) {
+  .mobile-header {
+    top: 2.7rem;
+    position: fixed;
+  }
+}
+
+/* ── Topnav center tip ───────────────────────────────────────────────────── */
+.wl-topnav-left {
+  flex: 1;
+}
+
+.wl-topnav-center {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 38%;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.wl-topnav-tip-icon {
+  flex-shrink: 0;
+  line-height: 0;
+  color: #f0a500;
+  opacity: 0.85;
+}
+
+.wl-topnav-tip-text {
+  font-size: 0.775rem;
+  color: var(--color-foreground-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: opacity 0.28s ease;
+}
+
+.wl-topnav-tip-text code {
+  font-size: 0.74rem;
+  padding: 0.04em 0.28em;
+  border-radius: 0.22em;
+  background: var(--color-background-hover, rgba(100,100,100,0.1));
+  border: 1px solid var(--color-background-border);
+  color: var(--color-foreground-primary);
+  font-family: monospace;
+}
+
+/* ── Per-page keyword tag bar ───────────────────────────────────────────── */
+.wl-eg-page-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.3rem 0 1.4rem;
+}

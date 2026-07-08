@@ -16,6 +16,8 @@ jobs:
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     outputs:
       is_main: ${{ steps.check.outputs.is_main }}
+      is_dev_release: ${{ steps.check.outputs.is_dev_release }}
+      should_run: ${{ steps.check.outputs.should_run }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,14 +31,32 @@ jobs:
           IS_ON_MAIN=$(git merge-base --is-ancestor "${TAG_COMMIT}" origin/main \
                        && echo "true" || echo "false")
           echo "is_main=${IS_ON_MAIN}" >> $GITHUB_OUTPUT
-          echo "Tag: ${GITHUB_REF_NAME}  commit: ${TAG_COMMIT}  on_main: ${IS_ON_MAIN}"
 
-  # ── Shared: run tests before main publish only ───────────────────────────
+          # Dev pre-release: a tag NOT on main whose name contains 'dev'
+          # (e.g. v1.3.1-dev0). Runs the full pipeline up to the TestPyPI install
+          # tests + a GitHub pre-release, then STOPS before the production PyPI
+          # publish. A tag off main WITHOUT 'dev' triggers nothing (should_run=false),
+          # so accidental/non-dev tags on dev never release.
+          IS_DEV_RELEASE=false
+          if [ "${IS_ON_MAIN}" != "true" ] && [[ "${GITHUB_REF_NAME}" == *dev* ]]; then
+            IS_DEV_RELEASE=true
+          fi
+          echo "is_dev_release=${IS_DEV_RELEASE}" >> $GITHUB_OUTPUT
+
+          if [ "${IS_ON_MAIN}" = "true" ] || [ "${IS_DEV_RELEASE}" = "true" ]; then
+            SHOULD_RUN=true
+          else
+            SHOULD_RUN=false
+          fi
+          echo "should_run=${SHOULD_RUN}" >> $GITHUB_OUTPUT
+          echo "Tag: ${GITHUB_REF_NAME}  commit: ${TAG_COMMIT}  on_main: ${IS_ON_MAIN}  dev_release: ${IS_DEV_RELEASE}  should_run: ${SHOULD_RUN}"
+
+  # ── Shared: run tests before any publish (main or dev pre-release) ────────
   test:
     name: Run Tests Before Release
     needs: detect-target
     runs-on: ubuntu-latest
-    if: ${{ needs.detect-target.outputs.is_main == 'true' }}
+    if: ${{ needs.detect-target.outputs.should_run == 'true' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -57,7 +77,7 @@ jobs:
         run: |
           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
           python -m pip install pytorch_lightning
-          python -m unittest discover -s ./weightslab/tests -p "test_*.py" -t . -v
+          python -m unittest discover -s ./tests -p "test_*.py" -t . -v
 
   # ═══════════════════════════════════════════════════════════════════════════
   # DEV RELEASE — tag on dev branch, not yet merged to main
@@ -66,9 +86,9 @@ jobs:
 
   build-and-publish-dev-release:
     name: Build & Publish Dev Release (TestPyPI)
-    needs: detect-target
+    needs: [detect-target,test]
     runs-on: ubuntu-latest
-    if: ${{ needs.detect-target.outputs.is_main != 'true' }}
+    if: ${{ needs.detect-target.outputs.should_run == 'true' }}
     permissions:
       contents: read
     outputs:
@@ -187,9 +207,11 @@ jobs:
           print('installed version:', m.version('weightslab'))
           "
 
+  # Only for a dev pre-release tag (off main, name contains 'dev').
   create-dev-release:
     name: Create GitHub Pre-Release
-    needs: [build-and-publish-dev-release, test-install-from-pip-dev-release]
+    needs: [detect-target, build-and-publish-dev-release, test-install-from-pip-dev-release]
+    if: ${{ needs.detect-target.outputs.is_dev_release == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -212,46 +234,107 @@ jobs:
           export VERSION_NO_V="${VERSION#v}"
           export PYPI_URL="https://test.pypi.org/project/weightslab/${VERSION_NO_V}/"
 
-          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${VERSION}$" | head -n 1 || true)
+          # Walk the actual commit graph for the nearest ancestor tag, rather
+          # than a lexicographic/semver sort across ALL tags. The old sort
+          # could pick an unrelated tag from a diverging branch — e.g. a
+          # "v1.3.0-dev0" tag cut on dev after "v1.3.0" was tagged on main
+          # sorted ABOVE it, making every real PR since v1.3.0 look "older"
+          # than that bogus previous-tag date and get silently filtered out
+          # (this is why past releases showed "no pull requests found").
+          PREV_TAG=$(git describe --tags --abbrev=0 "${VERSION}^" 2>/dev/null || true)
           if [ -n "$PREV_TAG" ]; then
-            export PREV_TAG_DATE=$(git log -1 --format="%aI" "${PREV_TAG}" 2>/dev/null || echo "2020-01-01T00:00:00Z")
+            RAW_DATE=$(git log -1 --format="%aI" "${PREV_TAG}" 2>/dev/null || true)
+            # Normalize to UTC "Z" form so string comparison against GitHub's
+            # mergedAt (also UTC "Z") is valid regardless of the committer's
+            # local timezone offset.
+            export PREV_TAG_DATE=$(date -u -d "${RAW_DATE:-2020-01-01}" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "2020-01-01T00:00:00Z")
             export GIT_RANGE="${PREV_TAG}..HEAD"
           else
             export PREV_TAG_DATE="2020-01-01T00:00:00Z"
             export GIT_RANGE="HEAD"
           fi
 
-          export COMMITS
-          COMMITS=$(git log "${GIT_RANGE}" --no-merges --format="- %h %s" 2>/dev/null | head -25 || true)
-          [ -z "$COMMITS" ] && COMMITS="_(no commits found)_"
+          export COMMITS_RAW
+          COMMITS_RAW=$(git log "${GIT_RANGE}" --no-merges --format="%h%x09%s" 2>/dev/null | head -25 || true)
 
           export GIT_AUTHORS
           GIT_AUTHORS=$(git log "${GIT_RANGE}" --format="%an" 2>/dev/null | sort -u | sed 's/^/- /' | head -30 || true)
 
+          # NOTE: deliberately NOT requesting --json commits here. With
+          # --limit 100 that expands into a GraphQL query requesting 100 PRs'
+          # worth of commit nodes, which reliably exceeds GitHub's 500,000
+          # node budget and makes `gh` print a plain-text GraphQL error
+          # instead of JSON — json.loads() below then fails, prs_data
+          # silently becomes [], and every release note says "no pull
+          # requests found" regardless of the date filter. Commits are
+          # fetched below, one lightweight call per PR, only for the small
+          # number of PRs that actually match this release.
           export PRS_JSON
           PRS_JSON=$(gh pr list --state merged --base "dev" --limit 100 \
-            --json number,title,mergedAt,url,author,body,commits \
+            --json number,title,mergedAt,url,author,body \
             2>/dev/null || echo "[]")
 
           python3 << 'PYEOF'
-          import os, json
+          import os, json, re, importlib.util, subprocess
           version     = os.environ["VERSION"]
           pypi_url    = os.environ["PYPI_URL"]
           prev_date   = os.environ.get("PREV_TAG_DATE", "2020-01-01")
-          commits     = os.environ.get("COMMITS", "_(no commits found)_")
+          commits_raw = os.environ.get("COMMITS_RAW", "")
           git_authors = os.environ.get("GIT_AUTHORS", "")
           try:
             prs_data = json.loads(os.environ.get("PRS_JSON", "[]"))
           except Exception:
             prs_data = []
+
+          _README_RE = re.compile(r'^update\s+readme(\.md)?\s*$', re.IGNORECASE)
+
+          def _strip_pr_suffix(head):
+            return re.sub(r'\s*\(#\d+\)\s*$', '', head).strip()
+
+          def _collapse_readme(entries):
+            """entries: list of (oid_or_None, head) tuples, in original order.
+            Collapse every bare "Update README[.md]" commit into a single
+            "Update README (n)" line at the position of its first occurrence —
+            these are near-duplicate housekeeping commits with no release signal."""
+            out, count, placeholder_idx = [], 0, None
+            for oid, head in entries:
+              if _README_RE.match(_strip_pr_suffix(head)):
+                count += 1
+                if placeholder_idx is None:
+                  placeholder_idx = len(out)
+                  out.append(None)
+                continue
+              out.append((oid, head))
+            if placeholder_idx is not None:
+              label = "Update README" if count == 1 else f"Update README ({count})"
+              out[placeholder_idx] = (None, label)
+            return out
+
+          def _format_entries(entries, indent=""):
+            return [f"{indent}- `{oid}` {head}" if oid else f"{indent}- {head}" for oid, head in entries]
+
           def _pr_entry(pr):
-            line = f"- [#{pr['number']}]({pr['url']}) {pr['title']} — {pr['mergedAt'][:10]}"
             desc = " ".join((pr.get("body") or "").split())  # collapse newlines/whitespace
-            if desc:
-              if len(desc) > 512:
-                desc = desc[:509].rstrip() + "..."
-              line += f"\n\n  > {desc}"
-            return line
+            if not desc:
+              desc = pr["title"]
+            if len(desc) > 512:
+              desc = desc[:509].rstrip() + "..."
+            return f"- [PR #{pr['number']}]({pr['url']}): {desc}"
+
+          def _fetch_pr_commits(number):
+            # One lightweight call per matched PR (see the note above the
+            # PRS_JSON fetch for why this isn't batched into the list query).
+            try:
+              out = subprocess.run(
+                ["gh", "pr", "view", str(number), "--json", "commits"],
+                capture_output=True, text=True, timeout=30,
+              )
+              if out.returncode != 0:
+                return []
+              return json.loads(out.stdout).get("commits") or []
+            except Exception:
+              return []
+
           filtered = [pr for pr in prs_data if pr.get("mergedAt", "") > prev_date]
           # "What's Changed precisely": list each merged PR's own developer commits,
           # NOT the squashed/merge/chore commits that land on the release branch
@@ -259,8 +342,8 @@ jobs:
           _seen_commits = set()
           _commit_blocks = []
           for pr in filtered:
-            _commit_lines = []
-            for c in (pr.get("commits") or []):
+            raw_entries = []
+            for c in _fetch_pr_commits(pr["number"]):
               oid = (c.get("oid") or "")[:7]
               head = (c.get("messageHeadline") or "").strip()
               if not head or head.startswith("Merge "):
@@ -269,13 +352,24 @@ jobs:
               if key in _seen_commits:
                 continue
               _seen_commits.add(key)
-              _commit_lines.append(f"  - `{oid}` {head}")
-            if _commit_lines:
+              raw_entries.append((oid, head))
+            commit_lines = _format_entries(_collapse_readme(raw_entries), indent="  ")
+            if commit_lines:
               _commit_blocks.append(
-                f"**[#{pr['number']}]({pr['url']}) {pr['title']}**\n" + "\n".join(_commit_lines)
+                f"**[#{pr['number']}]({pr['url']}) {pr['title']}**\n" + "\n".join(commit_lines)
               )
           # Fall back to the raw git log only when no PR commits are available.
-          commits_section = "\n\n".join(_commit_blocks) if _commit_blocks else commits
+          if _commit_blocks:
+            commits_section = "\n\n".join(_commit_blocks)
+          else:
+            fallback_entries = []
+            for line in commits_raw.splitlines():
+              if "\t" not in line:
+                continue
+              oid, head = line.split("\t", 1)
+              fallback_entries.append((oid, head))
+            fallback_entries = _collapse_readme(fallback_entries)
+            commits_section = "\n".join(_format_entries(fallback_entries)) if fallback_entries else "_(no commits found)_"
           if filtered:
             prs_lines = "\n".join(_pr_entry(pr) for pr in filtered)
             seen, clabels = set(), []
@@ -288,7 +382,23 @@ jobs:
           else:
             prs_lines = "_(no pull requests found since last release)_"
             contributors = git_authors or "_(no contributors found)_"
+
+          # CLI banner (weightslab/art.py), loaded as a standalone file so we
+          # don't pull in the full package (and its heavy optional deps) just
+          # to print a logo. ANSI color codes are stripped (Markdown can't render
+          # them); the box-drawing/ASCII art itself renders fine in a code fence.
+          banner_block = ""
+          try:
+            spec = importlib.util.spec_from_file_location("wl_art", "weightslab/art.py")
+            wl_art = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(wl_art)
+            plain_banner = re.sub(r'\x1b\[[0-9;]*m', '', wl_art._BANNER)
+            banner_block = f"```text\n{plain_banner.strip(chr(10))}\n```\n\n"
+          except Exception:
+            pass
+
           body = (
+            banner_block +
             "## **Weightslab**\n\n"
             "Follow us on [LinkedIn](https://www.linkedin.com/company/graybx-com/)"
             " | [Graybx](https://www.graybx.com/)\n\n"
@@ -308,7 +418,7 @@ jobs:
             "### Thank you!\n\n"
             f"{contributors}\n"
           )
-          with open("RELEASE_NOTES.md", "w") as f:
+          with open("RELEASE_NOTES.md", "w", encoding="utf-8") as f:
             f.write(body)
           PYEOF
 
@@ -330,8 +440,7 @@ jobs:
 
   build-and-publish-main:
     name: Build & Publish Main (PyPI)
-    needs: [detect-target,test]
-    # needs: [detect-target]
+    needs: [test-install-from-pip-dev-release, detect-target]
     runs-on: ubuntu-latest
     if: ${{ needs.detect-target.outputs.is_main == 'true' }}
     permissions:
@@ -445,7 +554,7 @@ jobs:
 
   create-main-release:
     name: Create GitHub Release
-    needs: [build-and-publish-main, test-install-from-pip-main]
+    needs: [test-install-from-pip-main]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -468,46 +577,107 @@ jobs:
           export VERSION_NO_V="${VERSION#v}"
           export PYPI_URL="https://pypi.org/project/weightslab/${VERSION_NO_V}/"
 
-          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${VERSION}$" | head -n 1 || true)
+          # Walk the actual commit graph for the nearest ancestor tag, rather
+          # than a lexicographic/semver sort across ALL tags. The old sort
+          # could pick an unrelated tag from a diverging branch — e.g. a
+          # "v1.3.0-dev0" tag cut on dev after "v1.3.0" was tagged on main
+          # sorted ABOVE it, making every real PR since v1.3.0 look "older"
+          # than that bogus previous-tag date and get silently filtered out
+          # (this is why past releases showed "no pull requests found").
+          PREV_TAG=$(git describe --tags --abbrev=0 "${VERSION}^" 2>/dev/null || true)
           if [ -n "$PREV_TAG" ]; then
-            export PREV_TAG_DATE=$(git log -1 --format="%aI" "${PREV_TAG}" 2>/dev/null || echo "2020-01-01T00:00:00Z")
+            RAW_DATE=$(git log -1 --format="%aI" "${PREV_TAG}" 2>/dev/null || true)
+            # Normalize to UTC "Z" form so string comparison against GitHub's
+            # mergedAt (also UTC "Z") is valid regardless of the committer's
+            # local timezone offset.
+            export PREV_TAG_DATE=$(date -u -d "${RAW_DATE:-2020-01-01}" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "2020-01-01T00:00:00Z")
             export GIT_RANGE="${PREV_TAG}..HEAD"
           else
             export PREV_TAG_DATE="2020-01-01T00:00:00Z"
             export GIT_RANGE="HEAD"
           fi
 
-          export COMMITS
-          COMMITS=$(git log "${GIT_RANGE}" --no-merges --format="- %h %s" 2>/dev/null | head -25 || true)
-          [ -z "$COMMITS" ] && COMMITS="_(no commits found)_"
+          export COMMITS_RAW
+          COMMITS_RAW=$(git log "${GIT_RANGE}" --no-merges --format="%h%x09%s" 2>/dev/null | head -25 || true)
 
           export GIT_AUTHORS
           GIT_AUTHORS=$(git log "${GIT_RANGE}" --format="%an" 2>/dev/null | sort -u | sed 's/^/- /' | head -30 || true)
 
+          # NOTE: deliberately NOT requesting --json commits here. With
+          # --limit 100 that expands into a GraphQL query requesting 100 PRs'
+          # worth of commit nodes, which reliably exceeds GitHub's 500,000
+          # node budget and makes `gh` print a plain-text GraphQL error
+          # instead of JSON — json.loads() below then fails, prs_data
+          # silently becomes [], and every release note says "no pull
+          # requests found" regardless of the date filter. Commits are
+          # fetched below, one lightweight call per PR, only for the small
+          # number of PRs that actually match this release.
           export PRS_JSON
           PRS_JSON=$(gh pr list --state merged --base "main" --limit 100 \
-            --json number,title,mergedAt,url,author,body,commits \
+            --json number,title,mergedAt,url,author,body \
             2>/dev/null || echo "[]")
 
           python3 << 'PYEOF'
-          import os, json
+          import os, json, re, importlib.util, subprocess
           version     = os.environ["VERSION"]
           pypi_url    = os.environ["PYPI_URL"]
           prev_date   = os.environ.get("PREV_TAG_DATE", "2020-01-01")
-          commits     = os.environ.get("COMMITS", "_(no commits found)_")
+          commits_raw = os.environ.get("COMMITS_RAW", "")
           git_authors = os.environ.get("GIT_AUTHORS", "")
           try:
             prs_data = json.loads(os.environ.get("PRS_JSON", "[]"))
           except Exception:
             prs_data = []
+
+          _README_RE = re.compile(r'^update\s+readme(\.md)?\s*$', re.IGNORECASE)
+
+          def _strip_pr_suffix(head):
+            return re.sub(r'\s*\(#\d+\)\s*$', '', head).strip()
+
+          def _collapse_readme(entries):
+            """entries: list of (oid_or_None, head) tuples, in original order.
+            Collapse every bare "Update README[.md]" commit into a single
+            "Update README (n)" line at the position of its first occurrence —
+            these are near-duplicate housekeeping commits with no release signal."""
+            out, count, placeholder_idx = [], 0, None
+            for oid, head in entries:
+              if _README_RE.match(_strip_pr_suffix(head)):
+                count += 1
+                if placeholder_idx is None:
+                  placeholder_idx = len(out)
+                  out.append(None)
+                continue
+              out.append((oid, head))
+            if placeholder_idx is not None:
+              label = "Update README" if count == 1 else f"Update README ({count})"
+              out[placeholder_idx] = (None, label)
+            return out
+
+          def _format_entries(entries, indent=""):
+            return [f"{indent}- `{oid}` {head}" if oid else f"{indent}- {head}" for oid, head in entries]
+
           def _pr_entry(pr):
-            line = f"- [#{pr['number']}]({pr['url']}) {pr['title']} — {pr['mergedAt'][:10]}"
             desc = " ".join((pr.get("body") or "").split())  # collapse newlines/whitespace
-            if desc:
-              if len(desc) > 512:
-                desc = desc[:509].rstrip() + "..."
-              line += f"\n\n  > {desc}"
-            return line
+            if not desc:
+              desc = pr["title"]
+            if len(desc) > 512:
+              desc = desc[:509].rstrip() + "..."
+            return f"- [PR #{pr['number']}]({pr['url']}): {desc}"
+
+          def _fetch_pr_commits(number):
+            # One lightweight call per matched PR (see the note above the
+            # PRS_JSON fetch for why this isn't batched into the list query).
+            try:
+              out = subprocess.run(
+                ["gh", "pr", "view", str(number), "--json", "commits"],
+                capture_output=True, text=True, timeout=30,
+              )
+              if out.returncode != 0:
+                return []
+              return json.loads(out.stdout).get("commits") or []
+            except Exception:
+              return []
+
           filtered = [pr for pr in prs_data if pr.get("mergedAt", "") > prev_date]
           # "What's Changed precisely": list each merged PR's own developer commits,
           # NOT the squashed/merge/chore commits that land on the release branch
@@ -515,8 +685,8 @@ jobs:
           _seen_commits = set()
           _commit_blocks = []
           for pr in filtered:
-            _commit_lines = []
-            for c in (pr.get("commits") or []):
+            raw_entries = []
+            for c in _fetch_pr_commits(pr["number"]):
               oid = (c.get("oid") or "")[:7]
               head = (c.get("messageHeadline") or "").strip()
               if not head or head.startswith("Merge "):
@@ -525,13 +695,24 @@ jobs:
               if key in _seen_commits:
                 continue
               _seen_commits.add(key)
-              _commit_lines.append(f"  - `{oid}` {head}")
-            if _commit_lines:
+              raw_entries.append((oid, head))
+            commit_lines = _format_entries(_collapse_readme(raw_entries), indent="  ")
+            if commit_lines:
               _commit_blocks.append(
-                f"**[#{pr['number']}]({pr['url']}) {pr['title']}**\n" + "\n".join(_commit_lines)
+                f"**[#{pr['number']}]({pr['url']}) {pr['title']}**\n" + "\n".join(commit_lines)
               )
           # Fall back to the raw git log only when no PR commits are available.
-          commits_section = "\n\n".join(_commit_blocks) if _commit_blocks else commits
+          if _commit_blocks:
+            commits_section = "\n\n".join(_commit_blocks)
+          else:
+            fallback_entries = []
+            for line in commits_raw.splitlines():
+              if "\t" not in line:
+                continue
+              oid, head = line.split("\t", 1)
+              fallback_entries.append((oid, head))
+            fallback_entries = _collapse_readme(fallback_entries)
+            commits_section = "\n".join(_format_entries(fallback_entries)) if fallback_entries else "_(no commits found)_"
           if filtered:
             prs_lines = "\n".join(_pr_entry(pr) for pr in filtered)
             seen, clabels = set(), []
@@ -544,7 +725,23 @@ jobs:
           else:
             prs_lines = "_(no pull requests found since last release)_"
             contributors = git_authors or "_(no contributors found)_"
+
+          # CLI banner (weightslab/art.py), loaded as a standalone file so we
+          # don't pull in the full package (and its heavy optional deps) just
+          # to print a logo. ANSI color codes are stripped (Markdown can't render
+          # them); the box-drawing/ASCII art itself renders fine in a code fence.
+          banner_block = ""
+          try:
+            spec = importlib.util.spec_from_file_location("wl_art", "weightslab/art.py")
+            wl_art = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(wl_art)
+            plain_banner = re.sub(r'\x1b\[[0-9;]*m', '', wl_art._BANNER)
+            banner_block = f"```text\n{plain_banner.strip(chr(10))}\n```\n\n"
+          except Exception:
+            pass
+
           body = (
+            banner_block +
             "## **Weightslab**\n\n"
             "Follow us on [LinkedIn](https://www.linkedin.com/company/graybx-com/)"
             " | [Graybx](https://www.graybx.com/)\n\n"
@@ -564,7 +761,7 @@ jobs:
             "### Thank you!\n\n"
             f"{contributors}\n"
           )
-          with open("RELEASE_NOTES.md", "w") as f:
+          with open("RELEASE_NOTES.md", "w", encoding="utf-8") as f:
             f.write(body)
           PYEOF
 

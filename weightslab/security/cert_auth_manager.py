@@ -125,7 +125,7 @@ class CertAuthManager:
 
         # Try to use PowerShell to generate certs
         try:
-            script_dir = Path(__file__).parent.parent / 'ui' / 'docker' / 'utils'
+            script_dir = Path(__file__).parent.parent.parent / 'docker' / 'docker' / 'utils'
             generate_script = script_dir / 'generate-certs.ps1'
 
             if not generate_script.exists():

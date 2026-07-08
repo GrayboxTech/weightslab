@@ -1664,7 +1664,7 @@ class LayerWiseOperations(NeuronWiseOperations):
 
 if __name__ == "__main__":
     from weightslab.backend.model_interface import ModelInterface
-    from weightslab.baseline_models.pytorch.models import FashionCNN as Model
+    from weightslab.examples.utils.baseline_models.pytorch.models import FashionCNN as Model
 
     # Define the model & the input
     model = Model()

@@ -77,17 +77,27 @@ autodoc_mock_imports = [
 ]
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = [
+    "_build", "Thumbs.db", ".DS_Store",
+    # Superseded by examples/pytorch/classification.rst and examples/pytorch/segmentation.rst
+    "usecases.rst",
+    "segmentation_usecase.rst",
+    # Replaced by direct toctree entries usage/good_practice and usage/docker
+    "usage.rst",
+    # SDK params moved into configuration.rst
+    "usage/parameters.rst",
+]
 
 html_theme = "furo"
-html_title = f"WeightsLab {release}"
-html_logo = "_static/logo-light.png"
+html_title = "WeightsLab"
 html_favicon = "_static/favicon.png"
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
-html_js_files = ["version-switcher.js"]
+html_js_files = ["version-switcher.js", "github-stars.js", "examples-gallery.js", "wl-topnav.js", "wl-ribbon.js"]
 html_theme_options = {
-    "sidebar_hide_name": False,
+    "light_logo": "logo-light.png",
+    "dark_logo":  "logo-dark.png",
+    "sidebar_hide_name": True,  # custom brand.html provides the styled name
 }
 
 # Build only the desired refs when using sphinx-multiversion.

@@ -8,8 +8,8 @@
   </a>
 </div>
 <div align="center">
-  <h3>PyTorch Dataset Debugger Powered by Training Signals.</h3>
-  <p>Pause training, mine live loss signals to surface mislabels, class imbalance & outliers,<br>then curate your image, video & LiDAR data — without restarting.</p>
+  <h3>Trace training signals back to the exact samples causing them</h3>
+  <p>Pause training, mine live loss signals to surface mislabels, class imbalance & outliers,<br>then curate your image, video & LiDAR data, without restarting.</p>
 </div>
 
 </div>
@@ -22,11 +22,16 @@
 
 ## What it does
 
-WeightsLab is an open-source PyTorch tool for dataset debugging, data quality monitoring, mislabel detection, and mid-training data curation for computer vision datasets: images, video & LiDAR point clouds.
+WeightsLab is an open-source PyTorch tool for dataset debugging, data quality monitoring, mislabel detection, and mid-training data curation for computer vision datasets: images, video & LiDAR point clouds. 
+Longer-term, we're building toward bringing dataset management, training, fine-tuning, and validation together in a single, unified workflow.
 
 <br>
-
-Most data problems are invisible until your model tells you: through loss spikes, poor generalization, or silent underperformance. WeightsLab connects those training signals back to the exact samples causing them
+<div align="center">
+  <img src="https://github.com/GrayboxTech/assets/blob/main/GIF/weightslab_demo_bdd.gif" width="1280" alt="WeightsLab Studio demo" />
+  <!-- <sub><a href="https://youtu.be/GBBDDaJQLWk">▶ Watch full demo</a></sub> -->
+</div>
+<br>
+Most data problems are invisible until your model tells you: through loss spikes, poor generalization, or silent underperformance. WeightsLab connects those training signals back to the exact samples causing them.
 
 **Wrap your training script with the SDK** to capture per-sample signals live.  
 **Open Studio** to inspect, filter, and curate your dataset mid-training, without restarting.
@@ -34,20 +39,12 @@ Most data problems are invisible until your model tells you: through loss spikes
 - **Detect** - Surface mislabels, outliers & class imbalance using live loss signals 
 - **Curate** - Discard bad samples, create data subsets, rebalance distributions 
 - **Continue** - Resume training on your cleaned dataset, no restart required 
-
-WeightsLab is an open-source PyTorch tool for dataset debugging, data quality monitoring, mislabel detection, and mid-training data curation for computer vision datasets (images, video & LiDAR point clouds).
-
-<br>
-
- → `give it a star ⭐` and join our [`early access ⏰`](https://grayboxtech.github.io/signup/)
-
 <br>
 
 ## Quickstart 
 
 ![Python](https://img.shields.io/badge/Python-3.10--3.14-5865F2?style=flat&logo=python&logoColor=white)
 ![Docker Desktop](https://img.shields.io/badge/Docker_Desktop-v4-0db7ed?style=flat&logo=docker&logoColor=white)
-![Docker Compose](https://img.shields.io/badge/Docker_Compose-v2-0db7ed?style=flat&logo=docker&logoColor=white)
 
 **1. Install**
 ```bash
@@ -103,8 +100,8 @@ For a detailed installation guide and advanced configuration &rarr; [Installatio
 
 2. **Wrap your parameters, model, optimizer, signals, and dataset:**
 ```python
-   parameters      = wl.watch_or_edit(parameters,                              flag='hp',     ...) # ← WeightsLab monitors your parameters and lets you update them from the UI
-   model           = wl.watch_or_edit(parameters,                                       flag='hp', ...) # ← WeightsLab monitors your model state
+   parameters      = wl.watch_or_edit(parameters, flag='hp',     ...) # ← WeightsLab monitors your parameters and lets you update them from the UI
+   model           = wl.watch_or_edit(model, flag='model', ...) # ← WeightsLab monitors your model state
    optimizer       = wl.watch_or_edit(optim.Adam(...),                         flag='opt',    ...) # ← Tracks optimizer state and lets you update the learning rate from the UI
    
    train_criterion = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"),  flag='signal', name="train_loss/sample", per_sample=True, log=True)   # ← Wrap and plot your signals on the UI
@@ -198,7 +195,7 @@ def main():
                     # instance_id=[1, 2],
                 )
 
-        avg_loss = total_loss / len(dataloader)
+        avg_loss = total_loss / len(loader)
         print(f"Epoch {epoch+1}/5 - Loss: {avg_loss:.4f}")
 
     print("✅ Training complete!")

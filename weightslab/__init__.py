@@ -60,14 +60,67 @@ if _IS_MAIN_PROCESS and grpc_tls_enabled and os.environ.get('WEIGHTSLAB_SKIP_SEC
 	except Exception as e:
 		logger.debug(f"Secure environment check skipped: {e}")
 
-# Get Package Metadata
-try:
-    # setuptools_scm will write weightslab/_version.py during build
-    from ._version import __version__ # type: ignore
-except Exception:
-    # Fallback when developing locally or before build; keeps behavior stable.
-	from datetime import datetime
-	__version__ = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+# Get Package Metadata. Resolve the version from the most authoritative source
+# available, so a live/editable checkout reports the CURRENT git tag rather than
+# a stale generated file. weightslab/_version.py is written by setuptools_scm at
+# BUILD time only — in a working tree it goes stale as new tags land, which is
+# why the banner used to show an old version. Preference order:
+#   1. live git checkout  -> derive from the current (or nearest older) git tag
+#   2. built/installed pkg -> the generated _version.py, else dist metadata
+#   3. last resort         -> a UTC timestamp (keeps import from ever failing)
+def _resolve_version() -> str:
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(pkg_dir)
+
+    # 1. Live checkout: the generated file may lag behind, so ask git first.
+    # Gated to the main process — spawned DataLoader workers re-import this
+    # package and must not each shell out to git; they fall through to the
+    # generated file below (they never display/report the version anyway).
+    if _IS_MAIN_PROCESS and os.path.isdir(os.path.join(repo_root, ".git")):
+        # Drop setuptools_scm's local segment ("+g<sha>.d<date>") to honor
+        # local_scheme="no-local-version" from pyproject at runtime too.
+        def _clean(v: str) -> str:
+            return v.split("+", 1)[0]
+        # setuptools_scm (a build dep; may be absent at runtime) yields a full
+        # PEP 440 version incl. commits-since-tag, e.g. 1.3.1.dev3.
+        try:
+            from setuptools_scm import get_version # type: ignore
+            return _clean(get_version(root=repo_root))
+        except Exception:
+            pass
+        # Plain git as a lighter fallback: the nearest reachable tag (older tags
+        # included), normalized from e.g. "v1.3.1-dev0" -> "1.3.1-dev0".
+        try:
+            import subprocess
+            out = subprocess.run(
+                ["git", "describe", "--tags", "--abbrev=0"],
+                cwd=repo_root, capture_output=True, text=True,
+            )
+            tag = out.stdout.strip()
+            if tag:
+                return tag[1:] if tag.startswith("v") else tag
+        except Exception:
+            pass
+
+    # 2. Built/installed package: the generated file (or dist metadata) is authoritative.
+    try:
+        from ._version import __version__ as _v # type: ignore
+        if _v:
+            return _v
+    except Exception:
+        pass
+    try:
+        from importlib.metadata import version as _dist_version
+        return _dist_version("weightslab")
+    except Exception:
+        pass
+
+    # 3. Never let version resolution break the import.
+    from datetime import datetime
+    return datetime.utcnow().strftime("%Y%m%d%H%M%S")
+
+
+__version__ = _resolve_version()
 
 if _IS_MAIN_PROCESS:
     try:
