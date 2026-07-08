@@ -45,6 +45,7 @@ Most data problems are invisible until your model tells you: through loss spikes
 ## Quickstart
 
 ![Python](https://img.shields.io/badge/Python-v3.10--v3.14-5865F2?style=flat&logo=python&logoColor=white)
+![PyPI](https://img.shields.io/pypi/v/weightslab?style=flat&color=5865F2&logo=pypi&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-v4-0db7ed?style=flat&logo=docker&logoColor=white)
 
 **1. Install**
