@@ -286,23 +286,23 @@ body[data-theme="dark"] .wl-only-dark {
   flex: 1;
 }
 
-/* "Open in Colab" badge, pinned bottom-right, above the card link. */
+/* "Open in Colab" logo, pinned top-right, above the card link. */
 .wl-eg-colab {
   position: absolute;
-  right: 1rem;
-  bottom: 0.85rem;
+  right: 0.9rem;
+  top: 0.9rem;
   z-index: 2;
   line-height: 0;
-  border-radius: 4px;
   transition: transform 0.12s;
 }
 
 .wl-eg-colab:hover {
-  transform: translateY(-1px);
+  transform: scale(1.1);
 }
 
 .wl-eg-colab img {
-  height: 20px;
+  height: 22px;
+  width: 22px;
   display: block;
 }
 
@@ -310,8 +310,7 @@ body[data-theme="dark"] .wl-only-dark {
   display: flex;
   flex-direction: column;
   gap: 0.55rem;
-  /* extra bottom padding leaves room for the Colab badge */
-  padding: 1.1rem 1.2rem 2.6rem;
+  padding: 1.1rem 1.2rem 1rem;
   border: 1.5px solid var(--color-background-border);
   border-radius: 0.65rem;
   background: var(--color-background-secondary);

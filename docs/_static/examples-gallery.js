@@ -106,8 +106,8 @@
     // "Open in Colab" badge, bottom-right, as a sibling of the card link (an
     // <a> cannot be nested inside another <a>). Only for examples with a notebook.
     var colabHtml = ex.colab
-      ? '<a class="wl-eg-colab" href="' + esc(ex.colab) + '" target="_blank" rel="noopener noreferrer" aria-label="Open in Google Colab">' +
-          '<img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab">' +
+      ? '<a class="wl-eg-colab" href="' + esc(ex.colab) + '" target="_blank" rel="noopener noreferrer" title="Open in Google Colab" aria-label="Open in Google Colab">' +
+          '<img src="https://colab.research.google.com/img/colab_favicon_256px.png" alt="Open in Colab">' +
         '</a>'
       : '';
     // The wrapper carries the filter data so the whole card (badge included)
