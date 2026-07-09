@@ -87,6 +87,12 @@ def _gather_inputs_fresh(lg, inputs, ids, step, fresh_cache=None):
         if fresh_cache is not None and inp in fresh_cache:
             cols[inp] = fresh_cache[inp]
             continue
+        # A reactive-derived input lives only in fresh_cache this pass (it's not
+        # in the ledger at this step until the end-of-pass persist). If it's not
+        # there yet, skip — don't query the ledger (a guaranteed-miss flush).
+        _m = getattr(_REGISTERED_SIGNALS.get(inp), '_wl_signal_meta', {})
+        if _m.get('inputs'):
+            return None
         at = {int(sid): val for sid, val in lg.query_per_sample_at_step(inp, ids, step)}
         for sid in ids:
             if sid not in at:
