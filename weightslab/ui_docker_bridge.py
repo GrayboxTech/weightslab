@@ -993,22 +993,22 @@ def ui_secure_environment(args):
     logger.warning(f" (Windows) setx WEIGHTSLAB_CERTS_DIR \"{manager.certs_dir}\"")
 
 
-# Bundled PyTorch examples, keyed by the CLI flag (e.g. --cls -> ws-classification).
+# Bundled PyTorch examples, keyed by the CLI flag (e.g. --cls -> wl-classification).
 # Each value is (directory name under examples/PyTorch, human-readable label).
 # kind -> (dir_name, label, category) where category is the examples/ subfolder.
 _EXAMPLES = {
-    "cls": ("ws-classification", "classification", "PyTorch"),
-    "seg": ("ws-segmentation", "segmentation", "PyTorch"),
-    "det": ("ws-detection", "detection", "PyTorch"),
-    "clus": ("ws-clustering", "clustering", "PyTorch"),
-    "gen": ("ws-generation", "generation", "PyTorch"),
-    "3d_det": ("ws-3d-lidar-detection", "3D LiDAR detection", "Usecases"),
-    "2d_det": ("ws-2d-lidar-detection", "2D LiDAR detection", "Usecases"),
+    "cls": ("wl-classification", "classification", "PyTorch"),
+    "seg": ("wl-segmentation", "segmentation", "PyTorch"),
+    "det": ("wl-detection", "detection", "PyTorch"),
+    "clus": ("wl-clustering", "clustering", "PyTorch"),
+    "gen": ("wl-generation", "generation", "PyTorch"),
+    "3d_det": ("wl-3d-lidar-detection", "3D LiDAR detection", "Usecases"),
+    "2d_det": ("wl-2d-lidar-detection", "2D LiDAR detection", "Usecases"),
 }
 _DEFAULT_EXAMPLE = "cls"
 
 
-def _get_example_dir(name: str = "ws-classification", category: str = "PyTorch") -> Path:
+def _get_example_dir(name: str = "wl-classification", category: str = "PyTorch") -> Path:
     """Path to a bundled example directory (under examples/<category>/<name>)."""
     return Path(__file__).parent / 'examples' / category / name
 

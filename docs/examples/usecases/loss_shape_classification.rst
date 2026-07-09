@@ -12,7 +12,7 @@ Loss-Shape Classification per Sample
      <span class="wl-eg-tag">trajectory</span>
    </div>
 
-**Example:** ``weightslab/examples/Usecases/ws-loss_shapes_classification_per_sample/``
+**Example:** ``weightslab/examples/Usecases/wl-loss_shapes_classification_per_sample/``
 
 This use case builds on :doc:`../pytorch/detection` (same Penn-Fudan dataset,
 same model, same ``guard_training_context`` pattern) and adds one new feature:

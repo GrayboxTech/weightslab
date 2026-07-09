@@ -12,7 +12,7 @@ Generation / Anomaly Detection — MVTec (PyTorch)
      <span class="wl-eg-tag">reconstruction</span>
    </div>
 
-**Example:** ``weightslab/examples/PyTorch/ws-generation/main.py``
+**Example:** ``weightslab/examples/PyTorch/wl-generation/main.py``
 
 **Task:** Unsupervised anomaly detection on MVTec capsule images with a
 multi-task UNet (classification head + reconstruction head + contrastive loss).

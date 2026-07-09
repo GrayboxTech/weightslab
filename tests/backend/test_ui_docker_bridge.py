@@ -583,9 +583,9 @@ class TestExampleStart(unittest.TestCase):
         cmd = mock_run.call_args.args[0]
         self.assertEqual(cmd[0], sys.executable)
         main_py = cmd[1].replace("\\", "/")
-        self.assertTrue(main_py.endswith("examples/PyTorch/ws-classification/main.py"), main_py)
+        self.assertTrue(main_py.endswith("examples/PyTorch/wl-classification/main.py"), main_py)
         cwd = mock_run.call_args.kwargs["cwd"].replace("\\", "/")
-        self.assertTrue(cwd.endswith("examples/PyTorch/ws-classification"), cwd)
+        self.assertTrue(cwd.endswith("examples/PyTorch/wl-classification"), cwd)
         self.assertTrue(any("classification (cls) example" in m for m in log_context.output))
 
     @patch("weightslab.ui_docker_bridge.subprocess.run")
@@ -603,7 +603,7 @@ class TestExampleStart(unittest.TestCase):
 
     def test_example_dir_points_at_bundled_example(self):
         # The bundled classification example must actually ship with the package.
-        self.assertTrue((_get_example_dir("ws-classification") / "main.py").exists())
+        self.assertTrue((_get_example_dir("wl-classification") / "main.py").exists())
 
     @patch("weightslab.ui_docker_bridge.subprocess.run")
     def test_example_start_seg_runs_segmentation(self, mock_run):
@@ -611,7 +611,7 @@ class TestExampleStart(unittest.TestCase):
         with self.assertLogs("weightslab.ui_docker_bridge", level="INFO") as log_context:
             example_start(argparse.Namespace(example_kind="seg"))
         main_py = mock_run.call_args.args[0][1].replace("\\", "/")
-        self.assertTrue(main_py.endswith("examples/PyTorch/ws-segmentation/main.py"), main_py)
+        self.assertTrue(main_py.endswith("examples/PyTorch/wl-segmentation/main.py"), main_py)
         self.assertTrue(any("segmentation (seg) example" in m for m in log_context.output))
 
     @patch("weightslab.ui_docker_bridge.subprocess.run")
@@ -620,7 +620,7 @@ class TestExampleStart(unittest.TestCase):
         mock_run.return_value = MagicMock(returncode=0)
         example_start(argparse.Namespace())
         main_py = mock_run.call_args.args[0][1].replace("\\", "/")
-        self.assertTrue(main_py.endswith("examples/PyTorch/ws-classification/main.py"), main_py)
+        self.assertTrue(main_py.endswith("examples/PyTorch/wl-classification/main.py"), main_py)
 
 
 class TestInstallExampleRequirements(unittest.TestCase):

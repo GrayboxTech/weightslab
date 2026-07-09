@@ -11,7 +11,7 @@ Detection — Penn-Fudan Pedestrians (PyTorch)
      <span class="wl-eg-tag">penn-fudan</span>
    </div>
 
-**Example:** ``weightslab/examples/PyTorch/ws-detection/main.py``
+**Example:** ``weightslab/examples/PyTorch/wl-detection/main.py``
 
 **Task:** Bounding-box detection on the Penn-Fudan pedestrian dataset with a
 small ResNet-backbone detector.

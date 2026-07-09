@@ -14,8 +14,8 @@ LiDAR Detection — 2D and 3D (PyTorch)
 
 **Examples:**
 
-- ``weightslab/examples/Usecases/ws-2d-lidar-detection/main.py``
-- ``weightslab/examples/Usecases/ws-3d-lidar-detection/main.py``
+- ``weightslab/examples/Usecases/wl-2d-lidar-detection/main.py``
+- ``weightslab/examples/Usecases/wl-3d-lidar-detection/main.py``
 
 **Task:** Object detection on LiDAR point clouds — 2D pillar-grid (BEV) and
 full 3D bounding boxes (KITTI-format).

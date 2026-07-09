@@ -11,7 +11,7 @@ Classification — MNIST (PyTorch)
      <span class="wl-eg-tag">cnn</span>
    </div>
 
-**Example:** ``weightslab/examples/PyTorch/ws-classification/main.py``
+**Example:** ``weightslab/examples/PyTorch/wl-classification/main.py``
 
 **Task:** 10-class digit classification on MNIST with a small CNN.
 
