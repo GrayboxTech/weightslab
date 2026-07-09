@@ -84,25 +84,12 @@ class LoggerQueue:
         self._stage_instance: list = []
         self._seq = 0
 
-        # --- per-sample query cache ---------------------------------------
-        # Many consumers in a single step read the SAME (signal, ids): e.g. 10
-        # reactive signals all reading the loss, or a batched context re-reading
-        # a history. Each read is a lock + _flush_stage + DuckDB scan, so N
-        # identical reads cost Nx for one answer. Two memoized readers share one
-        # per-signal version map:
-        #   _qps_cache      -> query_per_sample        (full history)
-        #   _qps_step_cache -> query_per_sample_at_step (values AT one step)
-        # both keyed by (signal, ids, [step,] hash, version[signal]). Staging a
-        # per-sample row bumps ITS version (see _stage_sample_row), so a cached
-        # read is served until that signal changes, then recomputed. Per-signal
-        # (not global) versioning is essential: persisting a derived signal must
-        # NOT invalidate the loss every dependent is still reading this step.
-        #
-        # The caches are STEP-SCOPED: because the loader reshuffles ids and the
-        # version bumps every step, a cache key never recurs across steps — so
-        # cross-step entries are pure dead weight. _stage_sample_row clears both
-        # caches when the training step advances, bounding them to one step's
-        # worth of entries (the intra-step reuse — the actual win — is kept).
+        # Per-sample query cache. Many consumers read the SAME (signal, ids) in
+        # one step (e.g. reactive signals all reading the loss); memoize so N
+        # identical reads cost 1 scan. Keyed by (signal, ids, [step,] hash,
+        # version[signal]); staging a row bumps that signal's version to
+        # invalidate. Step-scoped: _stage_sample_row clears both caches when the
+        # step advances (keys never recur across steps, so old entries are dead).
         self._qps_version: dict = defaultdict(int)
         self._qps_cache_step: int = -1
         self._qps_cache = functools.lru_cache(maxsize=2048)(self._query_per_sample_uncached)
@@ -196,11 +183,8 @@ class LoggerQueue:
     def _flush_stage(self) -> None:
         """Bulk-insert all staged rows into DuckDB and clear the buffers.
 
-        Uses ``register(pandas view) -> INSERT SELECT -> unregister``: this is
-        DuckDB's fast vectorized bulk-insert path. (A row-wise ``executemany``
-        from the staging tuples was measured ~6x SLOWER — DuckDB binds each row
-        individually — so despite the register/unregister showing up in profiles,
-        this stays the right approach for bulk.)"""
+        Uses register(pandas)->INSERT SELECT->unregister (DuckDB's fast bulk
+        path). A row-wise executemany was measured ~6x slower — don't switch."""
         with self._lock:
             if self._stage_signals:
                 df = pd.DataFrame(self._stage_signals, columns=_SIGNAL_COLS)
@@ -231,26 +215,18 @@ class LoggerQueue:
         self._maybe_autoflush()
 
     def _stage_sample_row(self, graph_name, exp_hash, sample_id, step, value):
-        # Step advanced -> last step's cache entries can never be hit again
-        # (ids reshuffle + version bump make every key unique per step). Drop
-        # them so the cache stays bounded to the current step instead of
-        # accumulating single-use entries.
+        # New step -> last step's cache entries can't recur; drop them.
         if int(step) > self._qps_cache_step:
             self._invalidate_qps_cache()
             self._qps_cache_step = int(step)
         self._stage_sample.append((
             graph_name, exp_hash, str(sample_id), int(step), float(value), self._next_seq(),
         ))
-        # A new per-sample row for this signal invalidates its cached reads
-        # WITHIN the step (an input written after a first read must be re-read).
-        self._qps_version[graph_name] += 1
+        self._qps_version[graph_name] += 1   # invalidate this signal's cached reads
         self._maybe_autoflush()
 
     def _invalidate_qps_cache(self) -> None:
-        """Drop all memoized per-sample query results (both the full-history and
-        the at-step readers) and reset versions. Used on step advance and by the
-        bulk delete/clear paths, where rows for many signals change at once and
-        per-signal version bumps would be impractical."""
+        """Drop both query caches + versions (step advance; bulk delete/clear)."""
         self._qps_cache.cache_clear()
         self._qps_step_cache.cache_clear()
         self._qps_version.clear()
@@ -767,20 +743,15 @@ class LoggerQueue:
         Returns a list of ``(sample_id, step, value, experiment_hash)`` tuples,
         filtered by *sample_ids* and optionally *exp_hash* (``None`` = all hashes).
 
-        Served from the per-signal query cache (see ``self._qps_cache``): the
-        result is memoized until a new per-sample row for *graph_name* is staged,
-        so repeated identical reads within a step cost one scan, not N. A fresh
-        ``list`` copy is returned each call so callers may mutate it freely.
+        Cached (memoized until *graph_name* is next staged). Returns a fresh list.
         """
         ids_key = tuple(str(s) for s in sample_ids) if sample_ids is not None else None
         cached = self._qps_cache(graph_name, ids_key, exp_hash, self._qps_version[graph_name])
         return list(cached)
 
     def _query_per_sample_uncached(self, graph_name, ids_key, exp_hash, _version):
-        """Actual DuckDB read behind :meth:`query_per_sample`. ``_version`` is a
-        cache-key discriminant only (unused in the body) — it changes when the
-        signal is written, forcing a recompute. Returns a tuple so the cached
-        value stays immutable across callers."""
+        """DuckDB read behind :meth:`query_per_sample`. ``_version`` is a cache
+        key only (bumped on write -> recompute). Returns an immutable tuple."""
         with self._lock:
             self._flush_stage()
             params = [graph_name]
@@ -795,42 +766,26 @@ class LoggerQueue:
         return tuple((sid, int(step), float(val), h) for (sid, step, val, h) in rows)
 
     def query_per_sample_at_step(self, graph_name: str, sample_ids, step, exp_hash=None):
-        """Per-sample values of *graph_name* at EXACTLY *step* — returns a list
-        of ``(sample_id, value)``. Unlike :meth:`query_per_sample`, the result is
-        O(batch), not O(history): the DuckDB ``WHERE step = ?`` filter is applied
-        in-engine so only the current step's rows are materialized into Python.
-        This keeps the reactive freshness gather flat as training accumulates
-        history (it only ever needs the value at the firing step). Served from
-        the step cache; a fresh ``list`` copy is returned each call.
-        """
+        """``(sample_id, value)`` for *graph_name* at exactly *step* — O(batch),
+        not O(history). Keeps the reactive gather flat as history grows. Cached."""
         ids_key = tuple(str(s) for s in sample_ids) if sample_ids is not None else None
         cached = self._qps_step_cache(graph_name, ids_key, int(step), exp_hash,
                                       self._qps_version[graph_name])
         return list(cached)
 
     def _query_per_sample_at_step_uncached(self, graph_name, ids_key, step, exp_hash, _version):
-        """DuckDB read behind :meth:`query_per_sample_at_step`. ``_version`` is a
-        cache-key discriminant only. Returns an immutable tuple.
+        """DuckDB read behind :meth:`query_per_sample_at_step` (``_version`` = cache key).
 
-        Fast path: the value at *step* was almost always just staged this step
-        and is still in the in-memory staging buffer (not yet flushed to DuckDB).
-        The reactive gather reads exactly this — the current step's value — so
-        scanning the small staging list lets us skip the expensive
-        flush -> register(pandas) -> INSERT -> unregister -> SELECT round-trip
-        entirely (profiling showed that DuckDB dance is ~a third of per-step
-        cost). We only fall through to DuckDB when some requested id is NOT in
-        the buffer (a mid-step flush moved it, or it's an older step)."""
+        Fast path: the current step's value is usually still in the in-memory
+        staging buffer, so scan it and skip the flush->register->INSERT->SELECT
+        round-trip. Fall through to DuckDB only if an id isn't staged."""
         step = int(step)
         with self._lock:
             if ids_key is not None:
                 ids_set = set(ids_key)
                 at = {}
-                # Scan the staging buffer from the end: it's append-ordered by
-                # seq (== non-decreasing step), so the target step's rows are
-                # near the tail. Grab the latest value per id (first seen going
-                # backwards wins) and stop as soon as all ids are found; break
-                # out entirely once we pass below `step` (no earlier row can
-                # match). Touches ~one batch of rows, not the whole 8k buffer.
+                # Scan from the tail (append-ordered by step); first value per id
+                # wins, stop when all found or once we drop below `step`.
                 for row in reversed(self._stage_sample):
                     s = row[3]
                     if s < step:

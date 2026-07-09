@@ -75,19 +75,18 @@ _REGISTERED_SIGNALS = {}
 _REACTIVE_FIRED = {}   # signal_name -> step it last fired at (per-step dedup)
 
 
-def _gather_inputs_fresh(lg, inputs, ids, step):
-    """Return ``{name: (B,) array}`` if EVERY input signal has a value AT *step*
-    for EVERY sample id, else ``None``. Selects the value logged *at* `step`
-    (not merely the latest) so a lagging signal-worker job for an older step
-    still gathers that step's inputs correctly.
+def _gather_inputs_fresh(lg, inputs, ids, step, fresh_cache=None):
+    """``{name: (B,) array}`` if every input has a value at *step* for every id,
+    else ``None`` (value AT step, not latest — a lagging worker still gathers it).
+    Reads via ``query_per_sample_at_step`` (O(batch), cached).
 
-    Uses the ledger's value-at-step read (``query_per_sample_at_step``), which
-    returns O(batch) rows for the firing step rather than the full per-sample
-    history — so the gather stays flat as training accumulates steps. Repeated
-    reads of the same input across dependents (10 signals all reading the loss)
-    are collapsed by the ledger's per-signal, step-scoped query cache."""
+    *fresh_cache*: in-memory values fired this pass — read them so the pass
+    persists once at the end, not per signal."""
     cols = {}
     for inp in inputs:
+        if fresh_cache is not None and inp in fresh_cache:
+            cols[inp] = fresh_cache[inp]
+            continue
         at = {int(sid): val for sid, val in lg.query_per_sample_at_step(inp, ids, step)}
         for sid in ids:
             if sid not in at:
@@ -125,6 +124,10 @@ def _react_dependents(seed_names, batch_ids, step, origin='train'):
             if inputs and nm in inputs:
                 yield name, func, meta, inputs
 
+    # Fired this pass; kept in-memory so chains read without a ledger round-trip
+    # and the whole pass persists in ONE save_signals (not one write per signal).
+    fired = {}          # {name: (B,) array}
+    fired_log = {}      # {name: log flag}
     queue = list(seed_names)
     while queue:
         logged = queue.pop()
@@ -134,7 +137,7 @@ def _react_dependents(seed_names, batch_ids, step, origin='train'):
             every = meta.get('compute_every_n_steps', 1) or 1
             if step % every != 0:
                 continue
-            cols = _gather_inputs_fresh(lg, inputs, ids, step)
+            cols = _gather_inputs_fresh(lg, inputs, ids, step, fresh_cache=fired)
             if cols is None:
                 continue  # inputs not all fresh yet — a later log will re-trigger
             _REACTIVE_FIRED[name] = step
@@ -158,28 +161,28 @@ def _react_dependents(seed_names, batch_ids, step, origin='train'):
             except Exception as e:
                 logger.debug(f"reactive signal '{name}' failed: {e}")
                 continue
-            # Persist (log so downstream reactive signals can read it). _react=False:
-            # the queue below drives chaining, avoiding re-entrant dispatch.
-            try:
-                # step=step (not the live model step): attribute the derived
-                # value to the step it was derived from. Critical when the signal
-                # worker lags behind training, else chained signals can't find it.
-                save_signals(signals={name: vals}, batch_ids=ids, step=step,
-                             log=meta.get('log', True), _react=False)
-            except Exception as e:
-                logger.debug(f"reactive persist '{name}' failed: {e}")
-            queue.append(name)   # its value may satisfy further reactive signals
+            fired[name] = np.asarray(vals, dtype=float)
+            fired_log[name] = bool(meta.get('log', True))
+            queue.append(name)
+
+    # One persist for all signals fired this pass. step=step attributes values to
+    # the firing step (matters when the worker lags). _react=False: no re-dispatch.
+    if fired:
+        try:
+            _logged = {n: v.tolist() for n, v in fired.items() if fired_log.get(n, True)}
+            _unlogged = {n: v.tolist() for n, v in fired.items() if not fired_log.get(n, True)}
+            if _logged:
+                save_signals(signals=_logged, batch_ids=ids, step=step, log=True, _react=False)
+            if _unlogged:
+                save_signals(signals=_unlogged, batch_ids=ids, step=step, log=False, _react=False)
+        except Exception as e:
+            logger.debug(f"reactive batched persist failed: {e}")
 
 
 def _detect_signal_cycles():
-    """Find circular dependencies in the reactive ``inputs`` graph.
-
-    Returns a list of cycles, each a list of signal names ending where it began
-    (e.g. ``['sig/X', 'sig/Y', 'sig/X']``). Only edges to OTHER registered
-    ``@wl.signal`` names are followed — base metrics (the watched loss, a plain
-    logged signal) are leaves, never part of a cycle. A signal in a cycle can
-    never fire (its inputs are never all fresh), so surfacing these turns a
-    silent no-fire into a diagnostic."""
+    """Cycles in the reactive ``inputs`` graph, each as a name list ending where
+    it began. Only edges to other registered signals count (base metrics are
+    leaves). A signal in a cycle never fires — surfacing it beats silent no-fire."""
     graph = {}
     for name, func in _REGISTERED_SIGNALS.items():
         meta = getattr(func, '_wl_signal_meta', {})
@@ -214,12 +217,8 @@ _SIGNAL_CYCLE_CHECKED = False
 
 
 def _warn_on_signal_cycles(force=False):
-    """Log a warning for each circular dependency in the reactive signal graph.
-    Idempotent (runs its scan at most once per process unless *force*). Triggered
-    from BOTH :func:`start_training` (early, before the first step) and lazily on
-    the first reactive dispatch — so it fires even in a headless SDK run that
-    never calls ``wl.serve``/``wl.start_training``. Warns rather than raises — the
-    cyclic signals simply stay dark while everything else trains normally."""
+    """Warn once per process for each reactive cycle. Fired from start_training
+    and the first dispatch (so it works headless). Warns, doesn't raise."""
     global _SIGNAL_CYCLE_CHECKED
     if _SIGNAL_CYCLE_CHECKED and not force:
         return
@@ -313,7 +312,8 @@ class SignalContext:
     Unified context object for WeightsLab signals.
     Carries all available metadata for a single sample during computation.
     """
-    def __init__(self, sample_id, dataframe, data=None, subscribed_value=None, logger=None, origin=None, step=None):
+    def __init__(self, sample_id, dataframe, data=None, subscribed_value=None, logger=None, origin=None,
+                 step=None, logits=None, preds=None, targets=None):
         self.sample_id = sample_id
         self.dataframe = dataframe
         self.data = data
@@ -321,6 +321,9 @@ class SignalContext:
         self.logger = logger
         self.origin = origin
         self.step = step          # step the trigger fired at (for freshness checks)
+        self.logits = logits      # this sample's raw model output row (subscribe_to path)
+        self.preds = preds
+        self.targets = targets
 
     @property
     def image(self) -> Optional[np.ndarray]:
@@ -424,13 +427,19 @@ class BatchSignalContext:
     (:meth:`history` runs a single query for the whole batch instead of one query
     per sample), which is where the large speed-ups come from.
     """
-    def __init__(self, sample_ids, subscribed_values, logger=None, dataframe=None, origin=None, step=None):
+    def __init__(self, sample_ids, subscribed_values, logger=None, dataframe=None, origin=None,
+                 step=None, logits=None, preds=None, targets=None):
         self.sample_ids = [int(s) for s in sample_ids]          # length B
         self.subscribed_values = np.asarray(subscribed_values, dtype=float)  # (B,)
         self.logger = logger
         self.dataframe = dataframe
         self.origin = origin
         self.step = step          # step the trigger fired at (for freshness checks)
+        # Raw model output for this batch (subscribe_to path): logit-derived
+        # signals compute from these, no save_signals. None on the inputs=[...] path.
+        self.logits = logits      # (B, C)
+        self.preds = preds
+        self.targets = targets
 
     def history(self, signal_name):
         """Per-sample history of *signal_name* for every sample in the batch, in
@@ -957,6 +966,9 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                                  dataframe=df_proxy,
                                  origin=kwargs.get('origin', 'train'),
                                  step=step,
+                                 logits=preds_raw.detach() if hasattr(preds_raw, 'detach') else preds_raw,
+                                 preds=preds.detach() if hasattr(preds, 'detach') else preds,
+                                 targets=targets.detach() if hasattr(targets, 'detach') else targets,
                              )
                              # Enforce that declared ingested signals are fresh.
                              for dep in ingests:
@@ -979,6 +991,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                                  val = float(val_vec[i])
 
                                  # Unified Context Pattern
+                                 _lrow = preds_raw[i] if hasattr(preds_raw, '__getitem__') and preds_raw is not None else None
                                  ctx = SignalContext(
                                      sample_id=int(uid),
                                      subscribed_value=val,
@@ -986,6 +999,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                                      dataframe=df_proxy,
                                      origin=kwargs.get('origin', 'train'),
                                      step=step,
+                                     logits=_lrow.detach() if hasattr(_lrow, 'detach') else _lrow,
                                  )
                                  try:
                                      res = func(ctx) # Compute per sample result with unified context
@@ -998,7 +1012,11 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                          dynamic_updates[name] = signal_value
                          if dynamic_updates and meta.get('log', True):
                              logger.debug(f"Dynamic updates computed for signal '{reg_name}': {list(dynamic_updates.keys())}")
-                             _log_signal(sum(signal_value)/len(signal_value), signal_value, name, step=step, **kwargs) # Log custom subscribed signals
+                             # Log per-sample keyed by id (dict), not a bare list —
+                             # else it reaches the dataframe but not the logger's
+                             # per_sample table, and reactive dependents can't read it.
+                             _sv = {int(ids_np[i]): float(signal_value[i]) for i in range(len(ids_np))}
+                             _log_signal(sum(signal_value)/len(signal_value), _sv, name, step=step, **kwargs) # Log custom subscribed signals
                      except StaleSignalError:
                          raise  # correctness enforcement: surface, don't swallow
                      except Exception as e:
@@ -1019,21 +1037,30 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
         preds = detach_to_cpu(preds)
         preds_raw = detach_to_cpu(preds_raw)
 
+        # Storing preds_raw (the (B,C) logits) every step is costly and only
+        # needed for FiftyOne/report drill-down — signals already read them via
+        # ctx.logits. Gate off to skip the store. Default on = current behavior.
+        try:
+            _store_preds = bool(get_hyperparams().get('ledger_store_preds_raw', True))
+        except Exception:
+            _store_preds = True
+
         # Enqueue signals and data
         save_signals(
             signals=signals,
             batch_ids=batch_ids,
-            preds_raw=preds_raw,
-            preds=preds,
-            targets=targets,
+            preds_raw=preds_raw if _store_preds else None,
+            preds=preds if _store_preds else None,
+            targets=targets if _store_preds else None,
             log=False # Already logged above, no need to log again in save_signals; set to False to avoid duplicate logging if save_signals is called separately without logging
         )
 
-    # Reactive signals: the watched metric was just logged (above), so it may
-    # satisfy an inputs=[...] signal that depends on it.
+    # Seed reactive dispatch with the watched metric AND subscribe_to results, so
+    # a chain like conf_r<-entropy<-logits fires without any user save_signals.
     if not per_instance and batch_ids is not None:
         try:
-            _dispatch_or_enqueue([reg_name], batch_ids, step, origin or 'train')
+            _seed = [reg_name] + [n for n in dynamic_updates.keys() if n != reg_name]
+            _dispatch_or_enqueue(_seed, batch_ids, step, origin or 'train')
         except StaleSignalError:
             raise
         except Exception as e:
