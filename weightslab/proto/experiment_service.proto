@@ -176,6 +176,13 @@ message SaveCheckpointOperation {
   bool save_optimizer = 2;     // also persist optimizer state
 }
 
+// Restarts the backend Python process. The process relies on the container's
+// restart policy (e.g. `restart: unless-stopped`) to come back up, at which
+// point it reloads its last saved checkpoint the same way it does on a fresh
+// container start.
+message RestartInstanceOperation {
+}
+
 message TrainerCommand {
   bool get_hyper_parameters = 4;
   bool get_interactive_layers = 5;
@@ -189,6 +196,7 @@ message TrainerCommand {
   optional DenySamplesOperation remove_eval_from_denylist_operation = 12;
   optional PlotNoteOperation plot_note_operation = 13;
   optional SaveCheckpointOperation save_checkpoint_operation = 14;
+  optional RestartInstanceOperation restart_operation = 15;
 }
 
 message HyperParameterDesc {
