@@ -1,18 +1,20 @@
-"""Per-sample signals on MNIST — the idiomatic WeightsLab way, zero save_signals.
+"""Per-sample signals on MNIST — readable, zero save_signals, with train + eval.
 
-The whole per-step user code is the watched loss. Everything else is a
-``@wl.signal``:
+Per-step user code is just the watched loss. Everything else is a @wl.signal:
+  entropy    from ctx.logits when the loss fires
+  loss_norm  reactive, from the logged loss
+  hardness   reactive, from loss + entropy
+  loss_shape reactive, classifies each sample's loss trajectory (live signal,
+             not an end-of-run function). Reads history, so it's throttled by
+             WL_SHAPE_EVERY (1 = every step, full coverage; higher = cheaper).
 
-* the watched loss (``crit``) logs a per-sample ``loss_sample`` trajectory;
-* ``sig/entropy`` is computed from ``ctx.logits`` when the loss fires (a
-  logit-derived signal — no manual push);
-* ``sig/loss_norm`` / ``sig/hardness`` are reactive, derived from logged signals;
-* trajectory shapes are classified once at the end from the loss history.
+Universal loss: the watched crit runs on the test split each epoch too, so test
+samples get a loss trajectory and a shape as well.
 
-Run:  python main.py --outdir ./out
+Env: WL_STRESS_EPOCHS, WL_STRESS_OUT, WL_SHAPE_EVERY.
 """
-import argparse
-from collections import defaultdict
+import os, time, gc, json, shutil
+from collections import defaultdict, Counter
 
 import numpy as np
 import torch
@@ -22,9 +24,49 @@ from torch.utils.data import Dataset
 from torchvision import datasets, transforms
 
 import weightslab as wl
-from weightslab.components.global_monitoring import guard_training_context
+from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
 
 LOSS = "loss_sample"
+SHAPES = ["monotonic", "plateaued", "Flat_high", "high_variance", "U_Shape", "Spiked"]
+OUT = os.environ.get("WL_STRESS_OUT", "/tmp/wl_stress")
+EPOCHS = int(os.environ.get("WL_STRESS_EPOCHS", "10"))
+SHAPE_EVERY = int(os.environ.get("WL_SHAPE_EVERY", "1"))
+BATCH = 64
+
+
+def classify_shape(values):
+    """Loss trajectory -> shape index (or -1 with < 5 points)."""
+    y = np.asarray(values, dtype=float)
+    if y.size < 5:
+        return -1
+    n = y.size
+    rng = max(float(y.max() - y.min()), 1e-8)
+    drop = (float(y[0]) - float(y[-1])) / (abs(float(y[0])) + 1e-8)
+    cv = float(y.std()) / (abs(float(y.mean())) + 1e-8)
+    argmin = int(np.argmin(y))
+    rebound = (float(y[-1]) - float(y.min())) / rng
+    tail = y[int(0.6 * n):]
+    tail_flat = float(tail.std()) / (abs(float(tail.mean())) + 1e-8) < 0.1
+    if 0.2 * n < argmin < 0.8 * n and rebound > 0.3:
+        return SHAPES.index("U_Shape")
+    if drop > 0.4:
+        return SHAPES.index("monotonic")
+    if drop > 0.15 and tail_flat:
+        return SHAPES.index("plateaued")
+    if float(np.diff(y).max()) / rng > 0.5:
+        return SHAPES.index("Spiked")
+    if cv > 0.5:
+        return SHAPES.index("high_variance")
+    return SHAPES.index("Flat_high")
+
+
+def rss_gb():
+    try:
+        for ln in open("/proc/self/status"):
+            if ln.startswith("VmRSS:"):
+                return int(ln.split()[1]) / (1024 * 1024)
+    except Exception:
+        return -1.0
 
 
 class SmallCNN(nn.Module):
@@ -41,93 +83,69 @@ class SmallCNN(nn.Module):
 
 
 class MNISTIdx(Dataset):
-    """Yields (image, uid, label). fast_get_label skips image decode at ledger init."""
-    def __init__(self, root, n):
-        self.m = datasets.MNIST(root, train=True, download=True, transform=None)
-        self.t = transforms.ToTensor(); self.n = n
+    """Yields (image, uid, label). uid namespaced by split so train/test don't
+    collide in the shared ledger; fast_get_label skips decode at ledger init."""
+    def __init__(self, root, train, base):
+        self.m = datasets.MNIST(root, train=train, download=True, transform=None)
+        self.t = transforms.ToTensor(); self.base = base
 
     def __len__(self):
-        return min(len(self.m), self.n)
+        return len(self.m)
 
     def __getitem__(self, i):
         img, lab = self.m[i]
-        return self.t(img), i, lab
+        return self.t(img), self.base + i, lab
 
     def fast_get_label(self, i):
         return int(self.m.targets[i])
 
 
-def classify_shape(values):
-    """Per-sample loss trajectory -> shape label (None if < 5 points)."""
-    y = np.asarray(values, dtype=float)
-    if y.size < 5:
-        return None
-    n = y.size
-    rng = max(float(y.max() - y.min()), 1e-8)
-    drop = (float(y[0]) - float(y[-1])) / (abs(float(y[0])) + 1e-8)
-    cv = float(y.std()) / (abs(float(y.mean())) + 1e-8)
-    argmin = int(np.argmin(y))
-    rebound = (float(y[-1]) - float(y.min())) / rng
-    tail = y[int(0.6 * n):]
-    tail_flat = float(tail.std()) / (abs(float(tail.mean())) + 1e-8) < 0.1
-    if 0.2 * n < argmin < 0.8 * n and rebound > 0.3:
-        return "U_Shape"
-    if drop > 0.4:
-        return "monotonic"
-    if drop > 0.15 and tail_flat:
-        return "plateaued"
-    if float(np.diff(y).max()) / rng > 0.5:
-        return "Spiked"
-    if cv > 0.5:
-        return "high_variance"
-    return "Flat_high"
-
-
-def finalize_shapes():
-    """End sweep: classify each sample's loss trajectory into a categorical tag."""
-    series = defaultdict(list)
-    for sid, step, val, _ in wl.query_signal_history(LOSS):
-        series[sid].append((step, val))
-    by_label = defaultdict(list)
-    for sid, pts in series.items():
-        label = classify_shape([v for _, v in sorted(pts)])
-        if label is not None:
-            by_label[label].append(sid)
-    for label, sids in by_label.items():
-        wl.set_categorical_tag(sids, "loss_shape", label)
-    return {k: len(v) for k, v in by_label.items()}
+def log(msg):
+    print(msg, flush=True)
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--outdir", default="./out")
-    ap.add_argument("--subset", type=int, default=2000)
-    ap.add_argument("--epochs", type=int, default=12)
-    args = ap.parse_args()
-
+    shutil.rmtree(OUT, ignore_errors=True)
+    os.makedirs(OUT + "/wl_logs", exist_ok=True)
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(0)
-    hp = {"experiment_name": "ws-signals-mnist", "device": str(dev),
-          "root_log_dir": args.outdir + "/wl_logs", "serving_grpc": False, "serving_cli": False,
-          "ledger_flush_max_rows": 8192,
-          "data": {"train_loader": {"batch_size": 64, "shuffle": True}}}
-    wl.watch_or_edit(hp, flag="hyperparameters", defaults=hp)
+    metrics = open(OUT + "/metrics.jsonl", "w")
 
-    ds = MNISTIdx(args.outdir + "/data", args.subset)
+    # vanilla baseline (plain PyTorch) for the overhead comparison
+    vb = SmallCNN().to(dev); vo = optim.Adam(vb.parameters(), lr=0.01); vc = nn.CrossEntropyLoss()
+    xb = torch.randn(BATCH, 1, 28, 28, device=dev); yb = torch.randint(0, 10, (BATCH,), device=dev)
+    sync = (lambda: torch.cuda.synchronize()) if dev.type == "cuda" else (lambda: None)
+    for _ in range(10):
+        vo.zero_grad(); vc(vb(xb), yb).backward(); vo.step()
+    sync(); t0 = time.perf_counter()
+    for _ in range(50):
+        vo.zero_grad(); vc(vb(xb), yb).backward(); vo.step()
+    sync(); vanilla_ms = 1000 * (time.perf_counter() - t0) / 50
+    del vb, vo; gc.collect()
+    log(f"[run] vanilla baseline = {vanilla_ms:.2f} ms/step (dev {dev})")
+
+    # WeightsLab setup: both splits tracked, watched loss, signals
+    hp = {"experiment_name": "signals-mnist", "device": str(dev), "root_log_dir": OUT + "/wl_logs",
+          "serving_grpc": False, "serving_cli": False, "ledger_flush_max_rows": 8192,
+          "ledger_enable_h5_persistence": False, "experiment_dump_to_train_steps_ratio": 10_000_000,
+          "data": {"train_loader": {"batch_size": BATCH, "shuffle": True}}}
+    wl.watch_or_edit(hp, flag="hyperparameters", defaults=hp)
+    train_ds = MNISTIdx(OUT + "/data", train=True, base=0)
+    test_ds = MNISTIdx(OUT + "/data", train=False, base=1_000_000)
     model = wl.watch_or_edit(SmallCNN().to(dev), flag="model", device=dev)
     opt = wl.watch_or_edit(optim.Adam(model.parameters(), lr=0.01), flag="optimizer")
-    loader = wl.watch_or_edit(ds, flag="data", loader_name="train_loader",
-                              batch_size=64, shuffle=True, is_training=True, preload_labels=True)
+    loader = wl.watch_or_edit(train_ds, flag="data", loader_name="train_loader",
+                              batch_size=BATCH, shuffle=True, is_training=True, preload_labels=True)
+    test_loader = wl.watch_or_edit(test_ds, flag="data", loader_name="test_loader",
+                                   batch_size=256, shuffle=False, is_training=False, preload_labels=True)
     crit = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"),
                             flag="loss", signal_name=LOSS, per_sample=True, log=True)
 
-    # entropy from the model output when the loss fires — a @wl.signal, no push.
     @wl.signal(name="sig/entropy", subscribe_to=LOSS, batched=True)
     def entropy(b):
         p = torch.softmax(b.logits, 1)
         return (-(p * (p + 1e-12).log()).sum(1)).detach().cpu().numpy()
 
-    # reactive derived signals (off logged signals; no model output needed)
     @wl.signal(name="sig/loss_norm", inputs=[LOSS], batched=True)
     def loss_norm(b):
         return b.inputs[LOSS] / (float(np.mean(b.inputs[LOSS])) + 1e-8)
@@ -136,25 +154,59 @@ def main():
     def hardness(b):
         return b.inputs[LOSS] * b.inputs["sig/entropy"]
 
+    @wl.signal(name="sig/loss_shape", inputs=[LOSS], batched=True, compute_every_n_steps=SHAPE_EVERY)
+    def loss_shape(b):
+        hist = b.history(LOSS)   # {uid: [loss values in step order]}
+        return np.array([classify_shape(hist[s]) for s in b.sample_ids], dtype=float)
+
     wl.serve(serving_grpc=False, serving_cli=False)
     wl.start_training(timeout=0)
+    log(f"[run] tracked train={len(train_ds)} test={len(test_ds)} | shape_every={SHAPE_EVERY}")
 
-    for epoch in range(1, args.epochs + 1):
+    def test_eval():
+        """Universal loss: watched crit over the test split each epoch."""
+        with torch.no_grad():
+            for tb in test_loader:
+                ti, tid, tl = tb[0].to(dev), tb[1], tb[2].to(dev)
+                with guard_testing_context:
+                    tlg = model(ti)
+                    crit(tlg, tl, batch_ids=tid, preds=tlg.argmax(1, keepdim=True))
+
+    step_times, gstep, t_run = [], 0, time.perf_counter()
+    for ep in range(1, EPOCHS + 1):
+        ep_ms = []
         for img, ids, lab in loader:
             img, lab = img.to(dev), lab.to(dev)
+            sync(); ts = time.perf_counter()
             with guard_training_context:
                 opt.zero_grad()
                 logits = model(img)
-                # the only per-step call: the watched loss logs loss_sample and
-                # fires the @wl.signal chain. No save_signals.
+                # only per-step call: the watched loss logs loss_sample and fires
+                # the @wl.signal chain. No save_signals.
                 crit(logits, lab, batch_ids=ids, preds=logits.argmax(1, keepdim=True)).mean().backward()
                 opt.step()
-        print(f"epoch {epoch}/{args.epochs}")
+            sync(); ep_ms.append(1000 * (time.perf_counter() - ts))
+            gstep += 1
+        test_eval()
+        wl_ms = float(np.mean(ep_ms)); step_times += ep_ms
+        rec = {"epoch": ep, "gstep": gstep, "wl_ms": round(wl_ms, 2), "vanilla_ms": round(vanilla_ms, 2),
+               "rss_gb": round(rss_gb(), 2), "elapsed_s": round(time.perf_counter() - t_run, 1)}
+        metrics.write(json.dumps(rec) + "\n"); metrics.flush()
+        log(f"[run] ep {ep:3d}/{EPOCHS} | WL {wl_ms:6.2f} ms vs vanilla {vanilla_ms:.2f} "
+            f"= +{100*(wl_ms/vanilla_ms-1):.0f}% | RSS {rec['rss_gb']:.2f} GB | {rec['elapsed_s']:.0f}s")
 
-    print("trajectory-shape distribution:", finalize_shapes())
-    path = wl.write_dataframe(args.outdir + "/per_sample_signals.csv",
-                              format="csv", columns=["signals", "tags"])
-    print("per-sample report:", path)
+    import pandas as pd
+    path = wl.write_dataframe(OUT + "/report.csv", format="csv", columns="signals")
+    df = pd.read_csv(path)
+    sc = [c for c in df.columns if c.endswith("sig/loss_shape")][0]
+    dist = Counter(SHAPES[int(v)] for v in df[sc].dropna() if v >= 0)
+    med = float(np.median(step_times))
+    metrics.close()
+    log("\n[run] ===== SUMMARY =====")
+    log(f"[run] vanilla {vanilla_ms:.2f} ms | WL median {med:.2f} ms/step (+{100*(med/vanilla_ms-1):.0f}%)")
+    log(f"[run] report {len(df)} rows | loss_shape covered {df[sc].notna().sum()}/{len(df)}")
+    log(f"[run] shape distribution: {dict(dist)}")
+    log(f"[run] report -> {path}")
 
 
 if __name__ == "__main__":
