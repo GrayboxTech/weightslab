@@ -11,7 +11,20 @@ Per-step user code is just the watched loss. Everything else is a @wl.signal:
 Universal loss: the watched crit runs on the test split each epoch too, so test
 samples get a loss trajectory and a shape as well.
 
-Env: WL_STRESS_EPOCHS, WL_STRESS_OUT, WL_SHAPE_EVERY.
+Env:
+  WL_STRESS_EPOCHS       (int, default 10)  number of training epochs.
+  WL_STRESS_OUT          (str, default /tmp/wl_stress)  output dir; wiped and
+                         recreated on start. Holds data/, wl_logs/,
+                         metrics.jsonl and report.csv.
+  WL_SHAPE_EVERY         (int, default 1)  throttle for the sig/loss_shape
+                         signal, which reads history and is therefore costly.
+                         1 = compute every step (full coverage); higher values
+                         compute every N steps (cheaper, sparser coverage).
+  WL_QUERY_CACHE_MAXSIZE (int, default 2048)  backend tuning knob (read in
+                         weightslab.backend.logger). Sets the LRU maxsize of the
+                         per-sample query cache the ledger uses when serving
+                         signals; larger values cache more distinct per-sample
+                         queries at the cost of memory.
 """
 import os, time, gc, json, shutil
 from collections import Counter
@@ -20,44 +33,19 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset
-from torchvision import datasets, transforms
 
 import weightslab as wl
 from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
 
+from utils.model import SmallCNN
+from utils.data import MNISTIdx
+from utils.criterions import SHAPES, classify_shape
+
 LOSS = "loss_sample"
-SHAPES = ["monotonic", "plateaued", "Flat_high", "high_variance", "U_Shape", "Spiked"]
 OUT = os.environ.get("WL_STRESS_OUT", "/tmp/wl_stress")
 EPOCHS = int(os.environ.get("WL_STRESS_EPOCHS", "10"))
 SHAPE_EVERY = int(os.environ.get("WL_SHAPE_EVERY", "1"))
 BATCH = 64
-
-
-def classify_shape(values):
-    """Loss trajectory -> shape index (or -1 with < 5 points)."""
-    y = np.asarray(values, dtype=float)
-    if y.size < 5:
-        return -1
-    n = y.size
-    rng = max(float(y.max() - y.min()), 1e-8)
-    drop = (float(y[0]) - float(y[-1])) / (abs(float(y[0])) + 1e-8)
-    cv = float(y.std()) / (abs(float(y.mean())) + 1e-8)
-    argmin = int(np.argmin(y))
-    rebound = (float(y[-1]) - float(y.min())) / rng
-    tail = y[int(0.6 * n):]
-    tail_flat = float(tail.std()) / (abs(float(tail.mean())) + 1e-8) < 0.1
-    if 0.2 * n < argmin < 0.8 * n and rebound > 0.3:
-        return SHAPES.index("U_Shape")
-    if drop > 0.4:
-        return SHAPES.index("monotonic")
-    if drop > 0.15 and tail_flat:
-        return SHAPES.index("plateaued")
-    if float(np.diff(y).max()) / rng > 0.5:
-        return SHAPES.index("Spiked")
-    if cv > 0.5:
-        return SHAPES.index("high_variance")
-    return SHAPES.index("Flat_high")
 
 
 def rss_gb():
@@ -67,37 +55,6 @@ def rss_gb():
                 return int(ln.split()[1]) / (1024 * 1024)
     except Exception:
         return -1.0
-
-
-class SmallCNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.input_shape = (1, 1, 28, 28)
-        self.net = nn.Sequential(
-            nn.Conv2d(1, 8, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(8, 16, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Flatten(), nn.Linear(16 * 7 * 7, 64), nn.ReLU(), nn.Linear(64, 10))
-
-    def forward(self, x):
-        return self.net(x)
-
-
-class MNISTIdx(Dataset):
-    """Yields (image, uid, label). uid namespaced by split so train/test don't
-    collide in the shared ledger; fast_get_label skips decode at ledger init."""
-    def __init__(self, root, train, base):
-        self.m = datasets.MNIST(root, train=train, download=True, transform=None)
-        self.t = transforms.ToTensor(); self.base = base
-
-    def __len__(self):
-        return len(self.m)
-
-    def __getitem__(self, i):
-        img, lab = self.m[i]
-        return self.t(img), self.base + i, lab
-
-    def fast_get_label(self, i):
-        return int(self.m.targets[i])
 
 
 def log(msg):

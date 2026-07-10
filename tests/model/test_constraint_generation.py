@@ -15,7 +15,25 @@ from typing import List, Tuple
 
 from weightslab.utils.modules_dependencies import DepType
 from weightslab.backend.model_interface import ModelInterface
+from weightslab.backend import ledgers
 from weightslab.utils.computational_graph import _detect_layer_constraints
+
+
+class _RegistryIsolation:
+    """Clean the global model registry after each test.
+
+    ``get_dependencies_onnx`` builds a throwaway ``ModelInterface`` (in ``eval``
+    mode, for ONNX dependency extraction) which registers itself as the global
+    experiment model and is never cleaned up. Left behind, ``get_model()`` keeps
+    returning that eval-mode model, and anything that reads it — e.g.
+    ``LoggerQueue._get_audit_mode`` (``get_model().audit_mode``) — sees
+    ``audit_mode == True``, leaking into unrelated tests run later in the suite.
+    """
+    def tearDown(self):
+        try:
+            ledgers.GLOBAL_LEDGER.unregister_model()
+        except Exception:
+            pass
 
 
 def get_dependencies_onnx(model: nn.Module, dummy_input: torch.Tensor) -> List[Tuple[nn.Module, nn.Module, DepType]]:
@@ -96,8 +114,8 @@ class MultiGroupedModel(nn.Module):
         return x
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
-class TestConstraintDetection(unittest.TestCase):
+# @unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
+class TestConstraintDetection(_RegistryIsolation, unittest.TestCase):
     """Test constraint detection on individual modules"""
 
     def test_grouped_conv_detection(self):
@@ -136,8 +154,8 @@ class TestConstraintDetection(unittest.TestCase):
         self.assertEqual(len(constraints), 0)
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
-class TestConstraintPropagation(unittest.TestCase):
+# @unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
+class TestConstraintPropagation(_RegistryIsolation, unittest.TestCase):
     """Test constraint propagation through dependency graphs"""
 
     def test_grouped_conv_propagation(self):
@@ -201,8 +219,8 @@ class TestConstraintPropagation(unittest.TestCase):
         self.assertEqual(model.model.g_conv3.wl_constraints[1]['cons_group_size'], 8)
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
-class TestConstraintReporting(unittest.TestCase):
+# @unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
+class TestConstraintReporting(_RegistryIsolation, unittest.TestCase):
     """Test constraint reporting and information retrieval"""
 
     def test_constraint_source_tracking(self):

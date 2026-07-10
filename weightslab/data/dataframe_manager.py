@@ -2151,7 +2151,7 @@ class LedgeredDataFrameManager:
 
         return df
 
-    def get_collapse_annotations_to_samples_df(self, iid: str = None) -> pd.DataFrame:
+    def get_collapse_annotations_to_samples_df(self) -> pd.DataFrame:
         """Collapse a (sample_id, annotation_id) multi-index df to one row per sample.
 
         The shared dataframe manager now expands every sample into one row per
