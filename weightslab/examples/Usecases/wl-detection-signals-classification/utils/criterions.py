@@ -250,6 +250,8 @@ def decode_predictions(outputs, grid_size, conf_thresh=0.3, max_det=10):
     return results
 
 
+
+
 # =========================================================================
 # Custom subscribed signal: per-sample loss-shape classification
 # =========================================================================
@@ -265,7 +267,6 @@ def decode_predictions(outputs, grid_size, conf_thresh=0.3, max_det=10):
 #   high_variance -> noisy oscillation                    (ambiguous label)
 #   U_Shape       -> learned then forgotten               (catastrophic interference)
 #   Spiked        -> sudden jump at some step             (data/aug/version change)
-from weightslab.backend import ledgers
 
 # Allowed values for the categorical tag, in display order.
 LOSS_SHAPE_LABELS = [
@@ -337,24 +338,43 @@ def _classify_loss_shape(values):
     subscribe_to="train_loss/sample",
     compute_every_n_steps=25,
     log=False,  # side-effecting signal: we tag samples, no aggregate curve needed
+    batched=True,  # fire once per BATCH (vectorized) instead of once per sample
 )
-def classify_loss_shape(ctx: wl.SignalContext) -> int:
-    """Dynamic signal fired per sample every 25 steps for "train_loss/sample".
+def classify_loss_shape(ctx: wl.BatchSignalContext) -> list:
+    """Batched signal fired once per batch every 25 steps for "train_loss/sample".
 
-    Pulls the sample's full loss history, classifies its shape, and tags the
-    sample with the categorical tag ``loss_shape``. Returns the numeric shape
-    code (or -1 when there is not enough history yet) so the verdict is also
-    available as a per-sample signal column.
+    The batched variant is dramatically faster than the per-sample one: it
+    reads every sample's loss trajectory in a SINGLE ledger query (instead of
+    one query per sample) and coalesces the categorical-tag writes to one call
+    per distinct shape (instead of one write per sample). It returns a length-B
+    list of numeric shape codes (``-1`` where there is not enough history yet),
+    aligned to ``ctx.sample_ids``.
     """
-    # Full per-sample trajectory of the subscribed metric, ordered by step.
-    history = wl.query_sample_history(ctx.sample_id, signal_name="train_loss/sample", exp_hash=checkpoint_manager.get_current_experiment_hash())
-    series = sorted(((step, val) for _, step, val, _ in history), key=lambda t: t[0])
-    values = [v for _, v in series]
+    exp_hash = checkpoint_manager.get_current_experiment_hash()
 
-    label = _classify_loss_shape(values)
-    if label is None:
-        return -1
+    # ONE ledger query for the whole batch, filtered to the current experiment.
+    # Rows come back ordered by seq (== step order); grouping by sample_id below
+    # therefore preserves each sample's per-step order without a re-sort.
+    histories = {sid: [] for sid in ctx.sample_ids}
+    for sid, _step, val, _ in ctx.logger.query_per_sample(
+        "train_loss/sample", sample_ids=ctx.sample_ids, exp_hash=exp_hash
+    ):
+        histories.setdefault(int(sid), []).append(val)
 
-    # Persist the verdict as a categorical tag on this sample.
-    wl.set_categorical_tag([ctx.sample_id], "loss_shape", label)
-    return LOSS_SHAPE_CODES[label]
+    # Classify every sample; bucket sample_ids by verdict so we can write the
+    # categorical tag once per shape rather than once per sample.
+    codes = []
+    ids_by_label = {}
+    for sid in ctx.sample_ids:
+        label = _classify_loss_shape(histories.get(sid, []))
+        if label is None:
+            codes.append(-1)
+            continue
+        codes.append(LOSS_SHAPE_CODES[label])
+        ids_by_label.setdefault(label, []).append(sid)
+
+    # One batched tag write per distinct shape present in this batch.
+    for label, ids in ids_by_label.items():
+        wl.set_categorical_tag(ids, "loss_shape", label)
+
+    return codes
