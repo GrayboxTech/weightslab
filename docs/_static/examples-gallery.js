@@ -10,41 +10,49 @@
   ];
 
   // URLs are root-relative (from the doc root), prefixed with content_root at render time
+  // Base for "Open in Colab" links (notebooks live under examples/Notebooks).
+  var COLAB = 'https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/';
+
   var EXAMPLES = [
     {
       badge: 'PyTorch', color: 'pytorch',
       title: 'Classification — MNIST',
       desc: 'CNN digit classifier on MNIST. Register hyperparameters, monitor per-sample loss, and use the deny-aware sampler to focus on hard examples.',
       tags: ['classification', 'supervised', 'mnist', 'cnn'],
-      url: 'examples/pytorch/classification.html'
+      url: 'examples/pytorch/classification.html',
+      colab: COLAB + 'PyTorch/ws-classification.ipynb'
     },
     {
       badge: 'PyTorch', color: 'pytorch',
       title: 'Segmentation — BDD100k',
       desc: 'Per-pixel semantic segmentation with a UNet. Track per-sample IoU and visualise mask overlays directly in the studio.',
       tags: ['segmentation', 'semantic', 'bdd100k', 'masks', 'dense prediction'],
-      url: 'examples/pytorch/segmentation.html'
+      url: 'examples/pytorch/segmentation.html',
+      colab: COLAB + 'PyTorch/ws-segmentation.ipynb'
     },
     {
       badge: 'PyTorch', color: 'pytorch',
       title: 'Detection — Penn-Fudan',
       desc: 'Bounding-box detection on Penn-Fudan pedestrians. Per-instance multi-index dataframe with (sample_id, annotation_id) keys.',
       tags: ['detection', 'object detection', 'bounding boxes', 'penn-fudan'],
-      url: 'examples/pytorch/detection.html'
+      url: 'examples/pytorch/detection.html',
+      colab: COLAB + 'PyTorch/ws-detection.ipynb'
     },
     {
       badge: 'PyTorch', color: 'pytorch',
       title: 'Clustering — Face Recognition',
       desc: 'Metric learning with triplet loss on face datasets. Store and explore high-dimensional embeddings per sample in the studio.',
       tags: ['clustering', 'unsupervised', 'embeddings', 'face recognition', 'metric learning'],
-      url: 'examples/pytorch/clustering.html'
+      url: 'examples/pytorch/clustering.html',
+      colab: COLAB + 'PyTorch/ws-clustering.ipynb'
     },
     {
       badge: 'PyTorch', color: 'pytorch',
       title: 'Generation / Anomaly Detection',
       desc: 'Unsupervised anomaly detection on MVTec with a multi-task UNet. Monitor reconstruction quality and per-sample anomaly scores.',
       tags: ['anomaly detection', 'generation', 'unsupervised', 'mvtec', 'reconstruction'],
-      url: 'examples/pytorch/generation.html'
+      url: 'examples/pytorch/generation.html',
+      colab: COLAB + 'PyTorch/ws-generation.ipynb'
     },
     {
       badge: 'Lightning', color: 'lightning',
@@ -72,7 +80,8 @@
       title: 'Loss-Shape Classification',
       desc: 'Dynamic subscribed signal that classifies each sample\'s loss trajectory (monotonic, U-shape, spiked, …) and auto-tags it.',
       tags: ['loss analysis', 'signal', 'categorical tag', 'per-sample', 'trajectory'],
-      url: 'examples/usecases/loss_shape_classification.html'
+      url: 'examples/usecases/loss_shape_classification.html',
+      colab: COLAB + 'Usecases/ws-segmentation-loss-shapes.ipynb'
     }
   ];
 
@@ -94,15 +103,25 @@
     }).join('');
     var search = (ex.title + ' ' + ex.tags.join(' ')).toLowerCase();
     var href = baseUrl + '/' + ex.url;
+    // "Open in Colab" badge, bottom-right, as a sibling of the card link (an
+    // <a> cannot be nested inside another <a>). Only for examples with a notebook.
+    var colabHtml = ex.colab
+      ? '<a class="wl-eg-colab" href="' + esc(ex.colab) + '" target="_blank" rel="noopener noreferrer" title="Open in Google Colab" aria-label="Open in Google Colab">' +
+          '<img src="https://colab.research.google.com/img/colab_favicon_256px.png" alt="Open in Colab">' +
+        '</a>'
+      : '';
+    // The wrapper carries the filter data so the whole card (badge included)
+    // shows/hides together.
     return (
-      '<a class="wl-eg-card" href="' + esc(href) + '"' +
-        ' data-search="' + esc(search) + '"' +
-        ' data-color="' + esc(ex.color) + '">' +
-        '<span class="wl-eg-badge wl-eg-badge--' + ex.color + '">' + esc(ex.badge) + '</span>' +
-        '<p class="wl-eg-title">' + esc(ex.title) + '</p>' +
-        '<p class="wl-eg-desc">' + esc(ex.desc) + '</p>' +
-        '<div class="wl-eg-tags">' + tagsHtml + '</div>' +
-      '</a>'
+      '<div class="wl-eg-cardwrap" data-search="' + esc(search) + '" data-color="' + esc(ex.color) + '">' +
+        '<a class="wl-eg-card" href="' + esc(href) + '">' +
+          '<span class="wl-eg-badge wl-eg-badge--' + ex.color + '">' + esc(ex.badge) + '</span>' +
+          '<p class="wl-eg-title">' + esc(ex.title) + '</p>' +
+          '<p class="wl-eg-desc">' + esc(ex.desc) + '</p>' +
+          '<div class="wl-eg-tags">' + tagsHtml + '</div>' +
+        '</a>' +
+        colabHtml +
+      '</div>'
     );
   }
 
@@ -166,7 +185,7 @@
       var totalVisible = 0;
 
       document.querySelectorAll('.wl-eg-section').forEach(function (section) {
-        var cards = section.querySelectorAll('.wl-eg-card');
+        var cards = section.querySelectorAll('.wl-eg-cardwrap');
         var sectionVisible = 0;
         cards.forEach(function (c) {
           var matchText  = !q || c.dataset.search.indexOf(q) !== -1;
