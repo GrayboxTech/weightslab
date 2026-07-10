@@ -31,6 +31,7 @@ Design notes
 
 import functools
 import json
+import os
 import threading
 import time
 from collections import defaultdict
@@ -90,10 +91,12 @@ class LoggerQueue:
         # version[signal]); staging a row bumps that signal's version to
         # invalidate. Step-scoped: _stage_sample_row clears both caches when the
         # step advances (keys never recur across steps, so old entries are dead).
+        # Cache size is env-configurable (WL_QUERY_CACHE_MAXSIZE, default 2048).
+        _qps_maxsize = int(os.environ.get("WL_QUERY_CACHE_MAXSIZE", "2048"))
         self._qps_version: dict = defaultdict(int)
         self._qps_cache_step: int = -1
-        self._qps_cache = functools.lru_cache(maxsize=2048)(self._query_per_sample_uncached)
-        self._qps_step_cache = functools.lru_cache(maxsize=2048)(self._query_per_sample_at_step_uncached)
+        self._qps_cache = functools.lru_cache(maxsize=_qps_maxsize)(self._query_per_sample_uncached)
+        self._qps_step_cache = functools.lru_cache(maxsize=_qps_maxsize)(self._query_per_sample_at_step_uncached)
 
         self._ensure_tables()
         self._restore_runtime_state_from_db()
