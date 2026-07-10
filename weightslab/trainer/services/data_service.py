@@ -4349,12 +4349,19 @@ class DataService:
             # not coerce to any numeric value at all (pure strings).
             col_series = df[column]
             numeric_vals = pd.to_numeric(col_series, errors="coerce")
-            is_categorical = numeric_vals.isna().all()
-            # A column that has a few non-NaN numeric values mixed with mostly
-            # NaN still counts as numeric; only treat as categorical when
-            # pd.to_numeric fails on all values.
-            if not is_categorical and numeric_vals.notna().sum() == 0:
-                is_categorical = True
+            is_category_dtype = (
+                str(col_series.dtype) == "category" or hasattr(col_series, "cat")
+            )
+            # A genuine numeric dtype (float/int/bool) is ALWAYS numeric — even
+            # when every value is NaN (e.g. a loss column no sample has filled
+            # yet). Such a column yields an empty numeric histogram, never a
+            # spurious "unset" categorical bar.
+            is_numeric_dtype = (
+                pd.api.types.is_numeric_dtype(col_series) and not is_category_dtype
+            )
+            is_categorical = (not is_numeric_dtype) and (
+                is_category_dtype or not bool(numeric_vals.notna().any())
+            )
 
             if is_categorical:
                 # --- Categorical path ---
