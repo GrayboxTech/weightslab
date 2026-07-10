@@ -798,6 +798,8 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
     # Extract torch function parameters
     _ = wl_kw.get('flag')
+    # Kept in-memory for ctx.logits (logit-derived signals); NOT persisted unless
+    # ledger_store_preds_raw is set (see the gated save_signals below).
     preds_raw = a[0] if len(a) > 0 else None
 
     # User parameters
@@ -1051,11 +1053,11 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
         # Storing preds_raw (the (B,C) logits) every step is costly and only
         # needed for FiftyOne/report drill-down — signals already read them via
-        # ctx.logits. Gate off to skip the store. Default on = current behavior.
+        # ctx.logits. Default off (dev disabled it); set the hyperparam to re-enable.
         try:
-            _store_preds = bool(get_hyperparams().get('ledger_store_preds_raw', True))
+            _store_preds = bool(get_hyperparams().get('ledger_store_preds_raw', False))
         except Exception:
-            _store_preds = True
+            _store_preds = False
 
         # Enqueue signals and data
         save_signals(
@@ -4009,33 +4011,51 @@ def write_history(
 LOSS_SHAPES = ["monotonic", "plateaued", "Flat_high", "high_variance", "U_Shape", "Spiked"]
 
 
-def classify_loss_shape(values, min_points=5, drop_learned=0.4, drop_plateau=0.15,
-                        tail_flat_cv=0.1, spike_jump=0.5, noisy_cv=0.5, u_rebound=0.3):
-    """Default per-sample loss-trajectory classifier -> one of ``LOSS_SHAPES``
-    (or ``None`` with < *min_points*). Every threshold is a named, scale-invariant
-    param with a natural default, so you can tune it without rewriting the
-    classifier, e.g. ``write_loss_shapes(classifier=lambda v:
-    wl.classify_loss_shape(v, drop_learned=0.5))``."""
+def trajectory_stats(values):
+    """Scale-invariant summary stats of one sample's trajectory — the reusable
+    feature layer. Returns a dict (or ``None`` with < 2 points) so you can build
+    a custom classifier on top without re-deriving the features::
+
+        def my_clf(v):
+            s = wl.trajectory_stats(v)
+            return None if s is None else ("fast" if s["drop"] > 0.6 else "slow")
+    """
     y = np.asarray(values, dtype=float)
-    if y.size < min_points:
+    if y.size < 2:
         return None
     n = y.size
     rng = max(float(y.max() - y.min()), 1e-8)
-    drop = (float(y[0]) - float(y[-1])) / (abs(float(y[0])) + 1e-8)
-    cv = float(y.std()) / (abs(float(y.mean())) + 1e-8)
-    argmin = int(np.argmin(y))
-    rebound = (float(y[-1]) - float(y.min())) / rng
     tail = y[int(0.6 * n):]
-    tail_flat = float(tail.std()) / (abs(float(tail.mean())) + 1e-8) < tail_flat_cv
-    if 0.2 * n < argmin < 0.8 * n and rebound > u_rebound:
+    return {
+        "n": n,
+        "first": float(y[0]), "last": float(y[-1]),
+        "drop": (float(y[0]) - float(y[-1])) / (abs(float(y[0])) + 1e-8),
+        "cv": float(y.std()) / (abs(float(y.mean())) + 1e-8),
+        "argmin_frac": float(np.argmin(y)) / n,
+        "rebound": (float(y[-1]) - float(y.min())) / rng,
+        "max_up_jump": float(np.diff(y).max()) / rng,
+        "tail_cv": float(tail.std()) / (abs(float(tail.mean())) + 1e-8),
+    }
+
+
+def classify_loss_shape(values, min_points=5, drop_learned=0.4, drop_plateau=0.15,
+                        tail_flat_cv=0.1, spike_jump=0.5, noisy_cv=0.5, u_rebound=0.3):
+    """Default classifier -> one of ``LOSS_SHAPES`` (or ``None`` with <
+    *min_points*). Built on :func:`trajectory_stats` (reuse those features
+    for your own rules) with every threshold a named, tunable param. Override the
+    whole thing by passing your own ``classifier`` to :func:`write_signal_shapes`."""
+    s = trajectory_stats(values)
+    if s is None or s["n"] < min_points:
+        return None
+    if 0.2 < s["argmin_frac"] < 0.8 and s["rebound"] > u_rebound:
         return "U_Shape"
-    if drop > drop_learned:
+    if s["drop"] > drop_learned:
         return "monotonic"
-    if drop > drop_plateau and tail_flat:
+    if s["drop"] > drop_plateau and s["tail_cv"] < tail_flat_cv:
         return "plateaued"
-    if float(np.diff(y).max()) / rng > spike_jump:
+    if s["max_up_jump"] > spike_jump:
         return "Spiked"
-    if cv > noisy_cv:
+    if s["cv"] > noisy_cv:
         return "high_variance"
     return "Flat_high"
 
@@ -4068,6 +4088,25 @@ def write_loss_shapes(loss_signal="loss_sample", classifier=None):
     """Convenience wrapper over :func:`write_signal_shapes` for the loss signal
     (tag ``loss_shape``, default loss classifier)."""
     return write_signal_shapes(loss_signal, tag_name="loss_shape", classifier=classifier)
+
+
+def enable_loss_shape_signal(loss_signal="loss_sample", name="sig/loss_shape",
+                             every=1, classifier=None):
+    """Register a LIVE per-step ``@wl.signal`` that classifies each sample's
+    loss-trajectory-so-far into an int-coded shape (index into ``LOSS_SHAPES``,
+    ``-1`` before there's enough history), updated every *every* steps.
+
+    This is the live counterpart to :func:`write_loss_shapes` (report-time). It's
+    heavier — it reads history on every fire — so throttle with *every* or prefer
+    the report-time path for a definitive, full-coverage tag."""
+    clf = classifier or classify_loss_shape
+
+    @signal(name=name, inputs=[loss_signal], batched=True, compute_every_n_steps=every)
+    def _live_shape(b):
+        hist = b.history(loss_signal)
+        return np.array([(LOSS_SHAPES.index(lbl) if (lbl := clf(hist[s])) is not None else -1)
+                         for s in b.sample_ids], dtype=float)
+    return _live_shape
 
 
 def write_dataframe(
