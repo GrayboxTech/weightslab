@@ -29,9 +29,12 @@ Design notes
   staging appends and flushes take the same lock.
 """
 
+import functools
 import json
+import os
 import threading
 import time
+from collections import defaultdict
 
 import duckdb
 import pandas as pd
@@ -81,6 +84,20 @@ class LoggerQueue:
         self._stage_sample: list = []
         self._stage_instance: list = []
         self._seq = 0
+
+        # Per-sample query cache. Many consumers read the SAME (signal, ids) in
+        # one step (e.g. reactive signals all reading the loss); memoize so N
+        # identical reads cost 1 scan. Keyed by (signal, ids, [step,] hash,
+        # version[signal]); staging a row bumps that signal's version to
+        # invalidate. Step-scoped: _stage_sample_row clears both caches when the
+        # step advances (keys never recur across steps, so old entries are dead).
+        # Cache size is env-configurable (WL_QUERY_CACHE_MAXSIZE, default 2048).
+        _qps_maxsize = int(os.environ.get("WL_QUERY_CACHE_MAXSIZE", "2048"))
+        self._qps_version: dict = defaultdict(int)
+        self._qps_cache_step: int = -1
+        self._qps_cache = functools.lru_cache(maxsize=_qps_maxsize)(self._query_per_sample_uncached)
+        self._qps_step_cache = functools.lru_cache(maxsize=_qps_maxsize)(self._query_per_sample_at_step_uncached)
+
         self._ensure_tables()
         self._restore_runtime_state_from_db()
 
@@ -167,7 +184,10 @@ class LoggerQueue:
             self._flush_stage()
 
     def _flush_stage(self) -> None:
-        """Bulk-insert all staged rows into DuckDB and clear the buffers."""
+        """Bulk-insert all staged rows into DuckDB and clear the buffers.
+
+        Uses register(pandas)->INSERT SELECT->unregister (DuckDB's fast bulk
+        path). A row-wise executemany was measured ~6x slower — don't switch."""
         with self._lock:
             if self._stage_signals:
                 df = pd.DataFrame(self._stage_signals, columns=_SIGNAL_COLS)
@@ -198,10 +218,21 @@ class LoggerQueue:
         self._maybe_autoflush()
 
     def _stage_sample_row(self, graph_name, exp_hash, sample_id, step, value):
+        # New step -> last step's cache entries can't recur; drop them.
+        if int(step) > self._qps_cache_step:
+            self._invalidate_qps_cache()
+            self._qps_cache_step = int(step)
         self._stage_sample.append((
             graph_name, exp_hash, str(sample_id), int(step), float(value), self._next_seq(),
         ))
+        self._qps_version[graph_name] += 1   # invalidate this signal's cached reads
         self._maybe_autoflush()
+
+    def _invalidate_qps_cache(self) -> None:
+        """Drop both query caches + versions (step advance; bulk delete/clear)."""
+        self._qps_cache.cache_clear()
+        self._qps_step_cache.cache_clear()
+        self._qps_version.clear()
 
     def _stage_instance_row(self, graph_name, exp_hash, sample_id, annotation_id, step, value):
         self._stage_instance.append((
@@ -244,6 +275,7 @@ class LoggerQueue:
             self._conn.execute("DELETE FROM per_instance")
             self._current_step_buffer.clear()
             self._buffered_step = None
+            self._invalidate_qps_cache()
 
     def _to_float(self, value):
         if isinstance(value, th.Tensor):
@@ -443,6 +475,7 @@ class LoggerQueue:
             self._flush_stage()
             self._conn.execute("DELETE FROM signals WHERE experiment_hash = ?", [eval_hash])
             self._conn.execute("DELETE FROM per_sample WHERE experiment_hash = ?", [eval_hash])
+            self._invalidate_qps_cache()
 
         # Drop queued points that reference this hash.
         self._pending_queue = [
@@ -712,19 +745,75 @@ class LoggerQueue:
 
         Returns a list of ``(sample_id, step, value, experiment_hash)`` tuples,
         filtered by *sample_ids* and optionally *exp_hash* (``None`` = all hashes).
+
+        Cached (memoized until *graph_name* is next staged). Returns a fresh list.
         """
+        ids_key = tuple(str(s) for s in sample_ids) if sample_ids is not None else None
+        cached = self._qps_cache(graph_name, ids_key, exp_hash, self._qps_version[graph_name])
+        return list(cached)
+
+    def _query_per_sample_uncached(self, graph_name, ids_key, exp_hash, _version):
+        """DuckDB read behind :meth:`query_per_sample`. ``_version`` is a cache
+        key only (bumped on write -> recompute). Returns an immutable tuple."""
         with self._lock:
             self._flush_stage()
             params = [graph_name]
             sql = "SELECT sample_id, step, value, experiment_hash FROM per_sample WHERE metric_name = ?"
             sql += self._hash_filter(exp_hash, params)
-            if sample_ids is not None:
+            if ids_key is not None:
                 sql += " AND sample_id IN (SELECT UNNEST(?))"
-                params.append([str(s) for s in sample_ids])
+                params.append(list(ids_key))
             sql += " ORDER BY seq"
             rows = self._conn.execute(sql, params).fetchall()
 
-        return [(sid, int(step), float(val), h) for (sid, step, val, h) in rows]
+        return tuple((sid, int(step), float(val), h) for (sid, step, val, h) in rows)
+
+    def query_per_sample_at_step(self, graph_name: str, sample_ids, step, exp_hash=None):
+        """``(sample_id, value)`` for *graph_name* at exactly *step* — O(batch),
+        not O(history). Keeps the reactive gather flat as history grows. Cached."""
+        ids_key = tuple(str(s) for s in sample_ids) if sample_ids is not None else None
+        cached = self._qps_step_cache(graph_name, ids_key, int(step), exp_hash,
+                                      self._qps_version[graph_name])
+        return list(cached)
+
+    def _query_per_sample_at_step_uncached(self, graph_name, ids_key, step, exp_hash, _version):
+        """DuckDB read behind :meth:`query_per_sample_at_step` (``_version`` = cache key).
+
+        Fast path: the current step's value is usually still in the in-memory
+        staging buffer, so scan it and skip the flush->register->INSERT->SELECT
+        round-trip. Fall through to DuckDB only if an id isn't staged."""
+        step = int(step)
+        with self._lock:
+            if ids_key is not None:
+                ids_set = set(ids_key)
+                at = {}
+                # Scan from the tail (append-ordered by step); first value per id
+                # wins, stop when all found or once we drop below `step`.
+                for row in reversed(self._stage_sample):
+                    s = row[3]
+                    if s < step:
+                        break
+                    if s == step and row[0] == graph_name \
+                            and (exp_hash is None or row[1] == exp_hash):
+                        sid = row[2]
+                        if sid in ids_set and sid not in at:
+                            at[sid] = row[4]
+                            if len(at) == len(ids_set):
+                                break
+                if len(at) == len(ids_set):
+                    return tuple((sid, float(val)) for sid, val in at.items())
+
+            # Fallback: not fully in the staging buffer -> flush + query DuckDB.
+            self._flush_stage()
+            params = [graph_name, step]
+            sql = "SELECT sample_id, value FROM per_sample WHERE metric_name = ? AND step = ?"
+            sql += self._hash_filter(exp_hash, params)
+            if ids_key is not None:
+                sql += " AND sample_id IN (SELECT UNNEST(?))"
+                params.append(list(ids_key))
+            rows = self._conn.execute(sql, params).fetchall()
+
+        return tuple((sid, float(val)) for (sid, val) in rows)
 
     def query_per_instance(
         self,

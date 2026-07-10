@@ -11,11 +11,15 @@ venv
 runs
 data
 MagicMock
+drop
+htmlcov
+htmlcov-report
 
 # Ignore hidden directories
 .history
 .lh
 .claude
+.coverage
 .chat
 .ai
 .pytest_cache
