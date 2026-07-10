@@ -4,17 +4,16 @@ Per-step user code is just the watched loss. Everything else is a @wl.signal:
   entropy    from ctx.logits when the loss fires
   loss_norm  reactive, from the logged loss
   hardness   reactive, from loss + entropy
-  loss_shape reactive, classifies each sample's loss trajectory (live signal,
-             not an end-of-run function). Reads history, so it's throttled by
-             WL_SHAPE_EVERY (1 = every step, full coverage; higher = cheaper).
+
+loss_shape comes from WeightsLab's built-in classifier, applied on report write
+(wl.write_dataframe(loss_shape_signal=...)) — no classifier code lives here.
 
 Universal loss: the watched crit runs on the test split each epoch too, so test
 samples get a loss trajectory and a shape as well.
 
-Env: WL_STRESS_EPOCHS, WL_STRESS_OUT, WL_SHAPE_EVERY.
+Env: WL_STRESS_EPOCHS, WL_STRESS_OUT.
 """
 import os, time, gc, json, shutil
-from collections import defaultdict, Counter
 
 import numpy as np
 import torch
@@ -27,37 +26,9 @@ import weightslab as wl
 from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
 
 LOSS = "loss_sample"
-SHAPES = ["monotonic", "plateaued", "Flat_high", "high_variance", "U_Shape", "Spiked"]
 OUT = os.environ.get("WL_STRESS_OUT", "/tmp/wl_stress")
 EPOCHS = int(os.environ.get("WL_STRESS_EPOCHS", "10"))
-SHAPE_EVERY = int(os.environ.get("WL_SHAPE_EVERY", "1"))
 BATCH = 64
-
-
-def classify_shape(values):
-    """Loss trajectory -> shape index (or -1 with < 5 points)."""
-    y = np.asarray(values, dtype=float)
-    if y.size < 5:
-        return -1
-    n = y.size
-    rng = max(float(y.max() - y.min()), 1e-8)
-    drop = (float(y[0]) - float(y[-1])) / (abs(float(y[0])) + 1e-8)
-    cv = float(y.std()) / (abs(float(y.mean())) + 1e-8)
-    argmin = int(np.argmin(y))
-    rebound = (float(y[-1]) - float(y.min())) / rng
-    tail = y[int(0.6 * n):]
-    tail_flat = float(tail.std()) / (abs(float(tail.mean())) + 1e-8) < 0.1
-    if 0.2 * n < argmin < 0.8 * n and rebound > 0.3:
-        return SHAPES.index("U_Shape")
-    if drop > 0.4:
-        return SHAPES.index("monotonic")
-    if drop > 0.15 and tail_flat:
-        return SHAPES.index("plateaued")
-    if float(np.diff(y).max()) / rng > 0.5:
-        return SHAPES.index("Spiked")
-    if cv > 0.5:
-        return SHAPES.index("high_variance")
-    return SHAPES.index("Flat_high")
 
 
 def rss_gb():
@@ -154,14 +125,9 @@ def main():
     def hardness(b):
         return b.inputs[LOSS] * b.inputs["sig/entropy"]
 
-    @wl.signal(name="sig/loss_shape", inputs=[LOSS], batched=True, compute_every_n_steps=SHAPE_EVERY)
-    def loss_shape(b):
-        hist = b.history(LOSS)   # {uid: [loss values in step order]}
-        return np.array([classify_shape(hist[s]) for s in b.sample_ids], dtype=float)
-
     wl.serve(serving_grpc=False, serving_cli=False)
     wl.start_training(timeout=0)
-    log(f"[run] tracked train={len(train_ds)} test={len(test_ds)} | shape_every={SHAPE_EVERY}")
+    log(f"[run] tracked train={len(train_ds)} test={len(test_ds)}")
 
     def test_eval():
         """Universal loss: watched crit over the test split each epoch."""
@@ -196,16 +162,17 @@ def main():
             f"= +{100*(wl_ms/vanilla_ms-1):.0f}% | RSS {rec['rss_gb']:.2f} GB | {rec['elapsed_s']:.0f}s")
 
     import pandas as pd
-    path = wl.write_dataframe(OUT + "/report.csv", format="csv", columns="signals")
+    # loss_shape comes from WeightsLab's built-in classifier, run on report write.
+    path = wl.write_dataframe(OUT + "/report.csv", format="csv",
+                              columns=["signals", "tags"], loss_shape_signal=LOSS)
     df = pd.read_csv(path)
-    sc = [c for c in df.columns if c.endswith("sig/loss_shape")][0]
-    dist = Counter(SHAPES[int(v)] for v in df[sc].dropna() if v >= 0)
+    sc = [c for c in df.columns if c.endswith("loss_shape")][0]
     med = float(np.median(step_times))
     metrics.close()
     log("\n[run] ===== SUMMARY =====")
     log(f"[run] vanilla {vanilla_ms:.2f} ms | WL median {med:.2f} ms/step (+{100*(med/vanilla_ms-1):.0f}%)")
     log(f"[run] report {len(df)} rows | loss_shape covered {df[sc].notna().sum()}/{len(df)}")
-    log(f"[run] shape distribution: {dict(dist)}")
+    log(f"[run] shape distribution: {df[sc].value_counts(dropna=True).to_dict()}")
     log(f"[run] report -> {path}")
 
 

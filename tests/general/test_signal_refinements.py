@@ -135,8 +135,26 @@ class TestDefaultShapeClassifier(unittest.TestCase):
         self.assertNotEqual(wl.classify_loss_shape(traj), "monotonic")   # default 0.4 unmet
         self.assertEqual(wl.classify_loss_shape(traj, drop_learned=0.25), "monotonic")
 
+    def test_trajectory_stats_reusable(self):
+        s = wl.trajectory_stats([2.0, 1.0, 0.5, 0.5, 0.4])
+        self.assertAlmostEqual(s["drop"], (2.0 - 0.4) / 2.0, places=5)
+        self.assertIn("cv", s); self.assertIn("tail_cv", s); self.assertIn("argmin_frac", s)
+        self.assertIsNone(wl.trajectory_stats([1.0]))   # < 2 points
+
+    def test_enable_live_signal_registers(self):
+        _REGISTERED_SIGNALS.clear()
+        try:
+            wl.enable_loss_shape_signal(loss_signal="loss_sample", name="sig/live_shape", every=5)
+            self.assertIn("sig/live_shape", _REGISTERED_SIGNALS)
+            meta = _REGISTERED_SIGNALS["sig/live_shape"]._wl_signal_meta
+            self.assertEqual(meta.get("inputs"), ["loss_sample"])
+            self.assertEqual(meta.get("compute_every_n_steps"), 5)
+        finally:
+            _REGISTERED_SIGNALS.clear()
+
     def test_exports(self):
-        for name in ("write_loss_shapes", "write_signal_shapes", "classify_loss_shape"):
+        for name in ("classify_loss_shape", "trajectory_stats", "write_loss_shapes",
+                     "write_signal_shapes", "enable_loss_shape_signal"):
             self.assertTrue(hasattr(wl, name), name)
         self.assertIn("monotonic", wl.LOSS_SHAPES)
 
