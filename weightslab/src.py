@@ -1047,7 +1047,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
             signals.update(dynamic_updates) # Merge dynamic signals
 
         preds = detach_to_cpu(preds)
-        preds_raw = detach_to_cpu(preds_raw)
+        # preds_raw = detach_to_cpu(preds_raw)
 
         # Storing preds_raw (the (B,C) logits) every step is costly and only
         # needed for FiftyOne/report drill-down — signals already read them via
@@ -1061,9 +1061,9 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
         save_signals(
             signals=signals,
             batch_ids=batch_ids,
-            preds_raw=preds_raw if _store_preds else None,
-            preds=preds if _store_preds else None,
-            targets=targets if _store_preds else None,
+            # preds_raw=preds_raw,
+            preds=preds,
+            targets=targets,
             log=False # Already logged above, no need to log again in save_signals; set to False to avoid duplicate logging if save_signals is called separately without logging
         )
 
