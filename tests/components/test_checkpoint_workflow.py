@@ -308,7 +308,7 @@ class CheckpointSystemTests(unittest.TestCase):
         cls.temp_dir = tempfile.mkdtemp(prefix="checkpoint_v3_test_")
         cls.log_dir = os.path.join(cls.temp_dir, "experiments")
 
-        # Initialize config from YAML-like dict (similar to ws-classification)
+        # Initialize config from YAML-like dict (similar to wl-classification)
         cls.config = {
             'experiment_name': EXP_NAME,
             'device': DEVICE,

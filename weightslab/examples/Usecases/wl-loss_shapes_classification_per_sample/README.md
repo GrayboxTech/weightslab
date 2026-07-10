@@ -20,7 +20,7 @@ weightslab start example --det
 Or run it directly:
 
 ```bash
-cd weightslab/examples/PyTorch/ws-detection
+cd weightslab/examples/PyTorch/wl-detection
 pip install -r requirements.txt
 python main.py
 ```

@@ -2402,6 +2402,8 @@ class DataService:
         except Exception as e:
             return f"Action: failed to load weights ({where}) from {exp_hash[:16]}: {e}"
 
+<<<<<<< HEAD
+=======
     # ------------------------------------------------------------------
     # Hyperparameter tuning (agent action)
     # ------------------------------------------------------------------
@@ -2593,6 +2595,67 @@ class DataService:
         except Exception as e:
             return f"Action: failed to set hyperparameter '{param}': {e}"
 
+    @classmethod
+    def _materialize_hp(cls, v, _depth=0):
+        """Recursively convert an HP Proxy / _ValueProxy tree into plain Python
+        (dict/list/scalars) so it can be JSON-formatted for display. Read-only."""
+        if _depth > 25:
+            return str(v)
+        if isinstance(v, dict) or hasattr(v, "keys"):
+            out = {}
+            try:
+                for k in v.keys():
+                    out[str(k)] = cls._materialize_hp(cls._hp_read_path(v, k), _depth + 1)
+            except Exception:
+                return str(v)
+            return out
+        scal = cls._hp_scalarize(v)
+        if scal is None or type(scal) in (bool, int, float, str):
+            return scal
+        if isinstance(scal, (list, tuple)):
+            return [cls._materialize_hp(x, _depth + 1) for x in scal]
+        return str(scal)
+
+    def _agent_show_config(self, param=None) -> str:
+        """Agent action (READ-ONLY): show the whole experiment configuration, or
+        the value at a single key/dotted-path (e.g. 'root_log_dir'). Never
+        mutates anything."""
+        import json as _json
+        from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name
+
+        hp_name = resolve_hp_name()
+        hp = get_hyperparams(hp_name)
+        if hp is None:
+            return "Config: no configuration is registered."
+
+        # Specific key requested.
+        if param:
+            path = self._resolve_hp_path(hp, param)
+            if path is None:
+                return (f"Config: could not find '{param}' in the configuration "
+                        "(ask to 'show the whole configuration' to see available keys).")
+            value = self._materialize_hp(self._hp_read_path(hp, path))
+            if isinstance(value, (dict, list)):
+                try:
+                    value = _json.dumps(value, indent=2, default=str)
+                except Exception:
+                    value = str(value)
+            return f"Config: {path} = {value}"
+
+        # Whole config dump.
+        materialized = self._materialize_hp(hp)
+        if not materialized:
+            return "Config: the configuration is empty."
+        try:
+            text = _json.dumps(materialized, indent=2, default=str, sort_keys=True)
+        except Exception:
+            text = str(materialized)
+        max_len = 6000
+        if len(text) > max_len:
+            text = text[:max_len] + "\n... (truncated; ask for a specific key, e.g. 'show the root log dir')"
+        return f"Configuration ({hp_name}):\n{text}"
+
+>>>>>>> 2db142c599a32f94669a3afad5f4098d5629ddde
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -2649,6 +2712,8 @@ class DataService:
                     exp_hash=params.get("hash") or params.get("exp_hash"),
                 )
 
+<<<<<<< HEAD
+=======
             # Set / scale a hyperparameter (batch size, learning rate, ratios, ...).
             elif action_name in ("set_hyperparam", "set_hyperparameter", "set_hp", "tune_hyperparam"):
                 return self._agent_set_hyperparam(
@@ -2657,6 +2722,14 @@ class DataService:
                     value=params.get("value"),
                 )
 
+            # READ-ONLY: show the config / a specific config value (no mutation).
+            elif action_name in ("show_config", "get_config", "show_configuration",
+                                 "get_hyperparam", "show_hyperparam", "config_info"):
+                return self._agent_show_config(
+                    param=params.get("param") or params.get("name") or params.get("key_path")
+                )
+
+>>>>>>> 2db142c599a32f94669a3afad5f4098d5629ddde
             return f"Action triggered: {action_name} (Not implemented)"
 
         # --- 3. DATAFRAME MANIPULATION ---

@@ -12,7 +12,7 @@ Segmentation — BDD100k (PyTorch)
      <span class="wl-eg-tag">dense prediction</span>
    </div>
 
-**Example:** ``weightslab/examples/PyTorch/ws-segmentation/main.py``
+**Example:** ``weightslab/examples/PyTorch/wl-segmentation/main.py``
 
 **Task:** Per-instance semantic segmentation on BDD100k (6 classes) with a
 small UNet.
@@ -114,3 +114,12 @@ these signals over training steps and lets you sort samples by them.
 
       weightslab ui launch           # 1. deploy the studio
       weightslab start example --seg # 2. start the segmentation demo
+
+
+.. raw:: html
+
+   <div style="text-align:right; margin-top:2rem;">
+     <a href="https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/PyTorch/ws-segmentation.ipynb" target="_blank" rel="noopener noreferrer">
+       <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab">
+     </a>
+   </div>

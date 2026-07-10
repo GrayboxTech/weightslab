@@ -952,6 +952,12 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                  for name, func in subscribers:
                      meta = getattr(func, '_wl_signal_meta', {})
                      compute_every = meta.get('compute_every_n_steps', 1)
+                     min_step = meta.get('min_step', 0)
+
+                     # Warm-up gate: don't fire until we've reached min_step
+                     # (e.g. a signal that needs enough per-sample history).
+                     if current_step < min_step:
+                         continue
 
                      # Frequency Check
                      if current_step % compute_every != 0:
@@ -1026,7 +1032,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                      except StaleSignalError:
                          raise  # correctness enforcement: surface, don't swallow
                      except Exception as e:
-                         logger.debug(f"Dynamic signal {name} failed: {e}")
+                         logger.error(f"Dynamic signal {name} failed: {e}")
                          pass # User function error, skip
 
     # Save statistics if requested and applicable.
@@ -1467,30 +1473,99 @@ def start_training(timeout: int = None) -> None:
         time.sleep(timeout)
     pause_ctrl.resume() # Ensure we're not paused if start_training is called after serve
 
+
+def _running_in_notebook() -> bool:
+    """True when running inside a Jupyter notebook kernel or Google Colab.
+
+    Distinguishes a notebook kernel (``ZMQInteractiveShell``) / Colab from a
+    plain script or a terminal IPython session, so we only nudge users who can't
+    reach a locally-launched Weights Studio without a tunnel.
+    """
+    if "google.colab" in sys.modules:
+        return True
+    try:
+        from IPython import get_ipython
+        shell = get_ipython()
+        return shell is not None and shell.__class__.__name__ == "ZMQInteractiveShell"
+    except Exception:
+        return False
+
+
 def serve(serving_cli: bool = True, serving_grpc: bool = False,
-          spawn_cli_client: bool = False, **kwargs) -> None:
+          spawn_cli_client: bool = False, serving_bore: bool = False,
+          bore_port: int = None, **kwargs):
     """Start WeightsLab services.
 
     Args:
         serving_cli: Start the interactive CLI server.
-        serving_grpc: Start the gRPC server.
+        serving_grpc: Start the gRPC server. In a notebook/Colab, if this is on
+            but ``serving_bore`` is off, a warning suggests ``serving_bore=True``
+            (the UI runs on your own machine and needs a tunnel to reach here).
         spawn_cli_client: When ``serving_cli`` is True, also open the interactive
             REPL in a new console window (the default, backward-compatible
             behavior). Set to ``False`` to start the CLI server *headless* — it
             still advertises its port, so you can attach on demand from any
             terminal with ``weightslab cli`` (or ``weightslab cli --port <port>``).
+        serving_bore: Expose the gRPC backend to the internet via a zero-signup
+            `bore <https://github.com/ekzhang/bore>`_ raw-TCP relay, so a Weights
+            Studio running on another machine can reach it (e.g. training in
+            Google Colab, UI on your laptop). Prints the public endpoint and the
+            two commands to run locally (``weightslab ui launch`` +
+            ``weightslab tunnel <endpoint>``). Implies a gRPC backend. Uses the
+            shared public relay ``bore.pub`` — the random port is the only thing
+            guarding it, so keep it to non-sensitive demos.
+        bore_port: Port to expose when ``serving_bore`` is set. Defaults to the
+            gRPC port (``grpc_port`` kwarg, else ``$GRPC_BACKEND_PORT``, else
+            50051).
         **kwargs: Extra server options passed to underlying backends
             (e.g. ``cli_host``, ``cli_port``, ``grpc_port``).
+
+    Returns:
+        The public ``host:port`` bore endpoint string when ``serving_bore`` is
+        set and the tunnel came up, otherwise ``None``.
     """
 
     if serving_grpc:
         grpc_serve(**kwargs)
+
+    # In a notebook/Colab the backend has no local Weights Studio to talk to
+    # (the UI runs on the user's own machine). Nudge them to open a tunnel.
+    if serving_grpc and not serving_bore and _running_in_notebook():
+        logger.warning(
+            "Running in a notebook/Colab with serving_grpc=True but "
+            "serving_bore=False. Weights Studio runs on your OWN machine and "
+            "cannot reach this backend directly. Pass serving_bore=True to open "
+            "a tunnel and sync with the UI: wl.serve(serving_grpc=True, "
+            "serving_bore=True)."
+        )
+
+    bore_endpoint = None
+    if serving_bore:
+        from weightslab.tunnel import serve_bore
+        port = (bore_port
+                or kwargs.get("grpc_port")
+                or int(os.getenv("GRPC_BACKEND_PORT", 50051)))
+        if not serving_grpc:
+            logger.warning(
+                "serving_bore=True but serving_grpc=False — the tunnel will have "
+                "no gRPC backend to expose. Set serving_grpc=True."
+            )
+        bore_endpoint = serve_bore(port=port)
+        if bore_endpoint:
+            print("=" * 60)
+            print(f" Backend exposed via bore at: {bore_endpoint}")
+            print(" On your local machine (Docker running), run:")
+            print("     weightslab ui launch")
+            print(f"     weightslab tunnel {bore_endpoint}")
+            print("=" * 60)
 
     if serving_cli:
         # The explicit parameter is the source of truth; drop any duplicate
         # spawn_client passed through kwargs so we don't pass it twice.
         kwargs.pop("spawn_client", None)
         cli_serve(spawn_client=spawn_cli_client, **kwargs)
+
+    return bore_endpoint
 
 
 def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
@@ -1517,7 +1592,8 @@ def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
         logger.info("Shutting down WeightsLab services.")
 
 
-def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, **kwargs):
+def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1,
+           min_step: int = 0, **kwargs):
     """
     Decorator that registers a custom signal function.
 
@@ -1529,6 +1605,12 @@ def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, 
         name: Public signal name. Defaults to decorated function name.
         subscribe_to: Optional signal/metric name this signal reacts to.
         compute_every_n_steps: Frequency for dynamic computation.
+        min_step: Minimum training step before a subscribed (dynamic) signal
+            starts firing. The signal is skipped while ``current_step <
+            min_step``. Defaults to ``0`` (fire from the start). Useful when a
+            signal needs enough history to be meaningful — e.g. a loss-shape
+            classifier that should only run once each sample has a trajectory
+            (``min_step=505``).
         **kwargs: Additional signal metadata stored in the ledger.
 
     Returns:
@@ -1538,7 +1620,8 @@ def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, 
         @wl.signal(name="blue_pixels")
         def compute_blue(sample, **kwargs): ...
 
-        @wl.signal(name="weighted_loss", subscribe_to="train_loss", compute_every_n_steps=10)
+        @wl.signal(name="weighted_loss", subscribe_to="train_loss",
+                   compute_every_n_steps=10, min_step=505)
         def compute_weighted(value, sample_id, **kwargs): ...
     """
     def decorator(func):
@@ -1558,6 +1641,7 @@ def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, 
         # ``subscribe_to`` keyword instead stay on the legacy dispatch.
         _inp = kwargs.get('inputs')
         func._wl_signal_meta['inputs'] = list(_inp) if _inp else None
+        func._wl_signal_meta['min_step'] = min_step
         func._wl_signal_name = reg_name
 
         return func
@@ -2103,7 +2187,17 @@ def save_signals(
         if x is None:
             return None
         if isinstance(x, list) and isinstance(x[0], list):
-            return [np.max(np.array([to_numpy(t) for t in row]), axis=0) for row in x]
+            rows = [[to_numpy(t) for t in row] for row in x]
+            # A sample can legitimately have zero instances (e.g. no tracked
+            # class visible in frame); fall back to an all-background mask
+            # shaped like its neighbors instead of reducing an empty array.
+            shape = next((r[0].shape for r in rows if r), None)
+            dtype = next((r[0].dtype for r in rows if r), np.uint16)
+            return [
+                np.max(np.array(row), axis=0) if row
+                else np.zeros(shape, dtype=dtype) if shape is not None else np.zeros(0, dtype=dtype)
+                for row in rows
+            ]
         elif isinstance(x, list):
             return [to_numpy(t) for t in x]
         if isinstance(x, th.Tensor):
@@ -3606,6 +3700,7 @@ def write_history(
     experiment_hash: str | None = None,
     sample_id=None,
     instance_id=None,
+    verbose: bool = False,
 ) -> str:
     """Dump signal history to *path* as JSON or CSV.
 
@@ -3682,6 +3777,10 @@ def write_history(
         sample_id, instance_id,
     )
 
+    # Progress lines are INFO only when verbose; otherwise DEBUG (quiet by
+    # default so periodic exports don't spam a training log).
+    _log = logger.info if verbose else logger.debug
+
     _lg = get_logger()
     if _lg is None:
         logger.warning(
@@ -3703,7 +3802,7 @@ def write_history(
             logger.debug("write_history: failed to resolve root_log_dir (%s); "
                          "falling back to current directory.", _e)
             path = "."
-        logger.info("write_history: no path given, using output directory %r.", path)
+        _log("write_history: no path given, using output directory %r.", path)
 
     fmt = format.lower().strip()
 
@@ -3748,7 +3847,7 @@ def write_history(
     write_sample = _type in ("all", "sample")
     write_instance = _type in ("all", "instance")
 
-    logger.info(
+    _log(
         "write_history: resolved filters → type=%r, experiment_hash=%s, "
         "graph_name=%s, sample_id=%s, instance_id=%s",
         _type,
@@ -3773,10 +3872,10 @@ def write_history(
         )
         _phash = _hashlib.md5(str(_params_key).encode()).hexdigest()[:8]
         path = _os.path.join(path, f"{_phash}_history.{fmt}")
-        logger.info("write_history: auto-generated filename %r (params hash "
-                    "%s).", _os.path.basename(path), _phash)
+        _log("write_history: auto-generated filename %r (params hash "
+             "%s).", _os.path.basename(path), _phash)
     _os.makedirs(_os.path.dirname(_os.path.abspath(path)), exist_ok=True)
-    logger.info("write_history: output file → %s", _os.path.abspath(path))
+    _log("write_history: output file → %s", _os.path.abspath(path))
 
     global_rows: list = []
     sample_rows: list = []
@@ -3890,7 +3989,7 @@ def write_history(
         )
 
     _total = len(global_rows) + len(sample_rows) + len(instance_rows)
-    logger.info(
+    _log(
         "write_history: wrote %d row(s) (global=%d, sample=%d, instance=%d) "
         "as %s to %s",
         _total, len(global_rows), len(sample_rows), len(instance_rows),
@@ -3913,6 +4012,7 @@ def write_dataframe(
     columns=None,
     sample_id=None,
     instance_id=None,
+    verbose: bool = False,
 ) -> str:
     """Dump the WeightsLab sample dataframe to *path* as JSON or CSV.
 
@@ -3993,6 +4093,9 @@ def write_dataframe(
         path, format, columns, sample_id, instance_id,
     )
 
+    # INFO only when verbose; DEBUG otherwise (quiet periodic exports).
+    _log = logger.info if verbose else logger.debug
+
     _dm = get_dataframe()
     if _dm is None:
         logger.warning(
@@ -4012,7 +4115,7 @@ def write_dataframe(
             logger.debug("write_dataframe: failed to resolve root_log_dir (%s); "
                          "falling back to current directory.", _e)
             path = "."
-        logger.info("write_dataframe: no path given, using output directory %r.", path)
+        _log("write_dataframe: no path given, using output directory %r.", path)
 
     fmt = format.lower().strip()
 
@@ -4031,7 +4134,7 @@ def write_dataframe(
     if columns is not None and not (isinstance(columns, str) and columns.lower() == "all"):
         _col_filter = [columns] if isinstance(columns, str) else list(columns)
 
-    logger.info(
+    _log(
         "write_dataframe: resolved filters → columns=%s, sample_id=%s, instance_id=%s",
         _col_filter if _col_filter is not None else "<all>",
         _sid_filter if _sid_filter is not None else "<all>",
@@ -4049,10 +4152,10 @@ def write_dataframe(
         )
         _phash = _hashlib.md5(str(_params_key).encode()).hexdigest()[:8]
         path = _os.path.join(path, f"{_phash}_dataframe.{fmt}")
-        logger.info("write_dataframe: auto-generated filename %r (params hash %s).",
-                    _os.path.basename(path), _phash)
+        _log("write_dataframe: auto-generated filename %r (params hash %s).",
+             _os.path.basename(path), _phash)
     _os.makedirs(_os.path.dirname(_os.path.abspath(path)), exist_ok=True)
-    logger.info("write_dataframe: output file → %s", _os.path.abspath(path))
+    _log("write_dataframe: output file → %s", _os.path.abspath(path))
 
     # Flush pending buffer to H5 before reading
     try:

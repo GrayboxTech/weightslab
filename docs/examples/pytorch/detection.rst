@@ -11,7 +11,7 @@ Detection — Penn-Fudan Pedestrians (PyTorch)
      <span class="wl-eg-tag">penn-fudan</span>
    </div>
 
-**Example:** ``weightslab/examples/PyTorch/ws-detection/main.py``
+**Example:** ``weightslab/examples/PyTorch/wl-detection/main.py``
 
 **Task:** Bounding-box detection on the Penn-Fudan pedestrian dataset with a
 small ResNet-backbone detector.
@@ -127,3 +127,12 @@ pipeline. See :ref:`good-practice-get-items` for the recommended signature.
 
       weightslab ui launch           # 1. deploy the studio
       weightslab start example --det # 2. start the detection demo
+
+
+.. raw:: html
+
+   <div style="text-align:right; margin-top:2rem;">
+     <a href="https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/PyTorch/ws-detection.ipynb" target="_blank" rel="noopener noreferrer">
+       <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab">
+     </a>
+   </div>

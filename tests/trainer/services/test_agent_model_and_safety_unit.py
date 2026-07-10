@@ -1560,6 +1560,64 @@ class TestAgentHyperparamActions(unittest.TestCase):
         self.assertEqual(int(self._read("data.train_loader.batch_size")), 16)  # unchanged
 
 
+class TestAgentConfigInfo(unittest.TestCase):
+    """action.show_config is READ-ONLY: it reports the whole config or a single
+    value, and never mutates the wrapped HP."""
+
+    def setUp(self):
+        from weightslab.backend import ledgers
+        self.ledgers = ledgers
+        ledgers.register_hyperparams({
+            "root_log_dir": "/tmp/exp/root_log_dir",
+            "experiment_dump_to_train_steps_ratio": 250,
+            "optimizer": {"lr": 0.001},
+            "data": {"train_loader": {"batch_size": 16}},
+        })
+        self.hp_name = ledgers.resolve_hp_name()
+
+    def tearDown(self):
+        try:
+            self.ledgers.register_hyperparams({})
+        except Exception:
+            pass
+
+    def _show(self, param=None):
+        ds = DataService.__new__(DataService)
+        ds._df_manager = None
+        ds.model_service = None
+        params = {} if param is None else {"param": param}
+        return ds._apply_agent_operation(pd.DataFrame({"loss": [0.1]}), "action.show_config", params)
+
+    def test_show_single_value(self):
+        msg = self._show("root_log_dir")
+        self.assertIn("root_log_dir", msg)
+        self.assertIn("/tmp/exp/root_log_dir", msg)
+
+    def test_show_semantic_batch_size(self):
+        msg = self._show("batch_size")
+        self.assertIn("16", msg)
+        self.assertIn("batch_size", msg)
+
+    def test_show_whole_config(self):
+        msg = self._show()
+        # All top-level keys appear in the dump.
+        for key in ("root_log_dir", "optimizer", "experiment_dump_to_train_steps_ratio", "data"):
+            self.assertIn(key, msg)
+
+    def test_unknown_key_is_graceful(self):
+        msg = self._show("no_such_key")
+        self.assertIn("could not find", msg.lower())
+
+    def test_show_config_does_not_mutate(self):
+        before = int(self.ledgers.get_hyperparams(self.hp_name)
+                     .get("data", {}).get("train_loader", {}).get("batch_size"))
+        self._show()
+        self._show("root_log_dir")
+        after = int(self.ledgers.get_hyperparams(self.hp_name)
+                    .get("data", {}).get("train_loader", {}).get("batch_size"))
+        self.assertEqual(before, after)  # read-only: nothing changed
+
+
 class TestSignalHistoryHelper(unittest.TestCase):
     """signal_history(metric, reduce) exposes per-sample logger HISTORY to agent
     code, enabling "never/ever" queries the current-value dataframe can't answer."""

@@ -32,6 +32,25 @@ def _is_truthy(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+_WEIGHTSLAB_VERSION: str | None = None
+
+
+def _weightslab_version() -> str:
+    """Backend weightslab package version, resolved once and cached.
+
+    Sent to the UI (via GetLatestLoggerDataResponse) so the studio can show the
+    backend version alongside the UI version in the logo tooltip.
+    """
+    global _WEIGHTSLAB_VERSION
+    if _WEIGHTSLAB_VERSION is None:
+        try:
+            from weightslab import __version__ as v
+            _WEIGHTSLAB_VERSION = str(v or "")
+        except Exception:
+            _WEIGHTSLAB_VERSION = ""
+    return _WEIGHTSLAB_VERSION
+
+
 def _load_auth_tokens() -> set[str]:
     """Load accepted bearer/API-key tokens from env vars."""
     raw_values: list[str] = []
@@ -408,7 +427,14 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     # -------------------------------------------------------------------------
     def GetLatestLoggerData(self, request, context):
         logger.debug(f"ExperimentServiceServicer.GetLatestLoggerData({request})")
-        return self._exp_service.GetLatestLoggerData(request, context)
+        response = self._exp_service.GetLatestLoggerData(request, context)
+        # Advertise the backend version to the UI (shown in the logo tooltip
+        # next to the UI version). Best-effort: never fail the poll over this.
+        try:
+            response.weightslab_version = _weightslab_version()
+        except Exception:
+            pass
+        return response
 
     # -------------------------------------------------------------------------
     # Training & hyperparameter commands
