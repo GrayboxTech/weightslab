@@ -150,16 +150,16 @@ def _react_dependents(seed_names, batch_ids, step, origin='train'):
             try:
                 if meta.get('batched'):
                     bctx = BatchSignalContext(sample_ids=ids, subscribed_values=cols[inputs[0]],
-                                              logger=lg, dataframe=df_proxy, origin=origin, step=step)
-                    bctx.inputs = cols
+                                              logger=lg, dataframe=df_proxy, origin=origin, step=step,
+                                              inputs=cols)
                     res = func(bctx)
                     vals = res.tolist() if hasattr(res, 'tolist') else list(res)
                 else:
                     vals = []
                     for i, sid in enumerate(ids):
                         ctx = SignalContext(sample_id=sid, subscribed_value=float(cols[inputs[0]][i]),
-                                            logger=lg, dataframe=df_proxy, origin=origin, step=step)
-                        ctx.inputs = {k: float(cols[k][i]) for k in cols}
+                                            logger=lg, dataframe=df_proxy, origin=origin, step=step,
+                                            inputs={k: float(cols[k][i]) for k in cols})
                         vals.append(func(ctx))
                 vals = [float(x) for x in vals]
             except StaleSignalError:
@@ -319,7 +319,7 @@ class SignalContext:
     Carries all available metadata for a single sample during computation.
     """
     def __init__(self, sample_id, dataframe, data=None, subscribed_value=None, logger=None, origin=None,
-                 step=None, logits=None, preds=None, targets=None):
+                 step=None, logits=None, preds=None, targets=None, inputs=None):
         self.sample_id = sample_id
         self.dataframe = dataframe
         self.data = data
@@ -330,6 +330,10 @@ class SignalContext:
         self.logits = logits      # this sample's raw model output row (subscribe_to path)
         self.preds = preds
         self.targets = targets
+        # Current-step value of each declared @wl.signal(inputs=[...]) input for
+        # THIS sample, keyed by signal name: ``ctx.inputs["sig/entropy"]``. Empty
+        # for signals that don't declare inputs (e.g. the subscribe_to path).
+        self.inputs = inputs if inputs is not None else {}
 
     @property
     def image(self) -> Optional[np.ndarray]:
@@ -434,7 +438,7 @@ class BatchSignalContext:
     per sample), which is where the large speed-ups come from.
     """
     def __init__(self, sample_ids, subscribed_values, logger=None, dataframe=None, origin=None,
-                 step=None, logits=None, preds=None, targets=None):
+                 step=None, logits=None, preds=None, targets=None, inputs=None):
         self.sample_ids = [int(s) for s in sample_ids]          # length B
         self.subscribed_values = np.asarray(subscribed_values, dtype=float)  # (B,)
         self.logger = logger
@@ -446,6 +450,11 @@ class BatchSignalContext:
         self.logits = logits      # (B, C)
         self.preds = preds
         self.targets = targets
+        # Current-step values of each declared @wl.signal(inputs=[...]) input for
+        # the whole batch, keyed by signal name: ``ctx.inputs["sig/entropy"]`` is a
+        # ``(B,)`` array aligned to ``sample_ids``. Populated by the reactive
+        # dispatch; empty for signals that don't declare inputs.
+        self.inputs = inputs if inputs is not None else {}
 
     def history(self, signal_name):
         """Per-sample history of *signal_name* for every sample in the batch, in

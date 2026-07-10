@@ -4341,11 +4341,7 @@ class DataService:
             # Detect whether column is categorical (string/object) or numeric.
             col_series = df[column]
             numeric_vals = pd.to_numeric(col_series, errors="coerce")
-            is_categorical = numeric_vals.isna().all() or (
-                col_series.dtype == object or
-                str(col_series.dtype) == "category" or
-                hasattr(col_series, "cat")
-            )
+            is_categorical = numeric_vals.isna().all()
             # A column that has a few non-NaN numeric values mixed with mostly
             # NaN still counts as numeric; only treat as categorical when
             # pd.to_numeric fails on all values.
