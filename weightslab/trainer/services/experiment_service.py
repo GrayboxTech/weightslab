@@ -727,9 +727,28 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         self._log_audit("checkpoint_save", "success", audit_details)
         return pb2.CommandResponse(success=True, message=msg)
 
+    def _handle_restart_instance(self):
+        self._log_audit("restart_instance", "success", {})
+        logger.warning(
+            "[ExperimentCommand] Restart requested via UI; exiting process so the "
+            "container's restart policy brings it back up and reloads the last checkpoint."
+        )
+
+        def _delayed_exit():
+            # Give the gRPC response a moment to flush to the client before the
+            # process dies.
+            time.sleep(0.5)
+            os._exit(0)
+
+        threading.Thread(target=_delayed_exit, daemon=True).start()
+        return pb2.CommandResponse(success=True, message="Restart requested. The instance will restart shortly.")
+
     # Training & hyperparameter commands
     # -------------------------------------------------------------------------
     def ExperimentCommand(self, request, context):
+        if request.HasField("restart_operation"):
+            return self._handle_restart_instance()
+
         self._ctx.ensure_components()
         components = self._ctx.components
 

@@ -1,0 +1,21 @@
+{#- Custom WeightsLab sidebar brand: mode-aware logo + colored name + GitHub link -#}
+<a class="sidebar-brand{% if logo_url or (theme_light_logo and theme_dark_logo) %} centered{% endif %}"
+   href="{{ pathto(master_doc) }}">
+  {%- if theme_light_logo and theme_dark_logo %}
+  <div class="sidebar-logo-container">
+    <img class="sidebar-logo only-light"
+         src="{{ pathto('_static/' + theme_light_logo, 1) }}"
+         alt="WeightsLab"/>
+    <img class="sidebar-logo only-dark"
+         src="{{ pathto('_static/' + theme_dark_logo, 1) }}"
+         alt="WeightsLab"/>
+  </div>
+  {%- elif logo_url %}
+  <div class="sidebar-logo-container">
+    <img class="sidebar-logo" src="{{ logo_url }}" alt="WeightsLab"/>
+  </div>
+  {%- endif %}
+  <span class="sidebar-brand-text wl-brand-name">
+    <span class="wl-brand-w">W</span>eights<span class="wl-brand-l">L</span>ab
+  </span>
+</a>

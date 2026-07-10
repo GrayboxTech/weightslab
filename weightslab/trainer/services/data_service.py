@@ -1263,7 +1263,7 @@ class DataService:
                 task_type = "classification" # Default fallback
                 if label is not None:
                     if isinstance(label, dict):
-                        if ('boxes' in label or 'bboxes' in label):
+                        if ('boxes' in label or 'bboxes' in label or 'bb' in label):
                             task_type = 'detection'
                     else:
                         l_arr = to_numpy_safe(label)
@@ -1378,7 +1378,7 @@ class DataService:
                                 bbox_format = detect_bbox_format(bboxes)
                                 bbox_data = {
                                     "bboxes": bboxes.tolist(),
-                                    "class_ids": class_ids.tolist() if class_ids is not None else 1,
+                                    "class_ids": class_ids.tolist() if hasattr(class_ids, 'tolist') else (class_ids if class_ids is not None else 1),
                                     "format": bbox_format
                                 }
                     if not bbox_data and label_raw is not None:
@@ -1465,7 +1465,17 @@ class DataService:
                         thumbnail=b""
                     )
                 )
-                if num_classes is not None and num_classes < label_raw.max():
+                # Sanity check: warn if the inferred num_classes is smaller than
+                # the largest class id present in the label. Guard against empty
+                # or non-array labels (e.g. detection samples with no objects),
+                # where .max() on a zero-size array raises ValueError.
+                label_np = to_numpy_safe(label_raw) if label_raw is not None else None
+                if (
+                    num_classes is not None
+                    and label_np is not None
+                    and label_np.size > 0
+                    and num_classes < label_np.max()
+                ):
                     logger.warning(f'Be aware that the num_classes infered is inferior to max value in the label')
 
                 # Per-sample class_names emission. KEPT because the studio has
@@ -1509,12 +1519,27 @@ class DataService:
 
                 # Handle dictionary labels (e.g. detection targets)
                 if isinstance(label, dict):
+                    def _json_default(o):
+                        if isinstance(o, np.ndarray):
+                            return o.tolist()
+                        if isinstance(o, (np.integer, np.floating)):
+                            return o.item()
+                        if hasattr(o, "detach") and hasattr(o, "cpu") and hasattr(o, "tolist"):
+                            return o.detach().cpu().tolist()  # torch.Tensor, without a hard import
+                        return str(o)
+                    try:
+                        # json.dumps (not str()) so the frontend's JSON.parse
+                        # of this 'target' stat never sees Python-repr syntax
+                        # (single quotes, tuples, numpy array reprs).
+                        dict_value_string = json.dumps(label, default=_json_default)
+                    except Exception:
+                        dict_value_string = json.dumps({"repr": str(label)})
                     data_stats.append(
                         create_data_stat(
                             name='target',
                             stat_type='string',
                             shape=[1],
-                            value_string=str(label), # Simplified visualization
+                            value_string=dict_value_string,
                             thumbnail=b""
                         )
                     )
@@ -1614,7 +1639,7 @@ class DataService:
                                 bbox_format = detect_bbox_format(pred_bboxes)
                                 pred_bbox_data = {
                                     "bboxes": pred_bboxes.tolist(),
-                                    "class_ids": pred_class_ids.tolist() if pred_class_ids is not None else 1,
+                                    "class_ids": pred_class_ids.tolist() if hasattr(pred_class_ids, 'tolist') else (pred_class_ids if pred_class_ids is not None else 1),
                                     "format": bbox_format
                                 }
                     if not pred_bbox_data and pred is not None:
@@ -1752,7 +1777,7 @@ class DataService:
                             target_width = w_limit
                             target_height = int(target_width / aspect_ratio)
                     elif request.resize_width == 0 and request.resize_height == 0:
-                        target_height = int(os.environ.get("WL_DEFAULT_THUMBNAIL_SIZE", 180)) # Default full resolution image is 360p on the longest side, but can be overridden by env var
+                        target_height = int(os.environ.get("WL_DEFAULT_THUMBNAIL_SIZE", 180)) # Default full resolution image is 180p on the longest side, but can be overridden by env var
                         target_width = int(target_height * aspect_ratio)
 
                     if is_full_resolution:
@@ -2377,6 +2402,260 @@ class DataService:
         except Exception as e:
             return f"Action: failed to load weights ({where}) from {exp_hash[:16]}: {e}"
 
+<<<<<<< HEAD
+=======
+    # ------------------------------------------------------------------
+    # Hyperparameter tuning (agent action)
+    # ------------------------------------------------------------------
+    # Semantic name -> ordered candidate dotted paths in the HP config. The
+    # first candidate that ALREADY EXISTS is used (set_hyperparam auto-creates
+    # missing paths, so we must resolve to a real key rather than blindly set).
+    _HP_ALIASES = {
+        "batch_size": ["data.train_loader.batch_size", "data.batch_size", "batch_size"],
+        "learning_rate": ["optimizer.lr", "lr", "optimizer.learning_rate"],
+        "dump_ratio": ["experiment_dump_to_train_steps_ratio"],
+        "eval_ratio": ["eval_full_to_train_steps_ratio"],
+    }
+    # Wording -> canonical semantic name.
+    _HP_SYNONYMS = {
+        "batch_size": "batch_size", "batchsize": "batch_size", "batch": "batch_size",
+        "learning_rate": "learning_rate", "learningrate": "learning_rate",
+        "lr": "learning_rate", "learning_rate_lr": "learning_rate",
+        "dump_ratio": "dump_ratio", "dumping_model_ratio": "dump_ratio",
+        "dump_model_ratio": "dump_ratio", "checkpoint_ratio": "dump_ratio",
+        "model_dump_ratio": "dump_ratio",
+        "eval_ratio": "eval_ratio", "evaluation_ratio": "eval_ratio",
+        "eval_full_ratio": "eval_ratio",
+    }
+
+    @staticmethod
+    def _hp_read_path(hp, dotted):
+        """Read a dotted path from the HP Proxy/dict; None if absent."""
+        cur = hp
+        for part in str(dotted).split('.'):
+            if cur is None:
+                return None
+            try:
+                if hasattr(cur, "get"):
+                    cur = cur.get(part, None)
+                elif isinstance(cur, dict):
+                    cur = cur.get(part, None)
+                else:
+                    return None
+            except Exception:
+                return None
+        return cur
+
+    @classmethod
+    def _hp_path_exists(cls, hp, dotted):
+        """True only if every segment of the dotted path is actually present
+        (so we never resolve to a key set_hyperparam would have to invent)."""
+        cur = hp
+        for part in str(dotted).split('.'):
+            if cur is None:
+                return False
+            try:
+                present = part in cur
+            except Exception:
+                present = False
+            if not present:
+                return False
+            cur = cls._hp_read_path(cur, part)
+        return True
+
+    @classmethod
+    def _resolve_hp_path(cls, hp, param):
+        """Map a user-facing HP name (semantic word or dotted path) to an
+        existing dotted path in the live config, or None if it can't be found."""
+        if not param:
+            return None
+        param = str(param).strip()
+        # 1. An explicit dotted path that already exists wins.
+        if cls._hp_path_exists(hp, param):
+            return param
+        # 2. Semantic alias -> first existing candidate path.
+        key = param.lower().replace(" ", "_").replace("-", "_")
+        canonical = cls._HP_SYNONYMS.get(key)
+        for cand in cls._HP_ALIASES.get(canonical, []):
+            if cls._hp_path_exists(hp, cand):
+                return cand
+        # 3. Fallback: search the config tree for a leaf key equal to the last token.
+        leaf = key.split(".")[-1]
+        return cls._search_hp_leaf(hp, leaf)
+
+    @classmethod
+    def _search_hp_leaf(cls, hp, leaf, _prefix=""):
+        """Depth-first search for a leaf key exactly matching `leaf`; returns its
+        dotted path (shortest match), or None."""
+        try:
+            keys = list(hp.keys()) if hasattr(hp, "keys") else []
+        except Exception:
+            keys = []
+        # Prefer an exact match at this level.
+        for k in keys:
+            if str(k).lower() == leaf:
+                return f"{_prefix}{k}"
+        # Recurse into nested dicts.
+        best = None
+        for k in keys:
+            child = cls._hp_read_path(hp, k)
+            if isinstance(child, dict) or hasattr(child, "keys"):
+                found = cls._search_hp_leaf(child, leaf, _prefix=f"{_prefix}{k}.")
+                if found and (best is None or found.count(".") < best.count(".")):
+                    best = found
+        return best
+
+    @staticmethod
+    def _hp_scalarize(v):
+        """Snapshot a live HP value to a plain scalar. Top-level scalars come
+        back from the Proxy as a *live* _ValueProxy that would change under us
+        after set_hyperparam, so freeze it to a real int/float/str for the
+        'was X' message and for type inference."""
+        if v is None:
+            return None
+        # Use type() not isinstance(): a live _ValueProxy masquerades its
+        # __class__ as the wrapped builtin, so isinstance(v, int) is True and
+        # would let the live proxy through unfrozen. type() sees the real class.
+        if type(v) in (bool, int, float, str):
+            return v
+        if isinstance(v, dict) or hasattr(v, "keys"):
+            return v
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            try:
+                return str(v)
+            except Exception:
+                return v
+        return int(f) if f.is_integer() else f
+
+    @staticmethod
+    def _coerce_hp_value(new_value, current):
+        """Keep the value's type consistent with the existing one: integer HPs
+        (batch_size, ratios) stay integers; floats stay floats."""
+        try:
+            if isinstance(current, bool):
+                return bool(new_value)
+            if isinstance(current, int) and not isinstance(current, bool):
+                return int(round(float(new_value)))
+            if isinstance(current, float):
+                return float(new_value)
+            # Unknown/None current: infer from the new value.
+            f = float(new_value)
+            return int(f) if float(f).is_integer() else f
+        except (TypeError, ValueError):
+            return new_value
+
+    def _agent_set_hyperparam(self, param, op="set", value=None) -> str:
+        """Agent action: change a hyperparameter in the live (wrapped) HP config.
+
+        ``param`` is a semantic name (``batch_size``/``learning_rate``/
+        ``dump_ratio``/``eval_ratio``) or a dotted path; ``op`` is ``set`` (value
+        is the new absolute value) or ``scale`` (value is a multiplier, e.g. 1.1
+        for "+10%"). The change mutates the shared HP Proxy in place, so training
+        reads the new value on its next iteration."""
+        from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name
+
+        if not param:
+            return "Action: no hyperparameter specified."
+        if value is None:
+            return f"Action: no value given for hyperparameter '{param}'."
+
+        hp_name = resolve_hp_name()
+        hp = get_hyperparams(hp_name)
+        if hp is None:
+            return "Action: no hyperparameters are registered; cannot tune."
+
+        path = self._resolve_hp_path(hp, param)
+        if path is None:
+            return (f"Action: could not find hyperparameter '{param}' in the current config "
+                    "(try an exact dotted path like 'data.train_loader.batch_size').")
+
+        current = self._hp_scalarize(self._hp_read_path(hp, path))
+        op = str(op or "set").lower()
+        try:
+            if op in ("set", "=", "assign"):
+                new_value = value
+            elif op in ("scale", "multiply", "mul", "*", "increase", "decrease"):
+                if current is None:
+                    return f"Action: cannot scale '{path}' — it has no current value."
+                new_value = float(current) * float(value)
+            elif op in ("delta", "add", "increment", "+"):
+                if current is None:
+                    return f"Action: cannot adjust '{path}' — it has no current value."
+                new_value = float(current) + float(value)
+            else:
+                return f"Action: unknown hyperparameter op '{op}' (use 'set' or 'scale')."
+
+            new_value = self._coerce_hp_value(new_value, current)
+            set_hyperparam(name=hp_name, key_path=path, value=new_value)
+            # Verify against the wrapped HP (set_hyperparam mutates it in place).
+            confirmed = self._hp_scalarize(self._hp_read_path(get_hyperparams(hp_name), path))
+            return f"Action: set {path} = {confirmed} (was {current})."
+        except Exception as e:
+            return f"Action: failed to set hyperparameter '{param}': {e}"
+
+    @classmethod
+    def _materialize_hp(cls, v, _depth=0):
+        """Recursively convert an HP Proxy / _ValueProxy tree into plain Python
+        (dict/list/scalars) so it can be JSON-formatted for display. Read-only."""
+        if _depth > 25:
+            return str(v)
+        if isinstance(v, dict) or hasattr(v, "keys"):
+            out = {}
+            try:
+                for k in v.keys():
+                    out[str(k)] = cls._materialize_hp(cls._hp_read_path(v, k), _depth + 1)
+            except Exception:
+                return str(v)
+            return out
+        scal = cls._hp_scalarize(v)
+        if scal is None or type(scal) in (bool, int, float, str):
+            return scal
+        if isinstance(scal, (list, tuple)):
+            return [cls._materialize_hp(x, _depth + 1) for x in scal]
+        return str(scal)
+
+    def _agent_show_config(self, param=None) -> str:
+        """Agent action (READ-ONLY): show the whole experiment configuration, or
+        the value at a single key/dotted-path (e.g. 'root_log_dir'). Never
+        mutates anything."""
+        import json as _json
+        from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name
+
+        hp_name = resolve_hp_name()
+        hp = get_hyperparams(hp_name)
+        if hp is None:
+            return "Config: no configuration is registered."
+
+        # Specific key requested.
+        if param:
+            path = self._resolve_hp_path(hp, param)
+            if path is None:
+                return (f"Config: could not find '{param}' in the configuration "
+                        "(ask to 'show the whole configuration' to see available keys).")
+            value = self._materialize_hp(self._hp_read_path(hp, path))
+            if isinstance(value, (dict, list)):
+                try:
+                    value = _json.dumps(value, indent=2, default=str)
+                except Exception:
+                    value = str(value)
+            return f"Config: {path} = {value}"
+
+        # Whole config dump.
+        materialized = self._materialize_hp(hp)
+        if not materialized:
+            return "Config: the configuration is empty."
+        try:
+            text = _json.dumps(materialized, indent=2, default=str, sort_keys=True)
+        except Exception:
+            text = str(materialized)
+        max_len = 6000
+        if len(text) > max_len:
+            text = text[:max_len] + "\n... (truncated; ask for a specific key, e.g. 'show the root log dir')"
+        return f"Configuration ({hp_name}):\n{text}"
+
+>>>>>>> 2db142c599a32f94669a3afad5f4098d5629ddde
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -2433,6 +2712,24 @@ class DataService:
                     exp_hash=params.get("hash") or params.get("exp_hash"),
                 )
 
+<<<<<<< HEAD
+=======
+            # Set / scale a hyperparameter (batch size, learning rate, ratios, ...).
+            elif action_name in ("set_hyperparam", "set_hyperparameter", "set_hp", "tune_hyperparam"):
+                return self._agent_set_hyperparam(
+                    param=params.get("param") or params.get("name") or params.get("key_path"),
+                    op=params.get("op", "set"),
+                    value=params.get("value"),
+                )
+
+            # READ-ONLY: show the config / a specific config value (no mutation).
+            elif action_name in ("show_config", "get_config", "show_configuration",
+                                 "get_hyperparam", "show_hyperparam", "config_info"):
+                return self._agent_show_config(
+                    param=params.get("param") or params.get("name") or params.get("key_path")
+                )
+
+>>>>>>> 2db142c599a32f94669a3afad5f4098d5629ddde
             return f"Action triggered: {action_name} (Not implemented)"
 
         # --- 3. DATAFRAME MANIPULATION ---
@@ -4019,11 +4316,14 @@ class DataService:
     def GetHistogram(self, request, context):
         """Server-side histogram binning of one column (typed RPC).
 
-        Bins the current all-data view by ROW ORDER into <= max_bins equal-
-        population bins; each bin carries {min,max,avg,count} over its finite
-        values plus a per-(origin,discarded) sub-bar breakdown. Returns typed
-        HistogramBin messages (no DataStat name-encoding). Empty bins are emitted
-        with count=0 and NaN stats so the client's positional bars stay aligned.
+        Numeric columns: bins the current all-data view by ROW ORDER into
+        <= max_bins equal-population bins; each bin carries {min,max,avg,count}
+        plus a per-(origin,discarded) sub-bar breakdown.
+
+        Categorical/string columns: counts occurrences per unique value and
+        returns CategoricalHistogramBar entries sorted by count descending.
+        The response carries is_categorical=True and categorical_bars instead
+        of bins (bins will be empty).
         """
         try:
             column = request.column or ""
@@ -4039,12 +4339,56 @@ class DataService:
                     success=False, message=f"column '{column}' not in view",
                     total_rows=n, bins=[])
 
-            bars = max(1, min(n, max_bins))
-            vals = pd.to_numeric(df[column], errors="coerce").to_numpy()
             origin = (df["origin"].astype(str).to_numpy() if "origin" in df.columns
                       else np.full(n, ""))
             disc = (df["discarded"].astype(bool).to_numpy() if "discarded" in df.columns
                     else np.zeros(n, bool))
+
+            # Detect whether column is categorical (string/object) or numeric.
+            col_series = df[column]
+            numeric_vals = pd.to_numeric(col_series, errors="coerce")
+            is_categorical = numeric_vals.isna().all() or (
+                col_series.dtype == object or
+                str(col_series.dtype) == "category" or
+                hasattr(col_series, "cat")
+            )
+            # A column that has a few non-NaN numeric values mixed with mostly
+            # NaN still counts as numeric; only treat as categorical when
+            # pd.to_numeric fails on all values.
+            if not is_categorical and numeric_vals.notna().sum() == 0:
+                is_categorical = True
+
+            if is_categorical:
+                # --- Categorical path ---
+                labels = col_series.astype(str).where(col_series.notna(), "")
+                gf = pd.DataFrame({"l": labels, "o": origin, "d": disc})
+                total_count = gf.groupby("l")["l"].count().rename("count")
+                sub_map: dict = {}
+                for (lbl, d, o), c in gf.groupby(["l", "d", "o"]).size().items():
+                    sub_map.setdefault(str(lbl), []).append(
+                        pb2.HistogramSubBar(origin=str(o), discarded=bool(d), count=int(c)))
+                cat_bars = [
+                    pb2.CategoricalHistogramBar(
+                        label=str(lbl),
+                        count=int(cnt),
+                        sub_bars=sub_map.get(str(lbl), []),
+                    )
+                    for lbl, cnt in total_count.sort_values(ascending=False).items()
+                ]
+                logger.info("[HistCat] column=%s rows=%d categories=%d",
+                            column, n, len(cat_bars))
+                return pb2.HistogramResponse(
+                    success=True,
+                    message=f"categorical histogram {column}: {len(cat_bars)} categories from {n} rows",
+                    total_rows=n,
+                    bins=[],
+                    is_categorical=True,
+                    categorical_bars=cat_bars,
+                )
+
+            # --- Numeric path (unchanged) ---
+            bars = max(1, min(n, max_bins))
+            vals = numeric_vals.to_numpy()
             edges = (np.arange(bars + 1) * n) // bars
             bin_of_row = np.searchsorted(edges, np.arange(n), side="right") - 1
             fin = np.isfinite(vals)
@@ -4074,7 +4418,7 @@ class DataService:
             return pb2.HistogramResponse(
                 success=True,
                 message=f"histogram {column}: {len(bins)} bins from {n} rows",
-                total_rows=n, bins=bins)
+                total_rows=n, bins=bins, is_categorical=False, categorical_bars=[])
         except Exception as e:
             logger.error("Error in GetHistogram: %s", str(e), exc_info=True)
             return pb2.HistogramResponse(

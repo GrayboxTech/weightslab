@@ -1,9 +1,9 @@
 Segmentation Use Case — Per-instance & Per-sample Signals (PyTorch)
-==================================================================
+===================================================================
 
 This page walks through the segmentation integration from:
 
-``weightslab/examples/PyTorch/ws-segmentation/main.py``
+``weightslab/examples/PyTorch/wl-segmentation/main.py``
 
 It builds on the classification :doc:`usecases` page and focuses on what is
 **specific to segmentation**: a *list of per-instance masks* per sample, a custom

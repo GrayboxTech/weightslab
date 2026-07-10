@@ -1,19 +1,400 @@
 Configuration
 =============
 
-WeightsLab and Weights Studio are configured entirely through environment variables.
-Copy the ``.env`` file in the repository root and adjust the values for your setup.
-All variables are optional ? the default shown in each table is used when unset.
+
+.. _config-sdk:
+
+Part A — Python SDK Parameters
+--------------------------------
+
+Configuration hierarchy
+~~~~~~~~~~~~~~~~~~~~~~~
+
+WeightsLab resolves settings at three levels, from highest to lowest priority:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 8 25 67
+
+   * - Level
+     - Source
+     - When to use
+   * - **1**
+     - Python kwargs passed to ``wl.watch_or_edit()`` or ``@wl.signal``
+     - Per-object overrides; code changes required.
+   * - **2**
+     - ``hyperparameters.yaml`` config file (``flag="hyperparameters"``)
+     - Live-editable during training without restarting the script.
+   * - **3**
+     - Environment variables
+     - Process-wide defaults; canonical for gRPC, TLS, logging, and the UI.
+
+For gRPC TLS specifically, when a ``hyperparameters.yaml`` is registered the
+resolution chain is:
+``grpc_tls_enabled`` (code/YAML) → ``GRPC_TLS_ENABLED`` (env) → built-in default.
+
+Config YAML file (``hyperparameters.yaml``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When you register a hyperparameter config with
+``wl.watch_or_edit(config, flag="hyperparameters")``, WeightsLab creates (or
+reads) a YAML file next to your training script.  Edit it while the script is
+running — changes are picked up within one poll interval (default: 1 s).
+
+.. code-block:: yaml
+
+   # hyperparameters.yaml — created automatically, edit freely while training
+   learning_rate: 0.001
+   batch_size: 32
+   optimizer: adam
+   num_epochs: 20
+   weight_decay: 0.0001
+
+Any key you add here is accessible inside the training loop via the config
+object returned by ``wl.watch_or_edit()``.  The file is auto-created with the
+``defaults`` dict you pass as a kwarg on the first run.
+
+``wl.watch_or_edit()`` — common kwargs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Accepted by every ``flag`` value.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 12 63
+
+   * - Parameter
+     - Default
+     - Description
+   * - ``name``
+     - *(inferred)*
+     - Explicit registration name for this object in the ledger.
+       Inferred from the variable name or class name when omitted.
+   * - ``root_log_dir``
+     - ``None``
+     - Override the root directory for checkpoints and logs for this
+       object only.  Defaults to ``WEIGHTSLAB_ROOT_LOG_DIR``.
+   * - ``skip_previous_auto_load``
+     - ``False``
+     - Do not auto-restore from an existing checkpoint on startup.
+   * - ``weak``
+     - ``False``
+     - Hold a weak reference to the wrapped object.
+   * - ``register``
+     - ``True``
+     - Register the object in the active ledger.
+
+.. code-block:: python
+
+   # These kwargs apply to every flag — shown here with flag="model"
+   model = wl.watch_or_edit(
+       model,
+       flag="model",
+       name="resnet50",               # default: inferred from variable name
+       root_log_dir="./logs",         # default: None  → WEIGHTSLAB_ROOT_LOG_DIR
+       skip_previous_auto_load=False, # default: False
+       register=True,                 # default: True
+   )
+
+Data loader — ``flag="data"``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 12 60
+
+   * - Parameter
+     - Default
+     - Description
+   * - ``loader_name``
+     - ``None``
+     - Display name in the ledger.  Required when registering more than
+       one loader per experiment.
+   * - ``batch_size``
+     - ``1``
+     - Batch size forwarded to the underlying ``DataLoader``.
+   * - ``shuffle``
+     - ``False``
+     - Shuffle samples each epoch.
+   * - ``num_workers``
+     - ``0``
+     - DataLoader worker processes for data prefetch.
+   * - ``drop_last``
+     - ``False``
+     - Drop the last incomplete batch.
+   * - ``pin_memory``
+     - ``True``
+     - Use pinned memory for faster GPU transfers.
+   * - ``is_training``
+     - ``False``
+     - Mark as the training loader (affects deny-aware sampler).
+   * - ``persistent_workers``
+     - ``None``
+     - Keep workers alive between iterations.  Auto-enabled when
+       ``num_workers > 0``.
+   * - ``compute_hash``
+     - ``True``
+     - Compute a content-based UID per sample.
+   * - ``enable_h5_persistence``
+     - ``True``
+     - Persist per-sample statistics to HDF5.
+
+.. code-block:: python
+
+   train_loader = wl.watch_or_edit(
+       train_dataset,
+       flag="data",
+       loader_name="train_loader",    # default: None
+       batch_size=32,                 # default: 1
+       shuffle=True,                  # default: False
+       num_workers=4,                 # default: 0
+       drop_last=False,               # default: False
+       pin_memory=True,               # default: True
+       is_training=True,              # default: False
+       persistent_workers=None,       # default: None (auto when num_workers > 0)
+       compute_hash=True,             # default: True
+       enable_h5_persistence=True,    # default: True
+   )
+
+Array / label preloading flags
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+These flags control the memory vs. latency trade-off for large datasets.
+See :ref:`good-practice-heavy-experiment` for the recommended combination.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 12 60
+
+   * - Parameter
+     - Default
+     - Description
+   * - ``array_autoload_arrays``
+     - ``False``
+     - Load **all** stored per-sample arrays into RAM at startup.
+       Prefer ``False`` + proxies for large datasets.
+   * - ``array_return_proxies``
+     - ``True``
+     - Return lazy ``ArrayProxy`` objects — the array is only loaded
+       when accessed.
+   * - ``array_use_cache``
+     - ``True``
+     - Keep recently accessed arrays in an LRU cache.
+   * - ``preload_labels``
+     - ``True``
+     - Scan all annotation files at init.  Set to ``False`` for
+       very large datasets with expensive label parsing.
+   * - ``preload_metadata``
+     - ``True``
+     - Scan all metadata files at init.
+
+.. code-block:: python
+
+   # Add preloading flags to the data loader call above
+   train_loader = wl.watch_or_edit(
+       train_dataset,
+       flag="data",
+       # ...loader kwargs...
+       array_autoload_arrays=False,   # default: False — keep False for large datasets
+       array_return_proxies=True,     # default: True
+       array_use_cache=True,          # default: True
+       preload_labels=True,           # default: True
+       preload_metadata=True,         # default: True
+   )
+
+Model — ``flag="model"``
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 12 60
+
+   * - Parameter
+     - Default
+     - Description
+   * - ``dummy_input``
+     - ``None``
+     - Representative input tensor used to trace the computation graph.
+   * - ``device``
+     - ``None``
+     - Target device (``"cpu"``, ``"cuda:0"``…).  Inferred when ``None``.
+   * - ``opset_version``
+     - ``17``
+     - ONNX opset version used for graph analysis.
+   * - ``use_onnx``
+     - ``False``
+     - Use ONNX export instead of TorchScript for graph analysis.
+   * - ``print_graph``
+     - ``False``
+     - Print the traced computational graph to stdout.
+   * - ``forced_model_wrapping``
+     - ``False``
+     - Force-wrap the model even if a checkpoint already provides one.
+
+.. code-block:: python
+
+   model = wl.watch_or_edit(
+       model,
+       flag="model",
+       dummy_input=torch.zeros(1, 3, 224, 224),  # default: None
+       device="cuda",                             # default: None (inferred)
+       opset_version=17,                          # default: 17
+       use_onnx=False,                            # default: False
+       print_graph=False,                         # default: False
+       forced_model_wrapping=False,               # default: False
+   )
+
+Hyperparameters — ``flag="hyperparameters"``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 12 60
+
+   * - Parameter
+     - Default
+     - Description
+   * - ``defaults``
+     - ``None``
+     - Dict of default key→value pairs written to the YAML file on
+       first run.
+   * - ``poll_interval``
+     - ``1.0``
+     - Seconds between polls for YAML file changes.
+   * - ``checkpoint_manager``
+     - ``None``
+     - Checkpoint-manager options dict, e.g.
+       ``{"load_config": True}``.
+
+.. code-block:: python
+
+   config = wl.watch_or_edit(
+       "hyperparameters.yaml",        # path or filename
+       flag="hyperparameters",
+       defaults={                     # default: None — written on first run
+           "learning_rate": 0.001,
+           "batch_size": 32,
+           "optimizer": "adam",
+           "num_epochs": 20,
+           "weight_decay": 1e-4,
+       },
+       poll_interval=1.0,             # default: 1.0 s
+       checkpoint_manager=None,       # default: None
+   )
+   # Access live-updated values during training:
+   # lr = config.learning_rate
+   # bs = config.batch_size
+
+Signal / metric / loss — ``flag="loss"`` / ``"metric"`` / ``"signal"``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 12 60
+
+   * - Parameter
+     - Default
+     - Description
+   * - ``name`` / ``signal_name``
+     - *(inferred)*
+     - Signal key used in the ledger and studio.
+   * - ``log``
+     - ``True``
+     - Aggregate and display this signal's curve.
+   * - ``per_sample``
+     - ``False``
+     - Store one value per sample per step.
+   * - ``per_instance``
+     - ``False``
+     - Store one value per ``(sample_id, annotation_id)`` pair.
+   * - ``subscribe_to``
+     - ``None``
+     - (*``@wl.signal`` only*) Name of another signal to watch.
+   * - ``compute_every_n_steps``
+     - ``1``
+     - (*``@wl.signal`` only*) Skip firing every *N* steps.
+   * - ``include_history``
+     - ``False``
+     - (*``@wl.signal`` only*) Populate ``ctx.subscribed_history``
+       on each firing.
+
+.. code-block:: python
+
+   # Loss registered via watch_or_edit
+   criterion = wl.watch_or_edit(
+       nn.CrossEntropyLoss(),
+       flag="loss",
+       name="train_loss/sample",      # default: inferred
+       log=True,                      # default: True
+       per_sample=True,               # default: False
+   )
+
+   # Signal via decorator
+   @wl.signal(
+       name="loss_trajectory_class",  # default: inferred from function name
+       subscribe_to="train_loss/sample",
+       log=False,                     # default: True
+       include_history=True,          # default: False
+       compute_every_n_steps=1,       # default: 1
+   )
+   def classify_trajectory(ctx):
+       history = ctx.subscribed_history  # list of past values
+       # ... classify and return a tag string
+       return "monotonic"
+
+----
+
+.. _config-env:
+
+.. rubric:: Part B — Environment Variables
+
+All variables are optional; the built-in default is used when unset.
+
+Deploying the Studio
+~~~~~~~~~~~~~~~~~~~~~
+
+All Weights Studio configuration variables are passed to the UI at launch time
+via ``weightslab ui launch``.  There are two ways to supply them.
+
+**Option 1 — shell exports (quick, per-session)**
 
 .. code-block:: bash
 
-   # From the repository root
-   cp .env .env.local          # or just edit .env directly
-   # Then export or load it before starting your training script
+   export ENABLE_AGENT=0
+   export BB_THUMB_RENDER=50
+   weightslab ui launch
+
+**Option 2 — ``.env`` file (persistent, version-controllable)**
+
+Create a ``.env`` file next to your training script (or in any parent directory):
+
+.. code-block:: bash
+
+   # .env
+   ENABLE_AGENT=0
+   BB_THUMB_RENDER=50
+   BB_MODAL_RENDER=200
+   GRID_CACHE_MAX_MB=256
+
+Then launch normally:
+
+.. code-block:: bash
+
+   weightslab ui launch
+
+WeightsLab loads the ``.env`` file automatically.  Shell exports take precedence
+over ``.env`` values.  No rebuild of the Studio container is needed — variables
+are injected at container start.
+
+.. note::
+
+   The full list of recognized deployment variables (feature toggles,
+   bounding-box limits, cache sizes, etc.) is in the **Weights Studio
+   (frontend)** section below.
 
 
 WeightsLab (Python backend)
----------------------------
+----------------------------
 
 Logging
 ~~~~~~~
@@ -209,6 +590,13 @@ Data and Cache
    * - ``WL_DEFAULT_THUMBNAIL_SIZE``
      - ``720``
      - Longest-edge pixel size used when generating preview thumbnails.
+   * - ``WL_MODAL_MAX_RESOLUTION``
+     - *(unset — full resolution)*
+     - Maximum longest-edge pixel size for images served to the modal
+       full-resolution viewer.  When set, the backend downscales images whose
+       longest edge exceeds this value before transmission — reduces bandwidth and
+       GPU memory pressure on high-resolution datasets (e.g. medical or satellite
+       imagery).  Leave unset to serve images at their original resolution.
    * - ``WL_BATCH_CHUNK_SIZE``
      - ``0``
      - Number of samples per internal processing chunk.
@@ -692,63 +1080,3 @@ enabled**; set it to ``0`` / ``false`` / ``no`` / ``off`` (any case) to disable.
    reload is enough to pick up a change.
 
 
-Deploying with ``build-and-deploy.sh``
----------------------------------------
-
-The helper script ``weightslab/ui/docker/utils/build-and-deploy.sh`` (and its
-mirror in ``weights_studio/docker/utils/``) writes all runtime configuration
-into the ``docker/.env`` file before starting the containers.  Any UI variable
-can be passed directly as a ``KEY=VALUE`` positional argument — no need to set
-environment variables beforehand:
-
-.. code-block:: bash
-
-   # From the docker/ directory
-   bash utils/build-and-deploy.sh ENABLE_AGENT=0 BB_THUMB_RENDER=50
-
-   # Dev mode
-   bash utils/build-and-deploy.sh --dev ENABLE_PLOTS=0 ENABLE_AGENT=0
-
-   # Multiple overrides
-   bash utils/build-and-deploy.sh --dev \
-       ENABLE_PLOTS=0 \
-       ENABLE_DATA_EXPLORATION=0 \
-       BB_THUMB_RENDER=20 \
-       BB_MODAL_RENDER=200 \
-       WS_HISTOGRAM_MAX_BINS=256
-
-The following ``KEY=VALUE`` arguments are recognised:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 40 60
-
-   * - Argument
-     - Effect
-   * - ``ENABLE_PLOTS=0``
-     - Disable the plots board and Signals card.
-   * - ``ENABLE_DATA_EXPLORATION=0``
-     - Disable the data grid and metadata panel.
-   * - ``ENABLE_HYPERPARAMETERS_OPTIMIZATION=0``
-     - Disable the Hyperparameters section.
-   * - ``ENABLE_AGENT=0``
-     - Disable the agent chat panel.
-   * - ``BB_THUMB_RENDER=N``
-     - Set the thumbnail bounding-box cap to N.
-   * - ``BB_MODAL_RENDER=N``
-     - Set the modal bounding-box cap to N.
-   * - ``WS_HISTOGRAM_MAX_BINS=N``
-     - Set the histogram bar cap to N (max 512).
-   * - ``GRID_WINDOW_SIZE=N``
-     - Set the prefetch sliding-window size (default 6).
-   * - ``GRID_CACHE_MAX_MB=N``
-     - Set the grid-view image cache memory budget in MB (default 128).
-   * - ``MODAL_CACHE_MAX_MB=N``
-     - Set the modal image cache memory budget in MB (default 64).
-   * - ``PC_MAX_POINTS=N``
-     - Cap the number of rendered point-cloud points (default: no cap).
-   * - ``DISABLE_GPU_RENDERING=1``
-     - Force CPU-side canvas rendering for point clouds (disables WebGL).
-
-Unrecognised arguments are silently ignored.  Any variable not supplied
-defaults to the value shown in the tables above.

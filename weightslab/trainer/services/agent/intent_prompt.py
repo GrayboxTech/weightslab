@@ -42,6 +42,11 @@ Choose the `kind` based on the user's VERB and INTENT:
 | **Save data state** | "Save the current data state", "Persist the tags and discards", "Snapshot the dataset state" | `action` (`action_name="save_data"`) |
 | **Load experiment** | "Load experiment state from hash <h>", "Restore the experiment <h>", "Go back to state <h>" | `action` (`action_name="load_experiment"`, `action_params={{"hash": "<h>"}}`) |
 | **Load weights** | "Load the model weights from step 500", "Roll back weights to step 500", "Load weights at step 500 from hash <h>" | `action` (`action_name="load_weights"`, `action_params={{"step": 500}}`) |
+<<<<<<< HEAD
+=======
+| **Tune hyperparameter** | "Set the batch size to 32", "Increase the learning rate by 10%", "Change the dumping model ratio to 15", "Change the evaluation ratio to 20" | `action` (`action_name="set_hyperparam"`; see rule 11) |
+| **Config question (READ-ONLY)** | "Show me the root log dir", "What is the batch size?", "Display the whole configuration", "Show the config" | `action` (`action_name="show_config"`; `action_params={{"param": "<key>"}}` for one value, omit for the whole config) |
+>>>>>>> 2db142c599a32f94669a3afad5f4098d5629ddde
 | **History query** | "...that never had train loss below 0.5", "...whose loss was ever above 5", "min/max/mean loss OVER TRAINING" | `transform`/`keep` using `signal_history(...)` (see rule 10) |
 
 ---
@@ -71,6 +76,14 @@ Choose the `kind` based on the user's VERB and INTENT:
    - "ever had loss above 5" / "loss spiked over 5 at some point" → `signal_history('train_loss','max') > 5`
    - "average train loss over training below 0.2" → `signal_history('train_loss','mean') < 0.2`
    Use it exactly like a normal column expression (create a tag, discard, or keep on it — see Ex39). A sample with no recorded history yields NaN (comparisons are False), so it's safely excluded.
+<<<<<<< HEAD
+=======
+11. **Hyperparameter tuning (`action_name="set_hyperparam"`)**: to change a training hyperparameter, emit a `kind="action"` step with `action_name="set_hyperparam"` and `action_params={{"param": <name>, "op": <"set"|"scale">, "value": <number>}}`.
+   - `param`: prefer a semantic name — `"batch_size"`, `"learning_rate"`, `"dump_ratio"` (the model-dump/checkpoint ratio), `"eval_ratio"` (the evaluation ratio) — or an exact dotted config path (e.g. `"data.train_loader.batch_size"`). The backend resolves the semantic name to the real config key.
+   - Absolute change ("set X to N", "change X to N") → `op="set"`, `value=N`.
+   - Relative change ("increase X by 10%", "decrease by 20%") → `op="scale"`, `value` = the multiplier (10% increase → `1.1`; 20% decrease → `0.8`). Compute the multiplier yourself.
+   - See Ex45–Ex48.
+>>>>>>> 2db142c599a32f94669a3afad5f4098d5629ddde
 
 ---
 ## 4. SCHEMA RULES (STRICT)
@@ -91,7 +104,13 @@ Choose the `kind` based on the user's VERB and INTENT:
     - `"save_data"` — snapshot the current data state (tags + discard flags).
     - `"load_experiment"` — load & apply a FULL saved experiment state (model + weights + data + config) by hash; REQUIRES `action_params={{"hash": "<exp_hash>"}}` (the hash the user gives).
     - `"load_weights"` — load ONLY model weights, optionally at a specific step: `action_params={{"step": <int>}}` (and optionally `"hash": "<exp_hash>"`; defaults to the current experiment).
+<<<<<<< HEAD
   - `action_params`: Optional dict of parameters for the action (e.g. `{{"architecture": true}}`, `{{"hash": "abc123..."}}`, `{{"step": 500}}`).
+=======
+    - `"set_hyperparam"` — change a training hyperparameter: `action_params={{"param": "<name-or-dotted-path>", "op": "<set|scale>", "value": <number>}}` (see rule 11).
+    - `"show_config"` — READ-ONLY: display the experiment configuration. Omit `action_params` to dump the whole config, or pass `action_params={{"param": "<key-or-dotted-path>"}}` to show a single value (e.g. `"root_log_dir"`, `"batch_size"`). Never modifies anything — use it for any "show/what is/display the config/setting" question.
+  - `action_params`: Optional dict of parameters for the action (e.g. `{{"architecture": true}}`, `{{"hash": "abc123..."}}`, `{{"step": 500}}`, `{{"param": "batch_size", "op": "set", "value": 32}}`).
+>>>>>>> 2db142c599a32f94669a3afad5f4098d5629ddde
 
 ---
 ---
@@ -706,6 +725,118 @@ User: "Load the model weights from step 500"
 }}
 
 
+<<<<<<< HEAD
+=======
+**Ex44: Load Experiment State AND Weights At A Specific Step (Compound — TWO actions)**
+User: "Load the experiment state from hash a1b2c3d4e5f6 and the step 57"
+{{
+  "reasoning": "Two actions in one request. FIRST restore the full experiment state from the given hash (load_experiment loads the latest/max step by default). THEN load the model weights at step 57 from that same hash to pin the weights to that exact step. Emit BOTH action steps, in this order.",
+  "primary_goal": "action",
+  "steps": [
+    {{
+      "kind": "action",
+      "action_name": "load_experiment",
+      "action_params": {{ "hash": "a1b2c3d4e5f6" }}
+    }},
+    {{
+      "kind": "action",
+      "action_name": "load_weights",
+      "action_params": {{ "step": 57, "hash": "a1b2c3d4e5f6" }}
+    }}
+  ]
+}}
+
+
+**Ex45: Set Batch Size (Absolute)**
+User: "Set the batch size to 32"
+{{
+  "reasoning": "Absolute hyperparameter change: set batch_size to 32.",
+  "primary_goal": "action",
+  "steps": [
+    {{
+      "kind": "action",
+      "action_name": "set_hyperparam",
+      "action_params": {{ "param": "batch_size", "op": "set", "value": 32 }}
+    }}
+  ]
+}}
+
+
+**Ex46: Increase Learning Rate By A Percentage (Relative)**
+User: "Increase the learning rate by 10%"
+{{
+  "reasoning": "Relative change of +10% -> multiply learning_rate by 1.1 (op=scale, value=1.1).",
+  "primary_goal": "action",
+  "steps": [
+    {{
+      "kind": "action",
+      "action_name": "set_hyperparam",
+      "action_params": {{ "param": "learning_rate", "op": "scale", "value": 1.1 }}
+    }}
+  ]
+}}
+
+
+**Ex47: Change The Dumping Model Ratio**
+User: "Change the dumping model ratio to 15"
+{{
+  "reasoning": "Absolute change of the model-dump/checkpoint ratio to 15.",
+  "primary_goal": "action",
+  "steps": [
+    {{
+      "kind": "action",
+      "action_name": "set_hyperparam",
+      "action_params": {{ "param": "dump_ratio", "op": "set", "value": 15 }}
+    }}
+  ]
+}}
+
+
+**Ex48: Change The Evaluation Ratio**
+User: "Change the evaluation ratio to 20"
+{{
+  "reasoning": "Absolute change of the evaluation ratio to 20.",
+  "primary_goal": "action",
+  "steps": [
+    {{
+      "kind": "action",
+      "action_name": "set_hyperparam",
+      "action_params": {{ "param": "eval_ratio", "op": "set", "value": 20 }}
+    }}
+  ]
+}}
+
+
+**Ex49: Show A Single Config Value (READ-ONLY)**
+User: "Show me the root log dir"
+{{
+  "reasoning": "Read-only config question about a single setting. Use show_config with the requested key; do NOT modify anything.",
+  "primary_goal": "action",
+  "steps": [
+    {{
+      "kind": "action",
+      "action_name": "show_config",
+      "action_params": {{ "param": "root_log_dir" }}
+    }}
+  ]
+}}
+
+
+**Ex50: Display The Whole Configuration (READ-ONLY)**
+User: "Display the whole configuration"
+{{
+  "reasoning": "Read-only request to dump the entire experiment configuration. Use show_config with no param.",
+  "primary_goal": "action",
+  "steps": [
+    {{
+      "kind": "action",
+      "action_name": "show_config"
+    }}
+  ]
+}}
+
+
+>>>>>>> 2db142c599a32f94669a3afad5f4098d5629ddde
 </examples>
 
 ---

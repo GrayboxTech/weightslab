@@ -560,45 +560,23 @@ If no port is provided (or port is ``0``), the server picks a free port.
 Console actions and commands
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Discovery and help:
+Full command-by-command reference (discovery/help, training control, registry
+inspection, sample-level dataset operations, hyperparameters, evaluation,
+audit mode, the AI agent, and session control) — with syntax, flags, and
+worked examples for every one — lives in :doc:`user_commands`. Quick
+summary of what's available:
 
-- ``help`` / ``h`` / ``?``: show all command syntaxes and examples.
-- ``status``: compact snapshot of models, loaders, optimizers, hyperparams.
-- ``dump``: sanitized ledger dump (dataloaders, optimizers, hyperparams).
-
-Training control:
-
-- ``pause`` (or ``p``): pause training and set ``is_training=False``.
-- ``resume`` (or ``r``): resume training and set ``is_training=True``.
-
-Registry inspection:
-
-- ``list_models``
-- ``list_optimizers``
-- ``list_loaders``
-- ``plot_model [model_name]``: prints model architecture text tree.
-
-Sample-level dataset operations:
-
-- ``list_uids [loader_name] [--discarded] [--limit N]``
-- ``discard <uid> [uid2 ...] [--loader loader_name]``
-- ``undiscard <uid> [uid2 ...] [--loader loader_name]``
-- ``add_tag <uid> <tag> [--loader loader_name]``
-
-Hyperparameter operations:
-
-- ``hp``: list hyperparameter sets.
-- ``hp <name>``: show one set.
-- ``set_hp [hp_name] <key.path> <value>``: update one key path.
-
-Model architecture operation:
-
-- ``operate [model_name] <op_type:int> <layer_id:int> <nb|[list]>``
-
-Session control:
-
-- ``exit`` / ``quit``: close client session.
-- ``clear`` / ``cls``: client-side terminal clear (not sent to server).
+- Discovery/help: ``help``, ``status``, ``dump``, ``ledger_dump``.
+- Training control: ``pause`` / ``resume``.
+- Registry inspection: ``list_models``, ``list_optimizers``, ``list_loaders``,
+  ``plot_model [model_name]``.
+- Sample-level dataset operations: ``list_uids``, ``discard``, ``undiscard``,
+  ``add_tag``.
+- Hyperparameters: ``hp``, ``set_hp``.
+- Evaluation: ``evaluate``, ``eval_status``, ``cancel_eval``.
+- Audit mode: ``audit [on|off]``.
+- AI agent: ``agent ...`` / ``query`` / ``ask`` — see :doc:`agent`.
+- Session control: ``exit`` / ``quit``, ``clear`` / ``cls``.
 
 Developer notes
 ~~~~~~~~~~~~~~~

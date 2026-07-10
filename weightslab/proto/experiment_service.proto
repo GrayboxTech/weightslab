@@ -69,6 +69,7 @@ message LoggerDataPoint {
 
 message GetLatestLoggerDataResponse {
   repeated LoggerDataPoint points = 1;  // All points from all metrics
+  string weightslab_version = 2;        // backend weightslab package version (shown in UI logo tooltip)
 }
 
 message Empty {}
@@ -176,6 +177,13 @@ message SaveCheckpointOperation {
   bool save_optimizer = 2;     // also persist optimizer state
 }
 
+// Restarts the backend Python process. The process relies on the container's
+// restart policy (e.g. `restart: unless-stopped`) to come back up, at which
+// point it reloads its last saved checkpoint the same way it does on a fresh
+// container start.
+message RestartInstanceOperation {
+}
+
 message TrainerCommand {
   bool get_hyper_parameters = 4;
   bool get_interactive_layers = 5;
@@ -189,6 +197,7 @@ message TrainerCommand {
   optional DenySamplesOperation remove_eval_from_denylist_operation = 12;
   optional PlotNoteOperation plot_note_operation = 13;
   optional SaveCheckpointOperation save_checkpoint_operation = 14;
+  optional RestartInstanceOperation restart_operation = 15;
 }
 
 message HyperParameterDesc {
@@ -416,6 +425,14 @@ message HistogramBin {
   repeated HistogramSubBar sub_bars = 5;
 }
 
+// One bar of a categorical histogram: count of rows with a given string value
+// plus the per-(origin,discarded) breakdown for split colouring.
+message CategoricalHistogramBar {
+  string label = 1;                    // category value ("" = unset / NaN)
+  int64 count = 2;                     // total count across all splits
+  repeated HistogramSubBar sub_bars = 3;
+}
+
 message HistogramRequest {
   string column = 1;     // dataframe/signal column to histogram
   int32 max_bins = 2;    // 0 => server default (512)
@@ -424,8 +441,10 @@ message HistogramRequest {
 message HistogramResponse {
   bool success = 1;
   string message = 2;
-  int64 total_rows = 3;  // rows in the view that were binned
-  repeated HistogramBin bins = 4;
+  int64 total_rows = 3;                // rows in the view that were binned
+  repeated HistogramBin bins = 4;      // numeric histogram (is_categorical=false)
+  bool is_categorical = 5;             // true => use categorical_bars instead of bins
+  repeated CategoricalHistogramBar categorical_bars = 6;
 }
 
 // --- Metadata retrieval (separated from GetDataSamples) ---

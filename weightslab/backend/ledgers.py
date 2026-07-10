@@ -558,6 +558,20 @@ class Proxy:
                             "\nOtherwise there is a missmatch between data metadata returned, e.g., some metadata has augmentation parameters and other not. Please initialize all metadata with the same keys and types to avoid this error."
                         )
                     raise StopIteration
+
+            def __del__(self):
+                # Safety net for callers that abandon a `for x in proxy:` loop
+                # before it runs to natural StopIteration (`break`, an
+                # exception, or a bounded/managed wrapper that stops early —
+                # see _EvalManagedLoader in src.py for a concrete case). Without
+                # this, is_a_loop stays stuck True forever on the underlying
+                # object, and every future plain `next(proxy)` call incorrectly
+                # propagates StopIteration once per epoch instead of
+                # transparently auto-resetting.
+                try:
+                    self._it.is_a_loop = False
+                except Exception:
+                    pass
         return _ProxyIterator(underlying_iter)
 
     def __len__(self):
@@ -568,7 +582,19 @@ class Proxy:
     def __getitem__(self, idx):
         if self._obj is None:
             raise TypeError("Proxy target not set")
-        return self._obj[idx]
+        value = self._obj[idx]
+        # Mirror .get(): subscript access on a mapping returns a live key proxy
+        # for "simple" values, so ``b['test']`` tracks studio edits exactly like
+        # ``b.get('test')``. Lists/slices and non-mapping containers, plus
+        # list/dict/callable values, are returned raw (unchanged behavior).
+        if (hasattr(self._obj, "get") and hasattr(self._obj, "keys")
+                and not (isinstance(value, (list, dict)) or callable(value))):
+            vp = Proxy._ValueProxy(self, idx)
+            # str / torch.device are handed back plain (see _plain_get_value);
+            # other simple types stay live proxies so studio edits keep tracking.
+            plain = _plain_get_value(vp._resolve())
+            return vp if plain is _KEEP_AS_PROXY else plain
+        return value
 
     def __setitem__(self, key, value):
         """Support item assignment: proxy[key] = value"""
