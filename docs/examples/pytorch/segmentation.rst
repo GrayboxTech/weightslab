@@ -12,7 +12,7 @@ Segmentation — BDD100k (PyTorch)
      <span class="wl-eg-tag">dense prediction</span>
    </div>
 
-**Example:** ``weightslab/examples/PyTorch/ws-segmentation/main.py``
+**Example:** ``weightslab/examples/PyTorch/wl-segmentation/main.py``
 
 **Task:** Per-instance semantic segmentation on BDD100k (6 classes) with a
 small UNet.

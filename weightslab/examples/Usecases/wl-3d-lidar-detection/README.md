@@ -6,8 +6,8 @@ with per-sample and per-instance signals flowing into the WeightsLab
 dashboards.
 
 ```
-ws-3d-lidar-detection/
-  main.py             # WL wiring + train/eval loop (mirrors PyTorch/ws-detection)
+wl-3d-lidar-detection/
+  main.py             # WL wiring + train/eval loop (mirrors PyTorch/wl-detection)
   config.yaml         # hyperparameters, ranges, loaders
   utils/
     data.py           # KITTI-format loader + synthetic scene fallback + collate
@@ -18,7 +18,7 @@ ws-3d-lidar-detection/
 ## Quick start
 
 ```bash
-cd weightslab/examples/Usecases/ws-3d-lidar-detection
+cd weightslab/examples/Usecases/wl-3d-lidar-detection
 python main.py
 ```
 
@@ -81,7 +81,7 @@ coordinates (`task_type = "detection_pointcloud"` — one task type covering 2D 
 
 ## WeightsLab signals
 
-Same pattern as `PyTorch/ws-detection`:
+Same pattern as `PyTorch/wl-detection`:
 
 - `*_loss/sample` (`per_sample=True`) — the YOLO-in-BEV loss, one value per
   frame: localization (x, y, z) + log-size + sin/cos heading + class CE

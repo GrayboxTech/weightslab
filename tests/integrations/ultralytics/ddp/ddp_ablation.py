@@ -31,10 +31,10 @@ import yaml, torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-# This harness lives under tests/ but drives the ws-detection usecase: put the usecase
+# This harness lives under tests/ but drives the wl-detection usecase: put the usecase
 # src on the path (for yolo_pipeline / utils.*) and resolve config/data/ddp_run vs IT.
 _USECASE_SRC = os.path.abspath(os.path.join(
-    os.path.dirname(__file__), "../../../../examples/PyTorch/ws-detection/src"))
+    os.path.dirname(__file__), "../../../../examples/PyTorch/wl-detection/src"))
 sys.path.insert(0, _USECASE_SRC)
 _HERE = _USECASE_SRC
 _HOST = "127.0.0.1"

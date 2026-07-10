@@ -511,7 +511,7 @@ Spiked          Sudden jump at some step — data/augmentation/version change.
    the verdict also live as a per-sample ``signals//loss_shape_classifier``
    column; the human-readable label lives on the ``loss_shape`` categorical tag.
 
-   See the detection use case (``examples/PyTorch/ws-detection/src/main.py``) for
+   See the detection use case (``examples/PyTorch/wl-detection/src/main.py``) for
    this signal wired into a real training loop.
 
 compute_signals

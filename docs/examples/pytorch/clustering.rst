@@ -12,7 +12,7 @@ Clustering — Face Recognition (PyTorch)
      <span class="wl-eg-tag">metric learning</span>
    </div>
 
-**Example:** ``weightslab/examples/PyTorch/ws-clustering/main.py``
+**Example:** ``weightslab/examples/PyTorch/wl-clustering/main.py``
 
 **Task:** Metric learning with triplet loss on the Olivetti / LFW face dataset.
 The goal is to train an embedding network so that embeddings from the same
