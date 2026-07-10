@@ -17,12 +17,14 @@
   <a href="https://github.com/GrayboxTech/weightslab/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License" /></a>
   <a href="https://github.com/GrayboxTech/weightslab/stargazers"><img src="https://img.shields.io/github/stars/GrayboxTech/weightslab?style=flat&color=5865F2" alt="Stars" /></a>
   <a href="https://pypi.org/project/weightslab/"><img src="https://img.shields.io/pypi/v/weightslab?style=flat&color=5865F2&logo=pypi&logoColor=white" alt="Version" /></a>
+  <a href="https://pepy.tech/project/weightslab"><img src="https://img.shields.io/pepy/dt/weightslab?style=flat&color=5865F2&logo=pypi&logoColor=white" alt="PyPI - Downloads" /></a>
+  <a href="https://github.com/GrayboxTech/weightslab/actions"><img src="https://img.shields.io/badge/CI-passing-brightgreen?style=flat&logo=githubactions&logoColor=white" alt="CI" /></a>
 </div>
 <br>
 
 ## What it does
 
-WeightsLab is an open-source PyTorch tool for dataset debugging, data quality monitoring, mislabel detection, and mid-training data curation for computer vision datasets: images, video & LiDAR point clouds. 
+WeightsLab is an open-source PyTorch tool for dataset debugging, data quality monitoring, mislabel detection, and mid-training data curation for computer vision datasets: images, video & LiDAR point clouds.
 Longer-term, we're building toward bringing dataset management, training, fine-tuning, and validation together in a single, unified workflow.
 
 <br>
@@ -33,18 +35,18 @@ Longer-term, we're building toward bringing dataset management, training, fine-t
 <br>
 Most data problems are invisible until your model tells you: through loss spikes, poor generalization, or silent underperformance. WeightsLab connects those training signals back to the exact samples causing them.
 
-**Wrap your training script with the SDK** to capture per-sample signals live.  
+**Wrap your training script with the SDK** to capture per-sample signals live.
 **Open Studio** to inspect, filter, and curate your dataset mid-training, without restarting.
 
-- **Detect** - Surface mislabels, outliers & class imbalance using live loss signals 
-- **Curate** - Discard bad samples, create data subsets, rebalance distributions 
-- **Continue** - Resume training on your cleaned dataset, no restart required 
+- **Detect** - Surface mislabels, outliers & class imbalance using live loss signals
+- **Curate** - Discard bad samples, create data subsets, rebalance distributions
+- **Continue** - Resume training on your cleaned dataset, no restart required
 <br>
 
-## Quickstart 
+## Quickstart
 
-![Python](https://img.shields.io/badge/Python-3.10--3.14-5865F2?style=flat&logo=python&logoColor=white)
-![Docker Desktop](https://img.shields.io/badge/Docker_Desktop-v4-0db7ed?style=flat&logo=docker&logoColor=white)
+![Python](https://img.shields.io/badge/Python-v3.10--v3.14-5865F2?style=flat&logo=python&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-v4-0db7ed?style=flat&logo=docker&logoColor=white)
 
 **1. Install**
 ```bash
@@ -103,13 +105,13 @@ For a detailed installation guide and advanced configuration &rarr; [Installatio
    parameters      = wl.watch_or_edit(parameters, flag='hp',     ...) # ← WeightsLab monitors your parameters and lets you update them from the UI
    model           = wl.watch_or_edit(model, flag='model', ...) # ← WeightsLab monitors your model state
    optimizer       = wl.watch_or_edit(optim.Adam(...),                         flag='opt',    ...) # ← Tracks optimizer state and lets you update the learning rate from the UI
-   
+
    train_criterion = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"),  flag='signal', name="train_loss/sample", per_sample=True, log=True)   # ← Wrap and plot your signals on the UI
    test_criterion  = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"),  flag='signal', name="test_loss/sample",  per_sample=True, log=False)  # ← Per-sample only, plot disabled
-   
+
    train_loader    = wl.watch_or_edit(train_dataset, flag='data', loader_name="train_loader", ...)  # ← Track your training dataset
    val_loader      = wl.watch_or_edit(val_dataset,   flag='data', loader_name="val_loader",   ...)  # ← Track your validation dataset
-   
+
 ```
 
 3. **Run your script, then launch the UI in a separate terminal:**
@@ -212,7 +214,7 @@ if __name__ == "__main__":
 
 ## WeightsLab vs Weights & Biases
 
-Weights & Biases (wandb) tracks experiments. WeightsLab connects training signals back to 
+Weights & Biases (wandb) tracks experiments. WeightsLab connects training signals back to
 the exact samples causing them — so you can fix your data, not just log it.
 
 <br>
@@ -325,7 +327,7 @@ any single file. It's the fastest way to orient before a first change.
 
 <br>
 
-We're building a community of ML engineers around data-centric training tooling. 
+We're building a community of ML engineers around data-centric training tooling.
 Interested in contributing or just want to say hi? → hello [at] graybx [dot] com
 
 </details>

@@ -4339,6 +4339,14 @@ class DataService:
                     else np.zeros(n, bool))
 
             # Detect whether column is categorical (string/object) or numeric.
+            # A column is numeric if ANY value coerces to a finite number — even
+            # when the pandas dtype is ``object`` (e.g. a loss column holding
+            # floats mixed with None/NaN for samples that have no value yet).
+            # None/NaN are MISSING data, not a category, so they must never turn
+            # a numeric column into a categorical one (which would surface them
+            # as a spurious "unset" bar). We therefore treat as categorical only
+            # a genuine pandas ``category`` dtype, or a column whose values do
+            # not coerce to any numeric value at all (pure strings).
             col_series = df[column]
             numeric_vals = pd.to_numeric(col_series, errors="coerce")
             is_categorical = numeric_vals.isna().all()

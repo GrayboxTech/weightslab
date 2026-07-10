@@ -172,6 +172,66 @@ class TestGetHistogramMixedNaN(unittest.TestCase):
         self.assertGreater(len(resp.bins), 0)
 
 
+class TestGetHistogramObjectDtypeNumeric(unittest.TestCase):
+    """A numeric column stored as object dtype (floats mixed with None/NaN)
+    must stay numeric — None/NaN are missing data, not an 'unset' category."""
+
+    def test_object_dtype_floats_with_none_stays_numeric(self):
+        # Mixing Python floats with None yields an object-dtype column; this is
+        # how a per-sample loss column looks before every sample has a value.
+        df = pd.DataFrame({
+            "loss": pd.Series(
+                [0.1, None, 0.3, np.nan, 0.5, None, 0.7, 0.2, None, 0.9],
+                dtype=object,
+            ),
+            "origin": ["train"] * 5 + ["eval"] * 5,
+            "discarded": [False] * 10,
+        })
+        self.assertEqual(df["loss"].dtype, object)
+        svc = _make_service_with_df(df)
+        resp = svc.GetHistogram(_req("loss"), MockContext())
+        self.assertTrue(resp.success, resp.message)
+        self.assertFalse(resp.is_categorical)
+        self.assertGreater(len(resp.bins), 0)
+        self.assertEqual(len(resp.categorical_bars), 0)
+
+    def test_none_nan_excluded_from_numeric_counts(self):
+        # Only the 6 finite values should be counted across all bins; the 4
+        # None/NaN entries must not appear as an "unset" category or a value.
+        df = pd.DataFrame({
+            "loss": pd.Series([1.0, None, 2.0, np.nan, 3.0, None, 4.0, 5.0, None, 6.0],
+                              dtype=object),
+            "origin": ["train"] * 10,
+            "discarded": [False] * 10,
+        })
+        svc = _make_service_with_df(df)
+        resp = svc.GetHistogram(_req("loss"), MockContext())
+        self.assertFalse(resp.is_categorical)
+        total_counted = sum(b.count for b in resp.bins)
+        self.assertEqual(total_counted, 6)
+
+
+class TestGetHistogramAllNaNFloatColumn(unittest.TestCase):
+    """A genuine float dtype column that is entirely NaN (e.g. a loss column
+    no sample has filled yet) must render as an empty numeric histogram — not
+    a categorical 'unset' bar."""
+
+    def test_all_nan_float_column_stays_numeric(self):
+        df = pd.DataFrame({
+            "loss": pd.Series([np.nan] * 8, dtype=float),
+            "origin": ["train"] * 8,
+            "discarded": [False] * 8,
+        })
+        self.assertTrue(pd.api.types.is_float_dtype(df["loss"]))
+        svc = _make_service_with_df(df)
+        resp = svc.GetHistogram(_req("loss"), MockContext())
+        self.assertTrue(resp.success, resp.message)
+        self.assertFalse(resp.is_categorical)
+        self.assertEqual(len(resp.categorical_bars), 0)
+        # No finite values → every bin is empty, none surfaced as "unset".
+        self.assertEqual(sum(b.count for b in resp.bins), 0)
+
+
 class TestGetHistogramEdgeCases(unittest.TestCase):
     def test_column_not_in_df(self):
         df = pd.DataFrame({"a": [1, 2, 3], "origin": ["train"] * 3,
