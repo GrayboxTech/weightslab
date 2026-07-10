@@ -12,7 +12,7 @@ Clustering — Face Recognition (PyTorch)
      <span class="wl-eg-tag">metric learning</span>
    </div>
 
-**Example:** ``weightslab/examples/PyTorch/ws-clustering/main.py``
+**Example:** ``weightslab/examples/PyTorch/wl-clustering/main.py``
 
 **Task:** Metric learning with triplet loss on the Olivetti / LFW face dataset.
 The goal is to train an embedding network so that embeddings from the same
@@ -95,3 +95,12 @@ silhouette score to identify consistently confused identities.
 
       weightslab ui launch            # 1. deploy the studio
       weightslab start example --clus # 2. start the clustering demo
+
+
+.. raw:: html
+
+   <div style="text-align:right; margin-top:2rem;">
+     <a href="https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/PyTorch/ws-clustering.ipynb" target="_blank" rel="noopener noreferrer">
+       <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab">
+     </a>
+   </div>

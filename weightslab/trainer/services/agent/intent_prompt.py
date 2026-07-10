@@ -74,13 +74,10 @@ Choose the `kind` based on the user's VERB and INTENT:
    - "average train loss over training below 0.2" → `signal_history('train_loss','mean') < 0.2`
    Use it exactly like a normal column expression (create a tag, discard, or keep on it — see Ex39). A sample with no recorded history yields NaN (comparisons are False), so it's safely excluded.
 11. **Hyperparameter tuning (`action_name="set_hyperparam"`)**: to change a training hyperparameter, emit a `kind="action"` step with `action_name="set_hyperparam"` and `action_params={{"param": <name>, "op": <"set"|"scale">, "value": <number>}}`.
-   - `param`: prefer a semantic name — `"batch_size"`, `"learning_rate"`, `"dump_ratio"` (the model-dump/checkpoint ratio), `"eval_ratio"` (the evaluation ratio) — or an exact dotted config path (e.g. `"data.train_loader.batch_size"`). The backend resolves the semantic name to the real config key.
-   - Absolute change ("set X to N", "change X to N") → `op="set"`, `value=N`.
    - Relative change ("increase X by 10%", "decrease by 20%") → `op="scale"`, `value` = the multiplier (10% increase → `1.1`; 20% decrease → `0.8`). Compute the multiplier yourself.
    - See Ex45–Ex48.
 
 ---
-## 4. SCHEMA RULES (STRICT)
 - **Primary Goal**: `ui_manipulation` (grid changes), `data_analysis` (answers), `action` (external), `model_management` (model_info/model_action), `out_of_scope`.
 - **Atomic Operations**:
   - `conditions`: List of dicts with keys "column", "op", "value". Operators: `==, !=, >, <, >=, <=, contains, in, max, min`.

@@ -1,12 +1,12 @@
 # 2D LiDAR (laser-scan) Object Detection (Pillars2D-lite)
 
-The 2D sibling of [`ws-3d-lidar-detection`](../ws-3d-lidar-detection/): object
+The 2D sibling of [`wl-3d-lidar-detection`](../wl-3d-lidar-detection/): object
 detection on a **2D point cloud** (a single-layer laser scan / bird's-eye
 occupancy slice) instead of a 3D LiDAR scene. Same WeightsLab wiring and
 per-sample / per-instance signals — just with `z` and `yaw` dropped.
 
 ```
-ws-2d-lidar-detection/
+wl-2d-lidar-detection/
   main.py             # WL wiring + train/eval loop
   config.yaml         # hyperparameters, plane range, loaders
   utils/
@@ -18,7 +18,7 @@ ws-2d-lidar-detection/
 ## Quick start
 
 ```bash
-cd weightslab/examples/Usecases/ws-2d-lidar-detection
+cd weightslab/examples/Usecases/wl-2d-lidar-detection
 python main.py
 # or, from anywhere:
 weightslab start example --2d_det

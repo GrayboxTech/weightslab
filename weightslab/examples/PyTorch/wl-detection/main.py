@@ -119,6 +119,8 @@ if __name__ == "__main__":
     parameters.setdefault("freeze_backbone", True)
     parameters.setdefault("compute_natural_sort", True)
 
+    exp_name = parameters["experiment_name"]
+
     # --- 2) Register hyperparameters ---
     exp_name = parameters["experiment_name"]
     wl.watch_or_edit(
@@ -128,7 +130,6 @@ if __name__ == "__main__":
         defaults=parameters,
         poll_interval=1.0,
     )
-
     num_classes = int(parameters["num_classes"])
     image_size = int(parameters["image_size"])
     grid_size = int(parameters["grid_size"])

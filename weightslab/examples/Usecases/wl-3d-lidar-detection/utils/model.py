@@ -14,7 +14,7 @@
 # (objectness, tx, ty, tz, log l, log w, log h, sin yaw, cos yaw,
 # class_logits...).
 #
-# Encoding (BEV cell-relative, mirrors the 2D ws-detection example):
+# Encoding (BEV cell-relative, mirrors the 2D wl-detection example):
 # * objectness = sigmoid(t_obj) -> P(box centered in cell)
 # * cx = x_min + (col + sigmoid(tx)) / S * range_x
 # * cy = y_min + (row + sigmoid(ty)) / S * range_y

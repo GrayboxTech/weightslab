@@ -1,6 +1,6 @@
 #!/bin/bash
 # Comprehensive deployment test for weights_studio frontend + backend
-# Tests communication between frontend and Python backend (ws-segmentation example)
+# Tests communication between frontend and Python backend (wl-segmentation example)
 # Runs both unsecured (HTTP) and secured (HTTPS) test scenarios
 
 # set -e
@@ -16,7 +16,7 @@ NC='\033[0m' # No Color
 CURRENT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 DOCKER_DIR="$CURRENT_DIR/docker"
 UTILS_DIR="$DOCKER_DIR/utils"
-EXAMPLE_DIR="$CURRENT_DIR/tests/playwright/examples/ws-segmentation"
+EXAMPLE_DIR="$CURRENT_DIR/tests/playwright/examples/wl-segmentation"
 GRPC_PORT=50051
 ENVOY_PORT=8080
 FRONTEND_PORT=5173

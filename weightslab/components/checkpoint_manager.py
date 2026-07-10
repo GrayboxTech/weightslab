@@ -1473,6 +1473,36 @@ class CheckpointManager:
         except Exception as e:
             logger.warning(f"Failed to load manager state: {e}")
 
+    def _resolve_device(self, model: Optional[th.nn.Module] = None) -> th.device:
+        """Resolve the torch device to deserialize a checkpoint onto.
+
+        Priority: the device of an already-loaded model, then the device
+        configured in the ledger's hyperparameters, then CPU. This avoids
+        ``torch.load`` defaulting to the checkpoint's original (possibly
+        CUDA) device on a machine where that device isn't available.
+        """
+        if model is None:
+            try:
+                model = ledgers.get_model()
+                if model is not None and hasattr(model, 'get') and callable(model.get):
+                    model = model.get()
+            except Exception:
+                model = None
+        if model is not None and hasattr(model, 'device'):
+            return model.device
+
+        try:
+            configured_device = (ledgers.get_hyperparams() or {}).get('device')
+        except Exception:
+            configured_device = None
+        if configured_device:
+            try:
+                return th.device(configured_device)
+            except Exception:
+                logger.warning(f"Could not parse configured device {configured_device!r}; defaulting to CPU")
+
+        return th.device('cpu')
+
     def load_latest_checkpoint(
         self,
         model: Optional[th.nn.Module] = None,
@@ -1516,7 +1546,8 @@ class CheckpointManager:
         logger.info(f"Loading checkpoint: {latest_checkpoint.name}")
 
         try:
-            checkpoint = th.load(latest_checkpoint, weights_only=False)
+            device = self._resolve_device(model)
+            checkpoint = th.load(latest_checkpoint, weights_only=False, map_location=device)
 
             # Load model state
             if model is None:
@@ -1685,7 +1716,7 @@ class CheckpointManager:
             if checkpoint_files:
                 latest_checkpoint = checkpoint_files[-1]
                 try:
-                    checkpoint = th.load(latest_checkpoint, weights_only=False)
+                    checkpoint = th.load(latest_checkpoint, weights_only=False, map_location=self._resolve_device())
                     rng_state = checkpoint.get('rng_state')
                     if rng_state:
                         result['rng_state'] = rng_state
@@ -1725,7 +1756,10 @@ class CheckpointManager:
 
             if checkpoint_file_to_load:
                 try:
-                    result['weights'] = th.load(checkpoint_file_to_load, weights_only=False)
+                    result['weights'] = th.load(
+                        checkpoint_file_to_load, weights_only=False,
+                        map_location=self._resolve_device(result.get('model')),
+                    )
                     result['loaded_components'].add('weights')
                     step = result['weights'].get('step', 0)
 

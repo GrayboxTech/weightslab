@@ -4,15 +4,20 @@ import torch
 import numpy as np
 from unittest.mock import MagicMock, patch
 import weightslab as wl
-from weightslab.src import _REGISTERED_SIGNALS, compute_signals, wrappered_fwd
+from weightslab.src import (
+    _REGISTERED_SIGNALS, _REACTIVE_FIRED, _react_dependents,
+    SignalContext, BatchSignalContext, compute_signals, wrappered_fwd,
+)
 
 class TestSignals(unittest.TestCase):
     def setUp(self):
         # Clear registered signals before each test
         _REGISTERED_SIGNALS.clear()
+        _REACTIVE_FIRED.clear()
 
     def tearDown(self):
         _REGISTERED_SIGNALS.clear()
+        _REACTIVE_FIRED.clear()
 
     # =========================================================================
     # Input Type Tests - Different signal and data input formats
@@ -251,6 +256,70 @@ class TestSignals(unittest.TestCase):
             losses_data = call_args[1]['losses']
             self.assertIn('signals//dynamic_sig', losses_data)
             
+    def test_context_exposes_inputs_attribute(self):
+        """SignalContext / BatchSignalContext always expose an `inputs` dict."""
+        # Defaults to an empty dict (never AttributeError, even off the reactive path).
+        sctx = SignalContext(sample_id=1, dataframe=None)
+        self.assertEqual(sctx.inputs, {})
+        bctx = BatchSignalContext(sample_ids=[1, 2], subscribed_values=[0.1, 0.2])
+        self.assertEqual(bctx.inputs, {})
+
+        # Populated via the constructor (as the reactive dispatch does).
+        cols = {"loss_sample": np.array([1.0, 2.0]), "sig/entropy": np.array([0.3, 0.4])}
+        bctx2 = BatchSignalContext(sample_ids=[1, 2], subscribed_values=cols["loss_sample"], inputs=cols)
+        self.assertIn("loss_sample", bctx2.inputs)
+        self.assertIn("sig/entropy", bctx2.inputs)
+        np.testing.assert_array_equal(bctx2.inputs["loss_sample"], [1.0, 2.0])
+
+    def test_reactive_inputs_populated_and_chained(self):
+        """A @wl.signal(inputs=[...]) reads its inputs via ctx.inputs[name], and a
+        derived input (another signal) is visible to a downstream signal."""
+        class FakeLogger:
+            def __init__(self, data):  # {sig: {sid: {step: val}}}
+                self.d = data
+            def query_per_sample_at_step(self, name, ids, step):
+                return [(sid, self.d[name][sid][step]) for sid in ids
+                        if name in self.d and sid in self.d[name]
+                        and step in self.d[name][sid]]
+            def query_per_sample(self, name, sample_ids=None):
+                rows = []
+                for sid in (sample_ids or []):
+                    for st, v in sorted(self.d.get(name, {}).get(sid, {}).items()):
+                        rows.append((sid, st, v, None))
+                return rows
+
+        captured = {}
+
+        @wl.signal(name="sig/loss_norm", inputs=["loss_sample"], batched=True)
+        def loss_norm(b):
+            captured["norm"] = dict(b.inputs)
+            return b.inputs["loss_sample"] / (float(np.mean(b.inputs["loss_sample"])) + 1e-8)
+
+        @wl.signal(name="sig/hardness", inputs=["loss_sample", "sig/loss_norm"], batched=True)
+        def hardness(b):
+            captured["hard"] = dict(b.inputs)
+            return b.inputs["loss_sample"] * b.inputs["sig/loss_norm"]
+
+        fake = FakeLogger({"loss_sample": {1: {10: 2.0}, 2: {10: 4.0}}})
+        saved = {}
+
+        def fake_save_signals(signals=None, **kw):
+            saved.update(signals or {})
+
+        with patch("weightslab.src.get_logger", return_value=fake), \
+             patch("weightslab.src.get_dataframe", return_value=None), \
+             patch("weightslab.src.save_signals", side_effect=fake_save_signals):
+            _react_dependents(["loss_sample"], batch_ids=[1, 2], step=10, origin="train")
+
+        # loss_norm read its base-metric input through ctx.inputs
+        np.testing.assert_array_equal(captured["norm"]["loss_sample"], [2.0, 4.0])
+        # hardness saw BOTH the base metric AND the derived signal via ctx.inputs
+        self.assertIn("loss_sample", captured["hard"])
+        self.assertIn("sig/loss_norm", captured["hard"])
+        # Both fired and were persisted
+        self.assertIn("sig/loss_norm", saved)
+        self.assertIn("sig/hardness", saved)
+
     def test_frequency_control(self):
         """Test compute_every_n_steps."""
         with patch("weightslab.src.list_models", return_value=["main"]), \

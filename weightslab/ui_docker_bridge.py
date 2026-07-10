@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 
 from weightslab.security import CertAuthManager
+from weightslab.tunnel import DEFAULT_LISTEN_PORT
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -172,6 +173,17 @@ commands:
                              --port PORT connect to a specific CLI port
                              --host HOST connect to a specific host (default: localhost)
 
+  tunnel Forward a REMOTE gRPC backend (e.g. a Colab run
+                           behind `ngrok tcp 50051`) to a LOCAL port so the UI
+                           stack — whose Envoy dials localhost:50051 — reaches
+                           it. Run alongside `weightslab ui launch`. Raw TCP, so
+                           the backend must be plaintext (default launch).
+                             ENDPOINT remote host:port (e.g. bore.pub:12345)
+                                             (default: $WEIGHTSLAB_TUNNEL_ENDPOINT)
+                             --listen-port N local port to expose (default 50051)
+                             --listen-host H interface to bind (default: auto)
+                             --remote-port N remote port, if not in ENDPOINT
+
 examples:
   weightslab se # one-time secure setup (then export WEIGHTSLAB_CERTS_DIR)
   weightslab se --force-certs # regenerate the certs
@@ -186,6 +198,7 @@ examples:
   weightslab start example --2d_det # run the 2D LiDAR detection demo
   weightslab cli # connect a terminal to the running experiment
   weightslab cli --port 60000 # connect to a specific CLI port
+  weightslab tunnel bore.pub:12345 # expose a remote (Colab) backend at localhost:50051 for the UI
 """
 
 
@@ -993,22 +1006,22 @@ def ui_secure_environment(args):
     logger.warning(f" (Windows) setx WEIGHTSLAB_CERTS_DIR \"{manager.certs_dir}\"")
 
 
-# Bundled PyTorch examples, keyed by the CLI flag (e.g. --cls -> ws-classification).
+# Bundled PyTorch examples, keyed by the CLI flag (e.g. --cls -> wl-classification).
 # Each value is (directory name under examples/PyTorch, human-readable label).
 # kind -> (dir_name, label, category) where category is the examples/ subfolder.
 _EXAMPLES = {
-    "cls": ("ws-classification", "classification", "PyTorch"),
-    "seg": ("ws-segmentation", "segmentation", "PyTorch"),
-    "det": ("ws-detection", "detection", "PyTorch"),
-    "clus": ("ws-clustering", "clustering", "PyTorch"),
-    "gen": ("ws-generation", "generation", "PyTorch"),
-    "3d_det": ("ws-3d-lidar-detection", "3D LiDAR detection", "Usecases"),
-    "2d_det": ("ws-2d-lidar-detection", "2D LiDAR detection", "Usecases"),
+    "cls": ("wl-classification", "classification", "PyTorch"),
+    "seg": ("wl-segmentation", "segmentation", "PyTorch"),
+    "det": ("wl-detection", "detection", "PyTorch"),
+    "clus": ("wl-clustering", "clustering", "PyTorch"),
+    "gen": ("wl-generation", "generation", "PyTorch"),
+    "3d_det": ("wl-3d-lidar-detection", "3D LiDAR detection", "Usecases"),
+    "2d_det": ("wl-2d-lidar-detection", "2D LiDAR detection", "Usecases"),
 }
 _DEFAULT_EXAMPLE = "cls"
 
 
-def _get_example_dir(name: str = "ws-classification", category: str = "PyTorch") -> Path:
+def _get_example_dir(name: str = "wl-classification", category: str = "PyTorch") -> Path:
     """Path to a bundled example directory (under examples/<category>/<name>)."""
     return Path(__file__).parent / 'examples' / category / name
 
@@ -1141,7 +1154,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     # metavar lists only the documented commands; the `example` alias is accepted
     # but intentionally omitted here (and help=SUPPRESS'd below) so it stays hidden.
-    sub = parser.add_subparsers(dest="command", metavar="{se,ui,start,cli,help}")
+    sub = parser.add_subparsers(dest="command", metavar="{se,ui,start,cli,tunnel,help}")
 
     # weightslab se [--force-certs] [certs_dir]
     se_parser = sub.add_parser("se", help="Set up the secure environment (TLS certs + gRPC auth token)")
@@ -1170,6 +1183,25 @@ def _build_parser() -> argparse.ArgumentParser:
                             help='CLI server port (default: auto-discover the running experiment)')
     cli_parser.add_argument('--host', default=None,
                             help='CLI server host (default: localhost)')
+
+    # weightslab tunnel ENDPOINT [--listen-port N] [--listen-host H] [--remote-port N]
+    tunnel_parser = sub.add_parser(
+        "tunnel",
+        help="Forward a remote gRPC backend (e.g. a Colab run via `ngrok tcp 50051`) "
+             "to a local port for the UI")
+    tunnel_parser.add_argument(
+        'endpoint', nargs='?', default=None,
+        help="Remote backend endpoint host:port (e.g. bore.pub:12345). "
+             "A tcp:// prefix is accepted. Default: $WEIGHTSLAB_TUNNEL_ENDPOINT.")
+    tunnel_parser.add_argument(
+        '--listen-port', '-p', type=int, default=DEFAULT_LISTEN_PORT,
+        help=f"Local port to expose (default: {DEFAULT_LISTEN_PORT} — the port the UI's Envoy dials)")
+    tunnel_parser.add_argument(
+        '--listen-host', default=None,
+        help="Local interface to bind (default: 127.0.0.1 on Windows/macOS, 0.0.0.0 on Linux)")
+    tunnel_parser.add_argument(
+        '--remote-port', type=int, default=None,
+        help="Remote port, if not included in ENDPOINT")
 
     # weightslab start example [--cls|--seg|--clus|--gen]
     start_parser = sub.add_parser("start", help="Start a bundled WeightsLab resource")
@@ -1201,6 +1233,9 @@ def main():
         parser.print_help()
     elif args.command == "cli":
         cli_connect(args)
+    elif args.command == "tunnel":
+        from weightslab.tunnel import tunnel_connect
+        tunnel_connect(args)
     elif args.command == "se":
         ui_secure_environment(args)
     elif args.command == "ui":

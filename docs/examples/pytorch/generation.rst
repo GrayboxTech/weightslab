@@ -12,7 +12,7 @@ Generation / Anomaly Detection — MVTec (PyTorch)
      <span class="wl-eg-tag">reconstruction</span>
    </div>
 
-**Example:** ``weightslab/examples/PyTorch/ws-generation/main.py``
+**Example:** ``weightslab/examples/PyTorch/wl-generation/main.py``
 
 **Task:** Unsupervised anomaly detection on MVTec capsule images with a
 multi-task UNet (classification head + reconstruction head + contrastive loss).
@@ -101,3 +101,12 @@ filter by pair distance to find the hardest negatives.
 
       weightslab ui launch           # 1. deploy the studio
       weightslab start example --gen # 2. start the generation / anomaly demo
+
+
+.. raw:: html
+
+   <div style="text-align:right; margin-top:2rem;">
+     <a href="https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/PyTorch/ws-generation.ipynb" target="_blank" rel="noopener noreferrer">
+       <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab">
+     </a>
+   </div>
