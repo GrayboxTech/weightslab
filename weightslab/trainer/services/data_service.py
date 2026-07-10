@@ -2402,6 +2402,8 @@ class DataService:
         except Exception as e:
             return f"Action: failed to load weights ({where}) from {exp_hash[:16]}: {e}"
 
+<<<<<<< HEAD
+=======
     # ------------------------------------------------------------------
     # Hyperparameter tuning (agent action)
     # ------------------------------------------------------------------
@@ -2653,6 +2655,7 @@ class DataService:
             text = text[:max_len] + "\n... (truncated; ask for a specific key, e.g. 'show the root log dir')"
         return f"Configuration ({hp_name}):\n{text}"
 
+>>>>>>> 2db142c599a32f94669a3afad5f4098d5629ddde
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -2709,6 +2712,8 @@ class DataService:
                     exp_hash=params.get("hash") or params.get("exp_hash"),
                 )
 
+<<<<<<< HEAD
+=======
             # Set / scale a hyperparameter (batch size, learning rate, ratios, ...).
             elif action_name in ("set_hyperparam", "set_hyperparameter", "set_hp", "tune_hyperparam"):
                 return self._agent_set_hyperparam(
@@ -2724,6 +2729,7 @@ class DataService:
                     param=params.get("param") or params.get("name") or params.get("key_path")
                 )
 
+>>>>>>> 2db142c599a32f94669a3afad5f4098d5629ddde
             return f"Action triggered: {action_name} (Not implemented)"
 
         # --- 3. DATAFRAME MANIPULATION ---
