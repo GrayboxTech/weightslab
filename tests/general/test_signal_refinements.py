@@ -120,5 +120,26 @@ class TestGatherFreshCache(unittest.TestCase):
         np.testing.assert_array_equal(res["sig/derived"], [1.0, 2.0])
 
 
+class TestDefaultShapeClassifier(unittest.TestCase):
+    def test_labels(self):
+        self.assertEqual(wl.classify_loss_shape([2, 1.5, 1, 0.5, 0.05]), "monotonic")
+        self.assertEqual(wl.classify_loss_shape([2, 2, 2, 2, 2]), "Flat_high")
+        self.assertEqual(wl.classify_loss_shape([0.1, 0.1, 0.1, 3.0, 0.1]), "Spiked")
+
+    def test_too_short_is_none(self):
+        self.assertIsNone(wl.classify_loss_shape([1, 2, 3]))
+        self.assertIsNone(wl.classify_loss_shape([1, 0.5, 0.1], min_points=5))
+
+    def test_thresholds_configurable(self):
+        traj = [1.0, 0.9, 0.8, 0.75, 0.7]                       # net drop 0.3
+        self.assertNotEqual(wl.classify_loss_shape(traj), "monotonic")   # default 0.4 unmet
+        self.assertEqual(wl.classify_loss_shape(traj, drop_learned=0.25), "monotonic")
+
+    def test_exports(self):
+        for name in ("write_loss_shapes", "write_signal_shapes", "classify_loss_shape"):
+            self.assertTrue(hasattr(wl, name), name)
+        self.assertIn("monotonic", wl.LOSS_SHAPES)
+
+
 if __name__ == "__main__":
     unittest.main()

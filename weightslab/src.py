@@ -4006,6 +4006,70 @@ def write_history(
     return path
 
 
+LOSS_SHAPES = ["monotonic", "plateaued", "Flat_high", "high_variance", "U_Shape", "Spiked"]
+
+
+def classify_loss_shape(values, min_points=5, drop_learned=0.4, drop_plateau=0.15,
+                        tail_flat_cv=0.1, spike_jump=0.5, noisy_cv=0.5, u_rebound=0.3):
+    """Default per-sample loss-trajectory classifier -> one of ``LOSS_SHAPES``
+    (or ``None`` with < *min_points*). Every threshold is a named, scale-invariant
+    param with a natural default, so you can tune it without rewriting the
+    classifier, e.g. ``write_loss_shapes(classifier=lambda v:
+    wl.classify_loss_shape(v, drop_learned=0.5))``."""
+    y = np.asarray(values, dtype=float)
+    if y.size < min_points:
+        return None
+    n = y.size
+    rng = max(float(y.max() - y.min()), 1e-8)
+    drop = (float(y[0]) - float(y[-1])) / (abs(float(y[0])) + 1e-8)
+    cv = float(y.std()) / (abs(float(y.mean())) + 1e-8)
+    argmin = int(np.argmin(y))
+    rebound = (float(y[-1]) - float(y.min())) / rng
+    tail = y[int(0.6 * n):]
+    tail_flat = float(tail.std()) / (abs(float(tail.mean())) + 1e-8) < tail_flat_cv
+    if 0.2 * n < argmin < 0.8 * n and rebound > u_rebound:
+        return "U_Shape"
+    if drop > drop_learned:
+        return "monotonic"
+    if drop > drop_plateau and tail_flat:
+        return "plateaued"
+    if float(np.diff(y).max()) / rng > spike_jump:
+        return "Spiked"
+    if cv > noisy_cv:
+        return "high_variance"
+    return "Flat_high"
+
+
+def write_signal_shapes(signal_name, tag_name=None, classifier=None):
+    """Reusable engine: classify every sample's trajectory of *signal_name* into
+    a categorical tag and return the ``{label: count}`` distribution. Works for
+    ANY per-sample signal — loss, accuracy, a second loss, any metric. Reads the
+    full history once (cheap end-of-report reduction). *classifier* (trajectory
+    -> label|None) defaults to the loss-shaped one (for a decreasing metric);
+    pass your own for e.g. accuracy (increasing). *tag_name* defaults to
+    ``'<signal>_shape'``."""
+    clf = classifier or classify_loss_shape
+    if tag_name is None:
+        tag_name = signal_name.split("/")[-1] + "_shape"
+    series = {}
+    for sid, step, val, _ in query_signal_history(signal_name):
+        series.setdefault(sid, []).append((step, val))
+    by_label = {}
+    for sid, pts in series.items():
+        label = clf([v for _, v in sorted(pts)])
+        if label is not None:
+            by_label.setdefault(label, []).append(sid)
+    for label, sids in by_label.items():
+        set_categorical_tag(sids, tag_name, label)
+    return {k: len(v) for k, v in by_label.items()}
+
+
+def write_loss_shapes(loss_signal="loss_sample", classifier=None):
+    """Convenience wrapper over :func:`write_signal_shapes` for the loss signal
+    (tag ``loss_shape``, default loss classifier)."""
+    return write_signal_shapes(loss_signal, tag_name="loss_shape", classifier=classifier)
+
+
 def write_dataframe(
     path: str | None = None,
     format: str = "json",
@@ -4013,8 +4077,13 @@ def write_dataframe(
     sample_id=None,
     instance_id=None,
     verbose: bool = False,
+    loss_shape_signal: str | None = None,
 ) -> str:
     """Dump the WeightsLab sample dataframe to *path* as JSON or CSV.
+
+    When *loss_shape_signal* is set (e.g. ``"loss_sample"``), the default loss-
+    shape classifier runs first (tags each sample + logs a distribution summary),
+    so a report written every N steps carries an up-to-date shape summary.
 
     Parameters
     ----------
@@ -4086,6 +4155,14 @@ def write_dataframe(
     # If reactive signals run on the worker thread, process every queued job
     # before reading, so the report includes the latest steps' derived signals.
     drain_signals()
+
+    # Default report summary: tag each sample's loss shape + log the distribution.
+    if loss_shape_signal is not None:
+        try:
+            dist = write_loss_shapes(loss_shape_signal)
+            logger.info("[WeightsLab] loss-shape summary (%s): %s", loss_shape_signal, dist)
+        except Exception as e:
+            logger.debug("loss-shape summary skipped: %s", e)
 
     logger.debug(
         "write_dataframe called: path=%r, format=%r, columns=%r, "
