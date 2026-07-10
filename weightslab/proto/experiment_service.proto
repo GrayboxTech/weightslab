@@ -69,6 +69,7 @@ message LoggerDataPoint {
 
 message GetLatestLoggerDataResponse {
   repeated LoggerDataPoint points = 1;  // All points from all metrics
+  string weightslab_version = 2;        // backend weightslab package version (shown in UI logo tooltip)
 }
 
 message Empty {}
