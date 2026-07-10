@@ -466,7 +466,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
     # Extract torch function parameters
     _ = wl_kw.get('flag')
-    preds_raw = a[0] if len(a) > 0 else None
+    # preds_raw = a[0] if len(a) > 0 else None
 
     # User parameters
     batch_ids = wl_kw.get('batch_ids')
@@ -673,13 +673,13 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
             signals.update(dynamic_updates) # Merge dynamic signals
 
         preds = detach_to_cpu(preds)
-        preds_raw = detach_to_cpu(preds_raw)
+        # preds_raw = detach_to_cpu(preds_raw)
 
         # Enqueue signals and data
         save_signals(
             signals=signals,
             batch_ids=batch_ids,
-            preds_raw=preds_raw,
+            # preds_raw=preds_raw,
             preds=preds,
             targets=targets,
             log=False # Already logged above, no need to log again in save_signals; set to False to avoid duplicate logging if save_signals is called separately without logging
