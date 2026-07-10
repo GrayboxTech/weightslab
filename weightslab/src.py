@@ -652,7 +652,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                              logger.debug(f"Dynamic updates computed for signal '{reg_name}': {list(dynamic_updates.keys())}")
                              _log_signal(sum(signal_value)/len(signal_value), signal_value, name, step=step, **kwargs) # Log custom subscribed signals
                      except Exception as e:
-                         logger.debug(f"Dynamic signal {name} failed: {e}")
+                         logger.error(f"Dynamic signal {name} failed: {e}")
                          pass # User function error, skip
 
     # Save statistics if requested and applicable.
@@ -1699,7 +1699,17 @@ def save_signals(
         if x is None:
             return None
         if isinstance(x, list) and isinstance(x[0], list):
-            return [np.max(np.array([to_numpy(t) for t in row]), axis=0) for row in x]
+            rows = [[to_numpy(t) for t in row] for row in x]
+            # A sample can legitimately have zero instances (e.g. no tracked
+            # class visible in frame); fall back to an all-background mask
+            # shaped like its neighbors instead of reducing an empty array.
+            shape = next((r[0].shape for r in rows if r), None)
+            dtype = next((r[0].dtype for r in rows if r), np.uint16)
+            return [
+                np.max(np.array(row), axis=0) if row
+                else np.zeros(shape, dtype=dtype) if shape is not None else np.zeros(0, dtype=dtype)
+                for row in rows
+            ]
         elif isinstance(x, list):
             return [to_numpy(t) for t in x]
         if isinstance(x, th.Tensor):

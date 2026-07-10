@@ -578,9 +578,17 @@ class H5ArrayStore:
                     with h5py.File(str(self._path), 'a') as f_main:
                         with h5py.File(str(tmp_path), 'r') as f_tmp:
                             for sample_group_name in f_tmp:
-                                if sample_group_name in f_main:
-                                    del f_main[sample_group_name]
-                                f_tmp.copy(sample_group_name, f_main)
+                                if sample_group_name not in f_main:
+                                    f_main.create_group(sample_group_name)
+                                dest_group = f_main[sample_group_name]
+                                src_group = f_tmp[sample_group_name]
+                                # Replace only the keys present in this batch
+                                # (e.g. "prediction") so sibling keys written
+                                # by an earlier flush (e.g. "target") survive.
+                                for key_name in src_group:
+                                    if key_name in dest_group:
+                                        del dest_group[key_name]
+                                    f_tmp.copy(f"{sample_group_name}/{key_name}", dest_group)
 
                     path_refs: Dict[int, Dict[str, str]] = {}
                     for sample_group_name, key_data in prepared.items():
@@ -661,7 +669,7 @@ class H5ArrayStore:
             return None
 
         # Use read lock for concurrent read access (multiple threads can load in parallel)
-        # self._rw_lock.acquire_read()
+        self._rw_lock.acquire_read()
         try:
             try:
                 with h5py.File(str(self._path), 'r', locking=False) as f:
