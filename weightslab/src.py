@@ -1504,7 +1504,7 @@ def _running_in_notebook() -> bool:
 
 def serve(serving_cli: bool = True, serving_grpc: bool = False,
           spawn_cli_client: bool = False, serving_bore: bool = False,
-          bore_port: int = None, allow_unconfigured: bool = False, **kwargs):
+          bore_port: int = None, allow_unconfigured: bool = True, **kwargs):
     """Start WeightsLab services.
 
     Args:
