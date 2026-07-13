@@ -52,7 +52,11 @@ Most data problems are invisible until your model tells you: through loss spikes
 ```bash
 pip install weightslab
 ```
-**2. Wrap your training script**
+**2. Launch Studio**
+```bash
+weightslab ui launch  # then open https://localhost:5173 🚀
+```
+**3. Wrap your training script**
 ```python
 # wrap the objects in your training script
 
@@ -65,10 +69,6 @@ loader = wl.watch_or_edit(dataset, flag='data', loader_name="train")
 ...
 wl.serve(serving_grpc=True, serving_cli=False)
 ...
-```
-**3. Launch Studio**
-```bash
-weightslab ui launch  # then open https://localhost:5173 🚀
 ```
 <br>
 

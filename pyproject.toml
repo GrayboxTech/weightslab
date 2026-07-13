@@ -28,8 +28,11 @@ classifiers = [
 # - Prefer compatible ranges, then pin exact versions only in CI/lockfiles.
 dependencies = [
   # Core data / persistence
-  "numpy>=1.25.2,<2.0; python_version < '3.13'",
-  "numpy>=2.1,<3; python_version >= '3.13'",
+  # numpy 2 is supported: weightslab's source uses no numpy-1-only APIs, and its
+  # compiled deps (torch, pandas, h5py, tables, onnx) ship numpy-2 wheels at the
+  # versions pip resolves. Range left open (<3) so Colab's numpy 2.x installs
+  # without a downgrade. Verified: import + torch/pandas interop + gRPC on np 2.4.
+  "numpy>=1.25.2,<3",
   "pandas>=2.2.3,<3",
   "duckdb>=1.1,<2",  # signal/sample/instance history store
   "PyYAML>=6.0.3,<7",
@@ -39,16 +42,21 @@ dependencies = [
   "xxhash>=3.4,<4.1",
   "tables>=3.9,<4",  # h5 deps
 
-  # PyTorch stack
-  "torch>=2.1,<2.9; python_version < '3.13'",
-  "torch==2.9; python_version >= '3.13'",
-  "torchvision>=0.16,<0.24; python_version < '3.13'",
-  "torchvision>=0.24,<1; python_version >= '3.13'",
+  # PyTorch stack. Upper bounds left open (<3 / <1) so a pre-installed modern
+  # torch (e.g. Colab's torch 2.9 / torchvision 0.24) is accepted as-is instead
+  # of being downgraded — the reinstall churn is what dragged numpy across the
+  # 1.x/2.x boundary and broke the ABI. Floors kept; pip picks a compatible
+  # numpy-2 build on a clean install.
+  "torch>=2.1,<3",
+  "torchvision>=0.16,<1",
   "torchmetrics>=1.9",
 
   # Serving / schema
   "grpcio>=1.80,<2",
-  "protobuf>=4.25,<7",
+  # protobuf <8 so Colab's protobuf 7.x is accepted (its <7 cap forced the
+  # downgrade cascade). Verified: all 70 generated gRPC messages serialize/parse
+  # and the descriptor pool builds under protobuf 7.35.
+  "protobuf>=4.25,<8",
   "pydantic>=2.7,<3",
 
   # Imaging
