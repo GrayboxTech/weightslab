@@ -25,7 +25,7 @@ from typing import Callable, Optional, Any
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.components.checkpoint_manager import CheckpointManager
 from weightslab.backend.optimizer_interface import OptimizerInterface
-from weightslab.backend.ledgers import DEFAULT_NAME, get_checkpoint_manager, get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal, list_models
+from weightslab.backend.ledgers import DEFAULT_NAME, get_checkpoint_manager, get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal, list_models, has_serving_config
 from weightslab.backend.model_interface import ModelInterface
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
@@ -1504,7 +1504,7 @@ def _running_in_notebook() -> bool:
 
 def serve(serving_cli: bool = True, serving_grpc: bool = False,
           spawn_cli_client: bool = False, serving_bore: bool = False,
-          bore_port: int = None, **kwargs):
+          bore_port: int = None, allow_unconfigured: bool = True, **kwargs):
     """Start WeightsLab services.
 
     Args:
@@ -1528,13 +1528,54 @@ def serve(serving_cli: bool = True, serving_grpc: bool = False,
         bore_port: Port to expose when ``serving_bore`` is set. Defaults to the
             gRPC port (``grpc_port`` kwarg, else ``$GRPC_BACKEND_PORT``, else
             50051).
+        allow_unconfigured: Escape hatch for the serving-config guard. ``serve``
+            reads hyperparameters once, here, for TLS, ports and
+            ``root_log_dir``; if none were wrapped
+            (``wl.watch_or_edit(params, flag="hyperparameters")``) those settings
+            silently fall back to env vars / defaults. Serving over the network
+            (``serving_grpc`` / ``serving_bore``) without config therefore
+            raises, because the backend may come up without TLS/auth. Pass
+            ``True`` (or set ``WL_ALLOW_UNCONFIGURED_SERVE=1``) to downgrade the
+            error to a warning and serve anyway. CLI-only serving always warns
+            (never raises), regardless of this flag.
         **kwargs: Extra server options passed to underlying backends
             (e.g. ``cli_host``, ``cli_port``, ``grpc_port``).
 
     Returns:
         The public ``host:port`` bore endpoint string when ``serving_bore`` is
         set and the tunnel came up, otherwise ``None``.
+
+    Raises:
+        RuntimeError: If ``serving_grpc`` or ``serving_bore`` is requested before
+            any serving config was wrapped and the escape hatch is not set.
     """
+
+    # ------------------------------------------------------------------
+    # Serving-config guard. grpc_serve reads hyperparameters ONCE, at this
+    # call, for TLS, ports and root_log_dir. Serving over the network before
+    # config is wrapped can bring the backend up UNSECURED (TLS falls back to
+    # GRPC_TLS_ENABLED, default off), so hard-fail on gRPC/bore; CLI-only is
+    # local, so warn. Escape hatch: allow_unconfigured / WL_ALLOW_UNCONFIGURED_SERVE.
+    # ------------------------------------------------------------------
+    if not has_serving_config():
+        network_serving = serving_grpc or serving_bore
+        allow = allow_unconfigured or os.environ.get(
+            "WL_ALLOW_UNCONFIGURED_SERVE", "0"
+        ).lower() in ("1", "true", "yes")
+        base_msg = (
+            "wl.serve() was called before any serving config was wrapped. Wrap "
+            'it first with wl.watch_or_edit(parameters, flag="hyperparameters") '
+            "so TLS, ports and root_log_dir come from your config instead of "
+            "falling back to environment variables / defaults."
+        )
+        if network_serving and not allow:
+            raise RuntimeError(
+                base_msg + " Refusing to expose an unconfigured backend over "
+                "gRPC/bore — it may come up without TLS/auth. Pass "
+                "allow_unconfigured=True (or set WL_ALLOW_UNCONFIGURED_SERVE=1) "
+                "to override."
+            )
+        logger.warning(base_msg)
 
     if serving_grpc:
         grpc_serve(**kwargs)
