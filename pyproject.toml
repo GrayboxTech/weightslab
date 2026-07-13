@@ -33,7 +33,11 @@ dependencies = [
   # versions pip resolves. Range left open (<3) so Colab's numpy 2.x installs
   # without a downgrade. Verified: import + torch/pandas interop + gRPC on np 2.4.
   "numpy>=1.24,<3",
-  "pandas>=2.2.3,<3",
+  # Floor at 2.2.2 (not 2.2.3) so Colab's pinned pandas==2.2.2 is accepted
+  # as-is: google-colab 1.0.0 requires pandas==2.2.2, and a >=2.2.3 floor forced
+  # an upgrade to 2.3.x that breaks that pin. Clean installs still pick the
+  # newest numpy-2-safe pandas (2.3.x).
+  "pandas>=2.2.2,<3",
   "duckdb>=1.1,<2",  # signal/sample/instance history store
   "PyYAML>=6.0.3,<7",
   "dill>=0.3.8,<0.5",
