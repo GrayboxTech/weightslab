@@ -32,7 +32,7 @@ dependencies = [
   # compiled deps (torch, pandas, h5py, tables, onnx) ship numpy-2 wheels at the
   # versions pip resolves. Range left open (<3) so Colab's numpy 2.x installs
   # without a downgrade. Verified: import + torch/pandas interop + gRPC on np 2.4.
-  "numpy>=1.25.2,<3",
+  "numpy>=1.24,<3",
   "pandas>=2.2.3,<3",
   "duckdb>=1.1,<2",  # signal/sample/instance history store
   "PyYAML>=6.0.3,<7",
@@ -47,7 +47,7 @@ dependencies = [
   # of being downgraded — the reinstall churn is what dragged numpy across the
   # 1.x/2.x boundary and broke the ABI. Floors kept; pip picks a compatible
   # numpy-2 build on a clean install.
-  "torch>=2.1,<3",
+  "torch>=2.1,<=2.9",
   "torchvision>=0.16,<1",
   "torchmetrics>=1.9",
 

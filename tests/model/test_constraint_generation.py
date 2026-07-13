@@ -19,6 +19,27 @@ from weightslab.backend import ledgers
 from weightslab.utils.computational_graph import _detect_layer_constraints
 
 
+def _onnx_export_available() -> bool:
+    """True when the ONNX export toolchain imports cleanly.
+
+    ``torch.onnx.export`` pulls in ``onnxscript``, which (as of 0.6.x) imports a
+    separately-packaged ``onnx_ir``. When that package is absent, importing
+    ``onnxscript`` raises ``ModuleNotFoundError: No module named 'onnx_ir'`` and
+    every ONNX-based dependency-extraction test fails at setup. Guard on this so
+    those tests skip where the toolchain is missing but still run once the
+    ``onnx``/dev extras are fully installed.
+    """
+    try:
+        import onnxscript  # noqa: F401  # transitively imports onnx_ir
+        return True
+    except Exception:
+        return False
+
+
+_ONNX_EXPORT_AVAILABLE = _onnx_export_available()
+_ONNX_SKIP_REASON = "ONNX export toolchain unavailable (onnxscript/onnx_ir not installed)"
+
+
 class _RegistryIsolation:
     """Clean the global model registry after each test.
 
@@ -155,6 +176,7 @@ class TestConstraintDetection(_RegistryIsolation, unittest.TestCase):
 
 
 # @unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
+@unittest.skipUnless(_ONNX_EXPORT_AVAILABLE, _ONNX_SKIP_REASON)
 class TestConstraintPropagation(_RegistryIsolation, unittest.TestCase):
     """Test constraint propagation through dependency graphs"""
 
@@ -220,6 +242,7 @@ class TestConstraintPropagation(_RegistryIsolation, unittest.TestCase):
 
 
 # @unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
+@unittest.skipUnless(_ONNX_EXPORT_AVAILABLE, _ONNX_SKIP_REASON)
 class TestConstraintReporting(_RegistryIsolation, unittest.TestCase):
     """Test constraint reporting and information retrieval"""
 
