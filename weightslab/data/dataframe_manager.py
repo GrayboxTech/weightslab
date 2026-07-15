@@ -2151,7 +2151,7 @@ class LedgeredDataFrameManager:
 
         return df
 
-    def get_collapse_annotations_to_samples_df(self) -> pd.DataFrame:
+    def get_collapse_annotations_to_samples_df(self, df: pd.DataFrame | None = None) -> pd.DataFrame:
         """Collapse a (sample_id, annotation_id) multi-index df to one row per sample.
 
         The shared dataframe manager now expands every sample into one row per
@@ -2182,8 +2182,16 @@ class LedgeredDataFrameManager:
 
         Returns a single-level ``sample_id``-indexed dataframe (origin stays a
         column). Dataframes that are not annotation-expanded are returned as-is.
+
+        Args:
+            df: An already-materialized combined frame (as returned by
+                :meth:`get_combined_df`) to collapse. When ``None`` (default) a
+                fresh combined frame is pulled here. Callers that just pulled the
+                combined frame should pass it in to avoid a second full copy +
+                buffer merge + proxy conversion over the whole dataset.
         """
-        df = self.get_combined_df()
+        if df is None:
+            df = self.get_combined_df()
 
         SID = SampleStatsEx.SAMPLE_ID.value
         ANNOT = SampleStatsEx.INSTANCE_ID.value

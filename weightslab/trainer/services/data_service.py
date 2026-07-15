@@ -860,8 +860,10 @@ class DataService:
 
             # The manager now expands samples into one row per (sample_id, annotation_id)
             # instance. Collapse back to one row per sample for the sample-centric UI/agent
-            # view, nesting per-instance signals into a dict column.
-            df = self._df_manager.get_collapse_annotations_to_samples_df()
+            # view, nesting per-instance signals into a dict column. Reuse the frame we just
+            # pulled — otherwise collapse would re-run get_combined_df() (full copy + buffer
+            # merge + proxy conversion) a second time over the whole dataset every refresh.
+            df = self._df_manager.get_collapse_annotations_to_samples_df(df)
 
             # Ensure sample_id is a column if it was the index
             df = safe_reset_index(df)
