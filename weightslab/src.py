@@ -4017,7 +4017,10 @@ def write_history(
         if write_instance:
             payload["instance"] = instance_rows
         with open(path, "w", encoding="utf-8") as fh:
-            _json.dump(payload, fh, indent=2, orient=orient)
+            # payload is a dict of record-lists (one list of row dicts per
+            # section); json.dump takes no `orient` (that's a pandas arg). The
+            # per-section records layout is the documented/tested contract.
+            _json.dump(payload, fh, indent=2)
 
     elif fmt == "csv":
         _CSV_FIELDS = [
