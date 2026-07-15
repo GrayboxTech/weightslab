@@ -3751,6 +3751,7 @@ def write_history(
     graph_name=None,
     experiment_hash: str | None = None,
     sample_id=None,
+    orient: str = "columns",
     instance_id=None,
     verbose: bool = False,
 ) -> str:
@@ -4016,7 +4017,7 @@ def write_history(
         if write_instance:
             payload["instance"] = instance_rows
         with open(path, "w", encoding="utf-8") as fh:
-            _json.dump(payload, fh, indent=2)
+            _json.dump(payload, fh, indent=2, orient=orient)
 
     elif fmt == "csv":
         _CSV_FIELDS = [
@@ -4165,6 +4166,7 @@ def write_dataframe(
     columns=None,
     sample_id=None,
     instance_id=None,
+    orient: str = "columns",
     verbose: bool = False,
     loss_shape_signal: str | None = None,
 ) -> str:
@@ -4392,7 +4394,7 @@ def write_dataframe(
     df_out = df_out.reset_index()
 
     if fmt == "json":
-        _json_str = df_out.to_json(orient="records", default_handler=str)
+        _json_str = df_out.to_json(orient=orient, default_handler=str)
         with open(path, "w", encoding="utf-8") as fh:
             _json.dump(_json.loads(_json_str), fh, indent=2)
 
