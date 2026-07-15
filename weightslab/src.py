@@ -30,7 +30,7 @@ from weightslab.backend.model_interface import ModelInterface
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
-from weightslab.utils.tools import detach_to_cpu
+from weightslab.utils.tools import detach_to_cpu, _running_in_notebook
 from weightslab.backend.logger import LoggerQueue
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
@@ -1483,23 +1483,6 @@ def start_training(timeout: int = None) -> None:
         logger.info(f"Starting WeightsLab training mode with a timeout of {timeout} seconds.")
         time.sleep(timeout)
     pause_ctrl.resume() # Ensure we're not paused if start_training is called after serve
-
-
-def _running_in_notebook() -> bool:
-    """True when running inside a Jupyter notebook kernel or Google Colab.
-
-    Distinguishes a notebook kernel (``ZMQInteractiveShell``) / Colab from a
-    plain script or a terminal IPython session, so we only nudge users who can't
-    reach a locally-launched Weights Studio without a tunnel.
-    """
-    if "google.colab" in sys.modules:
-        return True
-    try:
-        from IPython import get_ipython
-        shell = get_ipython()
-        return shell is not None and shell.__class__.__name__ == "ZMQInteractiveShell"
-    except Exception:
-        return False
 
 
 def serve(serving_cli: bool = True, serving_grpc: bool = False,
