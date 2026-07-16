@@ -25,7 +25,7 @@ import subprocess
 import sys
 import threading
 
-from weightslab.utils.tools import detach_to_cpu, _running_in_notebook
+from weightslab.utils.tools import _running_in_notebook
 
 
 logger = logging.getLogger(__name__)
