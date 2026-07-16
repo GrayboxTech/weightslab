@@ -1,24 +1,36 @@
-"""WLAwareTrainer — UL DetectionTrainer subclass that wires WL through the
-canonical pattern.
+"""WL-aware UL trainers — DetectionTrainer / SegmentationTrainer subclasses
+that wire WL through the canonical pattern.
 
-What this trainer does for you:
-  * Builds both `train_loader` and `test_loader` through
+What these trainers do for you:
+  * Build both `train_loader` and `test_loader` through
     `wl.watch_or_edit(flag='data', loader_name=...)` so each split has its
     own `DataSampleTrackingWrapper` with a disjoint uid range — no
     cross-origin collisions in the shared ledger.
-  * Registers the optimizer and model with WL on `on_train_start`.
-  * Installs per-sample TRAIN signals (cls/box/dfl per image + live NMS
+  * Register the optimizer and model with WL on `on_train_start`.
+  * Install per-sample TRAIN signals (cls/box/dfl per image + live NMS
     predictions overlay).
-  * Installs per-sample VAL signals (per-image IoU + AP@0.5 + post-NMS
+  * Install per-sample VAL signals (per-image IoU + AP@0.5 + post-NMS
     predictions overlay).
-  * Ships aggregate train losses + val metrics (P/R/mAP50/mAP50-95/fitness)
+  * Ship aggregate train losses + val metrics (P/R/mAP50/mAP50-95/fitness)
     as curves through WL channels.
-  * Wraps each train/val batch in WL's training/testing guard contexts.
+  * Wrap each train/val batch in WL's training/testing guard contexts.
+
+Two public trainers, one shared wiring mixin:
+  * `WLAwareTrainer`            — `detect` task (YOLO*n.pt).
+  * `WLAwareSegmentationTrainer` — `segment` task (YOLO*n-seg.pt). Reuses the
+    detection signal pack: `v8SegmentationLoss` calls the same
+    `get_assigned_targets_and_loss` sync point, `Segment` subclasses `Detect`,
+    and `SegmentationValidator._process_batch(preds, batch)` matches the
+    val-IoU tap — so per-sample box/cls/dfl + box-IoU flow unchanged. Masks are
+    trained on (they ride through the collate) but tracked at the bbox level;
+    per-sample mask signals/overlays are a future addition. Segmentation-only
+    overlay quirks are absorbed by `_ship_round`'s best-effort guards.
 
 Aggregate curves shipped via UL callbacks:
-  * `train/{box,cls,dfl}` from `trainer.loss_items`
-  * `val/{precision,recall,mAP50,mAP50-95,fitness}` from
-    `validator.metrics.results_dict`
+  * `train/{box,cls,dfl}` (+ `train/seg` for segmentation) from
+    `trainer.loss_items`
+  * `val/{precision,recall,mAP50,mAP50-95,fitness}` (+ mask `(M)` variants for
+    segmentation) from `validator.metrics.results_dict`
 """
 from __future__ import annotations
 
@@ -26,29 +38,78 @@ import torch
 from torch.nn import Identity
 
 from ultralytics.models.yolo.detect import DetectionTrainer
+from ultralytics.models.yolo.segment import SegmentationTrainer
 
 import weightslab as wl
 from weightslab.backend import ledgers
 
 from .collate import wl_ul_dict_collate
-from .dataset import WLAwareDataset
+from .dataset import WLAwareDataset, WLAwareSegmentationDataset
 from .signals import install_per_sample_signals, install_per_sample_val_signals
 
 
-class WLAwareTrainer(DetectionTrainer):
+# ─── per-task wiring config ─────────────────────────────────────────────
+# `loss_items` order per task (drives both channel names and index mapping):
+#   detect : (box, cls, dfl)
+#   segment: (box, seg, cls, dfl, sem)  ← we ship the first four; sem is 0 for
+#            models without a semantic head.
+_WL_TRAIN_LOSS_NAMES = {
+    "detect": ("box", "cls", "dfl"),
+    "segment": ("box", "seg", "cls", "dfl"),
+}
+
+# (results_dict key -> WL channel key). Segmentation adds the mask `(M)` metrics
+# alongside the box `(B)` ones.
+_WL_VAL_METRICS = {
+    "detect": (
+        ("metrics/precision(B)", "val/precision"),
+        ("metrics/recall(B)", "val/recall"),
+        ("metrics/mAP50(B)", "val/mAP50"),
+        ("metrics/mAP50-95(B)", "val/mAP50-95"),
+        ("fitness", "val/fitness"),
+    ),
+    "segment": (
+        ("metrics/precision(B)", "val/precision"),
+        ("metrics/recall(B)", "val/recall"),
+        ("metrics/mAP50(B)", "val/mAP50"),
+        ("metrics/mAP50-95(B)", "val/mAP50-95"),
+        ("metrics/precision(M)", "val/precision_mask"),
+        ("metrics/recall(M)", "val/recall_mask"),
+        ("metrics/mAP50(M)", "val/mAP50_mask"),
+        ("metrics/mAP50-95(M)", "val/mAP50-95_mask"),
+        ("fitness", "val/fitness"),
+    ),
+}
+
+
+class _WLTrainerMixin:
+    """Shared WL callback wiring + dataloader construction for UL trainers.
+
+    Concrete subclasses set two class attributes:
+      * `_WL_TASK`        — "detect" | "segment"
+      * `_WL_DATASET_CLS` — the `WLAwareDataset` subclass to re-class the
+                            UL-built dataset onto.
+    """
+
+    _WL_TASK = "detect"
+    _WL_DATASET_CLS = WLAwareDataset
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        task = self._WL_TASK
+        train_loss_names = _WL_TRAIN_LOSS_NAMES[task]
+        val_metrics = _WL_VAL_METRICS[task]
         state = {"channels": {}}
 
         def _register_channels():
             ch = state["channels"]
-            for n in ("box", "cls", "dfl"):
+            for n in train_loss_names:
                 ch[f"train/{n}"] = wl.watch_or_edit(
                     Identity(), flag="loss", name=f"train/{n}", log=True,
                 )
-            for key in ("precision", "recall", "mAP50", "mAP50-95", "fitness"):
-                ch[f"val/{key}"] = wl.watch_or_edit(
-                    Identity(), flag="metric", name=f"val/{key}", log=True,
+            for _ul_key, wl_key in val_metrics:
+                ch[wl_key] = wl.watch_or_edit(
+                    Identity(), flag="metric", name=wl_key, log=True,
                 )
 
         def _on_train_start(trainer):
@@ -102,8 +163,9 @@ class WLAwareTrainer(DetectionTrainer):
             ch = state["channels"]
             li = getattr(trainer, "loss_items", None)
             if li is not None and ch:
-                for i, n in enumerate(("box", "cls", "dfl")):
-                    ch[f"train/{n}"](li[i:i+1].detach())
+                for i, n in enumerate(train_loss_names):
+                    if i < li.numel():
+                        ch[f"train/{n}"](li[i:i+1].detach())
             wl.guard_training_context.__exit__(None, None, None)
 
         def _on_val_batch_start(validator):
@@ -118,13 +180,7 @@ class WLAwareTrainer(DetectionTrainer):
             rd = getattr(md, "results_dict", None) if md is not None else None
             if not rd or not ch:
                 return
-            for ul_key, wl_key in (
-                ("metrics/precision(B)", "val/precision"),
-                ("metrics/recall(B)", "val/recall"),
-                ("metrics/mAP50(B)", "val/mAP50"),
-                ("metrics/mAP50-95(B)", "val/mAP50-95"),
-                ("fitness", "val/fitness"),
-            ):
+            for ul_key, wl_key in val_metrics:
                 if ul_key in rd and wl_key in ch:
                     ch[wl_key](torch.tensor([float(rd[ul_key])]))
 
@@ -141,14 +197,14 @@ class WLAwareTrainer(DetectionTrainer):
         # so loader len reflects the active set. ({}, 0.0) unpacks cleanly into
         # UL's `{**self.metrics, ...}` which (None, None) does not.
         if len(self.test_loader) == 0:
-            print("[WLAwareTrainer] val skipped: all val samples are discarded",
-                  flush=True)
+            print("[%s] val skipped: all val samples are discarded"
+                  % type(self).__name__, flush=True)
             return {}, 0.0
         return super().validate()
 
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode="train"):
         dataset = self.build_dataset(dataset_path, mode, batch_size)
-        dataset.__class__ = WLAwareDataset
+        dataset.__class__ = self._WL_DATASET_CLS
         is_train = (mode == "train")
 
         # Get data configuration from ledger
@@ -177,7 +233,25 @@ class WLAwareTrainer(DetectionTrainer):
         )
 
         # NOTE: no `reset` shim needed here. `loader` is a ledger Proxy whose
-        # __getattr__ returns None for missing attrs (so `hasattr(loader,
-        # "reset")` is always True); DataLoaderInterface.reset() provides the
-        # real Ultralytics-compatible implementation that the proxy forwards to.
+        # __getattr__ raises AttributeError for missing attrs;
+        # DataLoaderInterface.reset() provides the real Ultralytics-compatible
+        # implementation that the proxy forwards to.
         return loader
+
+
+class WLAwareTrainer(_WLTrainerMixin, DetectionTrainer):
+    """WL-aware YOLO **detection** trainer. Drop-in for `YOLO(...).train(trainer=...)`."""
+
+    _WL_TASK = "detect"
+    _WL_DATASET_CLS = WLAwareDataset
+
+
+class WLAwareSegmentationTrainer(_WLTrainerMixin, SegmentationTrainer):
+    """WL-aware YOLO **segmentation** trainer. Drop-in for `YOLO(...-seg.pt).train(trainer=...)`.
+
+    See the module docstring: reuses the detection signal pack; masks train but
+    are tracked at the bbox level for now.
+    """
+
+    _WL_TASK = "segment"
+    _WL_DATASET_CLS = WLAwareSegmentationDataset

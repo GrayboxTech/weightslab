@@ -731,6 +731,13 @@ class DataManipulationAgent:
         self.openrouter_base_url = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         self.openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", None)
         self.openrouter_request_timeout = float(os.environ.get("OPENROUTER_REQUEST_TIMEOUT", "15.0"))
+        # Cap the completion length. OpenRouter pre-authorizes
+        # `max_tokens * completion_price` against the key's remaining budget
+        # BEFORE generating; with no cap the client requests the model's full
+        # output window (tens of thousands of tokens), which 402s on a
+        # credit/weekly-limited key even though the actual intent-planning
+        # response is only a few hundred tokens. Keep this modest.
+        self.openrouter_max_tokens = int(os.environ.get("OPENROUTER_MAX_TOKENS", "2048"))
         # Bias OpenRouter's upstream provider selection ("throughput"/"latency"/
         # "price"); empty string lets OpenRouter choose freely (see Phase B.2).
         self.openrouter_provider_sort = os.environ.get("OPENROUTER_PROVIDER_SORT", "throughput")
@@ -783,6 +790,7 @@ class DataManipulationAgent:
                 self.openrouter_base_url = a_cfg.get("openrouter_base_url", self.openrouter_base_url)
                 self.openrouter_api_key = a_cfg.get("openrouter_api_key", self.openrouter_api_key)
                 self.openrouter_request_timeout = float(a_cfg.get("openrouter_request_timeout", self.openrouter_request_timeout))
+                self.openrouter_max_tokens = int(a_cfg.get("openrouter_max_tokens", self.openrouter_max_tokens))
                 self.openrouter_provider_sort = a_cfg.get("openrouter_provider_sort", self.openrouter_provider_sort)
                 self.openrouter_structured_output = bool(a_cfg.get("openrouter_structured_output", self.openrouter_structured_output))
 
@@ -872,6 +880,7 @@ class DataManipulationAgent:
                         api_key=self.openrouter_api_key,
                         base_url=openrouter_base_url,
                         streaming=False, max_retries=1, request_timeout=self.openrouter_request_timeout,
+                        max_tokens=self.openrouter_max_tokens,
                         extra_body=extra_body,
                     )
                     self.chain_openrouter = llm
@@ -930,7 +939,17 @@ class DataManipulationAgent:
             return False, f"{provider} client was not initialized."
 
         try:
-            response = chain.invoke("Reply with OK.")
+            # Keep the probe's reservation tiny. OpenRouter pre-authorizes
+            # `max_tokens * price` before generating, so a large (or unset)
+            # cap makes the health check 402 on a budget-limited key even
+            # though the model is perfectly usable for real (short) requests.
+            probe = chain
+            if provider == "openrouter" and hasattr(chain, "bind"):
+                try:
+                    probe = chain.bind(max_tokens=16)
+                except Exception:
+                    probe = chain
+            response = probe.invoke("Reply with OK.")
         except Exception as e:
             _LOGGER.warning(f"[{provider}] connectivity check failed: {e}")
             return False, f"{provider} connectivity check failed: {e}"
