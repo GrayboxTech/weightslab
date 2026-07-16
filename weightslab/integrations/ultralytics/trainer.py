@@ -176,6 +176,8 @@ class WLAwareTrainer(DetectionTrainer):
             preload_metadata=cfg.get('preload_metadata', True),
         )
 
-        if not hasattr(loader, "reset"):
-            loader.reset = lambda *a, **k: None
+        # NOTE: no `reset` shim needed here. `loader` is a ledger Proxy whose
+        # __getattr__ returns None for missing attrs (so `hasattr(loader,
+        # "reset")` is always True); DataLoaderInterface.reset() provides the
+        # real Ultralytics-compatible implementation that the proxy forwards to.
         return loader
