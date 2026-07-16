@@ -511,6 +511,16 @@ LLM / agent integration (optional)
    * - ``OPENROUTER_REQUEST_TIMEOUT``
      - *(unset)*
      - Per-request timeout in seconds for OpenRouter calls.
+   * - ``OPENROUTER_MAX_TOKENS``
+     - ``2048``
+     - Maximum completion length requested from OpenRouter. OpenRouter
+       pre-authorizes ``max_tokens × completion_price`` against the key's
+       remaining budget *before* generating, so leaving this uncapped makes
+       the model request its full output window and can fail with a ``402``
+       ("requires more credits, or fewer max_tokens") on a credit- or
+       weekly-limited key — even though the model is otherwise usable. The
+       default is ample for intent planning; raise it only if you see
+       truncated responses.
 
 Telemetry
 ~~~~~~~~~~
