@@ -672,6 +672,49 @@ class LedgerTests(unittest.TestCase):
         delattr(proxy, "flag")
         self.assertFalse(hasattr(wrapped, "flag"))
 
+    def test_proxy_missing_attr_raises_attributeerror(self):
+        """Missing attributes on the wrapped object must raise AttributeError.
+
+        Regression: __getattr__ used to `return None`, which made
+        `hasattr(proxy, missing)` report True and silently resolved
+        `proxy.missing` to a non-callable None. That broke capability probes
+        such as Ultralytics' `if not hasattr(loader, "reset")` shim, leaving
+        `loader.reset` as None -> `'NoneType' object is not callable`.
+        """
+        proxy = Proxy(Dummy("x"))
+
+        # Existing attribute still forwards.
+        self.assertEqual(proxy.name, "x")
+
+        # Missing attribute raises (does not return None).
+        with self.assertRaises(AttributeError):
+            _ = proxy.definitely_not_here
+
+        # hasattr therefore reports False, and getattr honors the default.
+        self.assertFalse(hasattr(proxy, "definitely_not_here"))
+        self.assertIsNone(getattr(proxy, "definitely_not_here", None))
+        self.assertEqual(getattr(proxy, "definitely_not_here", 42), 42)
+
+    def test_proxy_forwards_callable_capability(self):
+        """A method present on the wrapped object is discoverable and callable.
+
+        Mirrors how a ledger Proxy wraps a DataLoaderInterface whose real
+        `reset()` must be reachable through the proxy.
+        """
+        class _HasReset:
+            def __init__(self):
+                self.calls = 0
+
+            def reset(self):
+                self.calls += 1
+
+        wrapped = _HasReset()
+        proxy = Proxy(wrapped)
+
+        self.assertTrue(hasattr(proxy, "reset"))
+        self.assertTrue(callable(proxy.reset))
+        proxy.reset()
+        self.assertEqual(wrapped.calls, 1)
 
 
 if __name__ == "__main__":

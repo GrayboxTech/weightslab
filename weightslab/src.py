@@ -30,7 +30,7 @@ from weightslab.backend.model_interface import ModelInterface
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
-from weightslab.utils.tools import detach_to_cpu
+from weightslab.utils.tools import detach_to_cpu, _running_in_notebook
 from weightslab.backend.logger import LoggerQueue
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
@@ -1483,23 +1483,6 @@ def start_training(timeout: int = None) -> None:
         logger.info(f"Starting WeightsLab training mode with a timeout of {timeout} seconds.")
         time.sleep(timeout)
     pause_ctrl.resume() # Ensure we're not paused if start_training is called after serve
-
-
-def _running_in_notebook() -> bool:
-    """True when running inside a Jupyter notebook kernel or Google Colab.
-
-    Distinguishes a notebook kernel (``ZMQInteractiveShell``) / Colab from a
-    plain script or a terminal IPython session, so we only nudge users who can't
-    reach a locally-launched Weights Studio without a tunnel.
-    """
-    if "google.colab" in sys.modules:
-        return True
-    try:
-        from IPython import get_ipython
-        shell = get_ipython()
-        return shell is not None and shell.__class__.__name__ == "ZMQInteractiveShell"
-    except Exception:
-        return False
 
 
 def serve(serving_cli: bool = True, serving_grpc: bool = False,
@@ -3751,6 +3734,7 @@ def write_history(
     graph_name=None,
     experiment_hash: str | None = None,
     sample_id=None,
+    orient: str = "columns",
     instance_id=None,
     verbose: bool = False,
 ) -> str:
@@ -4016,6 +4000,9 @@ def write_history(
         if write_instance:
             payload["instance"] = instance_rows
         with open(path, "w", encoding="utf-8") as fh:
+            # payload is a dict of record-lists (one list of row dicts per
+            # section); json.dump takes no `orient` (that's a pandas arg). The
+            # per-section records layout is the documented/tested contract.
             _json.dump(payload, fh, indent=2)
 
     elif fmt == "csv":
@@ -4165,6 +4152,7 @@ def write_dataframe(
     columns=None,
     sample_id=None,
     instance_id=None,
+    orient: str = "columns",
     verbose: bool = False,
     loss_shape_signal: str | None = None,
 ) -> str:
@@ -4392,7 +4380,7 @@ def write_dataframe(
     df_out = df_out.reset_index()
 
     if fmt == "json":
-        _json_str = df_out.to_json(orient="records", default_handler=str)
+        _json_str = df_out.to_json(orient=orient, default_handler=str)
         with open(path, "w", encoding="utf-8") as fh:
             _json.dump(_json.loads(_json_str), fh, indent=2)
 

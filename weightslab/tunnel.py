@@ -25,6 +25,9 @@ import subprocess
 import sys
 import threading
 
+from weightslab.utils.tools import _running_in_notebook
+
+
 logger = logging.getLogger(__name__)
 
 # Env var read as the default ENDPOINT so a bare ``weightslab tunnel`` works
@@ -321,8 +324,8 @@ def serve_bore(port: int = DEFAULT_LISTEN_PORT, relay: str = _BORE_RELAY,
 
     proc = subprocess.Popen(
         [bore, "local", str(port), "--to", relay],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
-    )
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True if _running_in_notebook() else False
+    )  # Bore independent of the parent process (so it keeps running if the notebook kernel restarts)
     _BORE_PROCS.append(proc)
 
     result = {"endpoint": None}

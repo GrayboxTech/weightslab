@@ -500,7 +500,16 @@ class Proxy:
             except (KeyError, TypeError):
                 pass
 
-        return None
+        # Attribute genuinely absent on the wrapped object. Raise AttributeError
+        # (as the class docstring promises) rather than returning None: returning
+        # None makes `hasattr(proxy, x)` report True for missing attributes, which
+        # breaks capability probes (e.g. `if not hasattr(loader, "reset")`) and
+        # silently resolves `proxy.missing` to a non-callable None. Callers that
+        # want a soft default should use `getattr(proxy, x, default)`, which now
+        # works correctly.
+        raise AttributeError(
+            f"'{type(obj).__name__}' object has no attribute {item!r}"
+        )
 
     def __delattr__(self, name: str) -> None:
         """Delete an attribute from the proxy or wrapped object safely.

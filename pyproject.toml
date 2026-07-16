@@ -33,7 +33,11 @@ dependencies = [
   # versions pip resolves. Range left open (<3) so Colab's numpy 2.x installs
   # without a downgrade. Verified: import + torch/pandas interop + gRPC on np 2.4.
   "numpy>=1.24,<3",
-  "pandas>=2.2.3,<3",
+  # Floor at 2.2.2 (not 2.2.3) so Colab's pinned pandas==2.2.2 is accepted
+  # as-is: google-colab 1.0.0 requires pandas==2.2.2, and a >=2.2.3 floor forced
+  # an upgrade to 2.3.x that breaks that pin. Clean installs still pick the
+  # newest numpy-2-safe pandas (2.3.x).
+  "pandas>=2.2.2,<3",
   "duckdb>=1.1,<2",  # signal/sample/instance history store
   "PyYAML>=6.0.3,<7",
   "dill>=0.3.8,<0.5",
@@ -53,10 +57,14 @@ dependencies = [
 
   # Serving / schema
   "grpcio>=1.80,<2",
-  # protobuf <8 so Colab's protobuf 7.x is accepted (its <7 cap forced the
-  # downgrade cascade). Verified: all 70 generated gRPC messages serialize/parse
-  # and the descriptor pool builds under protobuf 7.35.
-  "protobuf>=4.25,<8",
+  # Floor tracks the checked-in gencode: the *_pb2.py are regenerated with
+  # grpcio-tools ~=1.68 (protoc gencode 5.28.1), so any runtime >=5.28.1 satisfies
+  # protobuf's runtime>=gencode rule — including Colab's stock protobuf 5.29.6, so
+  # NO upgrade is forced on Colab. IMPORTANT: regenerate the stubs with
+  # grpcio-tools ~=1.68 to keep the gencode Colab-compatible; a newer grpcio-tools
+  # bumps the gencode and reintroduces the VersionError on Colab. Upper bound <8
+  # keeps modern runtimes (7.x) working.
+  "protobuf>=5.28.1,<8",
   "pydantic>=2.7,<3",
 
   # Imaging
