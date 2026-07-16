@@ -48,17 +48,14 @@ Most data problems are invisible until your model tells you: through loss spikes
 ![Python](https://img.shields.io/badge/Python-v3.10--v3.14-5865F2?style=flat&logo=python&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-v4-0db7ed?style=flat&logo=docker&logoColor=white)
 
-**1. Install**
+**1. Install & Launch Studio**
 ```bash
 pip install weightslab
-```
 
-**2. Launch Studio**
-```bash
 weightslab ui launch  # then open https://localhost:5173 🚀
 ```
 
-**3. Wrap your training script**
+**2. Wrap your training script**
 ```python
 # wrap the objects in your training script
 
