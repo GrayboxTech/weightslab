@@ -7,7 +7,7 @@ If you prefer to start from examples, see ``usecases`` right after this setup.
 Prerequisites
 -------------
 
-- Python v3.10+ installed.
+- Python v3.10+ installed
 - A virtual environment tool like ``venv`` or Conda (optionnal).
 - Docker v4+ to start the UI.
 - Your training project available locally.
