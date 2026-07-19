@@ -1504,7 +1504,7 @@ def serve(serving_cli: bool = True, serving_grpc: bool = False,
             `bore <https://github.com/ekzhang/bore>`_ raw-TCP relay, so a Weights
             Studio running on another machine can reach it (e.g. training in
             Google Colab, UI on your laptop). Prints the public endpoint and the
-            two commands to run locally (``weightslab ui launch`` +
+            two commands to run locally (``weightslab launch`` +
             ``weightslab tunnel <endpoint>``). Implies a gRPC backend. Uses the
             shared public relay ``bore.pub`` — the random port is the only thing
             guarding it, so keep it to non-sensitive demos.
@@ -1590,7 +1590,7 @@ def serve(serving_cli: bool = True, serving_grpc: bool = False,
             print("=" * 60)
             print(f" Backend exposed via bore at: {bore_endpoint}")
             print(" On your local machine (Docker running), run:")
-            print("     weightslab ui launch")
+            print("     weightslab launch")
             print(f"     weightslab tunnel {bore_endpoint}")
             print("=" * 60)
 

@@ -354,7 +354,7 @@ Deploying the Studio
 ~~~~~~~~~~~~~~~~~~~~~
 
 All Weights Studio configuration variables are passed to the UI at launch time
-via ``weightslab ui launch``.  There are two ways to supply them.
+via ``weightslab launch``.  There are two ways to supply them.
 
 **Option 1 — shell exports (quick, per-session)**
 
@@ -362,7 +362,7 @@ via ``weightslab ui launch``.  There are two ways to supply them.
 
    export ENABLE_AGENT=0
    export BB_THUMB_RENDER=50
-   weightslab ui launch
+   weightslab launch
 
 **Option 2 — ``.env`` file (persistent, version-controllable)**
 
@@ -380,7 +380,7 @@ Then launch normally:
 
 .. code-block:: bash
 
-   weightslab ui launch
+   weightslab launch
 
 WeightsLab loads the ``.env`` file automatically.  Shell exports take precedence
 over ``.env`` values.  No rebuild of the Studio container is needed — variables

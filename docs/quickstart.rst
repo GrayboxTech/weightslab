@@ -44,7 +44,7 @@ Then, in another terminal, launch the UI and open http://localhost:5173:
 
 .. code-block:: bash
 
-   weightslab ui launch
+   weightslab launch
 
 
 .. Launch WeightsLab services from your training script
@@ -139,8 +139,8 @@ Pass ``--certs`` to generate (if missing) and use TLS certificates + a gRPC auth
 
 .. code-block:: bash
 
-   weightslab ui launch              # unsecured HTTP (default; no certs generated)
-   weightslab ui launch --certs      # secured HTTPS + gRPC auth (generates certs if missing)
+   weightslab launch              # unsecured HTTP (default; no certs generated)
+   weightslab launch --certs      # secured HTTPS + gRPC auth (generates certs if missing)
 
 .. important::
 

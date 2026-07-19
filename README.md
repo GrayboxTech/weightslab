@@ -54,7 +54,7 @@ pip install weightslab
 ```
 **2. Launch Studio**
 ```bash
-weightslab ui launch  # then open https://localhost:5173 🚀
+weightslab launch  # then open https://localhost:5173 🚀
 ```
 **3. Wrap your training script**
 ```python
@@ -117,7 +117,7 @@ For a detailed installation guide and advanced configuration &rarr; [Installatio
 3. **Run your script, then launch the UI in a separate terminal:**
 ```bash
    python train.py
-   weightslab ui launch
+   weightslab launch
 ```
 
 4. **Open your browser** `https://localhost:5173` and inspect your training in real time.

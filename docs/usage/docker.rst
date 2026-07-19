@@ -27,8 +27,8 @@ Weights Studio frontend alongside it.
      - Siblings on the host
      - Siblings on the host
    * - Starts UI via
-     - ``weightslab ui launch``
-     - ``weightslab ui launch``
+     - ``weightslab launch``
+     - ``weightslab launch``
      - Custom ``ui-compose.yml``
    * - ``--privileged``
      - **Required**
@@ -59,7 +59,7 @@ Weights Studio frontend alongside it.
 
    - **A (DinD)** — fully self-contained; needs ``--privileged``. Best when
      you want isolation or are on Windows.
-   - **B (DooD)** — uses the stock ``weightslab ui launch``; cleanest on a
+   - **B (DooD)** — uses the stock ``weightslab launch``; cleanest on a
      Linux host with path alignment already done.
    - **C (self-contained siblings)** — no host prep, no bind mounts,
      works natively on Windows.
@@ -72,7 +72,7 @@ Option A: Docker-in-Docker (DinD)
 **Source:** ``weightslab/examples/Docker_training/docker_in_docker/``
 
 The trainer container starts its **own inner Docker daemon** and uses
-``weightslab ui launch`` inside it. Because the inner daemon shares the
+``weightslab launch`` inside it. Because the inner daemon shares the
 trainer container's filesystem, all paths resolve without any host-side setup.
 
 Wiring diagram
@@ -183,7 +183,7 @@ Open http://localhost:5173. Stop with ``Ctrl+C`` or ``docker compose down``.
 
    What ``WEIGHTSLAB_TLS=1`` does in ``entrypoint.sh``:
 
-   1. Runs ``weightslab ui launch --certs``, generating certs into
+   1. Runs ``weightslab launch --certs``, generating certs into
       ``WEIGHTSLAB_CERTS_DIR`` and configuring Envoy + the frontend for HTTPS.
    2. Exports ``GRPC_TLS_ENABLED=1`` + ``GRPC_TLS_CERT_DIR`` so the gRPC
       backend also speaks TLS (required to prevent Envoy upstream 503s).
@@ -252,7 +252,7 @@ Configuration requirements
 How config delivery works without bind mounts
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Option C does not call ``weightslab ui launch``. Instead, ``entrypoint.sh``:
+Option C does not call ``weightslab launch``. Instead, ``entrypoint.sh``:
 
 1. Renders Envoy's plaintext config from the installed ``weightslab`` package.
 2. Pipes it into the ``wl_envoy_cfg`` named volume via the socket using a

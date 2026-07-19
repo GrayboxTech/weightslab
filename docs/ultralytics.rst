@@ -201,7 +201,7 @@ Running the bundled example
 
    .. code-block:: bash
 
-      weightslab ui launch
+      weightslab launch
 
 4. Run the example:
 

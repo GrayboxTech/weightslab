@@ -203,7 +203,7 @@ Workflow in the studio
 
    .. code-block:: bash
 
-      weightslab ui launch           # 1. deploy the studio
+      weightslab launch           # 1. deploy the studio
       weightslab start example --det # 2. start the detection demo
 
    To run the full loss-shape example (with the ``@wl.signal(subscribe_to=...)``
@@ -213,7 +213,7 @@ Workflow in the studio
 .. raw:: html
 
    <div style="text-align:right; margin-top:2rem;">
-     <a href="https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/Usecases/ws-segmentation-loss-shapes.ipynb" target="_blank" rel="noopener noreferrer">
+     <a href="https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/Usecases/wl-segmentation-loss-shapes-classification.ipynb" target="_blank" rel="noopener noreferrer">
        <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab">
      </a>
    </div>

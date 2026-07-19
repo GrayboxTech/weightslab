@@ -38,7 +38,7 @@ with no further arguments prints the banner and this same command summary.
      - Purpose
    * - ``weightslab se``
      - One-time secure setup: generate TLS certs + a gRPC auth token.
-   * - ``weightslab ui launch``
+   * - ``weightslab launch``
      - Clean stale Docker state, then build & start the Weights Studio UI stack.
    * - ``weightslab start example`` (alias: ``weightslab example start``)
      - Run a bundled PyTorch example in the foreground.
@@ -60,7 +60,7 @@ weightslab se
 
 Generates TLS certificates and a gRPC auth token into a certs directory, then
 tells you to export ``WEIGHTSLAB_CERTS_DIR`` — the **single source of
-truth** the training backend, ``weightslab ui launch --certs``, and any new
+truth** the training backend, ``weightslab launch --certs``, and any new
 shell all read to decide whether TLS/auth is on (derived purely from whether
 cert files exist in that directory).
 
@@ -85,14 +85,14 @@ permanently (the command prints the exact ``export`` / ``setx`` line for
 your platform) so the training backend and Weights Studio agree on the same
 certificates.
 
-weightslab ui launch
+weightslab launch
 ~~~~~~~~~~~~~~~~~~~~~~
 
 **Syntax**
 
 .. code-block:: bash
 
-   weightslab ui launch [certs_dir] [--certs] [-i/--image REPO] [-v/--version TAG]
+   weightslab launch [certs_dir] [--certs] [-i/--image REPO] [-v/--version TAG]
 
 Purges stale ``weightslab``/``weights_studio`` Docker resources scoped to the
 bundled stack, then builds and starts the Weights Studio UI via Docker
@@ -116,10 +116,10 @@ Compose.
 
 .. code-block:: bash
 
-   weightslab ui launch                                    # unsecured HTTP (default)
-   weightslab ui launch --certs                             # secured HTTPS + gRPC auth
-   weightslab ui launch -i guillaumep2705/weightslab        # pull a custom repo (latest tag)
-   weightslab ui launch -i guillaumep2705/weightslab -v v1.2.3  # pin a specific version
+   weightslab launch                                    # unsecured HTTP (default)
+   weightslab launch --certs                             # secured HTTPS + gRPC auth
+   weightslab launch -i guillaumep2705/weightslab        # pull a custom repo (latest tag)
+   weightslab launch -i guillaumep2705/weightslab -v v1.2.3  # pin a specific version
 
 Once running, the UI is served at ``http://localhost:5173`` (or
 ``https://...`` when ``--certs`` is used); the exact URL is also printed at
@@ -180,7 +180,7 @@ the documented form.
    weightslab start example --3d_det       # 3D LiDAR detection
    weightslab example start --det          # tolerant alias, same as `start example --det`
 
-Then, in another terminal: ``weightslab ui launch`` and open
+Then, in another terminal: ``weightslab launch`` and open
 ``http://localhost:5173``. See :doc:`examples/index` for what each example
 demonstrates.
 
@@ -237,7 +237,7 @@ HTTP/2 frames must pass through untouched. Two consequences:
   zero-signup option is `bore <https://github.com/ekzhang/bore>`_ with its free
   public relay: ``bore local 50051 --to bore.pub`` (prints ``bore.pub:<port>``).
   ``ngrok tcp 50051`` also works but now requires a credit card on the free tier.
-- The backend must run **plaintext** — the default ``weightslab ui launch``
+- The backend must run **plaintext** — the default ``weightslab launch``
   (no ``--certs``) — so no TLS terminates mid-path.
 
 **Arguments**
@@ -274,7 +274,7 @@ HTTP/2 frames must pass through untouched. Two consequences:
    #    !bore local 50051 --to bore.pub
 
    # 2) On your machine, in two terminals:
-   weightslab ui launch                           # plaintext HTTP (default)
+   weightslab launch                           # plaintext HTTP (default)
    weightslab tunnel bore.pub:12345               # the host:port bore printed
 
    # 3) Open http://localhost:5173 — Studio streams live from Colab.
@@ -289,7 +289,7 @@ HTTP/2 frames must pass through untouched. Two consequences:
 The command probes the remote on startup (warning, not fatal, if it isn't up
 yet), re-resolves the endpoint per connection (so a changing tunnel IP is picked
 up), and runs until ``Ctrl+C``. See the classification Colab notebook
-(``examples/Notebooks/PyTorch/ws-classification.ipynb``) for the end-to-end
+(``examples/Notebooks/PyTorch/wl-classification.ipynb``) for the end-to-end
 setup.
 
 .. _cli-console:

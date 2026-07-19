@@ -5,7 +5,7 @@ a raw-TCP tunnel — on a **local** port, so the bundled Weights Studio Docker
 stack connects to it as if it were local. The stack's Envoy proxy dials
 ``localhost:50051`` (see the ``grpc_service`` upstream in the bundled envoy
 config), so making the remote backend appear there needs no change to the UI at
-all: just run ``weightslab ui launch`` and this tunnel side by side.
+all: just run ``weightslab launch`` and this tunnel side by side.
 
 Why a *raw* byte forwarder (no protocol parsing): the browser speaks gRPC-Web to
 Envoy, and Envoy speaks native HTTP/2 gRPC to its upstream. Those HTTP/2 frames
@@ -14,7 +14,7 @@ a gRPC-Web tunnel) breaks the connection. So this shuttles bytes both ways and
 leaves the protocol untouched. The matching remote tunnel must likewise be raw
 TCP — ``bore local 50051 --to bore.pub`` (zero-signup) or ``ngrok tcp 50051``
 (needs a card on the free tier) — and the backend must run **plaintext** (the
-default ``weightslab ui launch`` — no ``--certs``) so no TLS terminates mid-path.
+default ``weightslab launch`` — no ``--certs``) so no TLS terminates mid-path.
 """
 
 import logging
@@ -178,7 +178,7 @@ def run_tunnel(remote_host: str, remote_port: int,
 
     logger.info("=" * 60)
     logger.info(f" Tunnel up: {listen_host}:{listen_port}  ->  {remote_host}:{remote_port}")
-    logger.info(" If the UI isn't running yet, in another terminal: weightslab ui launch")
+    logger.info(" If the UI isn't running yet, in another terminal: weightslab launch")
     logger.info(" Then open http://localhost:5173")
     logger.info(" Ctrl+C to stop the tunnel.")
     logger.info("=" * 60)
