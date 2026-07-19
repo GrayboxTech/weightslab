@@ -25,9 +25,6 @@ import subprocess
 import sys
 import threading
 
-from weightslab.utils.tools import _running_in_notebook
-
-
 logger = logging.getLogger(__name__)
 
 # Env var read as the default ENDPOINT so a bare ``weightslab tunnel`` works
@@ -321,6 +318,10 @@ def serve_bore(port: int = DEFAULT_LISTEN_PORT, relay: str = _BORE_RELAY,
     except Exception as exc:  # download / platform failure — non-fatal for serve()
         logger.warning(f"Could not set up bore tunnel: {exc}")
         return None
+
+    # Imported lazily: utils.tools pulls in torch, and keeping it out of this
+    # module's import path lets the torch-free `weightslab` CLI stay fast.
+    from weightslab.utils.tools import _running_in_notebook
 
     proc = subprocess.Popen(
         [bore, "local", str(port), "--to", relay],

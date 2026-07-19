@@ -1116,6 +1116,95 @@ def cli_connect(args):
     sys.exit(exit_code)
 
 
+def ui_start_native(args):
+    """`weightslab start`: launch the Weights Studio UI natively (no Docker).
+
+    Serves the pre-built SPA vendored in this package and proxies gRPC-Web to a
+    running backend (started by ``wl.serve()``), all from one pure-Python HTTP
+    server. This is the Docker-free, pip-native replacement for
+    ``weightslab ui launch`` — like ``tensorboard``, the UI ships in the wheel.
+
+    Unsecured HTTP by default. Pass ``--certs`` (optionally with a certs_dir) to
+    serve HTTPS + mTLS to the backend, derived solely from cert-file presence.
+    """
+    try:
+        from weightslab.ui import server as ui_server
+    except Exception as exc:  # pragma: no cover - import guard
+        logger.error(f"Could not load the WeightsLab UI server: {exc}")
+        sys.exit(1)
+
+    ui_host = getattr(args, "host", None) or os.getenv("WEIGHTSLAB_UI_HOST", "0.0.0.0")
+    ui_port = getattr(args, "port", None) or int(os.getenv("WEIGHTSLAB_UI_PORT", "8080"))
+    backend_host = (getattr(args, "backend_host", None)
+                    or os.getenv("GRPC_BACKEND_HOST", "localhost"))
+    backend_port = (getattr(args, "backend_port", None)
+                    or int(os.getenv("GRPC_BACKEND_PORT", "50051")))
+    open_browser = not getattr(args, "no_browser", False)
+
+    # TLS/auth: single source of truth is cert-file presence in the certs dir.
+    # Only consulted when the user explicitly opts in with --certs / a certs_dir.
+    certs_dir = None
+    grpc_auth_token = None
+    certs_dir_arg = getattr(args, "certs_dir", None)
+    if getattr(args, "certs", False) or certs_dir_arg:
+        manager = (CertAuthManager(certs_dir=certs_dir_arg) if certs_dir_arg
+                   else CertAuthManager.from_env_or_default())
+        if manager.has_valid_certs():
+            certs_dir = str(manager.certs_dir)
+            try:
+                grpc_auth_token = manager.get_or_create_auth_token()
+            except Exception:
+                grpc_auth_token = None
+        else:
+            logger.warning(
+                f"--certs requested but no valid certs in {manager.certs_dir}. "
+                "Run `weightslab se` first. Falling back to unsecured HTTP."
+            )
+
+    if not ui_server.has_static_assets():
+        logger.warning(
+            "No bundled UI assets found in this install. The gRPC-Web proxy will "
+            "still run, but the web page is unavailable. Build+vendor the frontend "
+            "(weights_studio: `npm run build:embed`) or install a UI-bundled wheel."
+        )
+
+    # If the preferred UI port is taken, fall back to a free one.
+    probe_host = "127.0.0.1" if ui_host in ("0.0.0.0", "::", "") else ui_host
+    actual_port = ui_server.find_free_port(ui_port, host=probe_host)
+    if actual_port != ui_port:
+        logger.warning(f"Port {ui_port} is busy; using {actual_port} instead.")
+        ui_port = actual_port
+
+    ui_server.serve_ui(
+        ui_host=ui_host,
+        ui_port=ui_port,
+        backend_host=backend_host,
+        backend_port=backend_port,
+        open_browser=open_browser,
+        certs_dir=certs_dir,
+        grpc_auth_token=grpc_auth_token,
+        block=True,
+    )
+
+
+def _add_ui_server_flags(p: argparse.ArgumentParser) -> None:
+    """Attach flags for the native (Docker-free) UI server."""
+    p.add_argument('--port', type=int, default=None,
+                   help='UI HTTP port (default: 8080 or $WEIGHTSLAB_UI_PORT)')
+    p.add_argument('--host', default=None,
+                   help='UI bind host (default: 0.0.0.0)')
+    p.add_argument('--backend-host', dest='backend_host', default=None,
+                   help='Backend gRPC host to proxy to (default: localhost)')
+    p.add_argument('--backend-port', dest='backend_port', type=int, default=None,
+                   help='Backend gRPC port to proxy to (default: 50051)')
+    p.add_argument('--no-browser', dest='no_browser', action='store_true',
+                   help='Do not open the web browser automatically')
+    p.add_argument('--certs', action='store_true',
+                   help='Serve HTTPS + mTLS to the backend using TLS certs from '
+                        '$WEIGHTSLAB_CERTS_DIR (default: unsecured HTTP). '
+                        'Run `weightslab se` first to generate them.')
+
+
 def _add_example_kind_flags(p: argparse.ArgumentParser) -> None:
     """Attach the mutually-exclusive example-kind flags (default: classification)."""
     group = p.add_mutually_exclusive_group()
@@ -1142,9 +1231,14 @@ def _build_parser() -> argparse.ArgumentParser:
     The CLI is intentionally minimal — exactly these commands:
         weightslab --help | -h | help
         weightslab se [--force-certs]
+        weightslab start [--port PORT] [--backend-port PORT] [--certs]
         weightslab ui launch [--certs]
         weightslab start example [--cls|--seg|--det|--clus|--gen|--3d_det|--2d_det]
         weightslab cli [--port PORT] [--host HOST]
+
+    `weightslab start` (no sub-target) runs the Docker-free, pip-native UI
+    server (bundled SPA + gRPC-Web proxy). `weightslab ui launch` remains the
+    legacy Docker-based launcher.
     """
     parser = argparse.ArgumentParser(
         prog="weightslab",
@@ -1203,8 +1297,14 @@ def _build_parser() -> argparse.ArgumentParser:
         '--remote-port', type=int, default=None,
         help="Remote port, if not included in ENDPOINT")
 
-    # weightslab start example [--cls|--seg|--clus|--gen]
-    start_parser = sub.add_parser("start", help="Start a bundled WeightsLab resource")
+    # weightslab start [--port N ...]        -> native (Docker-free) UI server
+    # weightslab start example [--cls|--seg|--clus|--gen]  -> bundled example
+    start_parser = sub.add_parser(
+        "start",
+        help="Start the Weights Studio UI natively (no Docker); "
+             "or `start example` to run a bundled example")
+    # Flags on the bare `start` command launch the native UI server.
+    _add_ui_server_flags(start_parser)
     start_sub = start_parser.add_subparsers(dest="start_target")
     example_parser = start_sub.add_parser(
         "example", help="Start a bundled PyTorch example (default: classification)")
@@ -1247,7 +1347,8 @@ def main():
         if getattr(args, "start_target", None) == "example":
             example_start(args)
         else:
-            start_parser.print_help()
+            # Bare `weightslab start` -> launch the native (Docker-free) UI.
+            ui_start_native(args)
     elif args.command == "example":
         # Alias for `start example` — tolerate the swapped subcommand order
         # (`weightslab example start [flags]`) and the bare `weightslab example`.

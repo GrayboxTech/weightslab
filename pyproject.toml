@@ -137,6 +137,8 @@ include = ["weightslab", "weightslab.*"]
 weightslab = [
   "docker/**/*",
   "examples/**/*",
+  # Pre-built Weights Studio SPA served by the Docker-free `weightslab start`.
+  "ui/static/**/*",
 ]
 
 [tool.setuptools.exclude-package-data]
