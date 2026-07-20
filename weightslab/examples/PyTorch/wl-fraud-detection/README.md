@@ -1,5 +1,7 @@
 # WeightsLab — Bank Fraud Detection (tabular, pure PyTorch)
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/252-tabular-experiment/weightslab/examples/Notebooks/PyTorch/ws-fraud-detection.ipynb)
+
 A small, fully-runnable **tabular binary-classification** example: an MLP learns
 to flag fraudulent bank card transactions, streaming per-sample loss /
 prediction / accuracy to the WeightsLab UI. Being tabular, it's the natural

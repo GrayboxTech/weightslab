@@ -1,5 +1,7 @@
 # WeightsLab — Advertising CTR Recommendation (tabular, pure PyTorch)
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/252-tabular-experiment/weightslab/examples/Notebooks/PyTorch/ws-ads-recommendation.ipynb)
+
 A fully-runnable **click-through-rate (CTR) prediction** example — the core of
 an advertising recommendation system. A **Wide & Deep** model learns to predict
 `P(click)` for `(user, ad, context)` impressions, streaming per-impression loss /
