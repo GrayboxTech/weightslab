@@ -82,7 +82,7 @@ exclude_patterns = [
     # Superseded by examples/pytorch/classification.rst and examples/pytorch/segmentation.rst
     "usecases.rst",
     "segmentation_usecase.rst",
-    # Replaced by direct toctree entries usage/good_practice and usage/docker
+    # Replaced by direct toctree entry usage/good_practice
     "usage.rst",
     # SDK params moved into configuration.rst
     "usage/parameters.rst",

@@ -94,19 +94,19 @@ if _IS_MAIN_PROCESS:
 
 grpc_tls_enabled = os.environ.get('GRPC_TLS_ENABLED', 'true').lower() == 'true'
 if _IS_MAIN_PROCESS and grpc_tls_enabled and os.environ.get('WEIGHTSLAB_SKIP_SECURE_INIT', 'false').lower() != 'true':
-	try:
-		from weightslab.security import CertAuthManager
+    try:
+        from weightslab.security import CertAuthManager
 
-		enable_auth = os.environ.get('WL_ENABLE_GRPC_AUTH_TOKEN', 'true').lower() == 'true'
-		manager = CertAuthManager.from_env_or_default(enable_auth=enable_auth)
+        enable_auth = os.environ.get('WL_ENABLE_GRPC_AUTH_TOKEN', 'true').lower() == 'true'
+        manager = CertAuthManager.from_env_or_default(enable_auth=enable_auth)
 
-		success, msg = manager.check_and_apply()
-		if success:
-			logger.debug(f"Secure environment applied: {msg}")
-		else:
-			logger.debug(f"Running in unsecured mode — no certs found. To set up: weightslab ui se")
-	except Exception as e:
-		logger.debug(f"Secure environment check skipped: {e}")
+        success, msg = manager.check_and_apply()
+        if success:
+            logger.debug(f"Secure environment applied: {msg}")
+        else:
+            logger.debug("Running in unsecured mode - no certs found. To set up: weightslab se")
+    except Exception as e:
+        logger.debug(f"Secure environment check skipped: {e}")
 
 # Get Package Metadata. Resolve the version from the most authoritative source
 # available, so a live/editable checkout reports the CURRENT git tag rather than

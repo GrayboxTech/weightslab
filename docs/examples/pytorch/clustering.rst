@@ -93,7 +93,7 @@ silhouette score to identify consistently confused identities.
 
    .. code-block:: bash
 
-      weightslab ui launch            # 1. deploy the studio
+      weightslab start                # 1. deploy the studio
       weightslab start example --clus # 2. start the clustering demo
 
 

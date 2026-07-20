@@ -8,8 +8,7 @@ Prerequisites
 -------------
 
 - Python v3.10+ installed
-- A virtual environment tool like ``venv`` or Conda (optionnal).
-- Docker v4+ to start the UI.
+- A virtual environment tool like ``venv`` or Conda (optional).
 - Your training project available locally.
 
 Install WeightsLab
@@ -38,13 +37,13 @@ example like the classification example (--cls). It run a small experiment on a 
 
 .. code-block:: bash
 
-   weightslab example start --cls
+   weightslab start example --cls
 
-Then, in another terminal, launch the UI and open http://localhost:5173:
+Then, in another terminal, launch the UI and open the URL printed by the command:
 
 .. code-block:: bash
 
-   weightslab ui launch
+   weightslab start
 
 
 .. Launch WeightsLab services from your training script
@@ -139,8 +138,8 @@ Pass ``--certs`` to generate (if missing) and use TLS certificates + a gRPC auth
 
 .. code-block:: bash
 
-   weightslab ui launch              # unsecured HTTP (default; no certs generated)
-   weightslab ui launch --certs      # secured HTTPS + gRPC auth (generates certs if missing)
+   weightslab start              # unsecured HTTP (default)
+   weightslab start --certs    # secured HTTPS + gRPC auth (run `weightslab se` first)
 
 .. important::
 
@@ -148,13 +147,9 @@ Pass ``--certs`` to generate (if missing) and use TLS certificates + a gRPC auth
    terminal use the **same** certificates — it is the single source of truth for TLS/auth. Please note that this step has to be done before starting the experiment.
 
 Run ``weightslab``, ``weightslab help``, or ``weightslab -h`` to see the banner and the full
-command reference (``se``, ``ui launch``, ``start example ...``).
+command reference (``se``, ``start``, ``start example ...``).
 
-To stop the UI later:
-
-.. code-block:: bash
-
-   docker stop weights_studio_envoy weights_studio_frontend
+To stop the UI, press ``Ctrl+C`` in the terminal running ``weightslab start``.
 
 Prefer a terminal over a browser? ``weightslab cli`` opens an interactive
 console connected to the running experiment (pause/resume, status, evaluate,

@@ -300,13 +300,16 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
             else "window.WS_ENABLE_GRPC_AUTH_TOKEN='0';"
         )
         # Self-configuring: point the SPA at *this* origin's /api, whatever the
-        # host/port/scheme happens to be.  No rebuild, no env baking.
+        # host/port/scheme happens to be (no rebuild). Plus the feature/cache
+        # runtime globals from env vars — the faithful replacement for the old
+        # nginx config.js, so the UI stays tunable without a rebuild or Docker.
         config = (
             "<script>(function(){try{"
             "window.WS_SERVER_HOST=window.location.host+'"
             f"{self.api_prefix}';"
             "window.WS_SERVER_PROTOCOL=window.location.protocol.replace(':','');"
             f"{token_js}"
+            f"{_ui_env_globals_js()}"
             "}catch(e){console.error('[weightslab-ui] config error',e);}})();"
             "</script>"
         )
@@ -331,6 +334,44 @@ def _js_str(value: Optional[str]) -> str:
         return "''"
     escaped = value.replace("\\", "\\\\").replace("'", "\\'")
     return f"'{escaped}'"
+
+
+# Runtime UI-config globals mirrored from environment variables — the faithful,
+# Docker-free replacement for the old nginx entrypoint's config.js. Each
+# ``window.WS_*`` global is set from the FIRST environment variable present in
+# its candidate list, so a deployer can tune the UI at launch time without
+# rebuilding. When none are set the global is omitted and the SPA falls back to
+# its own built-in default.
+_UI_ENV_GLOBALS = [
+    ("WS_HISTOGRAM_MAX_BINS", ("WS_HISTOGRAM_MAX_BINS", "VITE_HISTOGRAM_MAX_BINS")),
+    ("WS_BB_THUMB_RENDER", ("BB_THUMB_RENDER", "WS_BB_THUMB_RENDER", "VITE_BB_THUMB_RENDER")),
+    ("WS_BB_MODAL_RENDER", ("BB_MODAL_RENDER", "WS_BB_MODAL_RENDER", "VITE_BB_MODAL_RENDER")),
+    ("WS_GRID_WINDOW_SIZE", ("GRID_WINDOW_SIZE", "VITE_GRID_WINDOW_SIZE")),
+    ("WS_MAX_IMAGE_CACHE_SIZE", ("GRID_MAX_IMAGE_CACHE_SIZE", "VITE_WS_MAX_IMAGE_CACHE_SIZE")),
+    ("WS_GRID_CACHE_MAX_MB", ("GRID_CACHE_MAX_MB", "VITE_WS_GRID_CACHE_MAX_MB")),
+    ("WS_MODAL_CACHE_MAX_MB", ("MODAL_CACHE_MAX_MB", "VITE_WS_MODAL_CACHE_MAX_MB")),
+    ("WS_WL_PC_MAX_POINTS", ("PC_MAX_POINTS", "VITE_WL_PC_MAX_POINTS")),
+    ("WS_WL_DISABLE_GPU_RENDERING", ("DISABLE_GPU_RENDERING", "VITE_WL_DISABLE_GPU_RENDERING")),
+    ("WS_ENABLE_PLOTS", ("ENABLE_PLOTS", "WS_ENABLE_PLOTS", "VITE_ENABLE_PLOTS")),
+    ("WS_ENABLE_DATA_EXPLORATION",
+     ("ENABLE_DATA_EXPLORATION", "WS_ENABLE_DATA_EXPLORATION", "VITE_ENABLE_DATA_EXPLORATION")),
+    ("WS_ENABLE_HYPERPARAMETERS_OPTIMIZATION",
+     ("ENABLE_HYPERPARAMETERS_OPTIMIZATION", "WS_ENABLE_HYPERPARAMETERS_OPTIMIZATION",
+      "VITE_ENABLE_HYPERPARAMETERS_OPTIMIZATION")),
+    ("WS_ENABLE_AGENT", ("ENABLE_AGENT", "WS_ENABLE_AGENT", "VITE_ENABLE_AGENT")),
+]
+
+
+def _ui_env_globals_js() -> str:
+    """Build ``window.WS_*=...;`` assignments for any configured env vars (else empty)."""
+    parts = []
+    for window_key, candidates in _UI_ENV_GLOBALS:
+        for env_name in candidates:
+            val = os.environ.get(env_name)
+            if val:
+                parts.append(f"window.{window_key}={_js_str(val)};")
+                break
+    return "".join(parts)
 
 
 def _guess_type(path: str) -> str:
@@ -363,8 +404,8 @@ def _build_channel(backend_host: str, backend_port: int,
     ]
     if certs_dir:
         ca = os.path.join(certs_dir, "ca.crt")
-        client_crt = os.path.join(certs_dir, "envoy-client.crt")
-        client_key = os.path.join(certs_dir, "envoy-client.key")
+        client_crt = os.path.join(certs_dir, "ui-client.crt")
+        client_key = os.path.join(certs_dir, "ui-client.key")
         if os.path.isfile(ca):
             root = _read(ca)
             key = _read(client_key) if os.path.isfile(client_key) else None
@@ -434,8 +475,8 @@ def serve_ui(
     ssl_ctx = None
     scheme = "http"
     if certs_dir:
-        server_crt = os.path.join(certs_dir, "envoy-server.crt")
-        server_key = os.path.join(certs_dir, "envoy-server.key")
+        server_crt = os.path.join(certs_dir, "ui-server.crt")
+        server_key = os.path.join(certs_dir, "ui-server.key")
         if os.path.isfile(server_crt) and os.path.isfile(server_key):
             ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ssl_ctx.load_cert_chain(server_crt, server_key)
