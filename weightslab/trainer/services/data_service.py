@@ -394,6 +394,17 @@ class DataService:
         self._preview_cache: dict[int, pb2.DataRecord] = {}
         self._preview_cache_ready = threading.Event()
         self._preview_cache_max = int(os.environ.get("WL_MAX_PREVIEW_CACHE_SIZE", "2000"))
+        # Byte budget for the cache. The count cap alone lets total memory grow
+        # linearly with dataset size and per-sample view count (a multi-camera
+        # dataset stores several images per sample), so also bound the bytes.
+        self._preview_cache_max_bytes = int(
+            float(os.environ.get("WL_MAX_PREVIEW_CACHE_MB", "256")) * 1024 * 1024)
+        self._preview_cache_bytes = 0
+        # Encoded extra image views, memoized per sample. The live sample path
+        # runs on every grid fetch, so re-decoding several source images per
+        # sample would dominate latency.
+        self._extra_view_memo: dict = {}
+        self._extra_view_memo_max = int(os.environ.get("WL_EXTRA_VIEW_MEMO", "4000"))
         preload_flag = os.environ.get("WL_PRELOAD_IMAGE_OVERVIEW", "1") != "0"
         # Also honour the legacy hp_dict key
         if not preload_flag:
@@ -448,7 +459,11 @@ class DataService:
             t0 = time.time()
 
             PREVIEW_SIZE = 64 # fixed low-res dimension
+            # Extra camera views can be stored smaller than the main thumbnail.
+            EXTRA_VIEW_SIZE = int(os.environ.get("WL_EXTRA_VIEW_PREVIEW_SIZE", str(PREVIEW_SIZE)))
             built = 0
+            self._preview_cache_bytes = 0
+            budget_stopped = 0
 
             index_names = list(getattr(df.index, "names", []) or [])
             origin_index_pos = index_names.index(SampleStatsEx.ORIGIN.value) if SampleStatsEx.ORIGIN.value in index_names else None
@@ -516,6 +531,35 @@ class DataService:
                         nc = len(pil_thumb.getbands())
                         stats.append(create_data_stat('raw_data', 'bytes', shape=[th, tw, nc], thumbnail=thumb_bytes))
                         del pil_thumb, pil_save, pil_img
+
+                    # --- Extra named image views (multi-camera datasets) ---
+                    # A dataset may expose extra_images(idx) -> {name: PIL.Image}.
+                    # Each view becomes its own `image_<name>` stat so the UI can
+                    # show/hide the views independently.
+                    extra_fn = getattr(ds, "extra_images", None) or getattr(dataset, "extra_images", None)
+                    if callable(extra_fn):
+                        try:
+                            for _vname, _vimg in (extra_fn(ds_idx) or {}).items():
+                                if _vimg is None:
+                                    continue
+                                _vw, _vh = _vimg.size
+                                _var = _vw / max(_vh, 1)
+                                if EXTRA_VIEW_SIZE < max(_vimg.size):
+                                    _tw = max(1, int(EXTRA_VIEW_SIZE * _var)) if _var >= 1 else EXTRA_VIEW_SIZE
+                                    _th = EXTRA_VIEW_SIZE if _var >= 1 else max(1, int(EXTRA_VIEW_SIZE / _var))
+                                    _vimg = _vimg.resize((_tw, _th), Image.Resampling.BILINEAR)
+                                else:
+                                    _tw, _th = _vw, _vh
+                                _vbuf = io.BytesIO()
+                                _vsave = _vimg.convert('RGB') if _vimg.mode not in ('RGB', 'RGBA') else _vimg
+                                _vsave.save(_vbuf, format='WEBP', quality=50, method=0)
+                                stats.append(create_data_stat(
+                                    "image_" + str(_vname), 'bytes',
+                                    shape=[_th, _tw, len(_vimg.getbands())],
+                                    thumbnail=_vbuf.getvalue()))
+                                _vbuf.close()
+                        except Exception as _exc:
+                            logger.debug("[PreviewCache] extra_images failed: %s", _exc)
 
                     # Resolve task type early: point-cloud detection labels are
                     # box rows, not rasterizable masks.
@@ -618,7 +662,17 @@ class DataService:
                         stats.append(create_data_stat('num_classes', 'scalar', shape=[1], value=[float(nc_val)]))
 
                     record = pb2.DataRecord(sample_id=str(sample_id), data_stats=stats)
+                    rec_bytes = sum(len(st.thumbnail or b"") for st in stats)
+                    if (self._preview_cache_bytes + rec_bytes) > self._preview_cache_max_bytes:
+                        budget_stopped = total - built
+                        logger.warning(
+                            "[PreviewCache] byte budget %.0f MB reached after %d samples; "
+                            "%d not cached (raise WL_MAX_PREVIEW_CACHE_MB or lower "
+                            "WL_EXTRA_VIEW_PREVIEW_SIZE)",
+                            self._preview_cache_max_bytes / 1e6, built, budget_stopped)
+                        break
                     self._preview_cache[sample_id] = record
+                    self._preview_cache_bytes += rec_bytes
                     built += 1
                 except Exception as exc:
                     # traceback.print_exc()
@@ -626,8 +680,13 @@ class DataService:
                     continue
 
             elapsed = time.time() - t0
-            logger.info("[PreviewCache] Done: %d/%d cached in %.1fs (%.1f ms/sample)",
-                        built, total, elapsed, elapsed / max(built, 1) * 1000)
+            logger.info("[PreviewCache] Done: %d/%d cached in %.1fs (%.1f ms/sample), "
+                        "%.1f MB (%.1f KB/sample, budget %.0f MB)%s",
+                        built, total, elapsed, elapsed / max(built, 1) * 1000,
+                        self._preview_cache_bytes / 1e6,
+                        self._preview_cache_bytes / max(built, 1) / 1024,
+                        self._preview_cache_max_bytes / 1e6,
+                        "" if not budget_stopped else " — %d skipped by budget" % budget_stopped)
         except Exception as exc:
             logger.error("[PreviewCache] Failed: %s", exc, exc_info=True)
         finally:
@@ -1846,6 +1905,45 @@ class DataService:
                             shape=raw_shape,
                         )
                     )
+
+                    # --- Extra named image views (multi-modality datasets) ---
+                    # A dataset may expose extra_images(idx) -> {name: PIL.Image}
+                    # (e.g. the several cameras of an AV rig). Each becomes an
+                    # `image_<name>` stat the UI can show/hide independently.
+                    _owner = getattr(dataset, "wrapped_dataset", dataset)
+                    _extra_fn = getattr(_owner, "extra_images", None) or getattr(dataset, "extra_images", None)
+                    if callable(_extra_fn):
+                        try:
+                            _vsize = int(os.environ.get("WL_EXTRA_VIEW_PREVIEW_SIZE", "0")) \
+                                or max(target_width, target_height)
+                            _memo_key = (str(sample_id), int(_vsize))
+                            _encoded = self._extra_view_memo.get(_memo_key)
+                            if _encoded is None:
+                                _encoded = []
+                                for _vname, _vimg in (_extra_fn(ds_idx) or {}).items():
+                                    if _vimg is None:
+                                        continue
+                                    _vw, _vh = _vimg.size
+                                    _var = _vw / max(_vh, 1)
+                                    if _vsize < max(_vimg.size):
+                                        _tw = max(1, int(_vsize * _var)) if _var >= 1 else _vsize
+                                        _th = _vsize if _var >= 1 else max(1, int(_vsize / _var))
+                                        _vimg = _vimg.resize((_tw, _th), Image.Resampling.BILINEAR)
+                                    else:
+                                        _tw, _th = _vw, _vh
+                                    _vbuf = io.BytesIO()
+                                    _vsave = _vimg.convert('RGB') if _vimg.mode not in ('RGB', 'RGBA') else _vimg
+                                    _vsave.save(_vbuf, format='WEBP', quality=50, method=0)
+                                    _encoded.append(("image_" + str(_vname), _vbuf.getvalue(),
+                                                     [_th, _tw, len(_vimg.getbands())]))
+                                    _vbuf.close()
+                                if len(self._extra_view_memo) < self._extra_view_memo_max:
+                                    self._extra_view_memo[_memo_key] = _encoded
+                            for _n, _b, _sh in _encoded:
+                                data_stats.append(create_data_stat(
+                                    name=_n, stat_type='bytes', thumbnail=_b, shape=_sh))
+                        except Exception as _exc:
+                            logger.debug("[Samples] extra_images failed: %s", _exc)
 
                     # Eagerly release intermediate image data to reduce peak memory
                     # across concurrent thread-pool workers.

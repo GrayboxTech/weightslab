@@ -1,0 +1,86 @@
+# Global configuration
+device: auto
+experiment_name: lidar3d_detection_usecase
+training_steps_to_do: null  # null = infinite training until manually stopped (behavior set by the user in main script)
+# root_log_dir:  # Empty to write in tmp directory, or specify a path to store logs and checkpoints
+
+checkpoint_manager:
+  load_config: false  # Disable loading previous checkpoint configuration to allow for changes in the current config.yaml file between experiments. Otherwise changes will be replaced.
+
+# Initially compute natural sorting values, e.g., average intensity. More details in the README.md file.
+compute_natural_sort: true
+
+# Experiment parameters
+eval_full_to_train_steps_ratio: 50
+experiment_dump_to_train_steps_ratio: 10000000  # effectively disable auto-checkpoint (0 is falsy→resets to default; use a huge number)
+tqdm_display: true
+is_training: false  # Start training immediately or not
+
+# Serving
+serving_grpc: true
+serving_cli: true
+
+# Configure global dataframe storage
+# NOTE: the default (h5 on, flush_max_rows 100, 60s interval) stalls a
+# per-instance-heavy 3D-detection workload — flush_async times out draining the
+# buffer, blocking BOTH training and the data service (UI). Batch flushes far
+# larger than a step's row count and drop H5 for a responsive interactive run.
+ledger_enable_h5_persistence: false
+ledger_enable_flushing_threads: true
+ledger_flush_max_rows: 1000000
+ledger_flush_interval: 3600.0
+
+# Model / task
+num_classes: 3                          # Car, Pedestrian, Cyclist
+point_cloud_range: [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]  # 360° surround crop (AV2 lidar is full-surround)
+voxel_size: 0.5                         # pillar size in meters -> 128x128 BEV canvas
+grid_size: 32                           # detection head predicts on a 32x32 BEV grid
+conf_thresh: 0.3                        # objectness*class confidence threshold for stored predictions
+max_points: 18000                       # random subsample cap per cloud (speed / memory)
+
+optimizer:
+  lr: 0.001
+
+# Data
+# source "auto": uses KITTI if <data_root>/kitti/training/velodyne exists,
+# otherwise falls back to synthetic LiDAR scenes (zero download, instant run).
+# See README.md for KITTI download instructions.
+# data_root: .\data
+data:
+  source: argoverse2           # auto | kitti | kitti_raw | synthetic | argoverse2
+  # Argoverse 2 Sensor (3D detection). train/val are separate folders on disk.
+  # Data lives on the glidar box at /data/av2/sensor. Start with a log subset
+  # for a responsive first bring-up; bump train_max_logs to 65 (all) later.
+  argoverse2:
+    train_dir: /data/av2/sensor/train
+    val_dir: /data/av2/sensor/val
+    train_max_logs: 20      # of 65 available; null = all
+    val_max_logs: 10        # of 150 available; null = all
+    sweep_stride: 2         # keep every 2nd 10Hz sweep (halve near-duplicate frames)
+    min_interior_pts: 1     # drop GT boxes with no lidar points inside
+  num_synthetic: 400      # number of generated scenes when running synthetic
+  # Real-world LiDAR drives (source: kitti_raw). Downloaded on first run to a
+  # temp dir (download_dir: null). GT 3D boxes come from KITTI tracklets when
+  # the drive has them (auto-downloaded); drives without tracklets are
+  # unlabeled (visualization / inference only). Camera RGB colourising is on by
+  # default for real drives (override with data.extra_features).
+  kitti_raw:
+    date: "2011_09_26"
+    drives: ["drive_0001"]   # ~0.5 GB + tracklets; has GT boxes
+    download_dir: null       # null = system temp dir (weightslab_kitti_raw)
+  thumbnail_projection: bev  # bev (default) | range (LiDAR scan format) | custom function name
+  use_custom_rendering: false  # Set to true to use CustomLidarDataset (see main.py for example)
+  # Extra per-point channels for the interactive 3D viewer (xyz+intensity are
+  # always present). The viewer offers a colour/shading mode per channel:
+  #   "normals" -> nx,ny,nz  (PCA over neighbours; enables normal shading)
+  #   "rgb"     -> r,g,b      (camera-image colours on KITTI; height pseudo-colour on synthetic)
+  # The model ignores these; they are visualisation-only. e.g. [normals, rgb]
+  extra_features: []
+  train_loader:
+    batch_size: 4
+    shuffle: true
+    max_samples: null     # null = use the full training split
+  test_loader:
+    batch_size: 4
+    shuffle: false
+    max_samples: 200      # cap val frames evaluated per pass so eval stays snappy
