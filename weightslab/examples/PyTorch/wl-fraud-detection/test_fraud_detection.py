@@ -27,23 +27,26 @@ def test_feature_layout_matches_image_grid():
 
 
 def test_synthetic_shapes_and_labels():
-    x, y = make_synthetic_fraud(500, seed=0)
-    assert x.shape == (500, NUM_FEATURES)
+    x_std, x_raw, y = make_synthetic_fraud(500, seed=0)
+    assert x_std.shape == x_raw.shape == (500, NUM_FEATURES)
     assert y.shape == (500,)
-    assert str(x.dtype) == "float32"
+    assert str(x_std.dtype) == "float32"
     assert set(int(v) for v in set(y.tolist())) <= {0, 1}
+    # Standardized features are ~zero-mean, raw ones are not.
+    assert abs(float(x_std.mean())) < 0.1
+    assert abs(float(x_raw.mean())) > 0.1
 
 
 def test_synthetic_is_deterministic_for_a_seed():
-    x1, y1 = make_synthetic_fraud(200, seed=42)
-    x2, y2 = make_synthetic_fraud(200, seed=42)
+    x1, _, y1 = make_synthetic_fraud(200, seed=42)
+    x2, _, y2 = make_synthetic_fraud(200, seed=42)
     assert (x1 == x2).all() and (y1 == y2).all()
-    x3, _ = make_synthetic_fraud(200, seed=7)
+    x3, _, _ = make_synthetic_fraud(200, seed=7)
     assert not (x1 == x3).all()
 
 
 def test_class_imbalance_is_realistic():
-    _, y = make_synthetic_fraud(1000, seed=1)
+    _, _, y = make_synthetic_fraud(1000, seed=1)
     assert 0.05 < float(y.mean()) < 0.20
 
 
@@ -54,6 +57,22 @@ def test_dataset_item_contract():
     assert tuple(image.shape) == (1, IMG_SIDE, IMG_SIDE)
     assert image.dtype == torch.float32
     assert idx == 0 and label in (0, 1)
+
+
+def test_get_items_exposes_feature_metadata_columns():
+    """The ledger-init contract must return raw features as a metadata dict so
+    they become sortable columns in the WeightsLab UI."""
+    ds = FraudDataset(50, seed=0)
+    image, uid, target, metadata = ds.get_items(
+        3, include_metadata=True, include_labels=True, include_images=False
+    )
+    assert image is None  # init does not decode images
+    assert uid == 3 and target in (0, 1)
+    assert isinstance(metadata, dict)
+    assert set(metadata.keys()) == set(FEATURE_NAMES)
+    assert all(isinstance(v, float) for v in metadata.values())
+    # Raw values, not standardized (e.g. amount is a positive currency figure).
+    assert metadata["amount"] != 0.0
 
 
 def test_dataset_respects_max_samples():

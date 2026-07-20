@@ -183,7 +183,7 @@ if __name__ == "__main__":
         is_training=True,
         compute_hash=False,
         preload_labels=True,
-        preload_metadata=False,
+        preload_metadata=True,
         enable_h5_persistence=enable_h5_persistence,
     )
     test_loader = wl.watch_or_edit(
@@ -195,7 +195,7 @@ if __name__ == "__main__":
         is_training=False,
         compute_hash=False,
         preload_labels=True,
-        preload_metadata=False,
+        preload_metadata=True,
         enable_h5_persistence=enable_h5_persistence,
     )
 

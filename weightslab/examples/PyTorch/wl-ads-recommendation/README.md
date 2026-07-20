@@ -55,23 +55,42 @@ Swap `AdsCTRDataset` for a loader over a real CTR log and set
 
 Keep the `__getitem__` contract `(packed_features_as_image, idx, label)`.
 
+## What "a sample" is here
+
+There are no images — **each sample is one ad impression (a row)**. The 8
+categorical fields (as readable labels) and 8 numeric features are exposed as
+**sortable columns** via the dataset's `get_items()` metadata contract
+(`preload_metadata=True`), so the List Exploration view shows real tabular
+columns (`ad_category`, `placement`, `bid_price`, …) alongside the tracked stats
+below. Sort, lock, histograms, discard/restore and neuron ops all work as on
+MNIST — they operate on the per-sample ledger, not on pixels.
+
 ## What you'll see in the UI
 
 | Signal / column                          | Meaning                                       |
 | ---------------------------------------- | --------------------------------------------- |
+| field columns (`ad_category`, `placement`, `bid_price`, …) | The 16 impression fields, sortable |
 | `train-loss-CE`, `test-loss-CE`          | Weighted cross-entropy per split              |
 | `metric-ACC`                             | Overall accuracy                              |
 | `test_metric/PredictedCTR_per_sample`    | Model's predicted `P(click)` per impression   |
 | `test_metric/Accuracy_per_sample`        | Per-impression correctness (0/1)              |
-| `loss`, `prediction`, `target` columns   | Per-sample columns to sort/lock in List view  |
+| `target`, `prediction` columns           | Per-sample truth/pred to sort/lock in List view |
 
 ## Test it
 
 ```bash
+# Fast, offline unit tests (pure PyTorch, no gRPC server):
 python -m pytest test_ads_recommendation.py -v
-# or:  python test_ads_recommendation.py
+
+# End-to-end integration check (needs weightslab installed): drives the tracked
+# loaders + watched loss + gRPC server, then asserts the ledger dataframe the UI
+# reads has per-sample rows, every field as a column, target/prediction/loss,
+# and a live gRPC endpoint.
+python verify_integration.py
 ```
 
-Pure-PyTorch smoke tests (no gRPC server): schema, reproducibility, calibrated
-CTR, pack/unpack roundtrip, model forward pass, and that training reduces loss
-and **ranks real clicks above non-clicks** on a held-out split (rank-AUC > 0.6).
+The unit tests cover schema, reproducibility, calibrated CTR, pack/unpack
+roundtrip, `get_items` metadata columns, the model forward pass, and that
+training reduces loss and **ranks real clicks above non-clicks** on a held-out
+split (rank-AUC > 0.6). `verify_integration.py` proves WeightsLab is fully wired
+in tabular mode.

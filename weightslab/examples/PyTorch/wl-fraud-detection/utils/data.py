@@ -53,11 +53,16 @@ assert IMG_SIDE * IMG_SIDE == NUM_FEATURES
 FRAUD_RATE = 0.12
 
 
-def make_synthetic_fraud(n_samples: int, seed: int = 0) -> Tuple[np.ndarray, np.ndarray]:
+def make_synthetic_fraud(
+    n_samples: int, seed: int = 0
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Generate deterministic synthetic transactions.
 
-    Returns ``(X, y)`` — ``X`` is ``float32[n_samples, NUM_FEATURES]``
-    (standardized) and ``y`` is ``int64[n_samples]`` with 1 = fraud.
+    Returns ``(X_std, X_raw, y)``:
+      * ``X_std``: ``float32[n, NUM_FEATURES]`` standardized features (model input)
+      * ``X_raw``: ``float32[n, NUM_FEATURES]`` raw, human-readable feature values
+        (surfaced as sortable metadata columns in the UI)
+      * ``y``: ``int64[n]`` label, 1 = fraud
 
     Fraud rows are drawn from shifted distributions (larger amounts and balance
     deltas, off-hours activity, higher merchant risk, more device changes, larger
@@ -65,7 +70,8 @@ def make_synthetic_fraud(n_samples: int, seed: int = 0) -> Tuple[np.ndarray, np.
     MLP learns it quickly, while class overlap keeps it non-trivial.
     """
     if n_samples <= 0:
-        return (np.zeros((0, NUM_FEATURES), dtype=np.float32), np.zeros((0,), dtype=np.int64))
+        empty = np.zeros((0, NUM_FEATURES), dtype=np.float32)
+        return (empty, empty.copy(), np.zeros((0,), dtype=np.int64))
 
     rng = np.random.default_rng(seed)
     n_fraud = max(1, int(round(n_samples * FRAUD_RATE)))
@@ -100,17 +106,21 @@ def make_synthetic_fraud(n_samples: int, seed: int = 0) -> Tuple[np.ndarray, np.
             axis=1,
         )
 
-    x = np.concatenate([_draw(n_legit, False), _draw(n_fraud, True)], axis=0).astype(np.float64)
+    x_raw = np.concatenate([_draw(n_legit, False), _draw(n_fraud, True)], axis=0).astype(np.float64)
     y = np.concatenate([np.zeros(n_legit, dtype=np.int64), np.ones(n_fraud, dtype=np.int64)])
 
     # Standardize per-feature (class-agnostic) so the MLP trains stably.
-    mean = x.mean(axis=0, keepdims=True)
-    std = x.std(axis=0, keepdims=True)
+    mean = x_raw.mean(axis=0, keepdims=True)
+    std = x_raw.std(axis=0, keepdims=True)
     std[std == 0] = 1.0
-    x = (x - mean) / std
+    x_std = (x_raw - mean) / std
 
-    perm = rng.permutation(len(x))  # interleave fraud/legit deterministically
-    return x[perm].astype(np.float32), y[perm]
+    perm = rng.permutation(len(x_raw))  # interleave fraud/legit deterministically
+    return (
+        x_std[perm].astype(np.float32),
+        x_raw[perm].astype(np.float32),
+        y[perm],
+    )
 
 
 class FraudDataset(Dataset):
@@ -122,15 +132,38 @@ class FraudDataset(Dataset):
     """
 
     def __init__(self, n_samples: int, seed: int = 0, max_samples: Optional[int] = None):
-        x, y = make_synthetic_fraud(n_samples, seed=seed)
+        x_std, x_raw, y = make_synthetic_fraud(n_samples, seed=seed)
         if max_samples is not None:
-            x, y = x[:max_samples], y[:max_samples]
-        self.features = torch.from_numpy(x)  # [N, 16] float32
-        self.labels = torch.from_numpy(y)    # [N] int64
+            x_std, x_raw, y = x_std[:max_samples], x_raw[:max_samples], y[:max_samples]
+        self.features = torch.from_numpy(x_std)  # [N, 16] float32 (model input)
+        self.raw = x_raw                          # [N, 16] float32 (display values)
+        self.labels = torch.from_numpy(y)         # [N] int64
 
     def __len__(self) -> int:
         return int(self.features.shape[0])
 
+    def _image(self, idx: int) -> torch.Tensor:
+        return self.features[idx].reshape(1, IMG_SIDE, IMG_SIDE)
+
+    def _metadata(self, idx: int) -> dict:
+        """Raw, human-readable feature values -> sortable UI columns."""
+        row = self.raw[idx]
+        return {name: round(float(row[i]), 4) for i, name in enumerate(FEATURE_NAMES)}
+
     def __getitem__(self, idx: int):
-        image = self.features[idx].reshape(1, IMG_SIDE, IMG_SIDE)
-        return image, idx, int(self.labels[idx].item())
+        # Training contract: (input, sample_id, label).
+        return self._image(idx), idx, int(self.labels[idx].item())
+
+    def get_items(self, idx: int, include_metadata: bool = False,
+                  include_labels: bool = False, include_images: bool = False):
+        """WeightsLab ledger-init contract: (image, uid, target, metadata).
+
+        Called once per sample at init with ``include_images=False``; the
+        returned ``metadata`` dict is flattened into per-sample columns, so each
+        transaction feature (``amount``, ``merchant_risk``, …) becomes a
+        sortable column in the List Exploration view.
+        """
+        image = self._image(idx) if include_images else None
+        target = int(self.labels[idx].item()) if include_labels else None
+        metadata = self._metadata(idx) if include_metadata else None
+        return image, idx, target, metadata

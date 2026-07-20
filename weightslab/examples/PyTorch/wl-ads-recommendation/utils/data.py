@@ -62,6 +62,23 @@ NUM_FIELDS = NUM_CATEGORICAL + NUM_NUMERIC  # 16
 IMG_SIDE = 4
 assert IMG_SIDE * IMG_SIDE == NUM_FIELDS
 
+# Human-readable labels per categorical field (len == cardinality), used only to
+# make the UI metadata columns legible; the model still sees integer codes.
+CATEGORICAL_VOCABS = {
+    "device_type": ["mobile", "desktop", "tablet", "ctv"],
+    "os": ["android", "ios", "windows", "other"],
+    "placement": ["banner", "sidebar", "interstitial", "native", "video"],
+    "hour_bucket": ["night", "early", "morning", "midday", "afternoon", "evening"],
+}
+
+
+def category_label(field: str, code: int) -> str:
+    """Readable label for a categorical code, or ``"<field>_<code>"`` fallback."""
+    vocab = CATEGORICAL_VOCABS.get(field)
+    if vocab is not None and 0 <= code < len(vocab):
+        return vocab[code]
+    return f"{field}_{code}"
+
 TARGET_CTR = 0.20
 # Fixed seed for the *ground-truth* click model, independent of the data seed,
 # so train and test splits share the same underlying mapping.
@@ -158,9 +175,37 @@ class AdsCTRDataset(Dataset):
     def __len__(self) -> int:
         return int(self.features.shape[0])
 
+    def _image(self, idx: int) -> torch.Tensor:
+        return self.features[idx].reshape(1, IMG_SIDE, IMG_SIDE)
+
+    def _metadata(self, idx: int) -> dict:
+        """Readable per-field values -> sortable UI columns."""
+        meta = {}
+        cat_row = self.cat[idx]
+        for f, name in enumerate(CATEGORICAL_FIELDS):
+            meta[name] = category_label(name, int(cat_row[f]))
+        num_row = self.num[idx]
+        for j, name in enumerate(NUMERIC_FIELDS):
+            meta[name] = round(float(num_row[j]), 4)
+        return meta
+
     def __getitem__(self, idx: int):
-        image = self.features[idx].reshape(1, IMG_SIDE, IMG_SIDE)
-        return image, idx, int(self.labels[idx].item())
+        # Training contract: (input, sample_id, label).
+        return self._image(idx), idx, int(self.labels[idx].item())
+
+    def get_items(self, idx: int, include_metadata: bool = False,
+                  include_labels: bool = False, include_images: bool = False):
+        """WeightsLab ledger-init contract: (image, uid, target, metadata).
+
+        The returned ``metadata`` dict (readable categorical labels + numeric
+        features) is flattened into per-sample columns, so each impression field
+        (``ad_category``, ``placement``, ``bid_price``, …) becomes a sortable
+        column in the List Exploration view.
+        """
+        image = self._image(idx) if include_images else None
+        target = int(self.labels[idx].item()) if include_labels else None
+        metadata = self._metadata(idx) if include_metadata else None
+        return image, idx, target, metadata
 
 
 def unpack(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:

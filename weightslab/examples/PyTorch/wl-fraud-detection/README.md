@@ -44,15 +44,26 @@ Swap `FraudDataset` for a loader over a real CSV to go from demo to reality:
 Keep the `__getitem__` contract `(features_as_image, idx, label)` and adjust
 `NUM_FEATURES` / the reshape.
 
+## What "a sample" is here
+
+There are no images — **each sample is one transaction (a row)**. The 16 raw
+features are exposed as **sortable columns** via the dataset's `get_items()`
+metadata contract (`preload_metadata=True`), so in the List Exploration view you
+get real tabular columns (`amount`, `merchant_risk`, `geo_distance_km`, …)
+alongside the tracked stats below. Everything you do on MNIST — sort, lock,
+right-click histograms, discard/restore samples, neuron ops — works the same
+way, because those operate on the per-sample ledger, not on pixels.
+
 ## What you'll see in the UI
 
-| Signal / column                        | Meaning                                        |
-| -------------------------------------- | ---------------------------------------------- |
-| `train-loss-CE`, `test-loss-CE`        | Weighted cross-entropy per split               |
-| `metric-ACC`                           | Overall accuracy                               |
-| `test_metric/Accuracy_per_sample`      | Per-transaction correctness (0/1)              |
-| `test_metric/Fraud_caught_per_sample`  | 1 when a true fraud was correctly flagged      |
-| `loss`, `prediction`, `target` columns | Per-sample columns to sort/lock in List view   |
+| Signal / column                          | Meaning                                        |
+| ---------------------------------------- | ---------------------------------------------- |
+| feature columns (`amount`, `merchant_risk`, …) | The 16 raw transaction features, sortable |
+| `train-loss-CE`, `test-loss-CE`          | Weighted cross-entropy per split               |
+| `metric-ACC`                             | Overall accuracy                               |
+| `test_metric/Accuracy_per_sample`        | Per-transaction correctness (0/1)              |
+| `test_metric/Fraud_caught_per_sample`    | 1 when a true fraud was correctly flagged      |
+| `target`, `prediction` columns           | Per-sample truth/pred to sort/lock in List view |
 
 Class weights (`[1.0, 4.0]`, config) up-weight the fraud class against the ~12%
 prevalence so the minority class drives the gradient.
@@ -60,10 +71,17 @@ prevalence so the minority class drives the gradient.
 ## Test it
 
 ```bash
+# Fast, offline unit tests (pure PyTorch, no gRPC server):
 python -m pytest test_fraud_detection.py -v
-# or:  python test_fraud_detection.py
+
+# End-to-end integration check (needs weightslab installed): drives the tracked
+# loaders + watched loss + gRPC server, then asserts the ledger dataframe the UI
+# reads has per-sample rows, every feature as a column, target/prediction/loss,
+# and a live gRPC endpoint.
+python verify_integration.py
 ```
 
-Pure-PyTorch smoke tests (no gRPC server): dataset contract, reproducibility,
-class balance, model forward pass, and that a few optimizer steps reduce the
-loss (final accuracy > 90%).
+The unit tests cover the dataset contract, reproducibility, class balance, the
+model forward pass, `get_items` metadata columns, and that a few optimizer steps
+reduce the loss (final accuracy > 90%). `verify_integration.py` proves WeightsLab
+is fully wired in tabular mode.

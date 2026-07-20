@@ -18,7 +18,9 @@ from utils.data import (  # noqa: E402
     NUM_CATEGORICAL,
     NUM_FIELDS,
     NUM_NUMERIC,
+    NUMERIC_FIELDS,
     AdsCTRDataset,
+    category_label,
     make_synthetic_ctr,
     unpack,
 )
@@ -72,6 +74,26 @@ def test_unpack_roundtrip():
     assert num.shape == (len(ds), NUM_NUMERIC)
     assert (cat == ds.cat).all(), "categorical indices must survive pack/unpack"
     assert torch.allclose(num, ds.num, atol=1e-5)
+
+
+def test_get_items_exposes_field_metadata_columns():
+    """The ledger-init contract must expose every field as a metadata column."""
+    ds = AdsCTRDataset(50, seed=2)
+    image, uid, target, metadata = ds.get_items(
+        4, include_metadata=True, include_labels=True, include_images=False
+    )
+    assert image is None
+    assert uid == 4 and target in (0, 1)
+    assert set(metadata.keys()) == set(CATEGORICAL_FIELDS) | set(NUMERIC_FIELDS)
+    # Categorical fields are readable strings, numeric are floats.
+    assert isinstance(metadata["placement"], str)
+    assert metadata["device_type"] in ("mobile", "desktop", "tablet", "ctv")
+    assert all(isinstance(metadata[n], float) for n in NUMERIC_FIELDS)
+
+
+def test_category_label_fallback():
+    assert category_label("device_type", 0) == "mobile"
+    assert category_label("region", 3) == "region_3"  # no vocab -> fallback
 
 
 def test_model_forward_shape():
