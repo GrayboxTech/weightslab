@@ -1,0 +1,48 @@
+# Global configuration
+experiment_name: fraud_detection_mlp
+device: auto
+training_steps_to_do: null  # null = train until manually stopped from the UI
+# root_log_dir: ...  # Path to save current experiment checkpoints and data
+
+# Initially compute natural sorting values (e.g. avg feature magnitude).
+compute_natural_sort: false
+
+# Experiment parameters
+eval_full_to_train_steps_ratio: 100
+experiment_dump_to_train_steps_ratio: 250
+write_export_ratio: 100
+skip_checkpoint_load: false
+tqdm_display: true
+is_training: false  # Start paused; press play in the UI.
+
+# Global dataframe storage
+ledger_enable_flushing_threads: true
+ledger_enable_h5_persistence: true
+ledger_flush_max_rows: 15000
+ledger_flush_interval: 30.0
+
+# Clients
+serving_grpc: true
+
+# Optimizer
+optimizer:
+  lr: 0.005
+
+# Class weighting to counter ~12% fraud prevalence [legit, fraud].
+class_weights: [1.0, 4.0]
+
+# Synthetic dataset generation (reproducible, no download).
+dataset:
+  seed: 0
+  n_train: 4000
+  n_test: 1000
+
+# DataLoader parameters
+data:
+  train_loader:
+    shuffle: true
+    batch_size: 32
+  test_loader:
+    shuffle: false
+    batch_size: 128
+    drop_last: false
