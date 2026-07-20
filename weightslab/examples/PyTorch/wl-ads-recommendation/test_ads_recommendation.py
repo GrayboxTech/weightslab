@@ -60,9 +60,10 @@ def test_ctr_is_realistic():
 def test_dataset_item_contract():
     ds = AdsCTRDataset(300, seed=2)
     assert len(ds) == 300
-    image, idx, label = ds[0]
-    assert tuple(image.shape) == (1, IMG_SIDE, IMG_SIDE)
-    assert image.dtype == torch.float32
+    x, idx, label = ds[0]
+    # Model input is the packed 1-D field vector (no fake image).
+    assert tuple(x.shape) == (NUM_FIELDS,)
+    assert x.dtype == torch.float32
     assert idx == 0 and label in (0, 1)
 
 

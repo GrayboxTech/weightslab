@@ -18,7 +18,7 @@ class FraudMLP(nn.Module):
 
     def __init__(self, in_features: int = NUM_FEATURES, hidden: int = 64, num_classes: int = 2):
         super().__init__()
-        self.input_shape = (1, 1, IMG_SIDE, IMG_SIDE)
+        self.input_shape = (1, NUM_FEATURES)
         self.net = nn.Sequential(
             nn.Flatten(),
             nn.Linear(in_features, hidden),

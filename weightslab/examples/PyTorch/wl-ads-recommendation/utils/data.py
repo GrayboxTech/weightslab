@@ -175,8 +175,9 @@ class AdsCTRDataset(Dataset):
     def __len__(self) -> int:
         return int(self.features.shape[0])
 
-    def _image(self, idx: int) -> torch.Tensor:
-        return self.features[idx].reshape(1, IMG_SIDE, IMG_SIDE)
+    def _input(self, idx: int) -> torch.Tensor:
+        # Tabular: the model input IS the packed 1-D field vector (no fake image).
+        return self.features[idx]
 
     def _metadata(self, idx: int) -> dict:
         """Readable per-field values -> sortable UI columns."""
@@ -191,7 +192,7 @@ class AdsCTRDataset(Dataset):
 
     def __getitem__(self, idx: int):
         # Training contract: (input, sample_id, label).
-        return self._image(idx), idx, int(self.labels[idx].item())
+        return self._input(idx), idx, int(self.labels[idx].item())
 
     def get_items(self, idx: int, include_metadata: bool = False,
                   include_labels: bool = False, include_images: bool = False):
@@ -202,7 +203,7 @@ class AdsCTRDataset(Dataset):
         (``ad_category``, ``placement``, ``bid_price``, …) becomes a sortable
         column in the List Exploration view.
         """
-        image = self._image(idx) if include_images else None
+        image = self._input(idx) if include_images else None
         target = int(self.labels[idx].item()) if include_labels else None
         metadata = self._metadata(idx) if include_metadata else None
         return image, idx, target, metadata

@@ -57,13 +57,17 @@ Keep the `__getitem__` contract `(packed_features_as_image, idx, label)`.
 
 ## What "a sample" is here
 
-There are no images — **each sample is one ad impression (a row)**. The 8
-categorical fields (as readable labels) and 8 numeric features are exposed as
-**sortable columns** via the dataset's `get_items()` metadata contract
-(`preload_metadata=True`), so the List Exploration view shows real tabular
-columns (`ad_category`, `placement`, `bid_price`, …) alongside the tracked stats
-below. Sort, lock, histograms, discard/restore and neuron ops all work as on
-MNIST — they operate on the per-sample ledger, not on pixels.
+There are no images — **each sample is one ad impression (a row)**, and the
+model input **is** the packed 1-D field vector (not a reshaped image).
+WeightsLab carries that vector through gRPC as a `raw_data` stat of type
+`vector` (the actual values), so `inputs`, `labels`/`target` and `metadata` all
+reach the UI. The 8 categorical fields (as readable labels) and 8 numeric
+features are also exposed as **sortable columns** via the dataset's
+`get_items()` metadata contract (`preload_metadata=True`), so the List
+Exploration view shows real tabular columns (`ad_category`, `placement`,
+`bid_price`, …) alongside the tracked stats below. Sort, lock, histograms,
+discard/restore and neuron ops all work as on MNIST — they operate on the
+per-sample ledger, not on pixels.
 
 ## What you'll see in the UI
 

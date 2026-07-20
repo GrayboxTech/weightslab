@@ -13,10 +13,10 @@ Real-world analogues (drop-in replaceable — just swap the dataset):
     anonymized V1..V28 PCA features) — https://www.kaggle.com/mlg-ulb/creditcardfraud
   * PaySim mobile-money fraud simulator — https://www.kaggle.com/ealaxi/paysim1
 
-The 16 features are reshaped to a 1x4x4 single-channel "image" so WeightsLab's
-image-centric grid renders a small per-transaction heatmap, while the List
-Exploration (tabular) view surfaces per-sample stats (loss / prediction /
-target) as sortable columns.
+The model input is the 1-D feature vector itself (no fake image). WeightsLab
+transmits it through gRPC as a ``vector`` raw_data stat carrying the actual
+values, and ``get_items`` exposes the raw features as sortable metadata columns
+in the List Exploration (tabular) view.
 """
 
 from __future__ import annotations
@@ -124,10 +124,12 @@ def make_synthetic_fraud(
 
 
 class FraudDataset(Dataset):
-    """Tabular fraud dataset yielding ``(image, idx, label)``.
+    """Tabular fraud dataset yielding ``(input, idx, label)``.
 
-    ``image`` is the 16 features reshaped to ``float32[1, IMG_SIDE, IMG_SIDE]``
-    so the WeightsLab grid renders a heatmap thumbnail; ``idx`` is the tracked
+    ``input`` is the 1-D standardized feature vector ``float32[NUM_FEATURES]``
+    fed straight to the model — there is no image. WeightsLab transmits the
+    feature values through gRPC as a ``vector`` raw_data stat, and ``get_items``
+    exposes the raw values as sortable metadata columns. ``idx`` is the tracked
     sample id; ``label`` is 0 (legit) / 1 (fraud).
     """
 
@@ -142,8 +144,9 @@ class FraudDataset(Dataset):
     def __len__(self) -> int:
         return int(self.features.shape[0])
 
-    def _image(self, idx: int) -> torch.Tensor:
-        return self.features[idx].reshape(1, IMG_SIDE, IMG_SIDE)
+    def _input(self, idx: int) -> torch.Tensor:
+        # Tabular: the model input IS the 1-D feature vector (no fake image).
+        return self.features[idx]
 
     def _metadata(self, idx: int) -> dict:
         """Raw, human-readable feature values -> sortable UI columns."""
@@ -152,7 +155,7 @@ class FraudDataset(Dataset):
 
     def __getitem__(self, idx: int):
         # Training contract: (input, sample_id, label).
-        return self._image(idx), idx, int(self.labels[idx].item())
+        return self._input(idx), idx, int(self.labels[idx].item())
 
     def get_items(self, idx: int, include_metadata: bool = False,
                   include_labels: bool = False, include_images: bool = False):
@@ -163,7 +166,7 @@ class FraudDataset(Dataset):
         transaction feature (``amount``, ``merchant_risk``, …) becomes a
         sortable column in the List Exploration view.
         """
-        image = self._image(idx) if include_images else None
+        image = self._input(idx) if include_images else None
         target = int(self.labels[idx].item()) if include_labels else None
         metadata = self._metadata(idx) if include_metadata else None
         return image, idx, target, metadata

@@ -36,7 +36,7 @@ class WideDeepCTR(nn.Module):
         num_classes: int = 2,
     ):
         super().__init__()
-        self.input_shape = (1, 1, IMG_SIDE, IMG_SIDE)
+        self.input_shape = (1, len(cardinalities) + num_numeric)
         self.cardinalities = list(cardinalities)
         self.num_numeric = num_numeric
 

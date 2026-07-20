@@ -163,6 +163,44 @@ def main() -> int:
     else:
         print(f"gRPC server listening on 127.0.0.1:{grpc_port}  OK")
 
+        # Real gRPC round-trip: the packed field vector fed to the model must
+        # reach the UI as raw_data of type 'vector' carrying the values.
+        try:
+            import grpc
+            from weightslab.proto import experiment_service_pb2 as pb2
+            from weightslab.proto import experiment_service_pb2_grpc as pb2_grpc
+
+            n_fields = len(CATEGORICAL_CARDINALITIES) + NUM_NUMERIC
+            channel = grpc.insecure_channel(f"127.0.0.1:{grpc_port}")
+            grpc.channel_ready_future(channel).result(timeout=10)
+            stub = pb2_grpc.ExperimentServiceStub(channel)
+            resp = stub.GetDataSamples(pb2.DataSamplesRequest(
+                start_index=0, records_cnt=5, include_raw_data=True,
+                resize_width=0, resize_height=0), timeout=20)
+
+            raw = None
+            for rec in resp.data_records:
+                for st in rec.data_stats:
+                    if st.name == "raw_data":
+                        raw = st
+                        break
+                if raw is not None:
+                    break
+
+            if raw is None:
+                problems.append("gRPC GetDataSamples returned no raw_data stat")
+            elif raw.type != "vector":
+                problems.append(f"raw_data.type is '{raw.type}', expected 'vector'")
+            elif len(raw.value) != n_fields:
+                problems.append(
+                    f"raw_data carries {len(raw.value)} values, expected {n_fields}")
+            else:
+                print(f"gRPC GetDataSamples: raw_data type='vector', "
+                      f"{len(raw.value)} field values reached the UI  OK")
+            channel.close()
+        except Exception as e:
+            problems.append(f"gRPC GetDataSamples failed: {e}")
+
     if problems:
         print("\n VERIFY FAILED:")
         for p in problems:

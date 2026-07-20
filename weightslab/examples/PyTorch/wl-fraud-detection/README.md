@@ -46,12 +46,15 @@ Keep the `__getitem__` contract `(features_as_image, idx, label)` and adjust
 
 ## What "a sample" is here
 
-There are no images — **each sample is one transaction (a row)**. The 16 raw
-features are exposed as **sortable columns** via the dataset's `get_items()`
-metadata contract (`preload_metadata=True`), so in the List Exploration view you
-get real tabular columns (`amount`, `merchant_risk`, `geo_distance_km`, …)
-alongside the tracked stats below. Everything you do on MNIST — sort, lock,
-right-click histograms, discard/restore samples, neuron ops — works the same
+There are no images — **each sample is one transaction (a row)**, and the model
+input **is** the 1-D feature vector (not a reshaped image). WeightsLab carries
+that vector through gRPC as a `raw_data` stat of type `vector` (the actual
+values), so `inputs`, `labels`/`target` and `metadata` all reach the UI. The 16
+raw features are also exposed as **sortable columns** via the dataset's
+`get_items()` metadata contract (`preload_metadata=True`), so the List
+Exploration view shows real tabular columns (`amount`, `merchant_risk`,
+`geo_distance_km`, …) alongside the tracked stats below. Everything you do on
+MNIST — sort, lock, histograms, discard/restore, neuron ops — works the same
 way, because those operate on the per-sample ledger, not on pixels.
 
 ## What you'll see in the UI

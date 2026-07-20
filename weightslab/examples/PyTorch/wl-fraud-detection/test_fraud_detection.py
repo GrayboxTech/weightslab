@@ -53,9 +53,10 @@ def test_class_imbalance_is_realistic():
 def test_dataset_item_contract():
     ds = FraudDataset(300, seed=3)
     assert len(ds) == 300
-    image, idx, label = ds[0]
-    assert tuple(image.shape) == (1, IMG_SIDE, IMG_SIDE)
-    assert image.dtype == torch.float32
+    x, idx, label = ds[0]
+    # Model input is the 1-D feature vector (no fake image).
+    assert tuple(x.shape) == (NUM_FEATURES,)
+    assert x.dtype == torch.float32
     assert idx == 0 and label in (0, 1)
 
 
@@ -88,7 +89,7 @@ def test_model_forward_shape_flat_and_image():
 def test_training_reduces_loss():
     torch.manual_seed(0)
     ds = FraudDataset(1000, seed=0)
-    features = ds.features.reshape(len(ds), 1, IMG_SIDE, IMG_SIDE)
+    features = ds.features  # [N, NUM_FEATURES]
     labels = ds.labels
 
     model = FraudMLP()

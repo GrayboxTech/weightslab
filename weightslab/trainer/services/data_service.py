@@ -46,6 +46,8 @@ from weightslab.trainer.services.data_image_utils import (
     rle_encode_mask,
     create_data_stat,
     resize_mask_nearest,
+    looks_like_tabular,
+    build_tabular_raw_data_stat,
 )
 
 
@@ -493,7 +495,12 @@ class DataService:
                         ds_idx = dataset.get_index_from_sample_id(sample_id)
                         member_rank = 0
 
-                    _, _, _, pil_img = load_raw_image_array(dataset, ds_idx, rank=member_rank)
+                    _pv_np_img, _, _, pil_img = load_raw_image_array(dataset, ds_idx, rank=member_rank)
+                    if looks_like_tabular(_pv_np_img):
+                        # Tabular sample: cache the feature values (lossless) as a
+                        # 'vector' raw_data stat + heatmap thumbnail, not an image.
+                        stats.append(build_tabular_raw_data_stat(_pv_np_img))
+                        pil_img = None  # skip the image-thumbnail path below
                     if pil_img is not None:
                         ar = pil_img.size[0] / max(pil_img.size[1], 1)
                         if PREVIEW_SIZE >= max(pil_img.size):
@@ -1750,7 +1757,12 @@ class DataService:
                 else:
                     np_img, is_volumetric, original_shape, middle_pil = None, False, [], None
 
-                if middle_pil is not None:
+                # Tabular input: the model input is a 1-D feature vector, not an
+                # image. Transmit the actual values (lossless) as a 'vector'
+                # raw_data stat instead of a lossy WebP image.
+                if looks_like_tabular(np_img):
+                    data_stats.append(build_tabular_raw_data_stat(np_img))
+                elif middle_pil is not None:
                     original_size = middle_pil.size
                     target_width = original_size[0]
                     target_height = original_size[1]
