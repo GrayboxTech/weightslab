@@ -31,6 +31,7 @@ Design notes
 
 import functools
 import json
+import logging
 import os
 import threading
 import time
@@ -41,6 +42,8 @@ import pandas as pd
 import torch as th
 
 from weightslab.backend.ledgers import get_logger, register_logger, get_checkpoint_manager
+
+logger = logging.getLogger(__name__)
 
 
 # Column order for each table's staging buffer / bulk insert.
@@ -112,45 +115,141 @@ class LoggerQueue:
         # Init checkpoint manager for experiment hash retrieval (if available)
         self.chkpt_manager = get_checkpoint_manager()
 
+        # If no explicit db_path was given but a checkpoint manager already
+        # exists, persist history to an on-disk DuckDB file under its loggers/
+        # dir. (The reverse ordering — CM created after the logger — is handled
+        # by CheckpointManager.__init__ calling set_db_path on the live logger.)
+        if db_path == ":memory:":
+            try:
+                loggers_dir = getattr(self.chkpt_manager, "loggers_dir", None)
+                if loggers_dir:
+                    self.set_db_path(os.path.join(str(loggers_dir), "loggers.duckdb"))
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------
     # DuckDB plumbing
     # ------------------------------------------------------------------
+    @staticmethod
+    def _schema_ddl(prefix: str = "") -> str:
+        """Return the CREATE-TABLE DDL for all history tables.
+
+        ``prefix`` lets the same schema be created inside an attached database
+        (e.g. ``"ondisk."``) when migrating from in-memory to a file.
+        """
+        return f"""
+            CREATE TABLE IF NOT EXISTS {prefix}signals (
+                metric_name VARCHAR,
+                experiment_hash VARCHAR,
+                step INTEGER,
+                metric_value DOUBLE,
+                timestamp BIGINT,
+                audit_mode BOOLEAN,
+                is_evaluation_marker BOOLEAN,
+                split_name VARCHAR,
+                evaluation_tags VARCHAR,
+                point_note VARCHAR,
+                seq BIGINT
+            );
+            CREATE TABLE IF NOT EXISTS {prefix}per_sample (
+                metric_name VARCHAR,
+                experiment_hash VARCHAR,
+                sample_id VARCHAR,
+                step INTEGER,
+                value REAL,
+                seq BIGINT
+            );
+            CREATE TABLE IF NOT EXISTS {prefix}per_instance (
+                metric_name VARCHAR,
+                experiment_hash VARCHAR,
+                sample_id VARCHAR,
+                annotation_id INTEGER,
+                step INTEGER,
+                value REAL,
+                seq BIGINT
+            );
+        """
+
     def _ensure_tables(self) -> None:
         with self._lock:
-            self._conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS signals (
-                    metric_name VARCHAR,
-                    experiment_hash VARCHAR,
-                    step INTEGER,
-                    metric_value DOUBLE,
-                    timestamp BIGINT,
-                    audit_mode BOOLEAN,
-                    is_evaluation_marker BOOLEAN,
-                    split_name VARCHAR,
-                    evaluation_tags VARCHAR,
-                    point_note VARCHAR,
-                    seq BIGINT
-                );
-                CREATE TABLE IF NOT EXISTS per_sample (
-                    metric_name VARCHAR,
-                    experiment_hash VARCHAR,
-                    sample_id VARCHAR,
-                    step INTEGER,
-                    value REAL,
-                    seq BIGINT
-                );
-                CREATE TABLE IF NOT EXISTS per_instance (
-                    metric_name VARCHAR,
-                    experiment_hash VARCHAR,
-                    sample_id VARCHAR,
-                    annotation_id INTEGER,
-                    step INTEGER,
-                    value REAL,
-                    seq BIGINT
-                );
-                """
-            )
+            self._conn.execute(self._schema_ddl())
+
+    _HISTORY_TABLES = ("signals", "per_sample", "per_instance")
+
+    def set_db_path(self, db_path) -> None:
+        """Persist signal history to an on-disk DuckDB file.
+
+        Call this once, early in setup. If the file already exists (resume),
+        its data is adopted as-is. If it does not, whatever little is currently
+        in the in-memory DB is migrated into the new file. Either way the file
+        becomes the live connection afterwards.
+
+        The hot logging path is unaffected: ``add_scalars`` still stages to RAM
+        and only bulk-flushes to DuckDB lazily. DuckDB serves reads from its
+        in-memory buffer pool, so this adds durability, not per-read disk hits.
+        """
+        if not db_path or db_path == ":memory:":
+            return
+        db_path = str(db_path)
+
+        with self._lock:
+            if self._db_path == db_path:
+                return
+
+            parent = os.path.dirname(db_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+
+            file_preexists = os.path.exists(db_path)
+
+            try:
+                # Make sure staged rows are materialized before we migrate.
+                self._flush_stage()
+
+                if not file_preexists:
+                    # Fresh file: copy whatever is in the in-memory DB into it.
+                    # ATTACH doesn't accept bind parameters, so inline the path
+                    # with SQL-escaped quotes.
+                    escaped = db_path.replace("'", "''")
+                    self._conn.execute(f"ATTACH '{escaped}' AS ondisk")
+                    self._conn.execute(self._schema_ddl(prefix="ondisk."))
+                    for tbl in self._HISTORY_TABLES:
+                        self._conn.execute(
+                            f"INSERT INTO ondisk.{tbl} SELECT * FROM {tbl}"
+                        )
+                    self._conn.execute("DETACH ondisk")
+
+                # Adopt the on-disk file as the live connection. On resume this
+                # is the source of truth; the fresh in-memory rows are ignored.
+                self._conn.close()
+                self._conn = duckdb.connect(database=db_path)
+                self._db_path = db_path
+                self._ensure_tables()
+                self._invalidate_qps_cache()
+                self._restore_runtime_state_from_db()
+                logger.info(
+                    f"[LoggerQueue] Signal history persisted on disk at {db_path} "
+                    f"({'adopted existing' if file_preexists else 'new'} database)."
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"[LoggerQueue] Failed to enable on-disk persistence at "
+                    f"{db_path}: {exc}. Keeping in-memory history."
+                )
+
+    def flush_to_disk(self) -> None:
+        """Flush staged rows and force a DuckDB checkpoint to the file.
+
+        No-op for an in-memory database. Call at checkpoint time so history is
+        durable even without a clean shutdown (DuckDB also replays its WAL on
+        the next open, so this is belt-and-braces)."""
+        with self._lock:
+            try:
+                self._flush_stage()
+                if self._db_path != ":memory:":
+                    self._conn.execute("CHECKPOINT")
+            except Exception as exc:
+                logger.warning(f"[LoggerQueue] flush_to_disk failed: {exc}")
 
     def _restore_runtime_state_from_db(self) -> None:
         """Repopulate seq counter and graph names from an existing (file) DB."""
