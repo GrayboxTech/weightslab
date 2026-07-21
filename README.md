@@ -89,6 +89,10 @@ For a detailed installation guide and advanced configuration &rarr; [Installatio
 > weightslab start example --clus     # clustering
 > weightslab start example --gen      # generation
 > ```
+>
+> Browse every runnable example — including the **tabular** fraud-detection and
+> ads-CTR usecases, each with a one-click **Colab** notebook — in the
+> [examples gallery](weightslab/examples/README.md).
 
 <br>
 

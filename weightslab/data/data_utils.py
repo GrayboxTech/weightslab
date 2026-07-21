@@ -1,3 +1,4 @@
+import io
 import re
 import numpy as np
 import torch as th
@@ -617,6 +618,20 @@ def load_raw_image_array(dataset, index, rank: int = 0) -> tuple:
 
     if hasattr(wrapped, '__getitem__'):
         np_img, is_volumetric, original_shape = _get_image_array_and_metadata(wrapped, index, rank=rank)
+
+        # Tabular samples (1-D feature vectors) have no spatial dims and cannot be
+        # PIL-encoded as an image. Render a small heatmap for display continuity;
+        # the caller transmits the actual values via build_tabular_raw_data_stat.
+        if getattr(np_img, "ndim", None) == 1:
+            from weightslab.trainer.services.data_image_utils import render_tabular_heatmap
+            thumb_bytes, _shp = render_tabular_heatmap(np_img)
+            thumb_pil = None
+            if thumb_bytes:
+                try:
+                    thumb_pil = Image.open(io.BytesIO(thumb_bytes)).convert("RGB")
+                except Exception:
+                    thumb_pil = None
+            return np_img, False, original_shape, thumb_pil
 
         # Point-cloud samples (LiDAR etc.) cannot be PIL-encoded; render a
         # server-side 2D thumbnail (BEV, range image, or custom projection).
