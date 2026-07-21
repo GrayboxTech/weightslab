@@ -53,6 +53,6 @@ Typical integration flow to custom Python script
   .. code-block:: bash
 
    weightslab start
-     python train.py
+   python train.py
 
 - Resume training from the UI and use tags/discards/signals to iteratively improve data and model behavior.

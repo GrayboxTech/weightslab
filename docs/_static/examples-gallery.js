@@ -20,7 +20,7 @@
       desc: 'CNN digit classifier on MNIST. Register hyperparameters, monitor per-sample loss, and use the deny-aware sampler to focus on hard examples.',
       tags: ['classification', 'supervised', 'mnist', 'cnn'],
       url: 'examples/pytorch/classification.html',
-      colab: COLAB + 'PyTorch/ws-classification.ipynb'
+      colab: COLAB + 'PyTorch/wl-classification.ipynb'
     },
     {
       badge: 'PyTorch', color: 'pytorch',
@@ -28,7 +28,7 @@
       desc: 'Per-pixel semantic segmentation with a UNet. Track per-sample IoU and visualise mask overlays directly in the studio.',
       tags: ['segmentation', 'semantic', 'bdd100k', 'masks', 'dense prediction'],
       url: 'examples/pytorch/segmentation.html',
-      colab: COLAB + 'PyTorch/ws-segmentation.ipynb'
+      colab: COLAB + 'PyTorch/wl-segmentation.ipynb'
     },
     {
       badge: 'PyTorch', color: 'pytorch',
@@ -36,7 +36,7 @@
       desc: 'Bounding-box detection on Penn-Fudan pedestrians. Per-instance multi-index dataframe with (sample_id, annotation_id) keys.',
       tags: ['detection', 'object detection', 'bounding boxes', 'penn-fudan'],
       url: 'examples/pytorch/detection.html',
-      colab: COLAB + 'PyTorch/ws-detection.ipynb'
+      colab: COLAB + 'PyTorch/wl-detection.ipynb'
     },
     {
       badge: 'PyTorch', color: 'pytorch',
@@ -44,7 +44,7 @@
       desc: 'Metric learning with triplet loss on face datasets. Store and explore high-dimensional embeddings per sample in the studio.',
       tags: ['clustering', 'unsupervised', 'embeddings', 'face recognition', 'metric learning'],
       url: 'examples/pytorch/clustering.html',
-      colab: COLAB + 'PyTorch/ws-clustering.ipynb'
+      colab: COLAB + 'PyTorch/wl-clustering.ipynb'
     },
     {
       badge: 'PyTorch', color: 'pytorch',
@@ -52,7 +52,7 @@
       desc: 'Unsupervised anomaly detection on MVTec with a multi-task UNet. Monitor reconstruction quality and per-sample anomaly scores.',
       tags: ['anomaly detection', 'generation', 'unsupervised', 'mvtec', 'reconstruction'],
       url: 'examples/pytorch/generation.html',
-      colab: COLAB + 'PyTorch/ws-generation.ipynb'
+      colab: COLAB + 'PyTorch/wl-generation.ipynb'
     },
     {
       badge: 'Lightning', color: 'lightning',
@@ -81,7 +81,7 @@
       desc: 'Dynamic subscribed signal that classifies each sample\'s loss trajectory (monotonic, U-shape, spiked, …) and auto-tags it.',
       tags: ['loss analysis', 'signal', 'categorical tag', 'per-sample', 'trajectory'],
       url: 'examples/usecases/loss_shape_classification.html',
-      colab: COLAB + 'Usecases/ws-segmentation-loss-shapes.ipynb'
+      colab: COLAB + 'Usecases/wl-segmentation-loss-shapes-classification.ipynb'
     }
   ];
 

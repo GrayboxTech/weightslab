@@ -139,7 +139,7 @@ Pass ``--certs`` to generate (if missing) and use TLS certificates + a gRPC auth
 .. code-block:: bash
 
    weightslab start              # unsecured HTTP (default)
-   weightslab start --certs    # secured HTTPS + gRPC auth (run `weightslab se` first)
+   weightslab start --certs      # secured HTTPS + gRPC auth (run `weightslab se` first)
 
 .. important::
 
