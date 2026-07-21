@@ -1,4 +1,4 @@
-"""Pure-Python WeightsLab UI server (Docker-free).
+"""Pure-Python WeightsLab UI server.
 
 This package bundles the pre-built Weights Studio single-page app under
 ``weightslab/ui/static`` and serves it together with a gRPC-Web proxy from a

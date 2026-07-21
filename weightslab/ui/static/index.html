@@ -48,8 +48,8 @@
       }
     });
   </script>
-  <script type="module" crossorigin src="/assets/index-CRYFrv2n.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-BePnPDPX.css">
+  <script type="module" crossorigin src="/assets/index-E-worJJ5.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-BJiXGpJW.css">
 </head>
 
 <body>
@@ -217,7 +217,7 @@
         <div class="header-branding">
           <span class="branding-text"><span class="branding-text-w">W</span>eights<span class="branding-text-l">L</span>ab by</span>
           <a href="https://www.graybx.com/" target="_blank" class="logo-link">
-            <img id="logo-img" src="/assets/logo-x9HI4Quq.png" alt="Graybx Logo" class="logo-img" data-hover-hint="" data-hover-hint-nowrap="">
+            <img id="logo-img" src="/images/lightmode/logo.png" alt="Graybx Logo" class="logo-img" data-hover-hint="" data-hover-hint-nowrap="">
           </a>
         </div>
       </div>
@@ -420,6 +420,14 @@
             <div class="inspector-header">
               <div class="inspector-title">Details</div>
               <div class="inspector-header-actions">
+                <div id="explore-view-toggle" class="explore-view-toggle" role="group" aria-label="Exploration view mode">
+                  <button id="explore-view-grid" class="explore-view-btn active" type="button" title="Grid view" aria-pressed="true">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect></svg>
+                  </button>
+                  <button id="explore-view-list" class="explore-view-btn" type="button" title="List view" aria-pressed="false">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+                  </button>
+                </div>
                 <button id="manual-data-save-btn" class="icon-btn" title="Manual Save Data State">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
                 </button>
@@ -589,6 +597,13 @@
               <div id="cells-grid">
                   <!-- Grid cells will be injected here -->
               </div>
+            </div>
+
+            <!-- LIST Exploration (table view) — overlays the grid area when active.
+                 The grid stays mounted underneath as the data engine; this view
+                 mirrors the same records as sortable rows. -->
+            <div id="list-exploration" class="list-exploration" hidden>
+              <!-- ListExplorationView injects its table here -->
             </div>
           </div>
         </div>

@@ -169,7 +169,7 @@ def _banner() -> str:
 _DESCRIPTION = (
     _banner()
     + "\nWeightsLab — Inspect, Edit, and Evolve Neural Networks\n"
-    + "Run the Weights Studio UI (Docker-free), bundled examples, and the secure "
+    + "Run the Weights Studio UI, bundled examples, and the secure "
     + "(TLS + gRPC auth) environment."
 )
 
@@ -225,7 +225,7 @@ commands:
 examples:
   weightslab se                       # one-time secure setup (then export WEIGHTSLAB_CERTS_DIR)
   weightslab se --force-certs         # regenerate the certs
-    weightslab start                    # launch the UI (unsecured HTTP, default) at :50051
+  weightslab start                    # launch the UI (unsecured HTTP, default) at :50051
   weightslab start --certs            # launch the UI over HTTPS (needs `weightslab se` first)
   weightslab start --port 9000        # launch the UI on a custom port
   weightslab start --backend-port 50052   # proxy to a backend on a custom gRPC port
@@ -690,7 +690,7 @@ def ui_start_native(args):
 
 
 def _add_ui_server_flags(p: argparse.ArgumentParser) -> None:
-    """Attach flags for the native (Docker-free) UI server."""
+    """Attach flags for the native UI server."""
     p.add_argument('--port', type=int, default=None,
                    help='UI HTTP port (default: config ui_port, else $WL_LAST_UI_PORT, else 50051)')
     p.add_argument('--config', default=None,
@@ -781,7 +781,7 @@ def _build_parser() -> argparse.ArgumentParser:
         '--remote-port', type=int, default=None,
         help="Remote port, if not included in ENDPOINT")
 
-    # weightslab start [--port N ...]        -> native (Docker-free) UI server
+    # weightslab start [--port N ...]        -> native UI server
     # weightslab start example [--cls|--seg|--clus|--gen]  -> bundled example
     start_parser = sub.add_parser(
         "start",
@@ -825,7 +825,7 @@ def main():
         if getattr(args, "start_target", None) == "example":
             example_start(args)
         else:
-            # Bare `weightslab start` -> launch the native (Docker-free) UI.
+            # Bare `weightslab start` -> launch the native UI.
             ui_start_native(args)
     elif args.command == "example":
         # Alias for `start example` — tolerate the swapped subcommand order.

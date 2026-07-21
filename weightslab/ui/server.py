@@ -505,7 +505,7 @@ def serve_ui(
 
     sys.stdout.write(
         "\n"
-        "  WeightsLab UI (Docker-free) is running:\n"
+        "  WeightsLab UI is running:\n"
         f"      {url}\n"
         f"    proxying gRPC-Web  ->  {backend_host}:{backend_port}\n"
         "    Press Ctrl+C to stop.\n\n"

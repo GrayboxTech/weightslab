@@ -1,4 +1,4 @@
-"""Tests for secure environment setup on the native (Docker-free) stack."""
+"""Tests for secure environment setup on the native stack."""
 
 import os
 import tempfile
