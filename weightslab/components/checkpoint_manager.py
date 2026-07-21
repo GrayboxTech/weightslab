@@ -113,6 +113,11 @@ class CheckpointManager:
         self.data_checkpoint_dir.mkdir(exist_ok=True)
         self.loggers_dir.mkdir(exist_ok=True)
 
+        # Persist the signal-history logger to an on-disk DuckDB file under
+        # loggers/. Handles the ordering where the logger was created before
+        # this checkpoint manager (the reverse is handled in LoggerQueue.__init__).
+        self._bind_logger_to_disk()
+
         # Manifest file for tracking hash chronology
         self.manifest_file = self.checkpoints_dir / "manifest.yaml"
 
@@ -193,6 +198,31 @@ class CheckpointManager:
             }
         except Exception:
             return None
+
+    def get_logger_db_path(self) -> Path:
+        """Path of the on-disk DuckDB file backing the signal-history logger."""
+        return self.loggers_dir / "loggers.duckdb"
+
+    def _bind_logger_to_disk(self) -> None:
+        """Point the registered logger at an on-disk DuckDB file, if possible.
+
+        Safe no-op when no logger is registered yet or it predates on-disk
+        persistence support."""
+        try:
+            lg = ledgers.get_logger()
+            if lg is not None and hasattr(lg, "set_db_path"):
+                lg.set_db_path(str(self.get_logger_db_path()))
+        except Exception as e:
+            logger.warning(f"Could not bind logger to on-disk DuckDB: {e}")
+
+    def flush_logger_to_disk(self) -> None:
+        """Force the logger to checkpoint its DuckDB history to disk (if any)."""
+        try:
+            lg = ledgers.get_logger()
+            if lg is not None and hasattr(lg, "flush_to_disk"):
+                lg.flush_to_disk()
+        except Exception as e:
+            logger.warning(f"Could not flush logger to disk: {e}")
 
     def _get_logger_snapshot_dir(self) -> Path:
         return self.loggers_dir
@@ -871,9 +901,9 @@ class CheckpointManager:
             except Exception as e:
                 logger.warning(f"Failed to save weights with component changes: {e}")
 
-        # Always save logger snapshot alongside other components (same hash)
-        if dump_model_architecture or dump_model_state or dump_optimizer_state or dump_config_state:
-            self.save_logger_snapshot()
+        # Durably checkpoint the on-disk signal-history DuckDB alongside the
+        # rest of the state (cheap CHECKPOINT; replaces the old JSON snapshot).
+        self.flush_logger_to_disk()
 
     def save_model_checkpoint(
         self,
@@ -977,12 +1007,6 @@ class CheckpointManager:
             # If model architecture doesn't exist in this hash directory, save a reference to where it is
             if self.config.get('checkpoint_manager', {}).get('dump_model_architecture', False):
                 self._save_architecture_reference_if_needed() # TODO (GP): Disable for now because it adds complexity for big models, and we want to ensure architecture is always saved with weights for simplicity
-
-            # Persist logger queues alongside weight checkpoints
-            try:
-                self.save_logger_snapshot()
-            except Exception as e:
-                logger.debug(f"Could not save logger snapshot with checkpoint: {e}")
             return checkpoint_file
         except Exception as e:
             logger.error(f"Failed to save model checkpoint: {e}")
@@ -1213,99 +1237,6 @@ class CheckpointManager:
                 traceback.print_exc()
             logger.error(f"Failed to save data snapshot: {e}")
         return None
-
-    def save_logger_snapshot(self, exp_hash: Optional[str] = None) -> Optional[Path]:
-        """Persist logger queues for the given experiment hash.
-
-        Uses the same hash as model/hp/data; does not affect hashing.
-        """
-        exp = exp_hash or self.current_exp_hash
-        if exp is None:
-            return None
-
-        try:
-            logger_names = ledgers.list_loggers()
-            if not logger_names:
-                return None
-
-            snapshot = {"exp_hash": exp, "timestamp": datetime.now().isoformat(), "loggers": {}}
-            for lname in logger_names:
-                lg = ledgers.get_logger(lname)
-                if lg == None:
-                    continue
-
-                # Get snapshot data from logger, using dedicated method if available for better encapsulation (e.g. for LoggerQueue)
-                payload = lg.save_snapshot()
-
-                # Get final snapshot for this logger
-                snapshot["loggers"][lname] = payload
-
-            if not snapshot["loggers"]:
-                return None
-
-            snapshot_dir = self._get_logger_snapshot_dir()
-            snapshot_dir.mkdir(parents=True, exist_ok=True)
-
-            # Merge existing payload to avoid dropping loggers not currently registered
-            try:
-                existing = self._load_logger_snapshot_payload()
-                existing_loggers = existing.get("loggers", {}) if isinstance(existing, dict) else {}
-                if existing_loggers:
-                    recursive_update(existing_loggers, snapshot.get("loggers", {}))
-                    snapshot["loggers"] = existing_loggers
-            except Exception as e:
-                logger.warning(f"Failed to merge existing logger snapshot: {e}")
-
-            records: List[bytes] = []
-            for lname, payload in snapshot["loggers"].items():
-                line = json.dumps({"logger_name": lname, "payload": payload}, default=str) + "\n"
-                records.append(line.encode("utf-8"))
-
-            chunks: List[bytes] = []
-            current_chunk = bytearray()
-            for record in records:
-                if current_chunk and (len(current_chunk) + len(record) > self.LOGGER_SNAPSHOT_MAX_FILE_SIZE_BYTES):
-                    chunks.append(bytes(current_chunk))
-                    current_chunk = bytearray()
-                current_chunk.extend(record)
-            if current_chunk:
-                chunks.append(bytes(current_chunk))
-
-            old_chunks = self._list_logger_snapshot_chunks()
-            for old_chunk in old_chunks:
-                try:
-                    old_chunk.unlink()
-                except Exception:
-                    pass
-
-            compressor = zstd.ZstdCompressor(level=3)
-            chunk_names: List[str] = []
-            for idx, raw_chunk in enumerate(chunks, start=1):
-                chunk_path = self._get_logger_snapshot_chunk_path(idx)
-                tmp_chunk_path = chunk_path.with_name(chunk_path.name + ".tmp")
-                with open(tmp_chunk_path, "wb") as f:
-                    f.write(compressor.compress(raw_chunk))
-                os.replace(tmp_chunk_path, chunk_path)
-                chunk_names.append(chunk_path.name)
-
-            manifest = {
-                "exp_hash": exp,
-                "timestamp": datetime.now().isoformat(),
-                "format": "ndjson+zstd",
-                "max_file_size_bytes": self.LOGGER_SNAPSHOT_MAX_FILE_SIZE_BYTES,
-                "chunks": chunk_names,
-            }
-            manifest_path = self._get_logger_snapshot_manifest_path()
-            tmp_manifest_path = manifest_path.with_name(manifest_path.name + ".tmp")
-            with open(tmp_manifest_path, "w", encoding="utf-8") as f:
-                json.dump(manifest, f, indent=2)
-            os.replace(tmp_manifest_path, manifest_path)
-
-            logger.info(f"Saved logger snapshot: {manifest_path} ({len(chunk_names)} chunks)")
-            return manifest_path
-        except Exception as e:
-            logger.warning(f"Failed to save logger snapshot: {e}")
-            return None
 
     def save_pending_changes(self, force: bool = False) -> bool:
         """Dump any pending changes to disk.
