@@ -115,15 +115,16 @@ utest = [
 ]
 
 [project.scripts]
-weightslab = "weightslab.ui_docker_bridge:main"
+weightslab = "weightslab.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/GrayboxTech/weightslab"
 
 [tool.setuptools]
-# Ship non-.py assets that live inside the package (docker stack + bundled
-# examples). Combined with the explicit globs below so the CLI subcommands
-# (`ui launch`, `start example`) find their files in a pip-installed package.
+# Ship non-.py assets that live inside the package (cert scripts, bundled
+# examples, pre-built UI). Combined with the explicit globs below so the CLI
+# subcommands (`start`, `start example`, `se`) find their files in a
+# pip-installed package.
 include-package-data = true
 
 [tool.setuptools.packages.find]
@@ -131,18 +132,19 @@ where = ["."]
 include = ["weightslab", "weightslab.*"]
 
 [tool.setuptools.package-data]
-# Bundle the docker stack (compose files, envoy/nginx configs, shell scripts)
-# and the example projects (main.py, config.yaml, sample data) that the
-# `weightslab` CLI resolves relative to the installed package.
+# Bundle the cert-generation scripts, the example projects (main.py, config.yaml,
+# sample data), and the pre-built Weights Studio SPA that `weightslab start`
+# serves directly — no Docker required.
 weightslab = [
-  "docker/**/*",
+  "ui/utils/**/*",
   "examples/**/*",
+  # Pre-built Weights Studio SPA served by `weightslab start`.
+  "ui/static/**/*",
 ]
 
 [tool.setuptools.exclude-package-data]
 # Never ship generated/local artifacts even if present on disk at build time.
 weightslab = [
-  "docker/docker/.env",
   "**/__pycache__/**",
   "**/*.pyc",
 ]

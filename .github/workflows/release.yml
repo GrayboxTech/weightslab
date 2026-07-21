@@ -102,6 +102,51 @@ jobs:
         with:
           python-version: '3.11'
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build and vendor Weights Studio UI
+        env:
+          WEIGHTS_STUDIO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          git fetch origin --prune
+          CANDIDATE_REF="$(git for-each-ref --format='%(refname:short)' refs/remotes/origin --contains "${GITHUB_SHA}" \
+            | sed 's#^origin/##' \
+            | grep -Ev '^(HEAD|main)$' \
+            | head -n 1 || true)"
+          if [ -z "${CANDIDATE_REF}" ]; then
+            CANDIDATE_REF="main"
+          fi
+
+          UI_REF="main"
+          if git ls-remote --exit-code --heads https://github.com/GrayboxTech/weights_studio.git "${CANDIDATE_REF}" >/dev/null 2>&1; then
+            UI_REF="${CANDIDATE_REF}"
+          fi
+          echo "Using weights_studio ref: ${UI_REF}"
+
+          CLONE_URL="https://github.com/GrayboxTech/weights_studio.git"
+          if [ -n "${WEIGHTS_STUDIO_TOKEN:-}" ]; then
+            CLONE_URL="https://x-access-token:${WEIGHTS_STUDIO_TOKEN}@github.com/GrayboxTech/weights_studio.git"
+          fi
+
+          rm -rf /tmp/weights_studio
+          git clone --depth 1 --branch "${UI_REF}" "${CLONE_URL}" /tmp/weights_studio
+
+          pushd /tmp/weights_studio >/dev/null
+          npm ci
+          npm test
+          npm run build
+          popd >/dev/null
+
+          rm -rf weightslab/ui/static
+          mkdir -p weightslab/ui/static
+          cp -R /tmp/weights_studio/dist/. weightslab/ui/static/
+
+          test -f weightslab/ui/static/index.html
+
       - name: Install build tools
         run: python -m pip install --upgrade pip build twine
 
@@ -455,6 +500,44 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build and vendor Weights Studio UI
+        env:
+          WEIGHTS_STUDIO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          CANDIDATE_REF="main"
+          if git ls-remote --exit-code --heads https://github.com/GrayboxTech/weights_studio.git "${CANDIDATE_REF}" >/dev/null 2>&1; then
+            UI_REF="${CANDIDATE_REF}"
+          else
+            UI_REF="main"
+          fi
+          echo "Using weights_studio ref: ${UI_REF}"
+
+          CLONE_URL="https://github.com/GrayboxTech/weights_studio.git"
+          if [ -n "${WEIGHTS_STUDIO_TOKEN:-}" ]; then
+            CLONE_URL="https://x-access-token:${WEIGHTS_STUDIO_TOKEN}@github.com/GrayboxTech/weights_studio.git"
+          fi
+
+          rm -rf /tmp/weights_studio
+          git clone --depth 1 --branch "${UI_REF}" "${CLONE_URL}" /tmp/weights_studio
+
+          pushd /tmp/weights_studio >/dev/null
+          npm ci
+          npm test
+          npm run build
+          popd >/dev/null
+
+          rm -rf weightslab/ui/static
+          mkdir -p weightslab/ui/static
+          cp -R /tmp/weights_studio/dist/. weightslab/ui/static/
+
+          test -f weightslab/ui/static/index.html
 
       - name: Install build tools
         run: python -m pip install --upgrade pip build twine

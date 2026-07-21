@@ -203,7 +203,7 @@ Workflow in the studio
 
    .. code-block:: bash
 
-      weightslab launch           # 1. deploy the studio
+      weightslab start               # 1. deploy the studio
       weightslab start example --det # 2. start the detection demo
 
    To run the full loss-shape example (with the ``@wl.signal(subscribe_to=...)``

@@ -46,7 +46,6 @@ Most data problems are invisible until your model tells you: through loss spikes
 ## Quickstart
 
 ![Python](https://img.shields.io/badge/Python-v3.10--v3.14-5865F2?style=flat&logo=python&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-v4-0db7ed?style=flat&logo=docker&logoColor=white)
 
 **1. Install**
 ```bash
@@ -54,7 +53,11 @@ pip install weightslab
 ```
 **2. Launch Studio**
 ```bash
+<<<<<<< HEAD
 weightslab launch  # then open https://localhost:5173 🚀
+=======
+weightslab start  # preferred localhost:50051; falls back to a free port if busy 🚀
+>>>>>>> a6f0c1acbac49221358a21b0bde87b348c09204b
 ```
 **3. Wrap your training script**
 ```python
@@ -117,10 +120,14 @@ For a detailed installation guide and advanced configuration &rarr; [Installatio
 3. **Run your script, then launch the UI in a separate terminal:**
 ```bash
    python train.py
+<<<<<<< HEAD
    weightslab launch
+=======
+   weightslab start
+>>>>>>> a6f0c1acbac49221358a21b0bde87b348c09204b
 ```
 
-4. **Open your browser** `https://localhost:5173` and inspect your training in real time.
+4. **Open your browser** at the URL printed by `weightslab start` and inspect your training in real time.
 
 </details>
 

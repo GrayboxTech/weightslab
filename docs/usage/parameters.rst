@@ -460,36 +460,6 @@ Audit logging
        interaction with the studio.
        Accepted: ``json``, ``csv``, ``none`` (disables audit logging).
 
-Docker integration
-~~~~~~~~~~~~~~~~~~~
-
-These variables are set inside Docker training containers; see
-:ref:`docker-usage` for full context.
-
-.. list-table::
-   :header-rows: 1
-   :widths: 35 15 50
-
-   * - Variable
-     - Default
-     - Description
-   * - ``GRPC_BACKEND_PORT``
-     - ``50051``
-     - Port the gRPC backend binds to. Must match the port Envoy
-       is configured to dial as ``grpc-backend``.
-   * - ``WEIGHTSLAB_TLS``
-     - ``0``
-     - Set to ``1`` inside a Docker Compose stack to enable the full
-       TLS + cert-generation flow (DinD and self-contained siblings).
-   * - ``WEIGHTSLAB_SKIP_DOCKER_OPS``
-     - ``0``
-     - Set to ``1`` inside a DinD container before ``weightslab ui
-       launch`` to skip the image rebuild and pull only.
-   * - ``WS_SERVER_PROTOCOL``
-     - ``http``
-     - Protocol served by the frontend's nginx. Set to ``https``
-       when providing TLS certificates to the Weights Studio container.
-
 LLM / agent integration (optional)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

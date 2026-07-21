@@ -1,58 +1,39 @@
 User Commands Reference
-========================
+=======================
 
-This page documents the ``weightslab`` command-line tool — every subcommand,
-flag, and default — plus the interactive CLI console it (and
-``wl.serve(serving_cli=True)``) opens onto a running experiment.
+This page documents the weightslab command-line interface and its subcommands.
 
-It's the CLI counterpart to :doc:`user_functions` (the Python API); see that
-page for everything you call from inside a training script.
+weightslab command
+------------------
 
-Two different things are called "CLI" in WeightsLab — keep them distinct:
-
-- The **installed command** — ``weightslab ...`` — run from any shell to
-  manage Docker/the UI, run bundled examples, or connect to a running
-  experiment.
-- The **interactive console** — the REPL you land in after ``weightslab
-  cli`` (or a standalone ``python -m weightslab.backend.cli client``)
-  connects — where you type commands like ``pause``, ``status``, or
-  ``evaluate``.
-
-``weightslab`` command
------------------------
-
-Installed as a console script (``weightslab = weightslab.ui_docker_bridge:main``),
-so it's available anywhere the package is installed — no ``python -m`` needed.
+Installed as a console script via pyproject.toml:
 
 .. code-block:: text
 
-   weightslab {se,ui,start,cli,tunnel,help} ...
+   weightslab {se,start,cli,tunnel,help} ...
 
-Running ``weightslab``, ``weightslab -h`` / ``--help``, or ``weightslab help``
-with no further arguments prints the banner and this same command summary.
+Run weightslab, weightslab -h, or weightslab help to print the full built-in help.
 
 .. list-table::
    :header-rows: 1
 
    * - Command
      - Purpose
-   * - ``weightslab se``
-     - One-time secure setup: generate TLS certs + a gRPC auth token.
-   * - ``weightslab launch``
-     - Clean stale Docker state, then build & start the Weights Studio UI stack.
-   * - ``weightslab start example`` (alias: ``weightslab example start``)
-     - Run a bundled PyTorch example in the foreground.
-   * - ``weightslab cli``
-     - Open an interactive console connected to a running experiment.
-   * - ``weightslab tunnel``
-     - Forward a remote gRPC backend (e.g. a Colab run) to a local port so the UI can reach it.
-   * - ``weightslab help``
-     - Show the help/banner (same as no command, or ``-h``).
+   * - weightslab se
+     - Generate TLS certificates and gRPC auth token in WEIGHTSLAB_CERTS_DIR.
+   * - weightslab start
+     - Start the native Weights Studio server (bundled SPA + gRPC-Web proxy).
+   * - weightslab start example
+     - Run a bundled training example.
+   * - weightslab cli
+     - Connect to a running experiment interactive console.
+   * - weightslab tunnel
+     - Forward a remote gRPC backend to a local TCP port.
+   * - weightslab help
+     - Show the help/banner (same as no command, or -h).
 
 weightslab se
-~~~~~~~~~~~~~~
-
-**Syntax**
+~~~~~~~~~~~~~
 
 .. code-block:: bash
 
@@ -60,81 +41,43 @@ weightslab se
 
 Generates TLS certificates and a gRPC auth token into a certs directory, then
 tells you to export ``WEIGHTSLAB_CERTS_DIR`` — the **single source of
-truth** the training backend, ``weightslab launch --certs``, and any new
+truth** the training backend, ``weightslab start --certs``, and any new
 shell all read to decide whether TLS/auth is on (derived purely from whether
 cert files exist in that directory).
 
-**Arguments**
-
-- ``certs_dir`` *(positional, optional)* — custom directory for the certs +
-  token. Default: ``$WEIGHTSLAB_CERTS_DIR`` if already set in the
-  environment, else ``~/.weightslab-certs``.
-- ``--force-certs`` — regenerate certificates even if valid ones already
-  exist in the target directory. Default: off (existing certs are reused).
-
-**Examples**
+weightslab start
+~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
-   weightslab se                        # one-time secure setup
-   weightslab se --force-certs          # regenerate the certs
-   weightslab se /custom/certs/path     # use a custom directory
+   weightslab start [--port PORT] [--config FILE] [--host HOST]
+                    [--backend-host HOST] [--backend-port PORT]
+                    [--no-browser] [--certs]
 
-After it finishes, export the printed ``WEIGHTSLAB_CERTS_DIR`` value
-permanently (the command prints the exact ``export`` / ``setx`` line for
-your platform) so the training backend and Weights Studio agree on the same
-certificates.
+Runs the UI natively from Python.
 
-weightslab launch
-~~~~~~~~~~~~~~~~~~~~~~
+Port resolution order:
 
-**Syntax**
+1. --port
+2. ui_port from --config / WEIGHTSLAB_EXPERIMENT_CONFIG config file
+3. WL_LAST_UI_PORT
+4. WEIGHTSLAB_UI_PORT (compatibility)
+5. 50051
 
-.. code-block:: bash
+If the chosen port is already in use, weightslab start falls back to a random
+available port and logs it.
 
-   weightslab launch [certs_dir] [--certs] [-i/--image REPO] [-v/--version TAG]
-
-Purges stale ``weightslab``/``weights_studio`` Docker resources scoped to the
-bundled stack, then builds and starts the Weights Studio UI via Docker
-Compose.
-
-**Arguments**
-
-- ``certs_dir`` *(positional, optional)* — same meaning as for ``weightslab se``.
-- ``--certs`` — generate certs (if missing) and run **secured** (HTTPS +
-  gRPC auth). Default: off — the UI launches **unsecured** (plain HTTP, no
-  gRPC auth, no certs generated). Existing certs already present in
-  ``WEIGHTSLAB_CERTS_DIR`` are always honored either way and are never
-  deleted by this command.
-- ``-i``, ``--image`` *(str, optional)* — frontend image repo to run/pull.
-  Default: ``graybx/weightslab``.
-- ``-v``, ``--version`` *(str, optional)* — frontend image tag/version to
-  pull. Default: ``latest``. An explicit ``--version`` overrides any tag
-  embedded in ``--image``.
-
-**Examples**
+Examples:
 
 .. code-block:: bash
 
-   weightslab launch                                    # unsecured HTTP (default)
-   weightslab launch --certs                             # secured HTTPS + gRPC auth
-   weightslab launch -i guillaumep2705/weightslab        # pull a custom repo (latest tag)
-   weightslab launch -i guillaumep2705/weightslab -v v1.2.3  # pin a specific version
-
-Once running, the UI is served at ``http://localhost:5173`` (or
-``https://...`` when ``--certs`` is used); the exact URL is also printed at
-the end of the command.
-
-.. important::
-
-   When using ``--certs``, set ``WEIGHTSLAB_CERTS_DIR`` manually (before
-   starting your training script) so the training backend and this UI use
-   the **same** certificates.
+   weightslab start
+   weightslab start --port 9000
+   weightslab start --backend-port 50052
+   weightslab start --certs
 
 weightslab start example
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**Syntax**
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
@@ -185,53 +128,25 @@ Then, in another terminal: ``weightslab launch`` and open
 demonstrates.
 
 weightslab cli
-~~~~~~~~~~~~~~~
-
-**Syntax**
+~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
    weightslab cli [--port PORT] [--host HOST]
 
-Opens the :ref:`interactive console <cli-console>` connected to a
-**currently-running experiment** — the experiment must have called
-``wl.serve(serving_cli=True)`` (the default when calling ``wl.serve()`` with
-no arguments).
-
-**Arguments**
-
-- ``--port`` *(int, optional)* — connect to a specific CLI server port.
-  Default: auto-discover the running experiment (the backend advertises its
-  actual host/port on startup; ``weightslab cli`` reads that advertisement).
-- ``--host`` *(str, optional)* — connect to a specific host. Default:
-  ``localhost``.
-
-**Examples**
-
-.. code-block:: bash
-
-   weightslab cli                    # auto-discover the running experiment
-   weightslab cli --port 60000       # connect to a specific port
-   weightslab cli --host 10.0.0.5 --port 60000
+Connects to a running experiment CLI server.
 
 weightslab tunnel
-~~~~~~~~~~~~~~~~~~
-
-**Syntax**
+~~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
    weightslab tunnel [ENDPOINT] [--listen-port N] [--listen-host H] [--remote-port N]
 
-Forwards a **remote** gRPC training backend to a **local** TCP port so the
-Weights Studio UI — whose Envoy proxy dials ``localhost:50051`` — connects to
-it as if it were local. This is what lets you **train on a remote machine (e.g.
-Google Colab) and watch it live in Studio running on your laptop**: Colab has no
-Docker daemon, so you run the UI locally and bridge the remote backend to it.
+Forwards a remote gRPC endpoint to a local TCP port.
 
-It is a raw byte forwarder (no protocol parsing) because the browser speaks
-gRPC-Web to Envoy and Envoy speaks native HTTP/2 gRPC to its upstream — those
-HTTP/2 frames must pass through untouched. Two consequences:
+- Use raw TCP tunnels (for example bore or ngrok tcp).
+- Default local listen port is 50051.
 
 - The remote tunnel must be **raw TCP**, *not* an HTTP/gRPC-Web tunnel. A
   zero-signup option is `bore <https://github.com/ekzhang/bore>`_ with its free

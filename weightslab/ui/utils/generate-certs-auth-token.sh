@@ -44,7 +44,7 @@ mkdir -p "$USER_CERT_DIR"
 
 CERTS_EXIST=false
 if [ -f "$USER_CERT_DIR/ca.crt" ] && \
-   [ -f "$USER_CERT_DIR/envoy-server.crt" ] && \
+   [ -f "$USER_CERT_DIR/ui-server.crt" ] && \
    [ -f "$USER_CERT_DIR/backend-server.crt" ]; then
     CERTS_EXIST=true
 fi
@@ -74,43 +74,43 @@ openssl req -x509 -new -nodes -key "$TMP_DIR/ca.key" -sha256 -days 825 \
     -subj "/CN=weightslab-dev-ca" \
     -out "$TMP_DIR/ca.crt"
 
-cat > "$TMP_DIR/envoy-server.ext" << 'EOF'
+cat > "$TMP_DIR/ui-server.ext" << 'EOF'
 subjectAltName = DNS:localhost,IP:127.0.0.1,IP:0:0:0:0:0:0:0:1
 extendedKeyUsage = serverAuth
 EOF
 
 cat > "$TMP_DIR/backend-server.ext" << 'EOF'
-subjectAltName = DNS:localhost,DNS:host.docker.internal,IP:127.0.0.1,IP:0:0:0:0:0:0:0:1
+subjectAltName = DNS:localhost,IP:127.0.0.1,IP:0:0:0:0:0:0:0:1
 extendedKeyUsage = serverAuth
 EOF
 
-cat > "$TMP_DIR/envoy-client.ext" << 'EOF'
+cat > "$TMP_DIR/ui-client.ext" << 'EOF'
 extendedKeyUsage = clientAuth
 EOF
 
-echo "Generating Envoy HTTPS server cert..."
-openssl genrsa -out "$TMP_DIR/envoy-server.key" 2048
-openssl req -new -key "$TMP_DIR/envoy-server.key" -subj "/CN=localhost" -out "$TMP_DIR/envoy-server.csr"
-openssl x509 -req -in "$TMP_DIR/envoy-server.csr" -CA "$TMP_DIR/ca.crt" -CAkey "$TMP_DIR/ca.key" \
-    -CAcreateserial -out "$TMP_DIR/envoy-server.crt" -days 825 -sha256 -extfile "$TMP_DIR/envoy-server.ext"
+echo "Generating UI HTTPS server cert..."
+openssl genrsa -out "$TMP_DIR/ui-server.key" 2048
+openssl req -new -key "$TMP_DIR/ui-server.key" -subj "/CN=localhost" -out "$TMP_DIR/ui-server.csr"
+openssl x509 -req -in "$TMP_DIR/ui-server.csr" -CA "$TMP_DIR/ca.crt" -CAkey "$TMP_DIR/ca.key" \
+    -CAcreateserial -out "$TMP_DIR/ui-server.crt" -days 825 -sha256 -extfile "$TMP_DIR/ui-server.ext"
 
 echo "Generating backend gRPC server cert..."
 openssl genrsa -out "$TMP_DIR/backend-server.key" 2048
-openssl req -new -key "$TMP_DIR/backend-server.key" -subj "/CN=host.docker.internal" -out "$TMP_DIR/backend-server.csr"
+openssl req -new -key "$TMP_DIR/backend-server.key" -subj "/CN=localhost" -out "$TMP_DIR/backend-server.csr"
 openssl x509 -req -in "$TMP_DIR/backend-server.csr" -CA "$TMP_DIR/ca.crt" -CAkey "$TMP_DIR/ca.key" \
     -CAcreateserial -out "$TMP_DIR/backend-server.crt" -days 825 -sha256 -extfile "$TMP_DIR/backend-server.ext"
 
-echo "Generating Envoy mTLS client cert..."
-openssl genrsa -out "$TMP_DIR/envoy-client.key" 2048
-openssl req -new -key "$TMP_DIR/envoy-client.key" -subj "/CN=envoy-client" -out "$TMP_DIR/envoy-client.csr"
-openssl x509 -req -in "$TMP_DIR/envoy-client.csr" -CA "$TMP_DIR/ca.crt" -CAkey "$TMP_DIR/ca.key" \
-    -CAcreateserial -out "$TMP_DIR/envoy-client.crt" -days 825 -sha256 -extfile "$TMP_DIR/envoy-client.ext"
+echo "Generating UI mTLS client cert..."
+openssl genrsa -out "$TMP_DIR/ui-client.key" 2048
+openssl req -new -key "$TMP_DIR/ui-client.key" -subj "/CN=ui-client" -out "$TMP_DIR/ui-client.csr"
+openssl x509 -req -in "$TMP_DIR/ui-client.csr" -CA "$TMP_DIR/ca.crt" -CAkey "$TMP_DIR/ca.key" \
+    -CAcreateserial -out "$TMP_DIR/ui-client.crt" -days 825 -sha256 -extfile "$TMP_DIR/ui-client.ext"
 
 cp -f "$TMP_DIR/ca.crt" "$USER_CERT_DIR/ca.crt"
-cp -f "$TMP_DIR/envoy-server.crt" "$USER_CERT_DIR/envoy-server.crt"
-cp -f "$TMP_DIR/envoy-server.key" "$USER_CERT_DIR/envoy-server.key"
-cp -f "$TMP_DIR/envoy-client.crt" "$USER_CERT_DIR/envoy-client.crt"
-cp -f "$TMP_DIR/envoy-client.key" "$USER_CERT_DIR/envoy-client.key"
+cp -f "$TMP_DIR/ui-server.crt" "$USER_CERT_DIR/ui-server.crt"
+cp -f "$TMP_DIR/ui-server.key" "$USER_CERT_DIR/ui-server.key"
+cp -f "$TMP_DIR/ui-client.crt" "$USER_CERT_DIR/ui-client.crt"
+cp -f "$TMP_DIR/ui-client.key" "$USER_CERT_DIR/ui-client.key"
 cp -f "$TMP_DIR/backend-server.crt" "$USER_CERT_DIR/backend-server.crt"
 cp -f "$TMP_DIR/backend-server.key" "$USER_CERT_DIR/backend-server.key"
 

@@ -1,4 +1,4 @@
-"""Anonymous usage telemetry — fired on first daily import and on `weightslab ui launch`.
+"""Anonymous usage telemetry — fired on first daily import and on `weightslab start`.
 
 Opt-out: set WL_NO_TELEMETRY=1 in your environment.
 No personally identifiable information is collected. The raw IP is used
@@ -87,7 +87,7 @@ def _payload(event: str, version: str) -> bytes:
         tz = "unknown"
     return json.dumps({
         "uuid": _get_or_create_uuid(),
-        "event": event,           # "import" | "ui_launch"
+        "event": event,           # "import" | "ui_start"
         "version": version,
         "python": sys.version.split()[0],
         "os": platform.system(),  # Windows / Linux / Darwin
@@ -138,15 +138,15 @@ def ping_import(version: str) -> None:
 
 
 def ping_ui_launch(version: str) -> None:
-    """Async ping on `weightslab ui launch` — at most once per 24 h or version change. No-op in CI."""
+    """Async ping on `weightslab start` — at most once per 24 h or version change. No-op in CI."""
     if _disabled() or _is_ci():
         return
     if not _ping_due(_LAST_UI_PING_FILE, version):
-        logger.debug("Telemetry ui_launch ping skipped (24 h cooldown active)")
+        logger.debug("Telemetry ui_start ping skipped (24 h cooldown active)")
         return
     _record_ping(_LAST_UI_PING_FILE, version)
     logger.info(
         "WeightsLab uses anonymous usage data (package version used, and OS name). "
         "Set WL_NO_TELEMETRY=1 to disable."
     )
-    _fire("ui_launch", version)
+    _fire("ui_start", version)

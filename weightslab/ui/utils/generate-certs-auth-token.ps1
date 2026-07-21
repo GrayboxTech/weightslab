@@ -24,7 +24,7 @@ New-Item -ItemType Directory -Force -Path $userCertDir | Out-Null
 
 # Check if certs already exist in user directory
 $certsExist = (Test-Path (Join-Path $userCertDir "ca.crt")) -and `
-              (Test-Path (Join-Path $userCertDir "envoy-server.crt")) -and `
+              (Test-Path (Join-Path $userCertDir "ui-server.crt")) -and `
               (Test-Path (Join-Path $userCertDir "backend-server.crt"))
 
 # If certs exist and not forcing recreation, skip generation
@@ -50,40 +50,40 @@ try {
     @"
     subjectAltName = DNS:localhost,IP:127.0.0.1,IP:0:0:0:0:0:0:0:1
 extendedKeyUsage = serverAuth
-"@ | Set-Content -Path (Join-Path $tmpDir "envoy-server.ext") -Encoding ASCII
+"@ | Set-Content -Path (Join-Path $tmpDir "ui-server.ext") -Encoding ASCII
 
     @"
-    subjectAltName = DNS:localhost,DNS:host.docker.internal,IP:127.0.0.1,IP:0:0:0:0:0:0:0:1
+    subjectAltName = DNS:localhost,IP:127.0.0.1,IP:0:0:0:0:0:0:0:1
 extendedKeyUsage = serverAuth
 "@ | Set-Content -Path (Join-Path $tmpDir "backend-server.ext") -Encoding ASCII
 
     @"
 extendedKeyUsage = clientAuth
-"@ | Set-Content -Path (Join-Path $tmpDir "envoy-client.ext") -Encoding ASCII
+"@ | Set-Content -Path (Join-Path $tmpDir "ui-client.ext") -Encoding ASCII
 
-    Write-Host "Generating Envoy HTTPS server cert..."
-    & openssl genrsa -out (Join-Path $tmpDir "envoy-server.key") 2048
-    & openssl req -new -key (Join-Path $tmpDir "envoy-server.key") -subj "/CN=localhost" -out (Join-Path $tmpDir "envoy-server.csr")
-    & openssl x509 -req -in (Join-Path $tmpDir "envoy-server.csr") -CA (Join-Path $tmpDir "ca.crt") -CAkey (Join-Path $tmpDir "ca.key") `
-        -CAcreateserial -out (Join-Path $tmpDir "envoy-server.crt") -days 825 -sha256 -extfile (Join-Path $tmpDir "envoy-server.ext")
+    Write-Host "Generating UI HTTPS server cert..."
+    & openssl genrsa -out (Join-Path $tmpDir "ui-server.key") 2048
+    & openssl req -new -key (Join-Path $tmpDir "ui-server.key") -subj "/CN=localhost" -out (Join-Path $tmpDir "ui-server.csr")
+    & openssl x509 -req -in (Join-Path $tmpDir "ui-server.csr") -CA (Join-Path $tmpDir "ca.crt") -CAkey (Join-Path $tmpDir "ca.key") `
+        -CAcreateserial -out (Join-Path $tmpDir "ui-server.crt") -days 825 -sha256 -extfile (Join-Path $tmpDir "ui-server.ext")
 
     Write-Host "Generating backend gRPC server cert..."
     & openssl genrsa -out (Join-Path $tmpDir "backend-server.key") 2048
-    & openssl req -new -key (Join-Path $tmpDir "backend-server.key") -subj "/CN=host.docker.internal" -out (Join-Path $tmpDir "backend-server.csr")
+    & openssl req -new -key (Join-Path $tmpDir "backend-server.key") -subj "/CN=localhost" -out (Join-Path $tmpDir "backend-server.csr")
     & openssl x509 -req -in (Join-Path $tmpDir "backend-server.csr") -CA (Join-Path $tmpDir "ca.crt") -CAkey (Join-Path $tmpDir "ca.key") `
         -CAcreateserial -out (Join-Path $tmpDir "backend-server.crt") -days 825 -sha256 -extfile (Join-Path $tmpDir "backend-server.ext")
 
-    Write-Host "Generating Envoy mTLS client cert..."
-    & openssl genrsa -out (Join-Path $tmpDir "envoy-client.key") 2048
-    & openssl req -new -key (Join-Path $tmpDir "envoy-client.key") -subj "/CN=envoy-client" -out (Join-Path $tmpDir "envoy-client.csr")
-    & openssl x509 -req -in (Join-Path $tmpDir "envoy-client.csr") -CA (Join-Path $tmpDir "ca.crt") -CAkey (Join-Path $tmpDir "ca.key") `
-        -CAcreateserial -out (Join-Path $tmpDir "envoy-client.crt") -days 825 -sha256 -extfile (Join-Path $tmpDir "envoy-client.ext")
+    Write-Host "Generating UI mTLS client cert..."
+    & openssl genrsa -out (Join-Path $tmpDir "ui-client.key") 2048
+    & openssl req -new -key (Join-Path $tmpDir "ui-client.key") -subj "/CN=ui-client" -out (Join-Path $tmpDir "ui-client.csr")
+    & openssl x509 -req -in (Join-Path $tmpDir "ui-client.csr") -CA (Join-Path $tmpDir "ca.crt") -CAkey (Join-Path $tmpDir "ca.key") `
+        -CAcreateserial -out (Join-Path $tmpDir "ui-client.crt") -days 825 -sha256 -extfile (Join-Path $tmpDir "ui-client.ext")
 
     Copy-Item -Force (Join-Path $tmpDir "ca.crt") (Join-Path $userCertDir "ca.crt")
-    Copy-Item -Force (Join-Path $tmpDir "envoy-server.crt") (Join-Path $userCertDir "envoy-server.crt")
-    Copy-Item -Force (Join-Path $tmpDir "envoy-server.key") (Join-Path $userCertDir "envoy-server.key")
-    Copy-Item -Force (Join-Path $tmpDir "envoy-client.crt") (Join-Path $userCertDir "envoy-client.crt")
-    Copy-Item -Force (Join-Path $tmpDir "envoy-client.key") (Join-Path $userCertDir "envoy-client.key")
+    Copy-Item -Force (Join-Path $tmpDir "ui-server.crt") (Join-Path $userCertDir "ui-server.crt")
+    Copy-Item -Force (Join-Path $tmpDir "ui-server.key") (Join-Path $userCertDir "ui-server.key")
+    Copy-Item -Force (Join-Path $tmpDir "ui-client.crt") (Join-Path $userCertDir "ui-client.crt")
+    Copy-Item -Force (Join-Path $tmpDir "ui-client.key") (Join-Path $userCertDir "ui-client.key")
     Copy-Item -Force (Join-Path $tmpDir "backend-server.crt") (Join-Path $userCertDir "backend-server.crt")
     Copy-Item -Force (Join-Path $tmpDir "backend-server.key") (Join-Path $userCertDir "backend-server.key")
 

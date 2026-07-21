@@ -1145,10 +1145,20 @@ class DataService:
                 if "origin" in df_update.columns:
                      del df_update["origin"]
 
-                self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
+                try:
+                    self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
+                except Exception as e:
+                    logger.warning(
+                        "[DataService] Skipping natural sort stats write for origin=%s: %s",
+                        origin,
+                        e,
+                    )
 
         # Force refresh internal view
-        self._slowUpdateInternals(force=True)
+        try:
+            self._slowUpdateInternals(force=True)
+        except Exception as e:
+            logger.warning("[DataService] Natural sort refresh failed, continuing startup: %s", e)
 
         logger.info(f"[DataService] Completed stats computation for {processed_count} samples")
         print(f"\n\nNatural sort computation finished for {processed_count} samples\n\n")
