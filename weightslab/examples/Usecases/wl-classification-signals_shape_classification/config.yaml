@@ -1,0 +1,48 @@
+# =============================================================================
+# Configuration for the per-sample loss-shape classification example (MNIST)
+# =============================================================================
+# Every value below can be overridden by the matching WL_STRESS_* / WL_* env
+# var (see the env table below) so the example stays scriptable for stress runs.
+
+# Global
+experiment_name: signals-mnist
+device: auto                 # auto | cpu | cuda
+
+# Run parameters
+epochs: 10                   # env override: WL_STRESS_EPOCHS
+out: /tmp/wl_stress          # env override: WL_STRESS_OUT — wiped & recreated on start
+                             # (holds data/, wl_logs/, metrics.jsonl, report.csv)
+batch_size: 64
+
+# Signals
+loss_signal_name: loss_sample
+shape_every: 1               # env override: WL_SHAPE_EVERY — throttle for
+                             # sig/loss_shape (reads history, so it's costly).
+                             # 5 = every step (full coverage); higher = cheaper.
+min_step: 0                 # min step to start computing
+                             # sig/loss_shape (otherwise it will be NaN).
+
+# Serving
+serving_grpc: true
+serving_cli: true
+
+# Ledger / dataframe storage
+ledger_flush_max_rows: 8192
+ledger_enable_h5_persistence: false
+experiment_dump_to_train_steps_ratio: 10000000
+query_cache_maxsize: 2048    # env override: WL_QUERY_CACHE_MAXSIZE — LRU maxsize
+                             # of the per-sample query cache the ledger uses when
+                             # serving signals (larger = more cached, more memory).
+
+# Optimizer
+optimizer:
+  lr: 0.01
+
+# Data loaders
+data:
+  train_loader:
+    batch_size: 64
+    shuffle: true
+  test_loader:
+    batch_size: 256
+    shuffle: false

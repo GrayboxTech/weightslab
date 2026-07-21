@@ -1045,6 +1045,26 @@ class DataLoaderInterface:
         """
         self._reset_iterator()
 
+    def reset(self) -> None:
+        """Recreate the internal iterator (Ultralytics / ``InfiniteDataLoader``-compatible).
+
+        Some training frameworks call ``loader.reset()`` to force a fresh
+        iterator after mutating the dataset mid-run — e.g. Ultralytics closes
+        mosaic augmentation near the end of training and then calls
+        ``train_loader.reset()`` so the change takes effect on the next epoch.
+        We map it to ``_reset_iterator()``.
+
+        Exposing this as a real method (rather than relying on a caller-side
+        shim like ``if not hasattr(loader, "reset"): loader.reset = ...``) is
+        important: this loader is handed to callers wrapped in a ledger
+        ``Proxy`` whose ``__getattr__`` returns ``None`` for genuinely-missing
+        attributes instead of raising ``AttributeError``. That makes
+        ``hasattr(proxy, "reset")`` return True and silently resolves
+        ``proxy.reset`` to ``None``, so any such shim is skipped and
+        ``reset()`` blows up with ``'NoneType' object is not callable``.
+        """
+        self._reset_iterator()
+
     # -------------------------------------------------------------------------
     # Iteration state capture/restore for deterministic resume
     # -------------------------------------------------------------------------

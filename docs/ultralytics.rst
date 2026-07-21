@@ -201,7 +201,7 @@ Running the bundled example
 
    .. code-block:: bash
 
-      weightslab ui launch
+      weightslab start
 
 4. Run the example:
 
@@ -209,7 +209,7 @@ Running the bundled example
 
       python weightslab/examples/Ultralytics/wl-detection/main.py
 
-5. Open ``http://localhost:5173`` to monitor training, inspect per-sample
+5. Open the URL printed by ``weightslab start`` to monitor training, inspect per-sample
    signals, tag difficult images, and discard outliers.
 
 Platform notes

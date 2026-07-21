@@ -354,7 +354,11 @@ Deploying the Studio
 ~~~~~~~~~~~~~~~~~~~~~
 
 All Weights Studio configuration variables are passed to the UI at launch time
-via ``weightslab ui launch``.  There are two ways to supply them.
+<<<<<<< HEAD
+via ``weightslab launch``.  There are two ways to supply them.
+=======
+via ``weightslab start``.  There are two ways to supply them.
+>>>>>>> a6f0c1acbac49221358a21b0bde87b348c09204b
 
 **Option 1 — shell exports (quick, per-session)**
 
@@ -362,7 +366,11 @@ via ``weightslab ui launch``.  There are two ways to supply them.
 
    export ENABLE_AGENT=0
    export BB_THUMB_RENDER=50
-   weightslab ui launch
+<<<<<<< HEAD
+   weightslab launch
+=======
+  weightslab start
+>>>>>>> a6f0c1acbac49221358a21b0bde87b348c09204b
 
 **Option 2 — ``.env`` file (persistent, version-controllable)**
 
@@ -380,11 +388,14 @@ Then launch normally:
 
 .. code-block:: bash
 
-   weightslab ui launch
+<<<<<<< HEAD
+   weightslab launch
+=======
+  weightslab start
+>>>>>>> a6f0c1acbac49221358a21b0bde87b348c09204b
 
 WeightsLab loads the ``.env`` file automatically.  Shell exports take precedence
-over ``.env`` values.  No rebuild of the Studio container is needed — variables
-are injected at container start.
+over ``.env`` values.
 
 .. note::
 
@@ -562,8 +573,7 @@ subclass) that unwinds the stack and releases the lock via ``finally`` /
      - ``0``
      - If set to ``1`` / ``true`` / ``yes`` / ``on``, the watchdog calls
        ``os._exit(1)`` instead of restarting the server when a stuck RPC is
-       detected.  Useful when running under a process supervisor (systemd,
-       Docker ``restart: always``) that handles the restart externally.
+       detected.  Useful when running under a process supervisor (e.g. systemd) that handles the restart externally.
 
 
 Data and Cache
@@ -867,20 +877,17 @@ Backend Connection
      - Description
    * - ``GRPC_BACKEND_HOST``
      - ``localhost``
-     - Hostname of the WeightsLab gRPC backend, used by the Envoy proxy.
+     - Hostname of the WeightsLab gRPC backend to proxy to.
    * - ``GRPC_BACKEND_PORT``
      - ``50051``
-     - Port of the WeightsLab gRPC backend, used by the Envoy proxy.
-   * - ``ENVOY_HOST``
-     - ``localhost``
-     - Hostname of the Envoy proxy the browser connects to.
-   * - ``ENVOY_PORT``
-     - ``8080``
-     - Port Envoy listens on for HTTPS / gRPC-Web traffic.
-   * - ``ENVOY_ADMIN_PORT``
-     - ``9901``
-     - Envoy admin interface port (metrics, health checks).
-       Bound to loopback and not published by Docker Compose by default.
+     - Port of the WeightsLab gRPC backend to proxy to.
+   * - ``WEIGHTSLAB_UI_HOST``
+     - ``0.0.0.0``
+     - Interface the ``weightslab start`` HTTP server binds to.
+   * - ``WEIGHTSLAB_UI_PORT``
+     - ``50051``
+     - Preferred port for the ``weightslab start`` HTTP server. If that port is
+       already in use, WeightsLab picks a random available port.
 
 
 Vite Dev Server
@@ -915,13 +922,10 @@ These variables are injected into the browser bundle at build / dev time.
      - Description
    * - ``VITE_SERVER_HOST``
      - ``localhost``
-     - Hostname (usually the Envoy proxy) the browser uses to reach the backend.
+     - Hostname the browser uses to reach the ``weightslab start`` server.
    * - ``VITE_SERVER_PORT``
      - ``8080``
      - Port the browser uses to reach the backend.
-   * - ``VITE_SERVER_PROTOCOL``
-     - ``https``
-     - Protocol (``http`` or ``https``) for browser-to-backend requests.
    * - ``VITE_IS_A_SANDBOX``
      - ``0``
      - Enables sandbox / demo mode ? disables all write operations in the UI.
@@ -940,21 +944,21 @@ These variables are injected into the browser bundle at build / dev time.
        look-ahead). Increasing this prefetches more aggressively at the cost of
        memory. ``VITE_MAX_PREFETCH_BATCHES`` is derived from this value
        (``window − 1``). **Runtime override (no rebuild):** ``GRID_WINDOW_SIZE``
-       (nginx env) or ``window.WS_GRID_WINDOW_SIZE``.
+       (env, injected by ``weightslab start``) or ``window.WS_GRID_WINDOW_SIZE``.
    * - ``VITE_WS_MAX_IMAGE_CACHE_SIZE``
      - *(window + 2)*
      - Maximum number of image entries held in the in-browser image cache.
        Defaults to ``VITE_GRID_WINDOW_SIZE + 2``. **Runtime override:**
-       ``GRID_MAX_IMAGE_CACHE_SIZE`` (nginx env) or ``window.WS_MAX_IMAGE_CACHE_SIZE``.
+       ``GRID_MAX_IMAGE_CACHE_SIZE`` (env, injected by ``weightslab start``) or ``window.WS_MAX_IMAGE_CACHE_SIZE``.
    * - ``VITE_WS_GRID_CACHE_MAX_MB``
      - ``128``
      - Maximum memory (MB) for the grid-view image tile cache.
-       **Runtime override:** ``GRID_CACHE_MAX_MB`` (nginx env) or
+       **Runtime override:** ``GRID_CACHE_MAX_MB`` (env, injected by ``weightslab start``) or
        ``window.WS_GRID_CACHE_MAX_MB``.
    * - ``VITE_WS_MODAL_CACHE_MAX_MB``
      - ``64``
      - Maximum memory (MB) for the full-resolution modal image cache.
-       **Runtime override:** ``MODAL_CACHE_MAX_MB`` (nginx env) or
+       **Runtime override:** ``MODAL_CACHE_MAX_MB`` (env, injected by ``weightslab start``) or
        ``window.WS_MODAL_CACHE_MAX_MB``.
 
 
@@ -972,14 +976,14 @@ Point cloud
      - *(unset — no cap)*
      - Maximum number of 3-D points rendered per point-cloud sample in the
        modal viewer. Leave unset for no cap. Useful on low-end GPUs.
-       **Runtime override:** ``PC_MAX_POINTS`` (nginx env) or
+       **Runtime override:** ``PC_MAX_POINTS`` (env, injected by ``weightslab start``) or
        ``window.WS_WL_PC_MAX_POINTS``.
    * - ``VITE_WL_DISABLE_GPU_RENDERING``
      - ``0``
      - Set to ``1`` to force CPU-side (canvas 2-D) rendering for point clouds,
        bypassing the three.js WebGL renderer. Useful when GPU drivers are absent
        or broken inside a headless container. **Runtime override:**
-       ``DISABLE_GPU_RENDERING`` (nginx env) or ``window.WS_WL_DISABLE_GPU_RENDERING``.
+       ``DISABLE_GPU_RENDERING`` (env, injected by ``weightslab start``) or ``window.WS_WL_DISABLE_GPU_RENDERING``.
 
 
 Bounding-box render limits
@@ -993,11 +997,10 @@ of ``10`` allows up to 10 GT boxes *and* 10 PRED boxes per image. Boxes beyond
 the cap are simply not drawn (predictions are typically score-ordered, so the
 most confident ones are kept).
 
-These are set on the Weights Studio frontend container (for example in
-``../weights_studio/docker/docker-compose.yml``) and injected into the page at
-startup by the nginx entrypoint — changing them needs no rebuild, just a
-container restart. For a local ``vite`` dev server, use the ``VITE_`` fallbacks
-shown below. Values are clamped to a hard ceiling of ``10000``.
+These are set as environment variables before ``weightslab start`` and injected
+into ``config.js`` at startup — changing them needs no rebuild, just a
+restart + browser reload. For a local ``vite`` dev server, use the ``VITE_``
+fallbacks shown below. Values are clamped to a hard ceiling of ``10000``.
 
 .. list-table::
    :header-rows: 1
@@ -1033,12 +1036,12 @@ agent. Each toggle **removes the area from the UI** (the elements are hidden)
 **and stops its background work** (auto-refresh timers and gRPC polls are never
 started), so a disabled area costs nothing at runtime.
 
-Like the bounding-box render limits, these are set on the Weights Studio frontend
-container (for example in ``../weights_studio/docker/docker-compose.yml``) and
-injected into the page at startup by the nginx entrypoint — changing them needs
-no rebuild, just a container restart + browser reload. For a local ``vite`` dev
-server, use the ``VITE_`` fallbacks shown below. Every toggle **defaults to
-enabled**; set it to ``0`` / ``false`` / ``no`` / ``off`` (any case) to disable.
+Like the bounding-box render limits, these are set as environment variables
+before ``weightslab start`` and injected into ``config.js`` at startup —
+changing them needs no rebuild, just a restart + browser reload. For a local
+``vite`` dev server, use the ``VITE_`` fallbacks shown below. Every toggle
+**defaults to enabled**; set it to ``0`` / ``false`` / ``no`` / ``off`` (any
+case) to disable.
 
 .. list-table::
    :header-rows: 1

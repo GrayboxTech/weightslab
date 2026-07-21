@@ -148,9 +148,11 @@ commands:
                            shells find them.
                              --force-certs regenerate even if certs exist
 
-  ui launch Purge stale weightslab/weights_studio Docker
-                           resources, then build & start the UI stack.
-                           UNSECURED (HTTP) by default — no certs generated.
+  launch Purge stale weightslab/weights_studio Docker
+                           resources, build & start the UI stack, then open it
+                           in your browser. UNSECURED (HTTP) by default — no
+                           certs generated. Also: bare `weightslab start`.
+                           (Legacy alias: `weightslab ui launch`.)
                              --certs generate (if missing) + use TLS
                                              certs + gRPC auth (HTTPS)
 
@@ -176,7 +178,7 @@ commands:
   tunnel Forward a REMOTE gRPC backend (e.g. a Colab run
                            behind `ngrok tcp 50051`) to a LOCAL port so the UI
                            stack — whose Envoy dials localhost:50051 — reaches
-                           it. Run alongside `weightslab ui launch`. Raw TCP, so
+                           it. Run alongside `weightslab launch`. Raw TCP, so
                            the backend must be plaintext (default launch).
                              ENDPOINT remote host:port (e.g. bore.pub:12345)
                                              (default: $WEIGHTSLAB_TUNNEL_ENDPOINT)
@@ -187,10 +189,12 @@ commands:
 examples:
   weightslab se # one-time secure setup (then export WEIGHTSLAB_CERTS_DIR)
   weightslab se --force-certs # regenerate the certs
-  weightslab ui launch # clean + launch (unsecured HTTP, default)
-  weightslab ui launch --certs # secured launch (HTTPS + gRPC auth)
-  weightslab ui launch -i guillaumep2705/weightslab # pull frontend from a custom repo (latest)
-  weightslab ui launch -i guillaumep2705/weightslab -v v1.2.3 # pin a specific version/tag
+  weightslab launch # clean + launch UI, open browser (unsecured HTTP, default)
+  weightslab start # same as `weightslab launch`
+  weightslab launch --certs # secured launch (HTTPS + gRPC auth)
+  weightslab launch -i guillaumep2705/weightslab # pull frontend from a custom repo (latest)
+  weightslab launch -i guillaumep2705/weightslab -v v1.2.3 # pin a specific version/tag
+  weightslab ui launch # legacy alias for `weightslab launch`
   weightslab start example # run the classification demo (default)
   weightslab start example --seg # run the segmentation demo
   weightslab start example --det # run the detection demo
@@ -776,6 +780,29 @@ def _clean_stale_docker_resources(frontend_image: str = _FRONTEND_IMAGE) -> None
             logger.debug(f"Could not remove {env_file}: {exc}")
 
 
+def _open_ui_in_browser(url: str) -> None:
+    """Best-effort: open the Studio UI in the default browser after launch.
+
+    Skipped when WEIGHTSLAB_NO_BROWSER is set, in CI, or on a headless Linux box
+    (no DISPLAY / Wayland). Never raises — a failed open must not fail the launch.
+    """
+    if (os.environ.get("WEIGHTSLAB_NO_BROWSER")
+            or os.environ.get("CI")
+            or os.environ.get("PYTEST_CURRENT_TEST")):
+        return
+    if sys.platform.startswith("linux") and not (
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    ):
+        logger.info("Headless environment — open the UI manually at %s", url)
+        return
+    try:
+        import webbrowser
+        if webbrowser.open_new_tab(url):
+            logger.info("Opening the Weights Studio UI in your browser…")
+    except Exception as e:  # noqa: BLE001 — auto-open is best-effort only
+        logger.debug("Could not auto-open the browser: %s", e)
+
+
 def ui_launch(args):
     """Purge stale Docker state, then build & start the UI.
 
@@ -937,7 +964,10 @@ def ui_launch(args):
     # file-presence rule the deploy pipeline applies.
     secured = manager.has_valid_certs()
     protocol = "https" if secured else "http"
-    logger.info(f"Weights Studio UI is running at: {protocol}://localhost:{port}")
+    url = f"{protocol}://localhost:{port}"
+    logger.info(f"Weights Studio UI is running at: {url}")
+    # Auto-open the UI (best-effort; set WEIGHTSLAB_NO_BROWSER to disable).
+    _open_ui_in_browser(url)
     if secured:
         certs_dir_str = str(manager.certs_dir)
         # Persist first (it logs its own lines), so the export/setx reminder
@@ -955,7 +985,7 @@ def ui_launch(args):
         logger.warning(f" (Windows) setx WEIGHTSLAB_CERTS_DIR \"{certs_dir_str}\"")
     else:
         logger.info("UI is running UNSECURED (HTTP, no gRPC auth). "
-                    "Re-run with `weightslab ui launch --certs` for TLS.")
+                    "Re-run with `weightslab launch --certs` for TLS.")
 
 
 def ui_secure_environment(args):
@@ -997,7 +1027,7 @@ def ui_secure_environment(args):
     logger.info(" gRPC auth token created")
     logger.info(f" Certs and token stored in: {manager.certs_dir}")
     logger.info(f" WEIGHTSLAB_CERTS_DIR exported for this process: {manager.certs_dir}")
-    logger.info("Then launch the secured UI with: weightslab ui launch --certs")
+    logger.info("Then launch the secured UI with: weightslab launch --certs")
     # Keep this the FINAL output so the user can't miss the action they must take.
     logger.warning("")
     logger.warning(" ACTION REQUIRED — set WEIGHTSLAB_CERTS_DIR globally so new shells "
@@ -1075,7 +1105,7 @@ def example_start(args):
 
     logger.info(f"Starting the WeightsLab {label} ({kind}) example...")
     logger.info(f" {main_py}")
-    logger.info("In another terminal, launch the UI with: weightslab ui launch")
+    logger.info("In another terminal, launch the UI with: weightslab launch")
     logger.info(f"Then open http://localhost:5173 — stop the example with Ctrl+C.")
     if not _CERTS_DIR_IN_ORIGINAL_ENV:
         manager = CertAuthManager.from_env_or_default()
@@ -1136,15 +1166,30 @@ def _add_example_kind_flags(p: argparse.ArgumentParser) -> None:
     p.set_defaults(example_kind=_DEFAULT_EXAMPLE)
 
 
+def _add_launch_flags(p, with_certs_dir: bool = True) -> None:
+    """Shared flags for every UI-launch entry point: `weightslab launch`, the bare
+    `weightslab start`, and the legacy `weightslab ui launch`."""
+    p.add_argument('--certs', action='store_true',
+                   help='Generate (if missing) and use TLS certs + gRPC auth token (secured HTTPS). Default: unsecured HTTP.')
+    p.add_argument('-i', '--image', default=None,
+                   help='Frontend image repo to run/pull (default: graybx/weightslab). e.g. guillaumep2705/weightslab')
+    p.add_argument('-v', '--version', default=None,
+                   help='Frontend image tag/version to pull (default: latest). e.g. v1.2.3')
+    if with_certs_dir:
+        p.add_argument('certs_dir', nargs='?', default=None,
+                       help='Custom directory for certs/token (default: $WEIGHTSLAB_CERTS_DIR or ~/.weightslab-certs)')
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser (banner + detailed command reference).
 
     The CLI is intentionally minimal — exactly these commands:
         weightslab --help | -h | help
         weightslab se [--force-certs]
-        weightslab ui launch [--certs]
+        weightslab launch [--certs]                 (also: bare `weightslab start`)
         weightslab start example [--cls|--seg|--det|--clus|--gen|--3d_det|--2d_det]
         weightslab cli [--port PORT] [--host HOST]
+        weightslab ui launch [--certs]              (legacy alias of `launch`)
     """
     parser = argparse.ArgumentParser(
         prog="weightslab",
@@ -1154,7 +1199,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     # metavar lists only the documented commands; the `example` alias is accepted
     # but intentionally omitted here (and help=SUPPRESS'd below) so it stays hidden.
-    sub = parser.add_subparsers(dest="command", metavar="{se,ui,start,cli,tunnel,help}")
+    sub = parser.add_subparsers(dest="command", metavar="{se,launch,start,ui,cli,tunnel,help}")
 
     # weightslab se [--force-certs] [certs_dir]
     se_parser = sub.add_parser("se", help="Set up the secure environment (TLS certs + gRPC auth token)")
@@ -1162,19 +1207,23 @@ def _build_parser() -> argparse.ArgumentParser:
     se_parser.add_argument('certs_dir', nargs='?', default=None,
                            help='Custom directory for certs/token (default: $WEIGHTSLAB_CERTS_DIR or ~/.weightslab-certs)')
 
-    # weightslab ui launch [--certs] [certs_dir]
-    ui_parser = sub.add_parser("ui", help="Manage the Weights Studio UI")
+    # weightslab launch [--certs] [-i IMAGE] [-v VERSION] [certs_dir]
+    # Primary command to bring up the Weights Studio UI (also reachable as the
+    # bare `weightslab start`, and the legacy `weightslab ui launch`).
+    launch_parser = sub.add_parser(
+        "launch",
+        help="Clean stale Docker state, launch the UI, and open it in the browser "
+             "(unsecured by default; --certs for TLS)")
+    _add_launch_flags(launch_parser)
+
+    # weightslab ui launch [...] — LEGACY alias, kept working for backward
+    # compatibility (existing notebooks/docs). Prefer `weightslab launch`.
+    # (help=SUPPRESS hides the `ui` command from the top-level --help listing.)
+    ui_parser = sub.add_parser("ui", help=argparse.SUPPRESS)
     ui_sub = ui_parser.add_subparsers(dest="action")
     launch_ui_parser = ui_sub.add_parser(
-        "launch", help="Clean stale Docker state, then launch the UI (unsecured by default; --certs for TLS)")
-    launch_ui_parser.add_argument('--certs', action='store_true', help='Generate (if missing) and use TLS certs + gRPC auth token (secured HTTPS). Default: unsecured HTTP.')
-    launch_ui_parser.add_argument('-i', '--image', default=None,
-                                  help='Frontend image repo to run/pull (default: graybx/weightslab). '
-                                       'e.g. guillaumep2705/weightslab')
-    launch_ui_parser.add_argument('-v', '--version', default=None,
-                                  help='Frontend image tag/version to pull (default: latest). e.g. v1.2.3')
-    launch_ui_parser.add_argument('certs_dir', nargs='?', default=None,
-                                  help='Custom directory for certs/token (default: $WEIGHTSLAB_CERTS_DIR or ~/.weightslab-certs)')
+        "launch", help="(legacy) alias for `weightslab launch`")
+    _add_launch_flags(launch_ui_parser)
 
     # weightslab cli [--port N] [--host H]
     cli_parser = sub.add_parser(
@@ -1203,8 +1252,12 @@ def _build_parser() -> argparse.ArgumentParser:
         '--remote-port', type=int, default=None,
         help="Remote port, if not included in ENDPOINT")
 
-    # weightslab start example [--cls|--seg|--clus|--gen]
-    start_parser = sub.add_parser("start", help="Start a bundled WeightsLab resource")
+    # weightslab start [--certs ...]        → launch the UI (alias of `launch`)
+    # weightslab start example [--cls|...]  → run a bundled PyTorch example
+    start_parser = sub.add_parser(
+        "start",
+        help="Launch the Weights Studio UI (bare `start`), or `start example` to run a demo")
+    _add_launch_flags(start_parser, with_certs_dir=False)
     start_sub = start_parser.add_subparsers(dest="start_target")
     example_parser = start_sub.add_parser(
         "example", help="Start a bundled PyTorch example (default: classification)")
@@ -1238,16 +1291,22 @@ def main():
         tunnel_connect(args)
     elif args.command == "se":
         ui_secure_environment(args)
+    elif args.command == "launch":
+        # Primary UI-launch command.
+        ui_launch(args)
     elif args.command == "ui":
+        # Legacy: `weightslab ui launch` still works (prefer `weightslab launch`).
         if getattr(args, "action", None) == "launch":
             ui_launch(args)
         else:
             ui_parser.print_help()
     elif args.command == "start":
+        # `weightslab start example ...` runs a demo; bare `weightslab start`
+        # launches the UI (alias of `weightslab launch`).
         if getattr(args, "start_target", None) == "example":
             example_start(args)
         else:
-            start_parser.print_help()
+            ui_launch(args)
     elif args.command == "example":
         # Alias for `start example` — tolerate the swapped subcommand order
         # (`weightslab example start [flags]`) and the bare `weightslab example`.

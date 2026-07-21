@@ -25,12 +25,12 @@ from typing import Callable, Optional, Any
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.components.checkpoint_manager import CheckpointManager
 from weightslab.backend.optimizer_interface import OptimizerInterface
-from weightslab.backend.ledgers import DEFAULT_NAME, get_checkpoint_manager, get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal, list_models
+from weightslab.backend.ledgers import DEFAULT_NAME, get_checkpoint_manager, get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal, list_models, has_serving_config
 from weightslab.backend.model_interface import ModelInterface
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
-from weightslab.utils.tools import detach_to_cpu
+from weightslab.utils.tools import detach_to_cpu, _running_in_notebook
 from weightslab.backend.logger import LoggerQueue
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
@@ -150,16 +150,16 @@ def _react_dependents(seed_names, batch_ids, step, origin='train'):
             try:
                 if meta.get('batched'):
                     bctx = BatchSignalContext(sample_ids=ids, subscribed_values=cols[inputs[0]],
-                                              logger=lg, dataframe=df_proxy, origin=origin, step=step)
-                    bctx.inputs = cols
+                                              logger=lg, dataframe=df_proxy, origin=origin, step=step,
+                                              inputs=cols)
                     res = func(bctx)
                     vals = res.tolist() if hasattr(res, 'tolist') else list(res)
                 else:
                     vals = []
                     for i, sid in enumerate(ids):
                         ctx = SignalContext(sample_id=sid, subscribed_value=float(cols[inputs[0]][i]),
-                                            logger=lg, dataframe=df_proxy, origin=origin, step=step)
-                        ctx.inputs = {k: float(cols[k][i]) for k in cols}
+                                            logger=lg, dataframe=df_proxy, origin=origin, step=step,
+                                            inputs={k: float(cols[k][i]) for k in cols})
                         vals.append(func(ctx))
                 vals = [float(x) for x in vals]
             except StaleSignalError:
@@ -319,7 +319,7 @@ class SignalContext:
     Carries all available metadata for a single sample during computation.
     """
     def __init__(self, sample_id, dataframe, data=None, subscribed_value=None, logger=None, origin=None,
-                 step=None, logits=None, preds=None, targets=None):
+                 step=None, logits=None, preds=None, targets=None, inputs=None):
         self.sample_id = sample_id
         self.dataframe = dataframe
         self.data = data
@@ -330,6 +330,10 @@ class SignalContext:
         self.logits = logits      # this sample's raw model output row (subscribe_to path)
         self.preds = preds
         self.targets = targets
+        # Current-step value of each declared @wl.signal(inputs=[...]) input for
+        # THIS sample, keyed by signal name: ``ctx.inputs["sig/entropy"]``. Empty
+        # for signals that don't declare inputs (e.g. the subscribe_to path).
+        self.inputs = inputs if inputs is not None else {}
 
     @property
     def image(self) -> Optional[np.ndarray]:
@@ -434,7 +438,7 @@ class BatchSignalContext:
     per sample), which is where the large speed-ups come from.
     """
     def __init__(self, sample_ids, subscribed_values, logger=None, dataframe=None, origin=None,
-                 step=None, logits=None, preds=None, targets=None):
+                 step=None, logits=None, preds=None, targets=None, inputs=None):
         self.sample_ids = [int(s) for s in sample_ids]          # length B
         self.subscribed_values = np.asarray(subscribed_values, dtype=float)  # (B,)
         self.logger = logger
@@ -446,6 +450,11 @@ class BatchSignalContext:
         self.logits = logits      # (B, C)
         self.preds = preds
         self.targets = targets
+        # Current-step values of each declared @wl.signal(inputs=[...]) input for
+        # the whole batch, keyed by signal name: ``ctx.inputs["sig/entropy"]`` is a
+        # ``(B,)`` array aligned to ``sample_ids``. Populated by the reactive
+        # dispatch; empty for signals that don't declare inputs.
+        self.inputs = inputs if inputs is not None else {}
 
     def history(self, signal_name):
         """Per-sample history of *signal_name* for every sample in the batch, in
@@ -1476,26 +1485,9 @@ def start_training(timeout: int = None) -> None:
     pause_ctrl.resume() # Ensure we're not paused if start_training is called after serve
 
 
-def _running_in_notebook() -> bool:
-    """True when running inside a Jupyter notebook kernel or Google Colab.
-
-    Distinguishes a notebook kernel (``ZMQInteractiveShell``) / Colab from a
-    plain script or a terminal IPython session, so we only nudge users who can't
-    reach a locally-launched Weights Studio without a tunnel.
-    """
-    if "google.colab" in sys.modules:
-        return True
-    try:
-        from IPython import get_ipython
-        shell = get_ipython()
-        return shell is not None and shell.__class__.__name__ == "ZMQInteractiveShell"
-    except Exception:
-        return False
-
-
 def serve(serving_cli: bool = True, serving_grpc: bool = False,
           spawn_cli_client: bool = False, serving_bore: bool = False,
-          bore_port: int = None, **kwargs):
+          bore_port: int = None, allow_unconfigured: bool = True, **kwargs):
     """Start WeightsLab services.
 
     Args:
@@ -1512,20 +1504,61 @@ def serve(serving_cli: bool = True, serving_grpc: bool = False,
             `bore <https://github.com/ekzhang/bore>`_ raw-TCP relay, so a Weights
             Studio running on another machine can reach it (e.g. training in
             Google Colab, UI on your laptop). Prints the public endpoint and the
-            two commands to run locally (``weightslab ui launch`` +
+            two commands to run locally (``weightslab start`` +
             ``weightslab tunnel <endpoint>``). Implies a gRPC backend. Uses the
             shared public relay ``bore.pub`` — the random port is the only thing
             guarding it, so keep it to non-sensitive demos.
         bore_port: Port to expose when ``serving_bore`` is set. Defaults to the
             gRPC port (``grpc_port`` kwarg, else ``$GRPC_BACKEND_PORT``, else
             50051).
+        allow_unconfigured: Escape hatch for the serving-config guard. ``serve``
+            reads hyperparameters once, here, for TLS, ports and
+            ``root_log_dir``; if none were wrapped
+            (``wl.watch_or_edit(params, flag="hyperparameters")``) those settings
+            silently fall back to env vars / defaults. Serving over the network
+            (``serving_grpc`` / ``serving_bore``) without config therefore
+            raises, because the backend may come up without TLS/auth. Pass
+            ``True`` (or set ``WL_ALLOW_UNCONFIGURED_SERVE=1``) to downgrade the
+            error to a warning and serve anyway. CLI-only serving always warns
+            (never raises), regardless of this flag.
         **kwargs: Extra server options passed to underlying backends
             (e.g. ``cli_host``, ``cli_port``, ``grpc_port``).
 
     Returns:
         The public ``host:port`` bore endpoint string when ``serving_bore`` is
         set and the tunnel came up, otherwise ``None``.
+
+    Raises:
+        RuntimeError: If ``serving_grpc`` or ``serving_bore`` is requested before
+            any serving config was wrapped and the escape hatch is not set.
     """
+
+    # ------------------------------------------------------------------
+    # Serving-config guard. grpc_serve reads hyperparameters ONCE, at this
+    # call, for TLS, ports and root_log_dir. Serving over the network before
+    # config is wrapped can bring the backend up UNSECURED (TLS falls back to
+    # GRPC_TLS_ENABLED, default off), so hard-fail on gRPC/bore; CLI-only is
+    # local, so warn. Escape hatch: allow_unconfigured / WL_ALLOW_UNCONFIGURED_SERVE.
+    # ------------------------------------------------------------------
+    if not has_serving_config():
+        network_serving = serving_grpc or serving_bore
+        allow = allow_unconfigured or os.environ.get(
+            "WL_ALLOW_UNCONFIGURED_SERVE", "0"
+        ).lower() in ("1", "true", "yes")
+        base_msg = (
+            "wl.serve() was called before any serving config was wrapped. Wrap "
+            'it first with wl.watch_or_edit(parameters, flag="hyperparameters") '
+            "so TLS, ports and root_log_dir come from your config instead of "
+            "falling back to environment variables / defaults."
+        )
+        if network_serving and not allow:
+            raise RuntimeError(
+                base_msg + " Refusing to expose an unconfigured backend over "
+                "gRPC/bore — it may come up without TLS/auth. Pass "
+                "allow_unconfigured=True (or set WL_ALLOW_UNCONFIGURED_SERVE=1) "
+                "to override."
+            )
+        logger.warning(base_msg)
 
     if serving_grpc:
         grpc_serve(**kwargs)
@@ -1556,8 +1589,8 @@ def serve(serving_cli: bool = True, serving_grpc: bool = False,
         if bore_endpoint:
             print("=" * 60)
             print(f" Backend exposed via bore at: {bore_endpoint}")
-            print(" On your local machine (Docker running), run:")
-            print("     weightslab ui launch")
+            print(" On your local machine, run:")
+            print("     weightslab start")
             print(f"     weightslab tunnel {bore_endpoint}")
             print("=" * 60)
 
@@ -3701,6 +3734,7 @@ def write_history(
     graph_name=None,
     experiment_hash: str | None = None,
     sample_id=None,
+    orient: str = "columns",
     instance_id=None,
     verbose: bool = False,
 ) -> str:
@@ -3966,6 +4000,9 @@ def write_history(
         if write_instance:
             payload["instance"] = instance_rows
         with open(path, "w", encoding="utf-8") as fh:
+            # payload is a dict of record-lists (one list of row dicts per
+            # section); json.dump takes no `orient` (that's a pandas arg). The
+            # per-section records layout is the documented/tested contract.
             _json.dump(payload, fh, indent=2)
 
     elif fmt == "csv":
@@ -4115,6 +4152,7 @@ def write_dataframe(
     columns=None,
     sample_id=None,
     instance_id=None,
+    orient: str = "columns",
     verbose: bool = False,
     loss_shape_signal: str | None = None,
 ) -> str:
@@ -4342,7 +4380,7 @@ def write_dataframe(
     df_out = df_out.reset_index()
 
     if fmt == "json":
-        _json_str = df_out.to_json(orient="records", default_handler=str)
+        _json_str = df_out.to_json(orient=orient, default_handler=str)
         with open(path, "w", encoding="utf-8") as fh:
             _json.dump(_json.loads(_json_str), fh, indent=2)
 

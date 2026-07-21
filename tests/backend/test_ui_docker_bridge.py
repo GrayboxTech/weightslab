@@ -389,7 +389,8 @@ class TestUiSecureEnvironment(unittest.TestCase):
 
 
 class TestMainCLI(unittest.TestCase):
-    """The CLI exposes exactly: se, ui launch, start example, help."""
+    """The CLI exposes: se, launch (+ bare start), start example, cli, tunnel,
+    help; the legacy `ui launch` still dispatches to the same handler."""
 
     @patch("weightslab.ui_docker_bridge.ui_secure_environment")
     def test_main_dispatches_se(self, mock_se):
@@ -413,9 +414,18 @@ class TestMainCLI(unittest.TestCase):
         with patch("sys.argv", ["weightslab", "ui"]):
             main() # should print ui help, not raise
 
-    def test_main_start_without_target_does_not_crash(self):
+    @patch("weightslab.ui_docker_bridge.ui_launch")
+    def test_main_dispatches_launch(self, mock_launch):
+        with patch("sys.argv", ["weightslab", "launch"]):
+            main()
+        mock_launch.assert_called_once()
+
+    @patch("weightslab.ui_docker_bridge.ui_launch")
+    def test_main_bare_start_launches_ui(self, mock_launch):
+        # bare `weightslab start` is an alias for `weightslab launch`
         with patch("sys.argv", ["weightslab", "start"]):
-            main() # should print start help, not raise
+            main()
+        mock_launch.assert_called_once()
 
     def test_main_help_does_not_crash(self):
         with patch("sys.argv", ["weightslab", "help"]):
@@ -683,6 +693,10 @@ class TestBannerAndHelp(unittest.TestCase):
     def test_no_args_shows_command_reference(self):
         out = self._capture_main(["weightslab"])
         self.assertIn("ui launch", out)
+
+    def test_help_mentions_new_launch_command(self):
+        out = self._capture_main(["weightslab", "help"])
+        self.assertIn("weightslab launch", out)
 
     def test_help_does_not_mention_removed_commands(self):
         out = self._capture_main(["weightslab", "help"])

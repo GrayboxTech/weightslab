@@ -23,6 +23,7 @@ Public:
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -39,6 +40,9 @@ import weightslab as wl
 from weightslab.utils.tools import filter_kwargs_for_callable
 
 from ._utils import normalize_post_nms_preds
+
+
+logger = logging.getLogger(__name__)
 
 
 # ─── overlay fallback tunables ─────────────────────────────────────────
@@ -174,19 +178,35 @@ def _ship_round(signals, channels, batch):
     """Iterate the signal list, ship anything the reducers produce. Wrapped
     in `no_grad` because signal capture is observational — running e.g.
     `Detect._inference` + NMS inside the train autograd graph would keep
-    those tensors alive until backward and compound across steps."""
+    those tensors alive until backward and compound across steps.
+
+    Signal capture is best-effort: every reducer / preds / channel call is
+    guarded so a signal that can't run on a given model or task (e.g. a
+    detection-style bbox overlay attempted on a `Segment` head whose
+    `_inference` output NMS can't parse) is skipped for that round instead
+    of crashing UL's training loop. Failures are logged at debug level."""
     ids = batch["ids"]
     with th.no_grad():
         for s in signals:
-            v = s.reduce(batch)
+            try:
+                v = s.reduce(batch)
+            except Exception as e:
+                logger.debug("Signal %s reduce failed; skipping round: %s", s.name, e)
+                continue
             if v is None:
                 continue
             kw = {"batch_ids": ids}
             if s.preds is not None:
-                p = s.preds(batch)
-                if p is not None:
-                    kw["preds"] = p
-            channels[s.name](v, **kw)
+                try:
+                    p = s.preds(batch)
+                    if p is not None:
+                        kw["preds"] = p
+                except Exception as e:
+                    logger.debug("Signal %s preds failed; shipping scalar only: %s", s.name, e)
+            try:
+                channels[s.name](v, **kw)
+            except Exception as e:
+                logger.debug("Signal %s channel emit failed: %s", s.name, e)
 
 
 def install_train_pipeline(model, signals: list[Signal]):

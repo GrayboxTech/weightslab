@@ -61,7 +61,7 @@ class _FakeDFManager:
     def get_df_view(self):
         return self.df.reset_index().copy()\
 
-    def get_collapse_annotations_to_samples_df(self):
+    def get_collapse_annotations_to_samples_df(self, df=None):
         # This fixture is already one row per sample (no instance rows), so the
         # per-sample collapsed view is just the frame with its index restored to
         # (origin, sample_id) columns — matching what the real manager returns.

@@ -500,7 +500,16 @@ class Proxy:
             except (KeyError, TypeError):
                 pass
 
-        return None
+        # Attribute genuinely absent on the wrapped object. Raise AttributeError
+        # (as the class docstring promises) rather than returning None: returning
+        # None makes `hasattr(proxy, x)` report True for missing attributes, which
+        # breaks capability probes (e.g. `if not hasattr(loader, "reset")`) and
+        # silently resolves `proxy.missing` to a non-callable None. Callers that
+        # want a soft default should use `getattr(proxy, x, default)`, which now
+        # works correctly.
+        raise AttributeError(
+            f"'{type(obj).__name__}' object has no attribute {item!r}"
+        )
 
     def __delattr__(self, name: str) -> None:
         """Delete an attribute from the proxy or wrapped object safely.
@@ -965,6 +974,24 @@ class Ledger:
         with self._lock:
             return list(self._hyperparams.keys())
 
+    def has_serving_config(self) -> bool:
+        """True if any hyperparameters set holds a non-empty mapping.
+
+        Distinguishes a genuine ``register_hyperparams`` from the empty
+        ``Proxy({})`` placeholder that ``get_hyperparams`` creates on first
+        access — so callers can tell whether serving config (TLS, ports,
+        ``root_log_dir``) was actually wrapped before ``serve()``. Checking
+        ``list_hyperparams()`` alone is not enough: a bare ``get_hyperparams``
+        call already leaves an (empty) placeholder behind.
+        """
+        with self._lock:
+            entries = list(self._hyperparams.values())
+        for entry in entries:
+            resolved = entry.get() if Proxy.is_proxy(entry) else entry
+            if isinstance(resolved, dict) and len(resolved) > 0:
+                return True
+        return False
+
     def set_hyperparam(self, key_path: str, value: Any, name: str = DEFAULT_NAME) -> None:
         """Set a nested hyperparameter using dot-separated `key_path`.
         Example: set_hyperparam(name='exp', key_path='data.train.batch_size', value=128)
@@ -1334,6 +1361,14 @@ def get_hyperparams(name: str = DEFAULT_NAME) -> Any:
 
 def list_hyperparams() -> List[str]:
     return GLOBAL_LEDGER.list_hyperparams()
+
+def has_serving_config() -> bool:
+    """True when serving config (hyperparameters) has been wrapped.
+
+    See :meth:`GrayBoxLedger.has_serving_config`. Used by ``wl.serve`` to guard
+    against exposing an unconfigured backend.
+    """
+    return GLOBAL_LEDGER.has_serving_config()
 
 def resolve_hp_name() -> str | None:
     """Resolve a sensible hyperparam set name from the ledger.

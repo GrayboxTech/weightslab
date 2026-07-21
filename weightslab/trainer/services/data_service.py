@@ -46,6 +46,8 @@ from weightslab.trainer.services.data_image_utils import (
     rle_encode_mask,
     create_data_stat,
     resize_mask_nearest,
+    looks_like_tabular,
+    build_tabular_raw_data_stat,
 )
 
 
@@ -493,7 +495,12 @@ class DataService:
                         ds_idx = dataset.get_index_from_sample_id(sample_id)
                         member_rank = 0
 
-                    _, _, _, pil_img = load_raw_image_array(dataset, ds_idx, rank=member_rank)
+                    _pv_np_img, _, _, pil_img = load_raw_image_array(dataset, ds_idx, rank=member_rank)
+                    if looks_like_tabular(_pv_np_img):
+                        # Tabular sample: cache the feature values (lossless) as a
+                        # 'vector' raw_data stat + heatmap thumbnail, not an image.
+                        stats.append(build_tabular_raw_data_stat(_pv_np_img))
+                        pil_img = None  # skip the image-thumbnail path below
                     if pil_img is not None:
                         ar = pil_img.size[0] / max(pil_img.size[1], 1)
                         if PREVIEW_SIZE >= max(pil_img.size):
@@ -860,8 +867,10 @@ class DataService:
 
             # The manager now expands samples into one row per (sample_id, annotation_id)
             # instance. Collapse back to one row per sample for the sample-centric UI/agent
-            # view, nesting per-instance signals into a dict column.
-            df = self._df_manager.get_collapse_annotations_to_samples_df()
+            # view, nesting per-instance signals into a dict column. Reuse the frame we just
+            # pulled — otherwise collapse would re-run get_combined_df() (full copy + buffer
+            # merge + proxy conversion) a second time over the whole dataset every refresh.
+            df = self._df_manager.get_collapse_annotations_to_samples_df(df)
 
             # Ensure sample_id is a column if it was the index
             df = safe_reset_index(df)
@@ -1143,10 +1152,20 @@ class DataService:
                 if "origin" in df_update.columns:
                      del df_update["origin"]
 
-                self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
+                try:
+                    self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
+                except Exception as e:
+                    logger.warning(
+                        "[DataService] Skipping natural sort stats write for origin=%s: %s",
+                        origin,
+                        e,
+                    )
 
         # Force refresh internal view
-        self._slowUpdateInternals(force=True)
+        try:
+            self._slowUpdateInternals(force=True)
+        except Exception as e:
+            logger.warning("[DataService] Natural sort refresh failed, continuing startup: %s", e)
 
         logger.info(f"[DataService] Completed stats computation for {processed_count} samples")
         print(f"\n\nNatural sort computation finished for {processed_count} samples\n\n")
@@ -1748,7 +1767,12 @@ class DataService:
                 else:
                     np_img, is_volumetric, original_shape, middle_pil = None, False, [], None
 
-                if middle_pil is not None:
+                # Tabular input: the model input is a 1-D feature vector, not an
+                # image. Transmit the actual values (lossless) as a 'vector'
+                # raw_data stat instead of a lossy WebP image.
+                if looks_like_tabular(np_img):
+                    data_stats.append(build_tabular_raw_data_stat(np_img))
+                elif middle_pil is not None:
                     original_size = middle_pil.size
                     target_width = original_size[0]
                     target_height = original_size[1]
@@ -4339,18 +4363,29 @@ class DataService:
                     else np.zeros(n, bool))
 
             # Detect whether column is categorical (string/object) or numeric.
+            # A column is numeric if ANY value coerces to a finite number — even
+            # when the pandas dtype is ``object`` (e.g. a loss column holding
+            # floats mixed with None/NaN for samples that have no value yet).
+            # None/NaN are MISSING data, not a category, so they must never turn
+            # a numeric column into a categorical one (which would surface them
+            # as a spurious "unset" bar). We therefore treat as categorical only
+            # a genuine pandas ``category`` dtype, or a column whose values do
+            # not coerce to any numeric value at all (pure strings).
             col_series = df[column]
             numeric_vals = pd.to_numeric(col_series, errors="coerce")
-            is_categorical = numeric_vals.isna().all() or (
-                col_series.dtype == object or
-                str(col_series.dtype) == "category" or
-                hasattr(col_series, "cat")
+            is_category_dtype = (
+                str(col_series.dtype) == "category" or hasattr(col_series, "cat")
             )
-            # A column that has a few non-NaN numeric values mixed with mostly
-            # NaN still counts as numeric; only treat as categorical when
-            # pd.to_numeric fails on all values.
-            if not is_categorical and numeric_vals.notna().sum() == 0:
-                is_categorical = True
+            # A genuine numeric dtype (float/int/bool) is ALWAYS numeric — even
+            # when every value is NaN (e.g. a loss column no sample has filled
+            # yet). Such a column yields an empty numeric histogram, never a
+            # spurious "unset" categorical bar.
+            is_numeric_dtype = (
+                pd.api.types.is_numeric_dtype(col_series) and not is_category_dtype
+            )
+            is_categorical = (not is_numeric_dtype) and (
+                is_category_dtype or not bool(numeric_vals.notna().any())
+            )
 
             if is_categorical:
                 # --- Categorical path ---

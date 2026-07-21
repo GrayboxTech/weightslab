@@ -1,11 +1,8 @@
 """Raw-TCP tunnel client for Weights Studio.
 
 Exposes a *remote* gRPC training backend — e.g. a Google Colab run sitting behind
-a raw-TCP tunnel — on a **local** port, so the bundled Weights Studio Docker
-stack connects to it as if it were local. The stack's Envoy proxy dials
-``localhost:50051`` (see the ``grpc_service`` upstream in the bundled envoy
-config), so making the remote backend appear there needs no change to the UI at
-all: just run ``weightslab ui launch`` and this tunnel side by side.
+a raw-TCP tunnel — on a **local** port, so a local ``weightslab start`` session
+can proxy to it as if it were local.
 
 Why a *raw* byte forwarder (no protocol parsing): the browser speaks gRPC-Web to
 Envoy, and Envoy speaks native HTTP/2 gRPC to its upstream. Those HTTP/2 frames
@@ -13,8 +10,8 @@ must pass through byte-for-byte — anything that re-frames them (an HTTP/1 prox
 a gRPC-Web tunnel) breaks the connection. So this shuttles bytes both ways and
 leaves the protocol untouched. The matching remote tunnel must likewise be raw
 TCP — ``bore local 50051 --to bore.pub`` (zero-signup) or ``ngrok tcp 50051``
-(needs a card on the free tier) — and the backend must run **plaintext** (the
-default ``weightslab ui launch`` — no ``--certs``) so no TLS terminates mid-path.
+(needs a card on the free tier) — and the backend must run **plaintext** so no
+TLS terminates mid-path.
 """
 
 import logging
@@ -40,8 +37,8 @@ _BORE_RELAY = "bore.pub"
 # (which would close their pipes and drop the tunnel) while the kernel lives.
 _BORE_PROCS = []
 
-# The local port the bundled Envoy upstream dials (GRPC_BACKEND_PORT default).
-# Binding here makes a remote backend look local to the UI stack.
+# The default local port a local UI proxy dials (GRPC_BACKEND_PORT default).
+# Binding here makes a remote backend look local to the UI server.
 DEFAULT_LISTEN_PORT = 50051
 
 # Size of the per-read buffer for the byte pump.
@@ -175,8 +172,8 @@ def run_tunnel(remote_host: str, remote_port: int,
 
     logger.info("=" * 60)
     logger.info(f" Tunnel up: {listen_host}:{listen_port}  ->  {remote_host}:{remote_port}")
-    logger.info(" If the UI isn't running yet, in another terminal: weightslab ui launch")
-    logger.info(" Then open http://localhost:5173")
+    logger.info(" If the UI isn't running yet, in another terminal: weightslab start")
+    logger.info(" Then open the URL printed by the start command")
     logger.info(" Ctrl+C to stop the tunnel.")
     logger.info("=" * 60)
 
@@ -319,10 +316,14 @@ def serve_bore(port: int = DEFAULT_LISTEN_PORT, relay: str = _BORE_RELAY,
         logger.warning(f"Could not set up bore tunnel: {exc}")
         return None
 
+    # Imported lazily: utils.tools pulls in torch, and keeping it out of this
+    # module's import path lets the torch-free `weightslab` CLI stay fast.
+    from weightslab.utils.tools import _running_in_notebook
+
     proc = subprocess.Popen(
         [bore, "local", str(port), "--to", relay],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
-    )
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True if _running_in_notebook() else False
+    )  # Bore independent of the parent process (so it keeps running if the notebook kernel restarts)
     _BORE_PROCS.append(proc)
 
     result = {"endpoint": None}

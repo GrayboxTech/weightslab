@@ -89,3 +89,25 @@ class WLAwareDataset(YOLODataset):
             )
             labels = _to_six_col(xyxy_np, np.asarray(data["cls"]))
         return image, str(i), labels, metadata
+
+
+class WLAwareSegmentationDataset(WLAwareDataset):
+    """YOLO segmentation dataset that speaks WL's preview protocol.
+
+    The parent `WLAwareDataset` already extracts the per-instance bboxes that
+    YOLO segmentation labels carry (`lab["bboxes"]` / `data["bboxes"]`), and
+    the full UL sample dict — masks included — rides through
+    `metadata["batch"]` untouched, so `wl_ul_dict_collate` -> UL's own
+    `collate_fn` still assembles the `masks` tensor the segmentation loss
+    needs. We therefore only need to (a) keep the segmentation dataset build
+    flags intact (this class is assigned onto an already-built segment dataset
+    via ``dataset.__class__ = WLAwareSegmentationDataset``, which preserves
+    ``use_segments`` / ``task``), and (b) advertise the task.
+
+    Studio tracks and renders these runs at the **bbox** level (the per-sample
+    signals and overlays are box-based), so `task_type` stays ``"detection"``
+    — masks are trained on but not yet streamed to the grid. When per-sample
+    mask signals/overlays land, flip this to ``"segmentation"``.
+    """
+
+    task_type = "detection"
