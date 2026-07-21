@@ -1072,7 +1072,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
         save_signals(
             signals=signals,
             batch_ids=batch_ids,
-            # preds_raw=preds_raw,
+            preds_raw=preds_raw if _store_preds else None,
             preds=preds,
             targets=targets,
             log=False # Already logged above, no need to log again in save_signals; set to False to avoid duplicate logging if save_signals is called separately without logging
