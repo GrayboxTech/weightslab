@@ -1603,7 +1603,7 @@ def serve(serving_cli: bool = True, serving_grpc: bool = False,
     return bore_endpoint
 
 
-def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
+def keep_serving(timeout: int = None, release_gpu: bool = False) -> None:
     """Keep process alive while background WeightsLab services are running.
 
     Args:

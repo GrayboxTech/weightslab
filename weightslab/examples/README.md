@@ -19,8 +19,8 @@ sends the input vector to the UI through gRPC as a `vector` — see
 
 | Example | Task | Run it | Colab |
 | --- | --- | --- | --- |
-| [**Bank Fraud Detection**](PyTorch/wl-fraud-detection) | Binary classification on 16 synthetic transaction features (~12% fraud). MLP. | `cd PyTorch/wl-fraud-detection && python main.py` | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/252-tabular-experiment/weightslab/examples/Notebooks/PyTorch/ws-fraud-detection.ipynb) |
-| [**Advertising CTR Recommendation**](PyTorch/wl-ads-recommendation) | Click-through-rate prediction (8 categorical + 8 numeric fields, ~20% CTR). Wide & Deep. | `cd PyTorch/wl-ads-recommendation && python main.py` | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/252-tabular-experiment/weightslab/examples/Notebooks/PyTorch/ws-ads-recommendation.ipynb) |
+| [**Bank Fraud Detection**](PyTorch/wl-fraud-detection) | Binary classification on 16 synthetic transaction features (~12% fraud). MLP. | `cd PyTorch/wl-fraud-detection && python main.py` | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/PyTorch/wl-fraud-detection.ipynb) |
+| [**Advertising CTR Recommendation**](PyTorch/wl-ads-recommendation) | Click-through-rate prediction (8 categorical + 8 numeric fields, ~20% CTR). Wide & Deep. | `cd PyTorch/wl-ads-recommendation && python main.py` | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/PyTorch/wl-ads-recommendation.ipynb) |
 
 Both datasets are generated in-process (no download). Real drop-in replacements
 are documented in each folder's README — Kaggle Credit Card Fraud / PaySim
@@ -30,10 +30,10 @@ are documented in each folder's README — Kaggle Credit Card Fraud / PaySim
 
 | Example | Task | Run it | Colab |
 | --- | --- | --- | --- |
-| [Image Classification](PyTorch/wl-classification) | MNIST digit classification. | `weightslab start example --cls` | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/PyTorch/ws-classification.ipynb) |
-| [Clustering](PyTorch/wl-clustering) | Feature/embedding clustering. | `weightslab start example --clus` | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/PyTorch/ws-clustering.ipynb) |
-| [Object Detection](PyTorch/wl-detection) | Single-shot detector on Penn-Fudan. | `weightslab start example --det` | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/PyTorch/ws-detection.ipynb) |
-| [Segmentation](PyTorch/wl-segmentation) | Semantic segmentation (BDD subset). | `weightslab start example --seg` | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/PyTorch/ws-segmentation.ipynb) |
+| [Image Classification](PyTorch/wl-classification) | MNIST digit classification. | `weightslab start example --cls` | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/PyTorch/wl-classification.ipynb) |
+| [Clustering](PyTorch/wl-clustering) | Feature/embedding clustering. | `weightslab start example --clus` | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/PyTorch/wl-clustering.ipynb) |
+| [Object Detection](PyTorch/wl-detection) | Single-shot detector on Penn-Fudan. | `weightslab start example --det` | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/PyTorch/wl-detection.ipynb) |
+| [Segmentation](PyTorch/wl-segmentation) | Semantic segmentation (BDD subset). | `weightslab start example --seg` | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/PyTorch/wl-segmentation.ipynb) |
 | [Generation](PyTorch/wl-generation) | Generative model example. | `weightslab start example --gen` | — |
 
 ## How tabular works

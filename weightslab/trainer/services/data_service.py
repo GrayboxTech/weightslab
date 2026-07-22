@@ -4237,6 +4237,12 @@ class DataService:
                     if isinstance(operations, dict): operations = [operations] # Backwards compat
                     if not operations: operations = []
 
+                    # Cooperative cancel: if the client aborted during the (possibly
+                    # long) LLM call, skip executing the operations entirely.
+                    if abort_event.is_set():
+                        logger.info("[ApplyDataQuery] Canceled by client before execution")
+                        return pb2.DataQueryResponse(success=False, message="Query canceled.")
+
                     with self._lock:
                         self._slowUpdateInternals(force=True)
 
@@ -4252,6 +4258,11 @@ class DataService:
                         _SCHEMA_MUTATING_FUNCS = {"df.modify", "df.drop_column"}
 
                         for op in operations:
+                            # Cooperative cancel between operations (frees the lock
+                            # promptly when the client aborts a multi-step query).
+                            if abort_event.is_set():
+                                logger.info("[ApplyDataQuery] Canceled by client mid-execution")
+                                return pb2.DataQueryResponse(success=False, message="Query canceled.")
                             func = op.get("function")
                             params = op.get("params", {}) or {}
 

@@ -14,6 +14,7 @@ __pycache__
 venv
 runs
 data
+!./tests/data/
 MagicMock
 drop
 htmlcov
