@@ -3571,18 +3571,19 @@ class DataService:
                             _DataStat(name=col, type="string", shape=[1], value_string="1")
                         )
 
-        # -- Per-sample loss trajectory + its shape (one source for the UI) ---
-        # For each visible sample attach its loss curve as an 'array' DataStat
-        # (the on-cell sparkline) AND classify THAT SAME curve into tag:loss_shape,
-        # so the drawn trajectory and its shape-haze come from one computation and
-        # can never disagree. The curve-derived shape is authoritative: it replaces
-        # any dataframe-provided tag:loss_shape for rows that have a trajectory;
-        # rows with no loss history keep whatever the dataframe carries. Guarded and
-        # a no-op for experiments with no per-sample "loss" signal.
+        # -- Per-sample loss trajectory (the on-cell sparkline) ---------------
+        # Attach each visible sample's loss curve as an 'array' DataStat so the
+        # grid can draw a sparkline. The loss-SHAPE haze is deliberately NOT
+        # computed here: classification runs on the write/train path
+        # (enable_loss_shape_signal / write_loss_shapes — cadenced and exp_hash
+        # scoped) which maintains the tag:loss_shape dataframe column. So this
+        # read path does no per-request classification and just ships the curve;
+        # the haze reads the pre-computed tag column like any other categorical.
+        # Guarded, a no-op for experiments with no per-sample "loss" signal;
+        # signal overridable via WL_LOSS_TRAJ_SIGNAL.
         traj_signal = os.environ.get("WL_LOSS_TRAJ_SIGNAL", "loss")
         try:
             from weightslab.backend import ledgers
-            from weightslab.src import classify_loss_shape
 
             logger_q = ledgers.get_logger()
             if logger_q is not None:
@@ -3599,10 +3600,6 @@ class DataService:
                             continue
                         pts.sort()
                         vals = [v for _, v in pts]
-                        try:
-                            shape = classify_loss_shape(vals, min_points=3)
-                        except Exception:
-                            shape = None
                         # Downsample the curve for display (endpoints preserved).
                         if len(vals) > 32:
                             idx = np.linspace(0, len(vals) - 1, 32).round().astype(int)
@@ -3612,15 +3609,8 @@ class DataService:
                         row_stats[i].append(
                             _DataStat(name="loss_trajectory", type="array",
                                       shape=[len(curve)], value=curve))
-                        if shape:
-                            # Curve-derived shape wins: drop any df-provided one.
-                            row_stats[i] = [s for s in row_stats[i]
-                                            if s.name != "tag:loss_shape"]
-                            row_stats[i].append(
-                                _DataStat(name="tag:loss_shape", type="string",
-                                          shape=[1], value_string=str(shape)))
         except Exception:
-            logger.debug("loss_trajectory/shape stat skipped", exc_info=True)
+            logger.debug("loss_trajectory stat skipped", exc_info=True)
 
         # -- Build DataRecord list in one comprehension -----------------------
         _DataRecord = pb2.DataRecord
