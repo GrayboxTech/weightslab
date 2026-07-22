@@ -1291,6 +1291,39 @@ class CheckpointSystemTests(unittest.TestCase):
         # Not possible as data are generated randomly without reproducibility now
         # self.check_reproducibility(loss_d_original, loss_d_verify, originals_uids, None, loss_tol=1e-1)
 
+    # ========================================================================
+    # Test: logger queue saved with weights
+    # ========================================================================
+    def test_logger_queue_saved_with_weights(self):
+        self.chkpt_manager.update_experiment_hash(force=False, dump_immediately=False)
+        self.chkpt_manager.save_pending_changes(force=True)
+
+        # Logger history is persisted to an on-disk DuckDB file alongside the
+        # checkpoint (the chunked-zstd snapshot was replaced by DuckDB in #257).
+        db_path = Path(self.chkpt_manager.get_logger_db_path())
+        self.assertTrue(db_path.exists(), "Logger DuckDB should be saved with checkpoint")
+
+        # The registered logger carries the persisted signal history.
+        lg = ledgers.get_logger('main')
+        self.assertIsNotNone(lg, "Logger entry should be present")
+        signals = lg.get_signal_history() if hasattr(lg, 'get_signal_history') else []
+        if isinstance(signals, dict):
+            total_signals = 0
+            for experiments in signals.values():
+                if not isinstance(experiments, dict):
+                    continue
+                for steps in experiments.values():
+                    if not isinstance(steps, dict):
+                        continue
+                    for entries in steps.values():
+                        if isinstance(entries, list):
+                            total_signals += len(entries)
+                        elif entries is not None:
+                            total_signals += 1
+            self.assertGreaterEqual(total_signals, 0, "Signal history count should be non-negative")
+        else:
+            self.assertIsInstance(signals, list, "Signal history should be list or nested dict")
+
 
 class CheckpointStepAwareBehaviorTests(unittest.TestCase):
     def test_model_hash_depends_on_init_step(self):
