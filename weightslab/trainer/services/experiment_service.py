@@ -792,11 +792,11 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                     checkpoint_manager = ledgers.get_checkpoint_manager()
                 except Exception:
                     checkpoint_manager = None
-            if checkpoint_manager is not None and hasattr(checkpoint_manager, "save_logger_snapshot"):
+            if checkpoint_manager is not None and hasattr(checkpoint_manager, "flush_logger_to_disk"):
                 try:
-                    checkpoint_manager.save_logger_snapshot()
+                    checkpoint_manager.flush_logger_to_disk()
                 except Exception:
-                    logger.debug("Could not persist logger snapshot after note update", exc_info=True)
+                    logger.debug("Could not persist logger history after note update", exc_info=True)
 
             # Log to audit trail
             self._log_audit(
