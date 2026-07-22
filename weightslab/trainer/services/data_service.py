@@ -3453,6 +3453,48 @@ class DataService:
         except Exception:
             return False
 
+    @staticmethod
+    def _downsample_curve(vals, max_points=32):
+        """Uniformly downsample a series to <= max_points floats (endpoints kept)."""
+        if len(vals) <= max_points:
+            return [float(v) for v in vals]
+        idx = np.linspace(0, len(vals) - 1, max_points).round().astype(int)
+        return [float(vals[j]) for j in idx]
+
+    def _loss_trajectory_curves(self, sample_ids):
+        """Downsampled per-sample loss curve for the on-cell sparkline.
+
+        Returns ``{str(sample_id): [float, ...]}`` for samples with history; an
+        empty dict when there is no logger or no per-sample loss signal. Read-only —
+        shape classification lives on the write path (enable_loss_shape_signal),
+        not here. Signal name overridable via WL_LOSS_TRAJ_SIGNAL (default "loss").
+        """
+        from weightslab.backend import ledgers
+
+        logger_q = ledgers.get_logger()
+        if logger_q is None:
+            return {}
+
+        signal = os.environ.get("WL_LOSS_TRAJ_SIGNAL", "loss")
+        try:
+            rows = logger_q.query_per_sample(signal, sample_ids=sample_ids)
+        except Exception:
+            logger.debug("loss_trajectory query skipped", exc_info=True)
+            return {}
+
+        by_sid = {}
+        for sid, step, val, _ in rows:
+            by_sid.setdefault(str(sid), []).append((int(step), float(val)))
+
+        curves = {
+            sid: self._downsample_curve([v for _, v in sorted(pts)])
+            for sid, pts in by_sid.items()
+        }
+        if curves:
+            logger.info("[loss_traj] page_ids=%d with_history=%d signal=%s",
+                        len(sample_ids), len(curves), signal)
+        return curves
+
     def _build_metadata_only_response(self, df_slice: pd.DataFrame, requested_cols=None):
         """Build a DataSamplesResponse of metadata DataRecords from dataframe columns only.
 
@@ -3571,46 +3613,19 @@ class DataService:
                             _DataStat(name=col, type="string", shape=[1], value_string="1")
                         )
 
-        # -- Per-sample loss trajectory (the on-cell sparkline) ---------------
-        # Attach each visible sample's loss curve as an 'array' DataStat so the
-        # grid can draw a sparkline. The loss-SHAPE haze is deliberately NOT
-        # computed here: classification runs on the write/train path
-        # (enable_loss_shape_signal / write_loss_shapes — cadenced and exp_hash
-        # scoped) which maintains the tag:loss_shape dataframe column. So this
-        # read path does no per-request classification and just ships the curve;
-        # the haze reads the pre-computed tag column like any other categorical.
-        # Guarded, a no-op for experiments with no per-sample "loss" signal;
-        # signal overridable via WL_LOSS_TRAJ_SIGNAL.
-        traj_signal = os.environ.get("WL_LOSS_TRAJ_SIGNAL", "loss")
-        try:
-            from weightslab.backend import ledgers
-
-            logger_q = ledgers.get_logger()
-            if logger_q is not None:
-                traj = {}
-                for sid, step, val, _ in logger_q.query_per_sample(
-                        traj_signal, sample_ids=sample_ids):
-                    traj.setdefault(str(sid), []).append((int(step), float(val)))
-                if traj:
-                    logger.info("[loss_traj] page_ids=%d with_history=%d signal=%s",
-                                len(sample_ids), len(traj), traj_signal)
-                    for i, sid in enumerate(sample_ids):
-                        pts = traj.get(str(sid))
-                        if not pts:
-                            continue
-                        pts.sort()
-                        vals = [v for _, v in pts]
-                        # Downsample the curve for display (endpoints preserved).
-                        if len(vals) > 32:
-                            idx = np.linspace(0, len(vals) - 1, 32).round().astype(int)
-                            curve = [float(vals[j]) for j in idx]
-                        else:
-                            curve = [float(v) for v in vals]
-                        row_stats[i].append(
-                            _DataStat(name="loss_trajectory", type="array",
-                                      shape=[len(curve)], value=curve))
-        except Exception:
-            logger.debug("loss_trajectory stat skipped", exc_info=True)
+        # -- Per-sample loss trajectory (the on-cell sparkline; read-only) -----
+        # Ship each visible sample's loss curve as an 'array' DataStat for the grid
+        # sparkline. The loss-SHAPE haze is NOT computed here: classification runs on
+        # the write/train path (enable_loss_shape_signal / write_loss_shapes) which
+        # maintains the tag:loss_shape column, so this path does no per-request work.
+        loss_curves = self._loss_trajectory_curves(sample_ids)
+        for i, sid in enumerate(sample_ids):
+            curve = loss_curves.get(str(sid))
+            if not curve:
+                continue
+            row_stats[i].append(
+                _DataStat(name="loss_trajectory", type="array",
+                          shape=[len(curve)], value=curve))
 
         # -- Build DataRecord list in one comprehension -----------------------
         _DataRecord = pb2.DataRecord
