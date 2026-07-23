@@ -51,15 +51,13 @@ Most data problems are invisible until your model tells you: through loss spikes
 ```bash
 pip install weightslab
 ```
+
 **2. Launch Studio**
 ```bash
-<<<<<<< HEAD
-weightslab launch  # then open https://localhost:5173 🚀
-=======
-weightslab start  # preferred localhost:50051; falls back to a free port if busy 🚀
->>>>>>> a6f0c1acbac49221358a21b0bde87b348c09204b
+weightslab start
 ```
-**3. Wrap your training script**
+
+**3.a. Wrap your training script locally**
 ```python
 # wrap the objects in your training script
 
@@ -73,10 +71,14 @@ loader = wl.watch_or_edit(dataset, flag='data', loader_name="train")
 wl.serve(serving_grpc=True, serving_cli=False)
 ...
 ```
+
+**3.b. Or in the cloud**
+
+[![Start coding with GCollab](https://img.shields.io/badge/Start_coding_with_GCollab-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=white)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/Colab/wl-colab-quickstart.ipynb)
+
+
 <br>
-
 For a detailed installation guide and advanced configuration &rarr; [Installation Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
-
 <br>
 
 > [!TIP]
@@ -87,12 +89,9 @@ For a detailed installation guide and advanced configuration &rarr; [Installatio
 > weightslab start example --seg      # segmentation
 > weightslab start example --det      # detection
 > weightslab start example --clus     # clustering
-> weightslab start example --gen      # generation
 > ```
 >
-> Browse every runnable example — including the **tabular** fraud-detection and
-> ads-CTR usecases, each with a one-click **Colab** notebook — in the
-> [examples gallery](weightslab/examples/README.md).
+> Explore our [sandbox](www.sandbox.graybx.com).
 
 <br>
 
@@ -124,11 +123,7 @@ For a detailed installation guide and advanced configuration &rarr; [Installatio
 3. **Run your script, then launch the UI in a separate terminal:**
 ```bash
    python train.py
-<<<<<<< HEAD
-   weightslab launch
-=======
    weightslab start
->>>>>>> a6f0c1acbac49221358a21b0bde87b348c09204b
 ```
 
 4. **Open your browser** at the URL printed by `weightslab start` and inspect your training in real time.
@@ -327,9 +322,8 @@ Find our documentation [online](https://grayboxtech.github.io/weightslab/latest/
 
 New here (human or AI coding agent)? Start with [AGENTS.md](AGENTS.md) — it
 captures the cross-repo architecture (weightslab backend ↔ weights_studio
-frontend via the shared proto), the module maps, the `wl.watch_or_edit`
-integration pattern, where tests live, and the gotchas that aren't obvious from
-any single file. It's the fastest way to orient before a first change.
+frontend via the shared proto), the module maps, the integration pattern, where tests live, and the gotchas that aren't obvious from
+any single file. It's the fastest way to orient before a first change and contribution.
 
 </details>
 
