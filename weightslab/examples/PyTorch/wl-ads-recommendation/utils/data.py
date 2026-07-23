@@ -19,9 +19,11 @@ Real-world analogues (drop-in replaceable):
 Canonical models for this task: Wide & Deep, DeepFM, Factorization Machines.
 ``utils/model.py`` implements a compact Wide & Deep.
 
-The 16 field values (8 categorical indices + 8 numeric) are packed into a single
-``1x4x4`` tensor per impression so WeightsLab's grid renders a heatmap thumbnail
-while the List Exploration view exposes the per-sample stats as sortable columns.
+The model input is the 16-field vector itself (categorical indices + per-feature
+standardized numerics; no fake image). WeightsLab transmits it through gRPC as a
+``vector`` raw_data stat carrying the actual values, and ``get_items`` exposes the
+raw, human-readable field values (dollars, years, page counts, …) as sortable
+metadata columns in the List Exploration (tabular) view.
 """
 
 from __future__ import annotations
@@ -97,20 +99,51 @@ def _true_params():
     return cat_weights, numeric_weights, interaction
 
 
+def _draw_raw_numeric(rng: np.random.Generator, n: int) -> np.ndarray:
+    """Draw the 8 numeric fields at their natural, human-readable scale.
+
+    Order matches ``NUMERIC_FIELDS``. These are the values an ad-serving
+    pipeline would actually log (dollars, years, page counts, …) — this is
+    what the UI shows as metadata; the model never sees these directly.
+    """
+    ad_position = rng.integers(1, 9, size=n).astype(np.float64)  # slot 1-8
+    bid_price = rng.gamma(2.0, 1.25, size=n)  # dollars, mean ~$2.50 CPC
+    user_age = np.clip(rng.normal(35.0, 12.0, size=n), 18, 80)
+    session_depth = rng.poisson(3.0, size=n).astype(np.float64) + 1  # pages viewed
+    historical_ctr = rng.beta(2.0, 25.0, size=n)  # user's baseline CTR, mean ~7%
+    days_since_last_click = rng.exponential(10.0, size=n)
+    num_ads_seen_today = rng.poisson(12.0, size=n).astype(np.float64) + 1
+    creative_freshness = rng.exponential(20.0, size=n)  # days since creative was made
+
+    return np.stack(
+        [
+            ad_position, bid_price, user_age, session_depth,
+            historical_ctr, days_since_last_click, num_ads_seen_today,
+            creative_freshness,
+        ],
+        axis=1,
+    )
+
+
 def make_synthetic_ctr(
     n_samples: int, seed: int = 0
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Generate deterministic synthetic ad impressions.
 
-    Returns ``(cat, num, y)``:
+    Returns ``(cat, num_std, num_raw, y)``:
       * ``cat``: ``int64[n, NUM_CATEGORICAL]`` category indices
-      * ``num``: ``float32[n, NUM_NUMERIC]`` standardized numeric features
+      * ``num_std``: ``float32[n, NUM_NUMERIC]`` standardized numeric features
+        (model input)
+      * ``num_raw``: ``float32[n, NUM_NUMERIC]`` raw, human-readable numeric
+        values (surfaced as sortable metadata columns in the UI)
       * ``y``:   ``int64[n]`` click label (1 = clicked), ~20% positive
     """
     if n_samples <= 0:
+        empty_num = np.zeros((0, NUM_NUMERIC), dtype=np.float32)
         return (
             np.zeros((0, NUM_CATEGORICAL), dtype=np.int64),
-            np.zeros((0, NUM_NUMERIC), dtype=np.float32),
+            empty_num,
+            empty_num.copy(),
             np.zeros((0,), dtype=np.int64),
         )
 
@@ -123,14 +156,19 @@ def make_synthetic_ctr(
         axis=1,
     ).astype(np.int64)
 
-    # Sample numeric features ~ N(0, 1) (already "standardized").
-    num = rng.normal(0.0, 1.0, size=(n_samples, NUM_NUMERIC)).astype(np.float32)
+    # Raw, human-readable numeric values, then standardize per-feature
+    # (class-agnostic) for the model input — mirrors the fraud-detection example.
+    num_raw = _draw_raw_numeric(rng, n_samples)
+    mean = num_raw.mean(axis=0, keepdims=True)
+    std = num_raw.std(axis=0, keepdims=True)
+    std[std == 0] = 1.0
+    num_std = (num_raw - mean) / std
 
     # Ground-truth click logit = sum of per-field effects + one interaction + numeric.
     logit = np.zeros(n_samples, dtype=np.float64)
     for f, w in enumerate(cat_weights):
         logit += w[cat[:, f]]
-    logit += num @ numeric_weights
+    logit += num_std @ numeric_weights
     logit += interaction[cat[:, 1], cat[:, 0]]  # ad_category x user_segment
 
     # Calibrate an additive bias so the *mean click probability* lands near
@@ -150,26 +188,29 @@ def make_synthetic_ctr(
     prob = 1.0 / (1.0 + np.exp(-logit))
     y = (rng.uniform(0.0, 1.0, size=n_samples) < prob).astype(np.int64)
 
-    return cat, num, y
+    return cat, num_std.astype(np.float32), num_raw.astype(np.float32), y
 
 
 class AdsCTRDataset(Dataset):
-    """Advertising CTR dataset yielding ``(image, idx, label)``.
+    """Tabular ads CTR dataset yielding ``(input, idx, label)``.
 
-    ``image`` packs the 8 categorical indices (as floats) followed by the 8
-    numeric features into ``float32[1, IMG_SIDE, IMG_SIDE]``; the model unpacks
-    it back into indices + numerics. ``idx`` is the tracked sample id; ``label``
-    is 0 (no click) / 1 (click).
+    ``input`` is the 1-D packed field vector ``float32[NUM_FIELDS]`` fed straight
+    to the model — the 8 categorical indices (as floats) followed by the 8
+    per-feature standardized numerics; there is no image. ``idx`` is the tracked
+    sample id; ``label`` is 0 (no click) / 1 (click).
     """
 
     def __init__(self, n_samples: int, seed: int = 0, max_samples: Optional[int] = None):
-        cat, num, y = make_synthetic_ctr(n_samples, seed=seed)
+        cat, num_std, num_raw, y = make_synthetic_ctr(n_samples, seed=seed)
         if max_samples is not None:
-            cat, num, y = cat[:max_samples], num[:max_samples], y[:max_samples]
-        packed = np.concatenate([cat.astype(np.float32), num], axis=1)  # [N, 16]
-        self.features = torch.from_numpy(packed)  # float32 [N, 16]
+            cat, num_std, num_raw, y = (
+                cat[:max_samples], num_std[:max_samples], num_raw[:max_samples], y[:max_samples],
+            )
+        packed = np.concatenate([cat.astype(np.float32), num_std], axis=1)  # [N, 16] (model input)
+        self.features = torch.from_numpy(packed)  # float32 [N, 16] (standardized, model input)
         self.cat = torch.from_numpy(cat)          # int64 [N, 8]
-        self.num = torch.from_numpy(num)          # float32 [N, 8]
+        self.num = torch.from_numpy(num_std)      # float32 [N, 8] (standardized)
+        self.num_raw = num_raw                    # float32 [N, 8] (raw, display values)
         self.labels = torch.from_numpy(y)         # int64 [N]
 
     def __len__(self) -> int:
@@ -180,15 +221,19 @@ class AdsCTRDataset(Dataset):
         return self.features[idx]
 
     def _metadata(self, idx: int) -> dict:
-        """Readable per-field values -> sortable UI columns."""
+        """Readable category labels + raw (non-standardized) numeric values -> sortable UI columns."""
         meta = {}
         cat_row = self.cat[idx]
         for f, name in enumerate(CATEGORICAL_FIELDS):
             meta[name] = category_label(name, int(cat_row[f]))
-        num_row = self.num[idx]
+        raw_row = self.num_raw[idx]
         for j, name in enumerate(NUMERIC_FIELDS):
-            meta[name] = round(float(num_row[j]), 4)
+            meta[name] = round(float(raw_row[j]), 4)
         return meta
+
+    def __getitems__(self, idx: int):
+        # Training contract: (input, sample_id, label).
+        return self._input(idx), idx, int(self.labels[idx].item())
 
     def __getitem__(self, idx: int):
         # Training contract: (input, sample_id, label).

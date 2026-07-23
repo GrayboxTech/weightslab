@@ -228,7 +228,7 @@ if __name__ == "__main__":
 
     if tqdm_display:
         train_range = tqdm.tqdm(
-            range(training_steps_to_do) if training_steps_to_do is not None else itertools.count(),
+            range(training_steps_to_do) if training_steps_to_do != None else itertools.count(),
             desc="Training",
             bar_format="{desc}: {n}/{total} [{elapsed}<{remaining}, {rate_fmt}] {bar} | {postfix}",
             ncols=140,
@@ -236,7 +236,7 @@ if __name__ == "__main__":
             leave=True,
         )
     else:
-        train_range = range(training_steps_to_do) if training_steps_to_do is not None else itertools.count()
+        train_range = range(training_steps_to_do) if training_steps_to_do != None else itertools.count()
 
     # ================
     # Training Loop

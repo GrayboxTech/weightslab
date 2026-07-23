@@ -7,6 +7,7 @@ Run:  python -m pytest test_ads_recommendation.py
 import os
 import sys
 
+import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -34,26 +35,42 @@ def test_schema():
 
 
 def test_synthetic_shapes_and_ranges():
-    cat, num, y = make_synthetic_ctr(500, seed=0)
+    cat, num_std, num_raw, y = make_synthetic_ctr(500, seed=0)
     assert cat.shape == (500, NUM_CATEGORICAL)
-    assert num.shape == (500, NUM_NUMERIC)
+    assert num_std.shape == (500, NUM_NUMERIC)
+    assert num_raw.shape == (500, NUM_NUMERIC)
     assert y.shape == (500,)
-    assert str(cat.dtype) == "int64" and str(num.dtype) == "float32"
+    assert str(cat.dtype) == "int64" and str(num_std.dtype) == "float32" and str(num_raw.dtype) == "float32"
     for f, card in enumerate(CATEGORICAL_CARDINALITIES):
         assert cat[:, f].min() >= 0 and cat[:, f].max() < card
     assert set(int(v) for v in set(y.tolist())) <= {0, 1}
 
 
+def test_numeric_standardized_vs_raw():
+    """Model input (standardized) must differ in scale from the raw metadata values."""
+    _, num_std, num_raw, _ = make_synthetic_ctr(2000, seed=0)
+    # Standardized: ~zero mean, ~unit variance per feature.
+    assert np.allclose(num_std.mean(axis=0), 0.0, atol=0.15)
+    assert np.allclose(num_std.std(axis=0), 1.0, atol=0.15)
+    # Raw values live at their natural human-readable scale (not standardized),
+    # e.g. bid_price in dollars, user_age in years — nowhere near unit variance.
+    bid_idx = NUMERIC_FIELDS.index("bid_price")
+    age_idx = NUMERIC_FIELDS.index("user_age")
+    assert num_raw[:, bid_idx].mean() > 1.0  # dollars, not ~0
+    assert num_raw[:, age_idx].mean() > 18.0  # years, not ~0
+    assert not np.allclose(num_std, num_raw)
+
+
 def test_deterministic_for_seed():
     a = make_synthetic_ctr(200, seed=5)
     b = make_synthetic_ctr(200, seed=5)
-    assert (a[0] == b[0]).all() and (a[1] == b[1]).all() and (a[2] == b[2]).all()
+    assert all((x == y).all() for x, y in zip(a, b))
     c = make_synthetic_ctr(200, seed=6)
     assert not (a[0] == c[0]).all()
 
 
 def test_ctr_is_realistic():
-    _, _, y = make_synthetic_ctr(4000, seed=1)
+    _, _, _, y = make_synthetic_ctr(4000, seed=1)
     assert 0.15 < float(y.mean()) < 0.26  # calibrated to ~20% CTR
 
 
@@ -90,6 +107,17 @@ def test_get_items_exposes_field_metadata_columns():
     assert isinstance(metadata["placement"], str)
     assert metadata["device_type"] in ("mobile", "desktop", "tablet", "ctv")
     assert all(isinstance(metadata[n], float) for n in NUMERIC_FIELDS)
+
+
+def test_metadata_numeric_values_are_raw_not_standardized():
+    """Metadata must carry the raw (human-scale) values, not the standardized
+    model input — the UI shows the model input in list mode and the raw
+    values as metadata, so the two must not collapse to the same numbers."""
+    ds = AdsCTRDataset(50, seed=2)
+    _, _, _, metadata = ds.get_items(4, include_metadata=True)
+    for j, name in enumerate(NUMERIC_FIELDS):
+        assert metadata[name] == round(float(ds.num_raw[4][j]), 4)
+        assert metadata[name] != round(float(ds.num[4][j]), 4)
 
 
 def test_category_label_fallback():

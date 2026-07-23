@@ -153,6 +153,10 @@ class FraudDataset(Dataset):
         row = self.raw[idx]
         return {name: round(float(row[i]), 4) for i, name in enumerate(FEATURE_NAMES)}
 
+    def __getitems__(self, idx: int):
+        # Training contract: (input, sample_id, label).
+        return self._input(idx), idx, int(self.labels[idx].item())
+
     def __getitem__(self, idx: int):
         # Training contract: (input, sample_id, label).
         return self._input(idx), idx, int(self.labels[idx].item())

@@ -83,6 +83,29 @@ def _point_cloud_chunk_bytes() -> int:
     return val
 
 
+def peek_is_tabular_sample(dataset, sample_id) -> bool:
+    """True when ``sample_id``'s raw model input is a 1-D feature vector.
+
+    Used as the last step of task_type auto-detection: image/detection/
+    segmentation datasets are identified by their *label* shape, but a tabular
+    dataset's label is a plain scalar, so the only way to tell it apart is to
+    peek at the *input* it feeds the model. Any resolution failure (missing
+    sample, dataset without the expected lookup methods, …) is treated as
+    "not tabular" rather than raised, since this is a best-effort heuristic.
+    """
+    try:
+        if hasattr(dataset, "get_physical_location"):
+            idx, rank = dataset.get_physical_location(sample_id)
+        else:
+            idx, rank = dataset.get_index_from_sample_id(sample_id), 0
+        if idx is None:
+            return False
+        img, _, _, _ = load_raw_image_array(dataset, idx, rank=rank)
+        return looks_like_tabular(img)
+    except (KeyError, ValueError, AttributeError, IndexError):
+        return False
+
+
 def normalize_metadata_copy_source_name(source_name: str, experiment_hash: str = None) -> str:
     """Normalize a source metadata name for deterministic copied-column naming."""
     name = str(source_name or "").strip()
@@ -602,6 +625,10 @@ class DataService:
                     task_type = str(db_task).strip().lower() if db_task and str(db_task).strip().lower() not in ("none", "nan", "unknown", "") else "unknown"
                     if task_type == "unknown" and _early_task:
                         task_type = _early_task
+                    if task_type == "unknown" and looks_like_tabular(_pv_np_img):
+                        # Tabular: the model INPUT (not the label) is a 1-D feature
+                        # vector — no spatial dims to key a heuristic off of.
+                        task_type = "tabular"
                     if task_type == "unknown" and label is not None:
                         l_arr = to_numpy_safe(label)
                         if l_arr is not None and l_arr.ndim >= 2 and l_arr.shape[-2] >= 16 and l_arr.shape[-1] >= 16:
@@ -1304,6 +1331,13 @@ class DataService:
                             except Exception:
                                 pass
 
+                # Tabular: the model INPUT (not the label) is a 1-D feature vector.
+                # Only peek at it when nothing else already matched, so this is a
+                # cheap no-op for image/detection/segmentation datasets.
+                if task_type == "classification" and dataset is not None:
+                    if peek_is_tabular_sample(dataset, sample_id):
+                        task_type = "tabular"
+
             # ====== Step 5a: Metadata stats — moved to GetMetaData ======
             # Generic dataframe metadata columns (signals, tags, custom fields, etc.)
             # are no longer returned by GetDataSamples; the dedicated GetMetaData RPC
@@ -1342,7 +1376,7 @@ class DataService:
 
             # ====== Step 7: Process labels ======
             t_label_convert = 0.0
-            if not skip_label_for_request and task_type != "classification":
+            if not skip_label_for_request and task_type not in ("classification", "tabular"):
                 t0_gt_conv = time.time()
                 label_raw = row.get(SampleStatsEx.TARGET.value) if label is None else label
                 if label_raw is None and dataset is not None:
@@ -1600,7 +1634,7 @@ class DataService:
             if skip_prediction_for_request:
                 pred = None
 
-            if task_type != "classification" and pred is not None:
+            if task_type not in ("classification", "tabular") and pred is not None:
                 t0_pmask = time.time()
 
                 # 3D (point cloud) detection predictions: same dual payload as
