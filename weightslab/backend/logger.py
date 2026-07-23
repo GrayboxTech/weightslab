@@ -61,6 +61,13 @@ _INSTANCE_COLS = [
 # many rows, to bound memory during long runs that never read history.
 _STAGE_FLUSH_THRESHOLD = 50_000
 
+# How often the background flush thread wakes up (see LoggerQueue._flush_loop).
+def _default_flush_interval_seconds() -> float:
+    try:
+        return float(os.environ.get("WL_LOGGER_FLUSH_INTERVAL_SECONDS", "2.0"))
+    except (TypeError, ValueError):
+        return 2.0
+
 
 class LoggerQueue:
     def __init__(self, register: bool = True, db_path: str = ":memory:") -> None:
@@ -78,6 +85,15 @@ class LoggerQueue:
         self._eval_mode_split: str = ""
         self._eval_mode_tags: list[str] = []
         self._eval_accum: dict = {} # {graph_name: [sum, count]}
+
+        # Background flush + loss-shape autotag state. Every flag="loss" signal
+        # is auto-classified by default (see _autotag_loss_shapes); these only
+        # hold user overrides/opt-outs for specific signals (or all of them).
+        self._loss_shape_overrides: dict = {}  # {signal_name: (tag_name, classifier)}
+        self._loss_shape_disabled: set = set()
+        self._loss_shape_all_disabled: bool = False
+        self._flush_stop = threading.Event()
+        self._flush_thread: threading.Thread | None = None
 
         # DuckDB connection + write-staging buffers.
         self._lock = threading.RLock()
@@ -126,6 +142,99 @@ class LoggerQueue:
                     self.set_db_path(os.path.join(str(loggers_dir), "loggers.duckdb"))
             except Exception:
                 pass
+
+        self._start_background_flush()
+
+    # ------------------------------------------------------------------
+    # Background flush + loss-shape autotag
+    # ------------------------------------------------------------------
+    def _start_background_flush(self) -> None:
+        """Start the periodic flush/loss-shape thread (off the caller's thread).
+
+        Runs for the life of the process (daemon) so neither the training loop
+        nor the gRPC servicer has to remember to flush or re-tag loss shapes
+        themselves — every flag="loss" signal is auto-classified with zero
+        setup. See _autotag_loss_shapes for the tagging half."""
+        if self._flush_thread is not None and self._flush_thread.is_alive():
+            return
+        self._flush_stop.clear()
+        self._flush_thread = threading.Thread(
+            target=self._flush_loop, name="WL-Logger-Flush", daemon=True)
+        self._flush_thread.start()
+
+    def set_loss_shape_override(self, loss_signal: str, tag_name: str | None = None,
+                                 classifier=None) -> None:
+        """Override the tag name / classifier used when auto-tagging *loss_signal*.
+
+        Every ``flag="loss"`` signal is already auto-classified with zero setup
+        (see :meth:`_autotag_loss_shapes`); call this only to customize one
+        specific signal (e.g. it isn't a decreasing loss, so the default
+        classifier is wrong for it). Also re-enables that signal if it had been
+        disabled via :meth:`disable_loss_shape_autotag`.
+        """
+        with self._lock:
+            self._loss_shape_overrides[loss_signal] = (tag_name, classifier)
+            self._loss_shape_disabled.discard(loss_signal)
+
+    def disable_loss_shape_autotag(self, loss_signal: str | None = None) -> None:
+        """Stop automatic loss-shape tagging for *loss_signal*, or for every
+        signal (including ones registered later) if *loss_signal* is ``None``.
+        The background flush itself keeps running either way."""
+        with self._lock:
+            if loss_signal is None:
+                self._loss_shape_all_disabled = True
+            else:
+                self._loss_shape_disabled.add(loss_signal)
+                self._loss_shape_overrides.pop(loss_signal, None)
+
+    def _autotag_loss_shapes(self) -> None:
+        """Re-classify every auto-detected ``flag="loss"`` signal.
+
+        Cheap to call on a schedule: the classifier skips any sample with too
+        little history yet (see ``classify_loss_shape``'s ``min_points``), and
+        an empty/no-op history read is fast. Failures are per-signal and never
+        propagate — one bad classifier/signal can't stop the others.
+        """
+        with self._lock:
+            if self._loss_shape_all_disabled:
+                return
+            disabled = set(self._loss_shape_disabled)
+            overrides = dict(self._loss_shape_overrides)
+        try:
+            # Lazy import: weightslab.src imports LoggerQueue at module load
+            # time, so importing it back here at module scope would cycle.
+            from weightslab.src import auto_loss_shape_signal_names, write_signal_shapes
+        except Exception as exc:
+            logger.debug(f"[LoggerQueue] loss-shape autotag: import failed: {exc}")
+            return
+        # Union, not just the auto-detected set: set_loss_shape_override() can
+        # also opt in a signal that wasn't registered via flag="loss" (e.g. a
+        # manually wl.save_signals()-logged one under a custom name).
+        signal_names = set(auto_loss_shape_signal_names()) | set(overrides.keys())
+        for signal_name in signal_names:
+            if signal_name in disabled:
+                continue
+            tag_name, classifier = overrides.get(signal_name, (None, None))
+            try:
+                write_signal_shapes(signal_name, tag_name=tag_name, classifier=classifier)
+            except Exception as exc:
+                logger.debug(
+                    f"[LoggerQueue] loss-shape autotag failed for {signal_name!r}: {exc}")
+
+    def _flush_loop(self) -> None:
+        interval = _default_flush_interval_seconds()
+        while not self._flush_stop.wait(interval):
+            try:
+                self.flush_to_disk()
+            except Exception as exc:
+                logger.debug(f"[LoggerQueue] background flush failed: {exc}")
+            self._autotag_loss_shapes()
+
+    def stop_background_flush(self) -> None:
+        """Stop the background flush/loss-shape thread (e.g. at shutdown or in tests)."""
+        self._flush_stop.set()
+        if self._flush_thread is not None:
+            self._flush_thread.join(timeout=2.0)
 
     # ------------------------------------------------------------------
     # DuckDB plumbing
@@ -321,9 +430,11 @@ class LoggerQueue:
         if int(step) > self._qps_cache_step:
             self._invalidate_qps_cache()
             self._qps_cache_step = int(step)
-        self._stage_sample.append((
-            graph_name, exp_hash, str(sample_id), int(step), float(value), self._next_seq(),
-        ))
+        self._stage_sample.append(
+            (
+                graph_name, exp_hash, str(sample_id), int(step), float(value), self._next_seq(),
+            )
+        )
         self._qps_version[graph_name] += 1   # invalidate this signal's cached reads
         self._maybe_autoflush()
 

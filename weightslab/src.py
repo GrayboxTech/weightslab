@@ -1279,6 +1279,14 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             except Exception:
                 pass
 
+            # Auto-detect for background loss-shape classification: any signal
+            # registered specifically via flag="loss" is, by convention, a
+            # reduction="none" per-sample criterion — exactly what the loss-shape
+            # classifier expects. No opt-in call needed; see
+            # auto_loss_shape_signal_names / LoggerQueue._autotag_loss_shapes.
+            if reg_name and 'loss' in flag.lower():
+                _AUTO_LOSS_SHAPE_SIGNALS.add(reg_name)
+
             # rebind caller, i.e., in-place update
             _loss = get_signal(reg_name)
             _rebind_caller_local(obj, _loss)
@@ -4066,6 +4074,20 @@ def write_history(
     return path
 
 
+# Signal names registered via watch_or_edit(..., flag="loss") — populated
+# automatically (see the loss branch above), so the background flush thread
+# can auto-classify every per-sample loss without the user calling anything.
+_AUTO_LOSS_SHAPE_SIGNALS: set = set()
+
+
+def auto_loss_shape_signal_names() -> list:
+    """Every signal name currently registered via ``flag="loss"`` — the
+    automatic loss-shape classification target set. Used internally by
+    :class:`weightslab.backend.logger.LoggerQueue`'s background flush thread;
+    read it yourself only for introspection/debugging."""
+    return sorted(_AUTO_LOSS_SHAPE_SIGNALS)
+
+
 LOSS_SHAPES = ["monotonic", "plateaued", "Flat_high", "high_variance", "U_Shape", "Spiked"]
 
 
@@ -4128,7 +4150,7 @@ def write_signal_shapes(signal_name, tag_name=None, classifier=None):
     ``'<signal>_shape'``."""
     clf = classifier or classify_loss_shape
     if tag_name is None:
-        tag_name = signal_name.split("/")[-1] + "_shape"
+        tag_name = signal_name + "_shape" if signal_name.endswith('_loss') else signal_name + "_loss_shape"
     series = {}
     for sid, step, val, _ in query_signal_history(signal_name):
         series.setdefault(sid, []).append((step, val))
@@ -4146,6 +4168,45 @@ def write_loss_shapes(loss_signal="loss_sample", classifier=None):
     """Convenience wrapper over :func:`write_signal_shapes` for the loss signal
     (tag ``loss_shape``, default loss classifier)."""
     return write_signal_shapes(loss_signal, tag_name="loss_shape", classifier=classifier)
+
+
+def enable_loss_shape_autotag(loss_signal=None, tag_name=None, classifier=None):
+    """Customize automatic loss-shape tagging — **not required to turn it on**.
+
+    Every signal registered via ``wl.watch_or_edit(criterion, flag="loss", ...)``
+    is already auto-classified in the background with zero setup: the logger's
+    periodic flush thread (``WL_LOGGER_FLUSH_INTERVAL_SECONDS`` env var, default
+    2s) discovers it automatically and re-tags it as ``'<signal>_shape'`` every
+    tick, once it has enough per-sample history to classify (see
+    :func:`classify_loss_shape`'s ``min_points``) — no call needed, and no
+    ``write_dataframe(loss_shape_signal=...)`` required either.
+
+    Call this only to override the tag name or classifier used for one specific
+    *loss_signal* (e.g. it isn't a decreasing loss, so the default classifier is
+    wrong for it). Re-enables that signal if it was previously disabled via
+    :func:`disable_loss_shape_autotag`.
+    """
+    if loss_signal is None:
+        raise ValueError(
+            "enable_loss_shape_autotag: loss_signal is required — every "
+            "flag='loss' signal is already auto-classified without calling "
+            "this; only call it to override the tag_name/classifier for one."
+        )
+    lg = get_logger()
+    if lg is None:
+        raise RuntimeError(
+            "enable_loss_shape_autotag: no logger registered yet — call this "
+            "after wl.watch_or_edit(criterion, flag='loss', log=True)."
+        )
+    lg.set_loss_shape_override(loss_signal, tag_name=tag_name, classifier=classifier)
+
+
+def disable_loss_shape_autotag(loss_signal=None):
+    """Stop automatic loss-shape tagging for *loss_signal*, or for every
+    signal (including ones registered later) if *loss_signal* is ``None``."""
+    lg = get_logger()
+    if lg is not None:
+        lg.disable_loss_shape_autotag(loss_signal)
 
 
 def enable_loss_shape_signal(loss_signal="loss_sample", name="sig/loss_shape",
@@ -4179,9 +4240,13 @@ def write_dataframe(
 ) -> str:
     """Dump the WeightsLab sample dataframe to *path* as JSON or CSV.
 
-    When *loss_shape_signal* is set (e.g. ``"loss_sample"``), the default loss-
-    shape classifier runs first (tags each sample + logs a distribution summary),
-    so a report written every N steps carries an up-to-date shape summary.
+    Every ``flag="loss"`` signal is already auto-classified into a
+    ``'<signal>_shape'`` tag in the background with zero setup (see
+    :func:`enable_loss_shape_autotag`'s docstring), so you normally don't need
+    *loss_shape_signal* at all. It remains as a one-off: when set (e.g.
+    ``"loss_sample"``), the classifier runs synchronously first so this
+    specific report is guaranteed fresh at the moment it's written, rather than
+    whatever the background thread last computed.
 
     Parameters
     ----------
