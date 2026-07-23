@@ -16,8 +16,10 @@ Covers all previously untested public methods:
 - load_signal_history (dict format, list format)
 """
 
+import os
+import time
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from weightslab.backend.logger import LoggerQueue
 
@@ -832,6 +834,132 @@ class TestResolveGraphName(unittest.TestCase):
     def test_no_match_returns_none(self):
         lg = self._lg_with("train_loss")
         self.assertIsNone(lg.resolve_graph_name("accuracy"))
+
+
+class TestBackgroundFlushAndLossShapeAutotag(unittest.TestCase):
+    """LoggerQueue starts a background thread that periodically flushes staged
+    rows and auto-classifies every flag="loss" signal — off the caller's
+    thread, with zero setup required (see auto_loss_shape_signal_names).
+
+    The actual tagging logic (_autotag_loss_shapes) is called directly here
+    rather than via time.sleep()-and-poll on the real background thread: with
+    many LoggerQueue instances created across this test file, a still-winding-
+    down daemon thread from an earlier test could otherwise tick during a
+    later test's `patch(...)` window and pollute its mock's call list. Calling
+    the method directly is deterministic and exercises the identical code path
+    the thread calls on every tick; test_background_flush_thread_starts_and_stops
+    separately covers that the thread itself starts/stops correctly.
+    """
+
+    def _lg_no_autoflush(self):
+        """A LoggerQueue with the background thread stopped immediately, so
+        only the explicit _autotag_loss_shapes() calls below can tag anything."""
+        lg = _lg()
+        lg.stop_background_flush()
+        return lg
+
+    def test_background_flush_thread_starts_and_stops(self):
+        with patch.dict(os.environ, {"WL_LOGGER_FLUSH_INTERVAL_SECONDS": "0.05"}):
+            lg = _lg()
+        self.addCleanup(lg.stop_background_flush)
+        self.assertIsNotNone(lg._flush_thread)
+        self.assertTrue(lg._flush_thread.is_alive())
+        lg.stop_background_flush()
+        self.assertFalse(lg._flush_thread.is_alive())
+
+    def test_auto_detected_signals_are_classified_with_no_setup_call(self):
+        """The core ask: zero user-facing calls — just discovered and tagged."""
+        lg = self._lg_no_autoflush()
+        with patch("weightslab.src.auto_loss_shape_signal_names", return_value=["train-loss-CE"]), \
+             patch("weightslab.src.write_signal_shapes") as mock_write_shapes:
+            lg._autotag_loss_shapes()
+        self.assertTrue(mock_write_shapes.called)
+        args, kwargs = mock_write_shapes.call_args
+        self.assertEqual(args[0], "train-loss-CE")
+        self.assertIsNone(kwargs.get("tag_name"))  # default '<signal>_shape' naming
+        self.assertIsNone(kwargs.get("classifier"))  # default loss classifier
+
+    def test_no_signals_means_no_classification_attempts(self):
+        lg = self._lg_no_autoflush()
+        with patch("weightslab.src.auto_loss_shape_signal_names", return_value=[]), \
+             patch("weightslab.src.write_signal_shapes") as mock_write_shapes:
+            lg._autotag_loss_shapes()
+        self.assertFalse(mock_write_shapes.called)
+
+    def test_set_loss_shape_override_customizes_tag_and_classifier(self):
+        lg = self._lg_no_autoflush()
+        classifier = MagicMock()
+        lg.set_loss_shape_override("train-loss-CE", tag_name="my_shape", classifier=classifier)
+        with patch("weightslab.src.auto_loss_shape_signal_names", return_value=["train-loss-CE"]), \
+             patch("weightslab.src.write_signal_shapes") as mock_write_shapes:
+            lg._autotag_loss_shapes()
+        self.assertTrue(mock_write_shapes.called)
+        args, kwargs = mock_write_shapes.call_args
+        self.assertEqual(args[0], "train-loss-CE")
+        self.assertEqual(kwargs.get("tag_name"), "my_shape")
+        self.assertIs(kwargs.get("classifier"), classifier)
+
+    def test_set_loss_shape_override_also_tracks_a_signal_outside_the_auto_detected_set(self):
+        """A manually-logged signal (not registered via flag="loss") can still
+        opt in by name — the override set is a superset, not a subset."""
+        lg = self._lg_no_autoflush()
+        lg.set_loss_shape_override("custom_metric")
+        with patch("weightslab.src.auto_loss_shape_signal_names", return_value=[]), \
+             patch("weightslab.src.write_signal_shapes") as mock_write_shapes:
+            lg._autotag_loss_shapes()
+        self.assertTrue(mock_write_shapes.called)
+        self.assertEqual(mock_write_shapes.call_args[0][0], "custom_metric")
+
+    def test_disable_loss_shape_autotag_for_one_signal(self):
+        lg = self._lg_no_autoflush()
+        lg.disable_loss_shape_autotag("train-loss-CE")
+        with patch("weightslab.src.auto_loss_shape_signal_names",
+                    return_value=["train-loss-CE", "val-loss-CE"]), \
+             patch("weightslab.src.write_signal_shapes") as mock_write_shapes:
+            lg._autotag_loss_shapes()
+        called_signals = {c.args[0] for c in mock_write_shapes.call_args_list}
+        self.assertNotIn("train-loss-CE", called_signals)
+        self.assertIn("val-loss-CE", called_signals)
+
+    def test_disable_loss_shape_autotag_for_all_signals(self):
+        lg = self._lg_no_autoflush()
+        lg.disable_loss_shape_autotag()
+        with patch("weightslab.src.auto_loss_shape_signal_names",
+                    return_value=["train-loss-CE", "val-loss-CE"]), \
+             patch("weightslab.src.write_signal_shapes") as mock_write_shapes:
+            lg._autotag_loss_shapes()
+        self.assertFalse(mock_write_shapes.called)
+
+
+class TestAutoLossShapeSignalRegistration(unittest.TestCase):
+    """watch_or_edit(..., flag="loss") must register the signal name for
+    automatic loss-shape classification with no further call required."""
+
+    def test_flag_loss_registers_signal_for_auto_classification(self):
+        import torch.nn as nn
+        import weightslab as wl
+        from weightslab.src import _AUTO_LOSS_SHAPE_SIGNALS
+
+        # _AUTO_LOSS_SHAPE_SIGNALS is process-global — clean up so this signal
+        # name doesn't leak into other tests' background flush threads (which
+        # would otherwise try, and safely fail, to classify a signal that
+        # doesn't exist in their own logger).
+        self.addCleanup(_AUTO_LOSS_SHAPE_SIGNALS.discard, "test_auto_loss_shape_signal")
+
+        crit = nn.CrossEntropyLoss(reduction="none")
+        wl.watch_or_edit(crit, flag="loss", signal_name="test_auto_loss_shape_signal", log=True)
+        self.assertIn("test_auto_loss_shape_signal", wl.auto_loss_shape_signal_names())
+
+    def test_flag_metric_does_not_register_for_auto_classification(self):
+        """Only flag="loss" implies a decreasing per-sample loss trajectory —
+        an arbitrary watched metric/signal shouldn't be force-classified as one."""
+        import torch
+        from torchmetrics.classification import Accuracy
+        import weightslab as wl
+
+        wl.watch_or_edit(Accuracy(task="multiclass", num_classes=2),
+                          flag="metric", signal_name="test_auto_metric_not_loss")
+        self.assertNotIn("test_auto_metric_not_loss", wl.auto_loss_shape_signal_names())
 
 
 if __name__ == "__main__":
