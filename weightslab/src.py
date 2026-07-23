@@ -3776,6 +3776,14 @@ def write_history(
     instance_id : int or list of int, optional
         Restrict per-instance rows to one or more annotation IDs.
         Has no effect on global or per-sample history.
+    orient : str, optional
+        JSON layout for each section (``"global"``/``"sample"``/``"instance"``),
+        forwarded to ``pandas.DataFrame.to_json``. Default ``"columns"``
+        (``{column: {row_index: value}}``) — compact, since each column name
+        is written once per section instead of once per row. Pass
+        ``"records"`` for the row-list-of-dicts shape
+        (``[{"graph_name": ..., "step": ..., ...}, ...]``) if that's more
+        convenient downstream. Ignored for ``format="csv"``.
 
     Returns
     -------
@@ -3800,6 +3808,10 @@ def write_history(
             type_of_history="sample",
             experiment_hash="abc123",
         )
+
+    Get the row-list-of-dicts JSON shape instead of the compact default::
+
+        wl.write_history("history.json", orient="records")
     """
     import csv as _csv
     import json as _json
@@ -3999,11 +4011,20 @@ def write_history(
             payload["sample"] = sample_rows
         if write_instance:
             payload["instance"] = instance_rows
+
+        # Each section is a list of row dicts sharing the same keys; route it
+        # through pandas so `orient` is genuinely honored. Default "columns"
+        # ({column: {row_index: value}}) writes each column name once per
+        # section instead of once per row — much smaller for many rows.
+        # orient="records" reproduces the original row-list-of-dicts shape.
+        import pandas as _pd
+        json_payload = {
+            section: _json.loads(_pd.DataFrame(rows).to_json(orient=orient, default_handler=str))
+            for section, rows in payload.items()
+        }
+
         with open(path, "w", encoding="utf-8") as fh:
-            # payload is a dict of record-lists (one list of row dicts per
-            # section); json.dump takes no `orient` (that's a pandas arg). The
-            # per-section records layout is the documented/tested contract.
-            _json.dump(payload, fh, indent=2)
+            _json.dump(json_payload, fh, indent=2)
 
     elif fmt == "csv":
         _CSV_FIELDS = [

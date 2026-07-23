@@ -1086,6 +1086,7 @@ write_history
        graph_name=None,
        experiment_hash=None,
        sample_id=None,
+       orient="columns",
        instance_id=None,
    )
 
@@ -1133,8 +1134,28 @@ Dump signal history to a file for offline analysis or debugging.
 - ``instance_id`` *(int or list of int, optional)* — restrict per-instance
   rows to one or more annotation IDs.  Has no effect on global or
   per-sample history.
+- ``orient`` *(str, optional)* — JSON layout for each section, forwarded to
+  ``pandas.DataFrame.to_json``.  Default ``"columns"`` (see below — compact,
+  writes each column name once per section instead of once per row).  Pass
+  ``"records"`` for the row-list-of-dicts shape shown further down.  Ignored
+  for ``format="csv"``.
 
-**JSON output shape**
+**JSON output shape (default, ``orient="columns"``)**
+
+.. code-block:: json
+
+   {
+     "global":   {"graph_name": {"0": "loss"}, "experiment_hash": {"0": "h1"}, "step": {"0": 1}, "metric_value": {"0": 0.42}},
+     "sample":   {"graph_name": {"0": "loss"}, "experiment_hash": {"0": "h1"}, "sample_id": {"0": "img0"}, "step": {"0": 1}, "metric_value": {"0": 0.38}},
+     "instance": {"graph_name": {"0": "iou"},  "experiment_hash": {"0": "h1"}, "sample_id": {"0": "img0"}, "annotation_id": {"0": 1}, "step": {"0": 1}, "metric_value": {"0": 0.81}}
+   }
+
+Only the sections selected by *type_of_history* are present in the output.
+Each section maps column name -> {row index -> value}; round-trips with
+``pandas.read_json(path, orient="columns")`` (or per-section via
+``pd.DataFrame(data["global"])``).
+
+**JSON output shape (``orient="records"``)**
 
 .. code-block:: json
 
@@ -1144,7 +1165,9 @@ Dump signal history to a file for offline analysis or debugging.
      "instance": [{"graph_name": "iou",  "experiment_hash": "h1", "sample_id": "img0", "annotation_id": 1, "step": 1, "metric_value": 0.81}]
    }
 
-Only the sections selected by *type_of_history* are present in the output.
+The row-list-of-dicts shape used before ``orient`` was wired up — repeats
+every column name once per row, so it's larger on disk for many-row
+sections. Pass ``orient="records"`` explicitly to keep using it.
 
 **CSV output shape**
 
