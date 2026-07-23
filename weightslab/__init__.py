@@ -45,6 +45,8 @@ for _name in (
     "query_sample_history", "query_instance_history", "write_history",
     "write_dataframe", "classify_loss_shape", "trajectory_stats",
     "write_loss_shapes", "write_signal_shapes", "enable_loss_shape_signal",
+    "enable_loss_shape_autotag", "disable_loss_shape_autotag",
+    "auto_loss_shape_signal_names",
     "LOSS_SHAPES", "get_current_experiment_hash", "pointcloud_thumbnail",
     "pointcloud_boxes",
 ):
@@ -222,6 +224,9 @@ __all__ = [
     "write_signal_shapes",
     "trajectory_stats",
     "enable_loss_shape_signal",
+    "enable_loss_shape_autotag",
+    "disable_loss_shape_autotag",
+    "auto_loss_shape_signal_names",
     "LOSS_SHAPES",
 
     "pointcloud_thumbnail",

@@ -34,14 +34,6 @@ logging.getLogger("PIL").setLevel(logging.INFO)
 # Train / Test loops (segmentation, using watcher-wrapped loaders)
 # =============================================================================
 
-def _instance_batch_idx(labels):
-    """Flat instance→sample map (sample-major) matching the PerInstance* ordering."""
-    return torch.tensor(
-        [s for s, insts in enumerate(labels) for _ in insts],
-        dtype=torch.long,
-    )
-
-
 def _run_instance_signals(sig, outputs, labels, ids, preds, return_metric=False):
     """Compute + log/save the per-sample AND per-instance Dice (metric) and BCE (loss)."""
     bce_sample = sig["bce_sample"](outputs, labels, batch_ids=ids, preds=preds)

@@ -77,14 +77,17 @@ def make_synthetic_fraud(
     n_fraud = max(1, int(round(n_samples * FRAUD_RATE)))
     n_legit = max(1, n_samples - n_fraud)
 
-    def _draw(n: int, fraud: bool) -> np.ndarray:
+    def _draw(n: int, fraud: bool) -> list[dict]:
+        """One dict per row, keyed by FEATURE_NAMES — self-documenting, and the
+        final array assembly below reads the keys in FEATURE_NAMES order, so a
+        renamed/reordered feature can't silently desync from its column."""
         amount = rng.gamma(2.0, 180.0 if fraud else 60.0, size=n)
         old_balance = rng.gamma(2.0, 800.0, size=n)
         spent = amount * (rng.uniform(0.6, 1.4, n) if fraud else rng.uniform(0.0, 0.6, n))
         new_balance = np.clip(old_balance - spent, 0, None)
         balance_delta = old_balance - new_balance
         txn_hour = (rng.normal(2.5, 2.0, n) % 24) if fraud else rng.normal(13.0, 4.0, n)
-        txn_dow = rng.integers(0, 7, n).astype(np.float64)
+        txn_day_of_week = rng.integers(0, 7, n).astype(np.float64)
         txn_count_1h = rng.poisson(4.0 if fraud else 1.0, n).astype(np.float64)
         txn_count_24h = rng.poisson(18.0 if fraud else 6.0, n).astype(np.float64)
         avg_amount_7d = rng.gamma(2.0, 90.0 if fraud else 70.0, size=n)
@@ -96,17 +99,27 @@ def make_synthetic_fraud(
         account_age_days = rng.gamma(2.0, 120.0 if fraud else 500.0, size=n)
         num_prior_disputes = rng.poisson(1.5 if fraud else 0.2, n).astype(np.float64)
 
-        return np.stack(
-            [
-                amount, old_balance, new_balance, balance_delta,
-                txn_hour, txn_dow, txn_count_1h, txn_count_24h,
-                avg_amount_7d, std_amount_7d, merchant_risk, device_change,
-                geo_distance_km, is_foreign, account_age_days, num_prior_disputes,
-            ],
-            axis=1,
-        )
+        return [
+            {'amount': amount[i],
+             'old_balance': old_balance[i],
+             'new_balance': new_balance[i],
+             'balance_delta': balance_delta[i],
+             'txn_hour': txn_hour[i],
+             'txn_day_of_week': txn_day_of_week[i],
+             'txn_count_1h': txn_count_1h[i],
+             'txn_count_24h': txn_count_24h[i],
+             'avg_amount_7d': avg_amount_7d[i],
+             'std_amount_7d': std_amount_7d[i],
+             'merchant_risk': merchant_risk[i],
+             'device_change': device_change[i],
+             'geo_distance_km': geo_distance_km[i],
+             'is_foreign': is_foreign[i],
+             'account_age_days': account_age_days[i],
+             'num_prior_disputes': num_prior_disputes[i]} for i in range(n)
+        ]
 
-    x_raw = np.concatenate([_draw(n_legit, False), _draw(n_fraud, True)], axis=0).astype(np.float64)
+    rows = _draw(n_legit, False) + _draw(n_fraud, True)
+    x_raw = np.array([[row[name] for name in FEATURE_NAMES] for row in rows], dtype=np.float64)
     y = np.concatenate([np.zeros(n_legit, dtype=np.int64), np.ones(n_fraud, dtype=np.int64)])
 
     # Standardize per-feature (class-agnostic) so the MLP trains stably.
