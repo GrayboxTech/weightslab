@@ -112,11 +112,7 @@ these signals over training steps and lets you sort samples by them.
 
    .. code-block:: bash
 
-<<<<<<< HEAD
-      weightslab launch           # 1. deploy the studio
-=======
       weightslab start               # 1. deploy the studio
->>>>>>> a6f0c1acbac49221358a21b0bde87b348c09204b
       weightslab start example --seg # 2. start the segmentation demo
 
 

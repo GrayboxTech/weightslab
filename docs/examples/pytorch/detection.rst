@@ -125,11 +125,7 @@ pipeline. See :ref:`good-practice-get-items` for the recommended signature.
 
    .. code-block:: bash
 
-<<<<<<< HEAD
-      weightslab launch           # 1. deploy the studio
-=======
     weightslab start               # 1. deploy the studio
->>>>>>> a6f0c1acbac49221358a21b0bde87b348c09204b
       weightslab start example --det # 2. start the detection demo
 
 

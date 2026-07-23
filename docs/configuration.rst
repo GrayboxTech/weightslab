@@ -354,11 +354,7 @@ Deploying the Studio
 ~~~~~~~~~~~~~~~~~~~~~
 
 All Weights Studio configuration variables are passed to the UI at launch time
-<<<<<<< HEAD
-via ``weightslab launch``.  There are two ways to supply them.
-=======
 via ``weightslab start``.  There are two ways to supply them.
->>>>>>> a6f0c1acbac49221358a21b0bde87b348c09204b
 
 **Option 1 — shell exports (quick, per-session)**
 
@@ -366,11 +362,7 @@ via ``weightslab start``.  There are two ways to supply them.
 
    export ENABLE_AGENT=0
    export BB_THUMB_RENDER=50
-<<<<<<< HEAD
-   weightslab launch
-=======
   weightslab start
->>>>>>> a6f0c1acbac49221358a21b0bde87b348c09204b
 
 **Option 2 — ``.env`` file (persistent, version-controllable)**
 
@@ -388,11 +380,7 @@ Then launch normally:
 
 .. code-block:: bash
 
-<<<<<<< HEAD
-   weightslab launch
-=======
   weightslab start
->>>>>>> a6f0c1acbac49221358a21b0bde87b348c09204b
 
 WeightsLab loads the ``.env`` file automatically.  Shell exports take precedence
 over ``.env`` values.
@@ -1081,5 +1069,3 @@ case) to disable.
    limits), with a build-time ``VITE_ENABLE_*`` fallback for the dev server.
    Because ``config.js`` is served ``no-store``, a container restart + normal
    reload is enough to pick up a change.
-
-

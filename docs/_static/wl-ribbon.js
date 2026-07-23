@@ -10,11 +10,7 @@
     'The studio streams signals in real-time — no need to wait for an epoch to end to see results.',
     '<code>weightslab start example --cls</code> launches a full MNIST classification demo in one command.',
     'Use <code>subscribe_to=</code> on a signal to build reactive per-sample analytics derived from other signals.',
-<<<<<<< HEAD
-    'Run <code>weightslab launch --certs</code> to enable HTTPS + mTLS for secure remote studio access.',
-=======
     'Run <code>weightslab start --certs</code> to enable HTTPS + mTLS for secure remote studio access.',
->>>>>>> a6f0c1acbac49221358a21b0bde87b348c09204b
     'Set <code>preload_labels=False</code> for large datasets to speed up startup; labels are loaded lazily.',
     'Use <code>array_return_proxies=True</code> (default) to avoid loading the full dataset array into RAM.',
     'Set <code>WEIGHTSLAB_LOG_LEVEL=DEBUG</code> to see full gRPC logs when debugging connectivity issues.',
