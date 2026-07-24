@@ -108,9 +108,19 @@ jobs:
 
       - name: Build and vendor Weights Studio UI
         env:
-          WEIGHTS_STUDIO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # weights_studio is a separate PRIVATE repo — the automatic
+          # secrets.GITHUB_TOKEN is scoped to THIS repo only and has no access
+          # to it, so both the ls-remote branch probe and the clone below must
+          # authenticate with a real cross-repo PAT instead.
+          WEIGHTS_STUDIO_TOKEN: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
         run: |
           set -euo pipefail
+
+          if [ -z "${WEIGHTS_STUDIO_TOKEN:-}" ]; then
+            echo "WEIGHTS_STUDIO_API_TOKEN secret is not set; cannot access the private weights_studio repo." >&2
+            exit 1
+          fi
+          CLONE_URL="https://x-access-token:${WEIGHTS_STUDIO_TOKEN}@github.com/GrayboxTech/weights_studio.git"
 
           git fetch origin --prune
           CANDIDATE_REF="$(git for-each-ref --format='%(refname:short)' refs/remotes/origin --contains "${GITHUB_SHA}" \
@@ -122,15 +132,10 @@ jobs:
           fi
 
           UI_REF="main"
-          if git ls-remote --exit-code --heads https://github.com/GrayboxTech/weights_studio.git "${CANDIDATE_REF}" >/dev/null 2>&1; then
+          if git ls-remote --exit-code --heads "${CLONE_URL}" "${CANDIDATE_REF}" >/dev/null 2>&1; then
             UI_REF="${CANDIDATE_REF}"
           fi
           echo "Using weights_studio ref: ${UI_REF}"
-
-          CLONE_URL="https://github.com/GrayboxTech/weights_studio.git"
-          if [ -n "${WEIGHTS_STUDIO_TOKEN:-}" ]; then
-            CLONE_URL="https://x-access-token:${WEIGHTS_STUDIO_TOKEN}@github.com/GrayboxTech/weights_studio.git"
-          fi
 
           rm -rf /tmp/weights_studio
           git clone --depth 1 --branch "${UI_REF}" "${CLONE_URL}" /tmp/weights_studio
@@ -507,22 +512,21 @@ jobs:
 
       - name: Build and vendor Weights Studio UI
         env:
-          WEIGHTS_STUDIO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # weights_studio is a separate PRIVATE repo — the automatic
+          # secrets.GITHUB_TOKEN is scoped to THIS repo only and has no access
+          # to it, so the clone below must authenticate with a real
+          # cross-repo PAT instead.
+          WEIGHTS_STUDIO_TOKEN: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
         run: |
           set -euo pipefail
 
-          CANDIDATE_REF="main"
-          if git ls-remote --exit-code --heads https://github.com/GrayboxTech/weights_studio.git "${CANDIDATE_REF}" >/dev/null 2>&1; then
-            UI_REF="${CANDIDATE_REF}"
-          else
-            UI_REF="main"
+          if [ -z "${WEIGHTS_STUDIO_TOKEN:-}" ]; then
+            echo "WEIGHTS_STUDIO_API_TOKEN secret is not set; cannot access the private weights_studio repo." >&2
+            exit 1
           fi
+          CLONE_URL="https://x-access-token:${WEIGHTS_STUDIO_TOKEN}@github.com/GrayboxTech/weights_studio.git"
+          UI_REF="main"
           echo "Using weights_studio ref: ${UI_REF}"
-
-          CLONE_URL="https://github.com/GrayboxTech/weights_studio.git"
-          if [ -n "${WEIGHTS_STUDIO_TOKEN:-}" ]; then
-            CLONE_URL="https://x-access-token:${WEIGHTS_STUDIO_TOKEN}@github.com/GrayboxTech/weights_studio.git"
-          fi
 
           rm -rf /tmp/weights_studio
           git clone --depth 1 --branch "${UI_REF}" "${CLONE_URL}" /tmp/weights_studio
