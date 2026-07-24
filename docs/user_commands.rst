@@ -190,7 +190,7 @@ Forwards a remote gRPC endpoint to a local TCP port.
 
    # 2) On your machine, in two terminals:
    weightslab launch                           # plaintext HTTP (default)
-   weightslab tunnel bore.pub:12345               # the host:port bore printed
+   weightslab tunnel bore.pub:12345               # in another window, the host:port bore printed
 
    # 3) Open http://localhost:5173 — Studio streams live from Colab.
 

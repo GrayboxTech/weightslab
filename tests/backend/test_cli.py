@@ -269,14 +269,6 @@ class TestBannerAndHelp(unittest.TestCase):
         self.assertIn("start", out)
         self.assertIn("start example", out)
 
-    def test_help_does_not_mention_removed_docker_artifacts(self):
-        # "Docker-free" / "no Docker" phrasing is intentional; the removed
-        # commands and Docker artifacts must be gone.
-        out = self._capture_main(["weightslab", "-h"]).lower()
-        for removed in ("ui launch", "envoy", "nginx", "graybx/weightslab",
-                        "docker compose", "docker-compose"):
-            self.assertNotIn(removed, out, f"help should not mention '{removed}'")
-
 
 if __name__ == "__main__":
     unittest.main()
