@@ -151,8 +151,18 @@ jobs:
           # to contain the tagged commit -- fragile, and NOT tied to
           # is_dev_release, so it could silently vendor the wrong UI.
           UI_REF="main"
-          if [ "${IS_DEV_RELEASE}" = "true" ] && git ls-remote --exit-code --heads "${CLONE_URL}" "dev" >/dev/null 2>&1; then
-            UI_REF="dev"
+          echo "is_dev_release=${IS_DEV_RELEASE}"
+          if [ "${IS_DEV_RELEASE}" = "true" ]; then
+            if DEV_HEAD="$(git ls-remote --heads "${CLONE_URL}" "dev" 2>&1)"; then
+              if [ -n "${DEV_HEAD}" ]; then
+                UI_REF="dev"
+              else
+                echo "weights_studio has no 'dev' branch (ls-remote returned nothing) -- falling back to main."
+              fi
+            else
+              echo "::warning::git ls-remote for weights_studio 'dev' branch failed -- falling back to main. Output was:"
+              echo "${DEV_HEAD}"
+            fi
           fi
           echo "Using weights_studio ref: ${UI_REF}"
 
