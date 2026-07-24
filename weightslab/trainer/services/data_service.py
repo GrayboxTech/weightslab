@@ -2711,6 +2711,45 @@ class DataService:
             text = text[:max_len] + "\n... (truncated; ask for a specific key, e.g. 'show the root log dir')"
         return f"Configuration ({hp_name}):\n{text}"
 
+    @staticmethod
+    def _mask_from_coerced_query(df, expr: str):
+        """Best-effort boolean mask for `expr` against `df`, tolerating two
+        shapes of "numeric in practice, awkward in dtype" columns that break a
+        plain comparison in df.query()/df.eval():
+
+        1. A column referenced by `expr` is index-level-only (e.g. ``sample_id``
+           on a (sample_id, annotation_id) MultiIndex) — promoted to a real
+           column via the same ``safe_reset_index`` GetHistogram already uses,
+           so pandas' query engine can reference it at all instead of raising
+           obscure internal errors (e.g. "'UnaryOp' object has no attribute
+           'evaluate'").
+        2. An object-dtype column holds numeric values mixed with a few
+           non-numeric placeholders (e.g. a per-sample signal not yet computed
+           for every row) — cast via ``pd.to_numeric`` (errors="coerce"),
+           matching GetHistogram's own is_numeric classification, so a filter
+           the UI offered as numeric doesn't crash with e.g. "'<' not
+           supported between instances of 'str' and 'int'".
+
+        Returns a boolean array positionally aligned to `df` (safe to apply as
+        ``df[mask]`` regardless of `df`'s actual index), or None if `expr`
+        doesn't parse/evaluate even against this coerced view.
+        """
+        reset = safe_reset_index(df)
+        candidate_names = set(re.findall(r'`([^`]+)`', expr)) | set(re.findall(r'\b[A-Za-z_]\w*\b', expr))
+        to_coerce = {}
+        for col in candidate_names:
+            if col not in reset.columns or reset[col].dtype != object:
+                continue
+            numeric_vals = pd.to_numeric(reset[col], errors="coerce")
+            if numeric_vals.notna().any():
+                to_coerce[col] = numeric_vals
+        coerced = reset.assign(**to_coerce) if to_coerce else reset
+        try:
+            mask = coerced.eval(expr, local_dict={"df": coerced, "np": np, "pd": pd})
+        except Exception:
+            return None
+        return np.asarray(mask, dtype=bool)
+
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -2820,8 +2859,23 @@ class DataService:
                     df.drop(index=df.index.difference(kept.index), inplace=True)
                     return f"Applied query (eval): {expr}"
                 except Exception as eval_e:
-                    logger.error(f"Query failed: {e} | Eval failed: {eval_e}")
-                    return f"Failed to filter: {expr}"
+                    # Both a plain df.query and df.eval can fail on a column that
+                    # is "numeric enough" by GetHistogram's own classification but
+                    # awkward in practice — either index-level-only (e.g.
+                    # sample_id on a MultiIndex) or object-dtype with a stray
+                    # non-numeric placeholder among otherwise-numeric values (e.g.
+                    # a per-sample signal not yet computed for every row). Retry
+                    # once against a coerced view (see _mask_from_coerced_query)
+                    # so a filter the UI offered as numeric doesn't fail here with
+                    # e.g. "'<' not supported between instances of 'str' and
+                    # 'int'".
+                    mask = self._mask_from_coerced_query(df, expr)
+                    if mask is None:
+                        logger.error(f"Query failed: {e} | Eval failed: {eval_e}")
+                        return f"Failed to filter: {expr}"
+                    kept = df[mask]
+                    df.drop(index=df.index.difference(kept.index), inplace=True)
+                    return f"Applied query: {expr}"
 
         # C) Column Modification (Transform)
         if func == "df.modify":
