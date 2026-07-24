@@ -93,14 +93,14 @@ silhouette score to identify consistently confused identities.
 
    .. code-block:: bash
 
-      weightslab ui launch            # 1. deploy the studio
+      weightslab start                # 1. deploy the studio
       weightslab start example --clus # 2. start the clustering demo
 
 
 .. raw:: html
 
    <div style="text-align:right; margin-top:2rem;">
-     <a href="https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/PyTorch/ws-clustering.ipynb" target="_blank" rel="noopener noreferrer">
+     <a href="https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/PyTorch/wl-clustering.ipynb" target="_blank" rel="noopener noreferrer">
        <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab">
      </a>
    </div>

@@ -165,6 +165,63 @@ def encode_image_webp(pil_image, quality=70, method=2):
         return b""
 
 
+# =============================================================================
+# Tabular inputs (1-D feature vectors)
+# =============================================================================
+# Tabular samples have no image — the model input IS a 1-D feature vector. We
+# transmit the actual feature values losslessly in the DataStat ``value`` field
+# (type ``"vector"``), and attach a small heatmap so image-only grids still show
+# a cell. The List Exploration view reads the per-feature metadata columns; a
+# tabular-aware grid can read ``value`` directly.
+
+def looks_like_tabular(np_img) -> bool:
+    """True when the sample input is a 1-D feature vector (no spatial dims)."""
+    return np_img is not None and getattr(np_img, "ndim", None) == 1
+
+
+def render_tabular_heatmap(vec: np.ndarray, cell: int = 16, quality: int = 60):
+    """Render a 1-D feature vector as a small square grayscale heatmap.
+
+    Returns ``(webp_bytes, [h, w, c])``. Values are min-max normalised for
+    display only; the exact values travel in the DataStat ``value`` field.
+    """
+    v = np.asarray(vec, dtype=np.float32).ravel()
+    n = int(v.size)
+    if n == 0:
+        return b"", [0, 0, 0]
+    side = int(np.ceil(np.sqrt(n)))
+    padded = np.zeros(side * side, dtype=np.float32)
+    padded[:n] = v
+    grid = padded.reshape(side, side)
+    mn, mx = float(np.nanmin(grid)), float(np.nanmax(grid))
+    norm = (grid - mn) / (mx - mn + 1e-8)
+    img8 = np.clip(norm * 255.0, 0, 255).astype(np.uint8)
+    try:
+        pil = Image.fromarray(img8, mode="L").resize(
+            (side * cell, side * cell), Image.Resampling.NEAREST)
+        buf = io.BytesIO()
+        pil.convert("RGB").save(buf, format="WEBP", quality=quality, method=1)
+        data = buf.getvalue()
+        buf.close()
+        return data, [side * cell, side * cell, 3]
+    except Exception as e:  # pragma: no cover - display-only fallback
+        logger.warning(f"Failed to render tabular heatmap: {e}")
+        return b"", [side, side, 1]
+
+
+def build_tabular_raw_data_stat(vec: np.ndarray):
+    """Build the ``raw_data`` DataStat for a tabular (1-D) input.
+
+    The feature values are carried losslessly in ``value`` (type ``"vector"``,
+    ``shape=[N]``); a heatmap rides along in ``thumbnail`` for display only.
+    """
+    v = np.asarray(vec, dtype=np.float32).ravel()
+    values = [float(x) for x in v]
+    thumb, _shape = render_tabular_heatmap(v)
+    return create_data_stat(
+        "raw_data", "vector", shape=[len(values)], value=values, thumbnail=thumb)
+
+
 def resize_mask_nearest(mask_arr: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
     """Resize a 2D+ mask array using nearest-neighbour (preserves class IDs).
 

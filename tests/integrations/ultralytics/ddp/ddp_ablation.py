@@ -149,7 +149,9 @@ def _worker(rank, world, master_port):
             _ensure_core_ddp_registered, reconcile_all, flush_outbox)
         _ensure_core_ddp_registered()
         import weightslab as wl
-        wl.serve(serving_grpc=True, serving_cli=False)
+        # DDP ablation harness: config wrapping is driven by yolo_pipeline across
+        # ranks, so opt out of the serve() serving-config guard explicitly.
+        wl.serve(serving_grpc=True, serving_cli=False, allow_unconfigured=True)
         decode = yolo_pipeline._decode_preds_to_6col
     else:
         model, loader, crit, iou, optimizer = _build_ul(cfg, device, batch_size, num_workers)

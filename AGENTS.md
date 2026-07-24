@@ -59,11 +59,12 @@ experiment becomes inspectable/editable; Weights Studio is the UI for that.
 **Wire path (the thing that breaks most often):**
 
 ```
-Browser (Vite app)  →  Envoy :8080 (grpc-web ↔ grpc)  →  Python gRPC servicer  →  training loop
+Browser  →  weightslab start :8080 (grpc-web → grpc proxy)  →  Python gRPC servicer  →  training loop
 ```
 
-- The browser cannot speak raw gRPC, so **Envoy** transcodes grpc-web ↔ gRPC.
-  If Envoy is down or misconfigured, the UI loads but no data appears.
+- `weightslab start` is a pure-Python HTTP server that serves the bundled SPA
+  and translates grpc-web (browser) to raw gRPC (backend). No Docker, no Envoy.
+  If `weightslab start` is not running, the browser has no UI to load.
 - The gRPC servicer and the training loop run in the **same process, different
   threads**, coordinated by locks in
   `weightslab/weightslab/components/global_monitoring.py`.
@@ -88,13 +89,19 @@ wl.serve(serving_grpc=True, serving_cli=True)   # background threads, same proce
 wl.keep_serving()                                # keep the process alive for the UI
 ```
 
-Then start the studio stack (Envoy + frontend) and open it in a browser.
+Then start the UI in another terminal and open it in a browser:
+
+```bash
+weightslab start   # serves at http://localhost:8080 by default
+```
+
 Working starting points live in
 `weightslab/weightslab/examples/{PyTorch,Lightning,Usecases}/<usecase>/`
 (each is a `main.py` + `config.yaml`) — find the closest example and mirror it.
 
-Studio deployment details (Docker compose, Envoy, ports, certs) are in
-`weights_studio/docker/` and documented in `weightslab/docs/weights_studio.rst`.
+UI deployment details (port, TLS, certs) are documented in
+`weightslab/docs/weights_studio.rst`. TLS is opt-in: run `weightslab se` once,
+then `weightslab start --certs`.
 
 ---
 
@@ -138,10 +145,10 @@ ones when debugging:
 | Variable | Default | Why you touch it |
 |---|---|---|
 | `WEIGHTSLAB_LOG_LEVEL` | `INFO` | Set `DEBUG` to see what's happening. (`WATCHDOG` level sits between WARNING/ERROR.) |
-| `GRPC_BACKEND_HOST` / `GRPC_BACKEND_PORT` | `0.0.0.0` / `50051` | Backend must listen where Envoy expects it. |
-| `GRPC_TLS_ENABLED` | `1` | TLS on the gRPC socket. Set `0` **only** for isolated local debugging. |
-| `GRPC_TLS_REQUIRE_CLIENT_AUTH` | `1` | mTLS. Must match what Envoy presents. |
-| `GRPC_TLS_CERT_DIR` | `~/certs` | Where default cert files are looked up. |
+| `GRPC_BACKEND_HOST` / `GRPC_BACKEND_PORT` | `0.0.0.0` / `50051` | Backend gRPC bind address. |
+| `GRPC_TLS_ENABLED` | `0` | TLS on the gRPC socket. Set `1` with `weightslab start --certs`. |
+| `GRPC_TLS_REQUIRE_CLIENT_AUTH` | `0` | mTLS. Must match what `weightslab start --certs` presents. |
+| `WEIGHTSLAB_CERTS_DIR` | `~/.weightslab-certs` | Where cert files are looked up (single source of truth). |
 | `GRPC_AUTH_TOKEN` | *(unset)* | Optional metadata-token auth on top of mTLS. |
 | `GRPC_MAX_MESSAGE_BYTES` | `268435456` (256 MB) | Raise it if large tensors/image batches fail. |
 | `WEIGHTSLAB_DISABLE_WATCHDOGS` | `0` | Set `1` when debugging with breakpoints (see §5). |
@@ -151,7 +158,7 @@ ones when debugging:
 
 | Variable | Default | Why you touch it |
 |---|---|---|
-| `WS_SERVER_HOST` / `WS_SERVER_PORT` / `WS_SERVER_PROTOCOL` | `localhost` / `8080` / `https` | How the browser reaches the backend (via Envoy). The #1 connection-issue knob. |
+| `WS_SERVER_HOST` / `WS_SERVER_PORT` / `WS_SERVER_PROTOCOL` | `localhost` / `8080` / `http` | How the browser reaches the `weightslab start` server. The #1 connection-issue knob. |
 | `WS_HISTOGRAM_MAX_BINS` | `512` | Cap on metadata histogram bars. |
 | `BB_THUMB_RENDER` | `10` | Max bounding boxes drawn per **thumbnail**, per overlay (GT and PRED capped independently). |
 | `BB_MODAL_RENDER` | `100` | Max bounding boxes drawn per **modal** image, per overlay. A `?` button in the modal shows the active limit. |
@@ -161,11 +168,10 @@ ones when debugging:
 | `ENABLE_AGENT` | `1` | `0`/`false` removes the agent chat bar + history panel and stops the agent health poll. |
 
 > **VITE_ vs WS_/BB_/ENABLE_:** `VITE_*` variables are baked at **build time**
-> (changing them needs a rebuild). `WS_*` / `BB_*` / `ENABLE_*` are injected at
-> **container start** into `config.js` and read as `window.*` globals (the
-> toggles as `window.WS_ENABLE_*`) — changing them needs only a container restart
-> + browser reload (see the caching note in §5). Each `ENABLE_*` defaults to on;
-> set it to `0`/`false`/`no`/`off` to disable. Full reference:
+> (changing them needs a frontend rebuild). `WS_*` / `BB_*` / `ENABLE_*` are
+> injected into `config.js` at `weightslab start` time and read as `window.*`
+> globals — changing them needs only a restart + browser reload. Each `ENABLE_*`
+> defaults to on; set it to `0`/`false`/`no`/`off` to disable. Full reference:
 > `weightslab/docs/configuration.rst` (“Feature toggles”).
 
 ---
@@ -177,19 +183,15 @@ distilled from issues hit in development).
 
 **UI loads but the sample grid is empty / "failed to fetch" / gRPC errors.**
 The wire path (§1) is broken somewhere. Check in order: (1) backend actually
-serving on `0.0.0.0:50051`; (2) Envoy running and reachable on `:8080`;
-(3) frontend `WS_SERVER_HOST/PORT/PROTOCOL` point at Envoy, not the raw backend;
-(4) **TLS mismatch** — `WS_SERVER_PROTOCOL=https` vs `http`, Envoy server certs,
-and Envoy→backend mTLS certs all consistent. For local debugging you can drop
-TLS end-to-end (`GRPC_TLS_ENABLED=0` + `VITE_SERVER_PROTOCOL=http`).
+serving on `0.0.0.0:50051`; (2) `weightslab start` is running and the browser
+can reach it on `:8080`; (3) **TLS mismatch** if using `--certs` — run
+`weightslab se` first and export `WEIGHTSLAB_CERTS_DIR`. For local debugging
+drop TLS entirely (omit `--certs`; `GRPC_TLS_ENABLED=0`).
 
 **Changed an env var, restarted, but the UI still uses the old value.**
 - `VITE_*` is build-time → you must **rebuild** the frontend, not just restart.
-- `WS_*` / `BB_*` are read once per page load → you must **reload the tab**.
-- Historically `config.js` was served `Cache-Control: immutable` so even a
-  restart needed a **hard refresh**; current builds serve `/config.js` with
-  `no-store`, so a container restart + normal reload is enough. On an older
-  deployment, hard-refresh (Ctrl+Shift+R) or clear cache.
+- `WS_*` / `BB_*` / `ENABLE_*` are injected at `weightslab start` time → you
+  must **restart `weightslab start`** then reload the tab.
 
 **Sample grid flashes empty cells when auto-refresh fires.**
 An auto-refresh (timer or manual) that lands while a `GetDataSamples` grid fetch
@@ -247,7 +249,8 @@ OpenRouter** initialized from the UI via `/init` (then `/model` to switch,
 - `grid_data/` — grid + modal rendering (`GridCell.ts`, `DataImageService.ts`,
   `gridDataManager.ts`, `BboxRenderer.ts`, `SegmentationRenderer.ts`,
   `PointCloudViewer.ts`).
-- `docker/` — compose, `nginx-entrypoint.sh` (injects `config.js`), Envoy assets.
+- `ui/` — `server.py` (pure-Python HTTP + gRPC-Web proxy), `static/` (bundled SPA),
+  `utils/` (cert-generation scripts, sync-frontend helper).
 
 **Docs:** `weightslab/docs/` (Sphinx) — `configuration.rst` (all env vars),
 `weights_studio.rst` (studio deploy + agent), `quickstart.rst`, `grpc/`.
@@ -257,7 +260,7 @@ OpenRouter** initialized from the UI via `/init` (then `/model` to switch,
 ## 7. For contributors (working in a checkout)
 
 - **The two repos must sit side by side** (`…/weightslab`, `…/weights_studio`);
-  codegen and Envoy configs reach across by relative path.
+  proto codegen scripts reach across by relative path.
 - **Editing the proto is cross-repo** — do all of: edit
   `experiment_service.proto`; regenerate Python stubs from the repo root; run
   `npm run generate-proto:data` in weights_studio. Editing one side only leaves

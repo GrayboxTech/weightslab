@@ -1,4 +1,5 @@
 import io
+import sys
 import xxhash
 import types
 import logging
@@ -21,6 +22,23 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------------
 # -------------------------- Utils Functions ---------------------------------
 # ----------------------------------------------------------------------------
+
+def _running_in_notebook() -> bool:
+    """True when running inside a Jupyter notebook kernel or Google Colab.
+
+    Distinguishes a notebook kernel (``ZMQInteractiveShell``) / Colab from a
+    plain script or a terminal IPython session, so we only nudge users who can't
+    reach a locally-launched Weights Studio without a tunnel.
+    """
+    if "google.colab" in sys.modules:
+        return True
+    try:
+        from IPython import get_ipython
+        shell = get_ipython()
+        return shell is not None and shell.__class__.__name__ == "ZMQInteractiveShell"
+    except Exception:
+        return False
+
 
 def safe_reset_index(df: "pd.DataFrame") -> "pd.DataFrame":
     """Reset DataFrame index levels into columns, skipping any level whose name

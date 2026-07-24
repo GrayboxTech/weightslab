@@ -4,6 +4,7 @@ import json
 import os
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from weightslab.backend.logger import LoggerQueue
@@ -54,6 +55,24 @@ def _call(path, lg_instance, **kwargs):
         return write_history(path, **kwargs)
 
 
+def _load(path):
+    """Read a write_history JSON export back into the row-records shape
+    ({"global": [...], "sample": [...], "instance": [...]}) regardless of
+    which `orient` it was written with.
+
+    write_history defaults to ``orient="columns"`` per section
+    (``{column: {row_index: value}}``) — compact, since it writes each
+    column name once per section instead of once per row. These tests
+    assert row-level behavior, so normalize back to records here.
+    """
+    raw = json.loads(open(path, encoding="utf-8").read())
+    return {
+        section: payload if isinstance(payload, list)
+        else pd.DataFrame(payload).to_dict(orient="records")
+        for section, payload in raw.items()
+    }
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -80,44 +99,79 @@ def tmp_csv(tmp_path):
 class TestWriteHistoryJsonStructure:
     def test_json_has_all_sections(self, lg, tmp_json):
         _call(tmp_json, lg)
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert set(data.keys()) == {"global", "sample", "instance"}
 
     def test_global_section_not_empty(self, lg, tmp_json):
         _call(tmp_json, lg)
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert len(data["global"]) > 0
 
     def test_sample_section_not_empty(self, lg, tmp_json):
         _call(tmp_json, lg)
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert len(data["sample"]) > 0
 
     def test_instance_section_not_empty(self, lg, tmp_json):
         _call(tmp_json, lg)
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert len(data["instance"]) > 0
 
     def test_global_row_keys(self, lg, tmp_json):
         _call(tmp_json, lg)
-        row = json.loads(open(tmp_json).read())["global"][0]
+        row = _load(tmp_json)["global"][0]
         assert {"graph_name", "experiment_hash", "step", "metric_value"} <= set(row.keys())
 
     def test_sample_row_keys(self, lg, tmp_json):
         _call(tmp_json, lg)
-        row = json.loads(open(tmp_json).read())["sample"][0]
+        row = _load(tmp_json)["sample"][0]
         assert {"graph_name", "experiment_hash", "sample_id", "step", "metric_value"} <= set(row.keys())
 
     def test_instance_row_keys(self, lg, tmp_json):
         _call(tmp_json, lg)
-        row = json.loads(open(tmp_json).read())["instance"][0]
+        row = _load(tmp_json)["instance"][0]
         assert {
             "graph_name", "experiment_hash", "sample_id", "annotation_id", "step", "metric_value"
         } <= set(row.keys())
 
+    def test_default_orient_is_columnar(self, lg, tmp_json):
+        """Default orient="columns": each section is {column: {row_index: value}},
+        not a list of row dicts — this is the whole point (one column-name
+        string per section instead of one per row)."""
+        _call(tmp_json, lg)
+        raw = json.loads(open(tmp_json, encoding="utf-8").read())
+        assert isinstance(raw["global"], dict)
+        assert isinstance(raw["global"]["graph_name"], dict)
+        assert isinstance(raw["sample"], dict)
+        assert isinstance(raw["instance"], dict)
+
+    def test_orient_records_reproduces_the_row_list_shape(self, lg, tmp_json):
+        _call(tmp_json, lg, orient="records")
+        raw = json.loads(open(tmp_json, encoding="utf-8").read())
+        assert isinstance(raw["global"], list)
+        assert {"graph_name", "experiment_hash", "step", "metric_value"} <= set(raw["global"][0].keys())
+
+    def test_columnar_default_is_smaller_than_records_for_many_rows(self, tmp_path):
+        # Enough rows that the per-row column-name repetition in orient="records"
+        # dominates file size — the case write_history's history logs are
+        # actually shaped like (few columns, many steps).
+        many_lg = LoggerQueue(register=False)
+        many_lg.chkpt_manager = _mock_chkpt("h1")
+        for step in range(1, 201):
+            many_lg.add_scalars("loss", {"loss": float(step)}, step,
+                                signal_per_sample=None, aggregate_by_step=False)
+
+        cols_path = str(tmp_path / "cols.json")
+        recs_path = str(tmp_path / "recs.json")
+        with patch("weightslab.src.get_logger", return_value=many_lg):
+            write_history(cols_path, type_of_history="global")
+            write_history(recs_path, type_of_history="global", orient="records")
+
+        assert os.path.getsize(cols_path) < os.path.getsize(recs_path)
+
     def test_file_is_valid_json(self, lg, tmp_json):
         _call(tmp_json, lg)
-        json.loads(open(tmp_json).read()) # must not raise
+        _load(tmp_json) # must not raise
 
     def test_output_file_created(self, lg, tmp_json):
         _call(tmp_json, lg)
@@ -131,38 +185,38 @@ class TestWriteHistoryJsonStructure:
 class TestWriteHistoryJsonTypeFilter:
     def test_type_all_explicit(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="all")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert set(data.keys()) == {"global", "sample", "instance"}
 
     def test_type_none_means_all(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history=None)
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert set(data.keys()) == {"global", "sample", "instance"}
 
     def test_type_global_only(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="global")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert set(data.keys()) == {"global"}
         assert "sample" not in data
         assert "instance" not in data
 
     def test_type_sample_only(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="sample")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert set(data.keys()) == {"sample"}
         assert "global" not in data
         assert "instance" not in data
 
     def test_type_instance_only(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="instance")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert set(data.keys()) == {"instance"}
         assert "global" not in data
         assert "sample" not in data
 
     def test_type_instances_plural_alias(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="instances")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert set(data.keys()) == {"instance"}
 
 
@@ -173,32 +227,32 @@ class TestWriteHistoryJsonTypeFilter:
 class TestWriteHistoryJsonGraphFilter:
     def test_graph_name_filters_global(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="global", graph_name="loss")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert all(r["graph_name"] == "loss" for r in data["global"])
 
     def test_graph_name_filters_sample(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="sample", graph_name="acc")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert all(r["graph_name"] == "acc" for r in data["sample"])
 
     def test_graph_name_filters_instance(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="instance", graph_name="iou")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert all(r["graph_name"] == "iou" for r in data["instance"])
 
     def test_unknown_graph_name_global_empty(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="global", graph_name="no_such_graph")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert data["global"] == []
 
     def test_unknown_graph_name_sample_empty(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="sample", graph_name="no_such_graph")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert data["sample"] == []
 
     def test_multiple_graphs_all_present_without_filter(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="global")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         graph_names = {r["graph_name"] for r in data["global"]}
         assert "loss" in graph_names and "acc" in graph_names
 
@@ -210,28 +264,28 @@ class TestWriteHistoryJsonGraphFilter:
 class TestWriteHistoryJsonHashFilter:
     def test_exp_hash_filters_global(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="global", experiment_hash="h1")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert all(r["experiment_hash"] == "h1" for r in data["global"])
 
     def test_exp_hash_filters_sample(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="sample", experiment_hash="h2")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert all(r["experiment_hash"] == "h2" for r in data["sample"])
         assert len(data["sample"]) > 0
 
     def test_exp_hash_missing_global_empty(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="global", experiment_hash="hX")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert data["global"] == []
 
     def test_exp_hash_filters_instance(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="instance", experiment_hash="h1")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert all(r["experiment_hash"] == "h1" for r in data["instance"])
 
     def test_both_hashes_present_with_all(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="global", graph_name="loss", experiment_hash="all")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         hashes = {r["experiment_hash"] for r in data["global"]}
         assert "h1" in hashes and "h2" in hashes
 
@@ -243,24 +297,24 @@ class TestWriteHistoryJsonHashFilter:
 class TestWriteHistoryJsonSampleFilter:
     def test_sample_id_filters_sample_history(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="sample", graph_name="loss", sample_id="s1")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert all(r["sample_id"] == "s1" for r in data["sample"])
 
     def test_sample_id_filters_instance_history(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="instance", sample_id="s1")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert all(r["sample_id"] == "s1" for r in data["instance"])
 
     def test_instance_id_filters_instance_history(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="instance", instance_id=1)
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert all(r["annotation_id"] == 1 for r in data["instance"])
 
     def test_sample_and_instance_id_combined(self, lg, tmp_json):
         # annotation_id=1 lives under h1
         _call(tmp_json, lg, type_of_history="instance", sample_id="s1",
               instance_id=1, experiment_hash="h1")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert len(data["instance"]) == 1
         assert data["instance"][0]["sample_id"] == "s1"
         assert data["instance"][0]["annotation_id"] == 1
@@ -268,7 +322,7 @@ class TestWriteHistoryJsonSampleFilter:
     def test_sample_id_no_effect_on_global(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="global", graph_name="loss",
               sample_id="s1", experiment_hash="all")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         hashes = {r["experiment_hash"] for r in data["global"]}
         assert "h1" in hashes and "h2" in hashes
 
@@ -280,14 +334,14 @@ class TestWriteHistoryJsonSampleFilter:
 class TestWriteHistoryJsonValues:
     def test_global_steps_present(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="global", graph_name="loss", experiment_hash="h1")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         steps = {r["step"] for r in data["global"]}
         assert 1 in steps and 2 in steps
 
     def test_sample_value_correct(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="sample", graph_name="loss",
               experiment_hash="h1", sample_id="s1")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert len(data["sample"]) == 1
         assert abs(data["sample"][0]["metric_value"] - 1.0) < 1e-5
 
@@ -295,12 +349,12 @@ class TestWriteHistoryJsonValues:
         # value 0.8 for annotation_id=1 is stored under h1
         _call(tmp_json, lg, type_of_history="instance", graph_name="iou",
               sample_id="s1", instance_id=1, experiment_hash="h1")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert abs(data["instance"][0]["metric_value"] - 0.8) < 1e-4
 
     def test_combined_graph_hash_filter(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="global", graph_name="loss", experiment_hash="h2")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         for row in data["global"]:
             assert row["graph_name"] == "loss"
             assert row["experiment_hash"] == "h2"
@@ -383,7 +437,7 @@ class TestWriteHistoryEdgeCases:
         empty_lg.chkpt_manager = None
         with patch("weightslab.src.get_logger", return_value=empty_lg):
             write_history(tmp_json, experiment_hash="all")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert data["global"] == []
         assert data["sample"] == []
         assert data["instance"] == []
@@ -399,12 +453,12 @@ class TestWriteHistoryEdgeCases:
 
     def test_case_insensitive_type(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="SAMPLE")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert set(data.keys()) == {"sample"}
 
     def test_case_insensitive_format(self, lg, tmp_json):
         _call(tmp_json, lg, format="JSON")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert "global" in data
 
     def test_returns_written_path(self, lg, tmp_json):
@@ -455,14 +509,14 @@ class TestWriteHistoryEdgeCases:
 
     def test_graph_name_list_filters_global(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="global", graph_name=["loss", "acc"])
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert all(r["graph_name"] in {"loss", "acc"} for r in data["global"])
         names = {r["graph_name"] for r in data["global"]}
         assert "loss" in names and "acc" in names
 
     def test_graph_name_list_filters_sample(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="sample", graph_name=["loss", "acc"])
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         names = {r["graph_name"] for r in data["sample"]}
         assert "loss" in names and "acc" in names
 
@@ -470,28 +524,28 @@ class TestWriteHistoryEdgeCases:
         # s2 for "loss" is under h1 only; use "all" to see both hashes
         _call(tmp_json, lg, type_of_history="sample", graph_name="loss",
               sample_id=["s1", "s2"], experiment_hash="all")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         sids = {r["sample_id"] for r in data["sample"]}
         assert sids == {"s1", "s2"}
 
     def test_sample_id_list_filters_instance(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="instance", sample_id=["s1", "s2"],
               experiment_hash="all")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         sids = {r["sample_id"] for r in data["instance"]}
         assert sids == {"s1", "s2"}
 
     def test_instance_id_list_filters_instance(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="instance", instance_id=[1, 2],
               experiment_hash="all")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         aids = {r["annotation_id"] for r in data["instance"]}
         assert aids == {1, 2}
 
     def test_instance_id_list_single_value(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="instance", instance_id=[1],
               experiment_hash="all")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         assert all(r["annotation_id"] == 1 for r in data["instance"])
 
     # -- new: experiment_hash default / "all" behavior --
@@ -499,14 +553,14 @@ class TestWriteHistoryEdgeCases:
     def test_default_hash_uses_current(self, lg, tmp_json):
         # current hash is h2; without specifying, only h2 rows returned
         _call(tmp_json, lg, type_of_history="global", graph_name="loss")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         hashes = {r["experiment_hash"] for r in data["global"]}
         assert hashes == {"h2"}
 
     def test_experiment_hash_all_returns_every_hash(self, lg, tmp_json):
         _call(tmp_json, lg, type_of_history="global", graph_name="loss",
               experiment_hash="all")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         hashes = {r["experiment_hash"] for r in data["global"]}
         assert "h1" in hashes and "h2" in hashes
 
@@ -514,7 +568,7 @@ class TestWriteHistoryEdgeCases:
         # pass h1 explicitly even though current is h2
         _call(tmp_json, lg, type_of_history="global", graph_name="loss",
               experiment_hash="h1")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         hashes = {r["experiment_hash"] for r in data["global"]}
         assert hashes == {"h1"}
 
@@ -526,7 +580,7 @@ class TestWriteHistoryEdgeCases:
                        signal_per_sample=None, aggregate_by_step=False)
         with patch("weightslab.src.get_logger", return_value=lg):
             write_history(tmp_json, type_of_history="global")
-        data = json.loads(open(tmp_json).read())
+        data = _load(tmp_json)
         # row exists (experiment_hash stored as "")
         assert len(data["global"]) == 1
         assert data["global"][0]["experiment_hash"] == ""

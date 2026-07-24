@@ -72,7 +72,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
       :link: weights_studio
       :link-type: doc
 
-      Deploy and operate the UI: architecture, Docker, ports, and actions.
+      Deploy and operate the UI: architecture, ports, TLS, and actions.
 
    .. grid-item-card:: Configuration
       :link: configuration
@@ -112,7 +112,6 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    :hidden:
 
    usage/good_practice
-   usage/docker
 
 
 .. toctree::

@@ -460,36 +460,6 @@ Audit logging
        interaction with the studio.
        Accepted: ``json``, ``csv``, ``none`` (disables audit logging).
 
-Docker integration
-~~~~~~~~~~~~~~~~~~~
-
-These variables are set inside Docker training containers; see
-:ref:`docker-usage` for full context.
-
-.. list-table::
-   :header-rows: 1
-   :widths: 35 15 50
-
-   * - Variable
-     - Default
-     - Description
-   * - ``GRPC_BACKEND_PORT``
-     - ``50051``
-     - Port the gRPC backend binds to. Must match the port Envoy
-       is configured to dial as ``grpc-backend``.
-   * - ``WEIGHTSLAB_TLS``
-     - ``0``
-     - Set to ``1`` inside a Docker Compose stack to enable the full
-       TLS + cert-generation flow (DinD and self-contained siblings).
-   * - ``WEIGHTSLAB_SKIP_DOCKER_OPS``
-     - ``0``
-     - Set to ``1`` inside a DinD container before ``weightslab ui
-       launch`` to skip the image rebuild and pull only.
-   * - ``WS_SERVER_PROTOCOL``
-     - ``http``
-     - Protocol served by the frontend's nginx. Set to ``https``
-       when providing TLS certificates to the Weights Studio container.
-
 LLM / agent integration (optional)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -511,6 +481,16 @@ LLM / agent integration (optional)
    * - ``OPENROUTER_REQUEST_TIMEOUT``
      - *(unset)*
      - Per-request timeout in seconds for OpenRouter calls.
+   * - ``OPENROUTER_MAX_TOKENS``
+     - ``2048``
+     - Maximum completion length requested from OpenRouter. OpenRouter
+       pre-authorizes ``max_tokens × completion_price`` against the key's
+       remaining budget *before* generating, so leaving this uncapped makes
+       the model request its full output window and can fail with a ``402``
+       ("requires more credits, or fewer max_tokens") on a credit- or
+       weekly-limited key — even though the model is otherwise usable. The
+       default is ample for intent planning; raise it only if you see
+       truncated responses.
 
 Telemetry
 ~~~~~~~~~~

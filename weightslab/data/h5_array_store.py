@@ -470,39 +470,49 @@ class H5ArrayStore:
 
         self._ensure_parent()
 
+        # Acquire the exclusive write side of the read-write lock so that no
+        # reader (load_array / load_arrays_batch) can have the file open in
+        # 'r' mode while we open it in 'a' mode. HDF5 forbids opening the same
+        # file read-write while it is already open read-only in the same
+        # process ("file is already open for read-only"), which otherwise
+        # corrupts the store.
         with self._local_lock:
-            with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout, poll_interval=self._poll_interval):
-                try:
-                    with h5py.File(str(self._path), 'a') as f:
-                        # Create group structure: /sample_id/key_name/
-                        sample_group_name = str(sample_id)
-                        if sample_group_name not in f:
-                            sample_group = f.create_group(sample_group_name)
-                        else:
-                            sample_group = f[sample_group_name]
+            self._rw_lock.acquire_write()
+            try:
+                with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout, poll_interval=self._poll_interval):
+                    try:
+                        with h5py.File(str(self._path), 'a') as f:
+                            # Create group structure: /sample_id/key_name/
+                            sample_group_name = str(sample_id)
+                            if sample_group_name not in f:
+                                sample_group = f.create_group(sample_group_name)
+                            else:
+                                sample_group = f[sample_group_name]
 
-                        # Remove existing key if present
-                        if key_name in sample_group:
-                            del sample_group[key_name]
+                            # Remove existing key if present
+                            if key_name in sample_group:
+                                del sample_group[key_name]
 
-                        # Create key group
-                        key_group = sample_group.create_group(key_name)
+                            # Create key group
+                            key_group = sample_group.create_group(key_name)
 
-                        # Store array data (with optional compression)
-                        if self._use_compression:
-                            key_group.create_dataset('data', data=array, compression='gzip', compression_opts=4)
-                        else:
-                            key_group.create_dataset('data', data=array)
+                            # Store array data (with optional compression)
+                            if self._use_compression:
+                                key_group.create_dataset('data', data=array, compression='gzip', compression_opts=4)
+                            else:
+                                key_group.create_dataset('data', data=array)
 
-                        # Store metadata
-                        for k, v in metadata.items():
-                            key_group.attrs[k] = v
+                            # Store metadata
+                            for k, v in metadata.items():
+                                key_group.attrs[k] = v
 
-                    return self._build_path_reference(sample_id, key_name)
+                        return self._build_path_reference(sample_id, key_name)
 
-                except Exception as exc:
-                    logger.error(f"[H5ArrayStore] Failed to save array for sample_id={sample_id}, key={key_name}: {exc}")
-                    return None
+                    except Exception as exc:
+                        logger.error(f"[H5ArrayStore] Failed to save array for sample_id={sample_id}, key={key_name}: {exc}")
+                        return None
+            finally:
+                self._rw_lock.release_write()
 
     def save_arrays_batch(
         self,
@@ -571,51 +581,74 @@ class H5ArrayStore:
             return {}
 
         # --- Phase 2: merge temp into main file under lock ---
+        # Hold the exclusive write side of the read-write lock so that no
+        # reader (load_array / load_arrays_batch) has the file open in 'r'
+        # mode while we open it in 'a' mode. HDF5 refuses to open a file
+        # read-write while it is already open read-only in the same process
+        # ("file is already open for read-only"); that failure previously
+        # triggered a backup-restore that overwrote the live file out from
+        # under open reader handles and corrupted the store.
         with self._local_lock:
-            with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout, poll_interval=self._poll_interval):
-                backup_path = self._create_backup()
-                try:
-                    with h5py.File(str(self._path), 'a') as f_main:
-                        with h5py.File(str(tmp_path), 'r') as f_tmp:
-                            for sample_group_name in f_tmp:
-                                if sample_group_name not in f_main:
-                                    f_main.create_group(sample_group_name)
-                                dest_group = f_main[sample_group_name]
-                                src_group = f_tmp[sample_group_name]
-                                # Replace only the keys present in this batch
-                                # (e.g. "prediction") so sibling keys written
-                                # by an earlier flush (e.g. "target") survive.
-                                for key_name in src_group:
-                                    if key_name in dest_group:
-                                        del dest_group[key_name]
-                                    f_tmp.copy(f"{sample_group_name}/{key_name}", dest_group)
+            self._rw_lock.acquire_write()
+            try:
+                with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout, poll_interval=self._poll_interval):
+                    backup_path = self._create_backup()
+                    # Track whether we actually began mutating the main file.
+                    # If we never opened it (e.g. it was busy), the file is
+                    # intact and restoring from a copy would only risk harm.
+                    main_opened = False
+                    try:
+                        with h5py.File(str(self._path), 'a') as f_main:
+                            main_opened = True
+                            with h5py.File(str(tmp_path), 'r') as f_tmp:
+                                for sample_group_name in f_tmp:
+                                    if sample_group_name not in f_main:
+                                        f_main.create_group(sample_group_name)
+                                    dest_group = f_main[sample_group_name]
+                                    src_group = f_tmp[sample_group_name]
+                                    # Replace only the keys present in this batch
+                                    # (e.g. "prediction") so sibling keys written
+                                    # by an earlier flush (e.g. "target") survive.
+                                    for key_name in src_group:
+                                        if key_name in dest_group:
+                                            del dest_group[key_name]
+                                        f_tmp.copy(f"{sample_group_name}/{key_name}", dest_group)
 
-                    path_refs: Dict[int, Dict[str, str]] = {}
-                    for sample_group_name, key_data in prepared.items():
-                        sample_id = sample_group_name
-                        path_refs[sample_id] = {
-                            key_name: self._build_path_reference(sample_id, key_name)
-                            for key_name in key_data
-                        }
+                        path_refs: Dict[int, Dict[str, str]] = {}
+                        for sample_group_name, key_data in prepared.items():
+                            sample_id = sample_group_name
+                            path_refs[sample_id] = {
+                                key_name: self._build_path_reference(sample_id, key_name)
+                                for key_name in key_data
+                            }
 
-                    # Merge succeeded — remove backup so recover() doesn't restore it
-                    if backup_path:
-                        backup_path.unlink(missing_ok=True)
+                        # Merge succeeded — remove backup so recover() doesn't restore it
+                        if backup_path:
+                            backup_path.unlink(missing_ok=True)
 
-                    logger.debug(
-                        f"[H5ArrayStore] Successfully upserted "
-                        f"{sum(len(v) for v in path_refs.values())} arrays for "
-                        f"{len(path_refs)} samples"
-                    )
-                    return path_refs
+                        logger.debug(
+                            f"[H5ArrayStore] Successfully upserted "
+                            f"{sum(len(v) for v in path_refs.values())} arrays for "
+                            f"{len(path_refs)} samples"
+                        )
+                        return path_refs
 
-                except Exception as exc:
-                    logger.error(f"[H5ArrayStore] Failed to merge temp batch file: {exc}")
-                    if backup_path:
-                        self._restore_backup(backup_path)
-                    return {}
-                finally:
-                    tmp_path.unlink(missing_ok=True)
+                    except Exception as exc:
+                        logger.error(f"[H5ArrayStore] Failed to merge temp batch file: {exc}")
+                        if backup_path:
+                            if main_opened:
+                                # We started writing into the main file; it may
+                                # be half-merged, so roll back to the backup.
+                                self._restore_backup(backup_path)
+                            else:
+                                # Main file was never touched — drop the backup
+                                # rather than overwrite a healthy file.
+                                backup_path.unlink(missing_ok=True)
+                        return {}
+                    finally:
+                        tmp_path.unlink(missing_ok=True)
+            finally:
+                self._rw_lock.release_write()
 
     def recover(self) -> None:
         """

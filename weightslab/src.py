@@ -25,12 +25,12 @@ from typing import Callable, Optional, Any
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.components.checkpoint_manager import CheckpointManager
 from weightslab.backend.optimizer_interface import OptimizerInterface
-from weightslab.backend.ledgers import DEFAULT_NAME, get_checkpoint_manager, get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal, list_models
+from weightslab.backend.ledgers import DEFAULT_NAME, get_checkpoint_manager, get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal, list_models, has_serving_config
 from weightslab.backend.model_interface import ModelInterface
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
-from weightslab.utils.tools import detach_to_cpu
+from weightslab.utils.tools import detach_to_cpu, _running_in_notebook
 from weightslab.backend.logger import LoggerQueue
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
@@ -1072,7 +1072,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
         save_signals(
             signals=signals,
             batch_ids=batch_ids,
-            # preds_raw=preds_raw,
+            preds_raw=preds_raw if _store_preds else None,
             preds=preds,
             targets=targets,
             log=False # Already logged above, no need to log again in save_signals; set to False to avoid duplicate logging if save_signals is called separately without logging
@@ -1278,6 +1278,14 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 register_signal(obj, name=reg_name)
             except Exception:
                 pass
+
+            # Auto-detect for background loss-shape classification: any signal
+            # registered specifically via flag="loss" is, by convention, a
+            # reduction="none" per-sample criterion — exactly what the loss-shape
+            # classifier expects. No opt-in call needed; see
+            # auto_loss_shape_signal_names / LoggerQueue._autotag_loss_shapes.
+            if reg_name and 'loss' in flag.lower():
+                _AUTO_LOSS_SHAPE_SIGNALS.add(reg_name)
 
             # rebind caller, i.e., in-place update
             _loss = get_signal(reg_name)
@@ -1521,20 +1529,61 @@ def serve(serving_cli: bool = True, serving_grpc: bool = False,
             `bore <https://github.com/ekzhang/bore>`_ raw-TCP relay, so a Weights
             Studio running on another machine can reach it (e.g. training in
             Google Colab, UI on your laptop). Prints the public endpoint and the
-            two commands to run locally (``weightslab ui launch`` +
+            two commands to run locally (``weightslab start`` +
             ``weightslab tunnel <endpoint>``). Implies a gRPC backend. Uses the
             shared public relay ``bore.pub`` — the random port is the only thing
             guarding it, so keep it to non-sensitive demos.
         bore_port: Port to expose when ``serving_bore`` is set. Defaults to the
             gRPC port (``grpc_port`` kwarg, else ``$GRPC_BACKEND_PORT``, else
             50051).
+        allow_unconfigured: Escape hatch for the serving-config guard. ``serve``
+            reads hyperparameters once, here, for TLS, ports and
+            ``root_log_dir``; if none were wrapped
+            (``wl.watch_or_edit(params, flag="hyperparameters")``) those settings
+            silently fall back to env vars / defaults. Serving over the network
+            (``serving_grpc`` / ``serving_bore``) without config therefore
+            raises, because the backend may come up without TLS/auth. Pass
+            ``True`` (or set ``WL_ALLOW_UNCONFIGURED_SERVE=1``) to downgrade the
+            error to a warning and serve anyway. CLI-only serving always warns
+            (never raises), regardless of this flag.
         **kwargs: Extra server options passed to underlying backends
             (e.g. ``cli_host``, ``cli_port``, ``grpc_port``).
 
     Returns:
         The public ``host:port`` bore endpoint string when ``serving_bore`` is
         set and the tunnel came up, otherwise ``None``.
+
+    Raises:
+        RuntimeError: If ``serving_grpc`` or ``serving_bore`` is requested before
+            any serving config was wrapped and the escape hatch is not set.
     """
+
+    # ------------------------------------------------------------------
+    # Serving-config guard. grpc_serve reads hyperparameters ONCE, at this
+    # call, for TLS, ports and root_log_dir. Serving over the network before
+    # config is wrapped can bring the backend up UNSECURED (TLS falls back to
+    # GRPC_TLS_ENABLED, default off), so hard-fail on gRPC/bore; CLI-only is
+    # local, so warn. Escape hatch: allow_unconfigured / WL_ALLOW_UNCONFIGURED_SERVE.
+    # ------------------------------------------------------------------
+    if not has_serving_config():
+        network_serving = serving_grpc or serving_bore
+        allow = allow_unconfigured or os.environ.get(
+            "WL_ALLOW_UNCONFIGURED_SERVE", "0"
+        ).lower() in ("1", "true", "yes")
+        base_msg = (
+            "wl.serve() was called before any serving config was wrapped. Wrap "
+            'it first with wl.watch_or_edit(parameters, flag="hyperparameters") '
+            "so TLS, ports and root_log_dir come from your config instead of "
+            "falling back to environment variables / defaults."
+        )
+        if network_serving and not allow:
+            raise RuntimeError(
+                base_msg + " Refusing to expose an unconfigured backend over "
+                "gRPC/bore — it may come up without TLS/auth. Pass "
+                "allow_unconfigured=True (or set WL_ALLOW_UNCONFIGURED_SERVE=1) "
+                "to override."
+            )
+        logger.warning(base_msg)
 
     if serving_grpc:
         grpc_serve(**kwargs)
@@ -1565,8 +1614,8 @@ def serve(serving_cli: bool = True, serving_grpc: bool = False,
         if bore_endpoint:
             print("=" * 60)
             print(f" Backend exposed via bore at: {bore_endpoint}")
-            print(" On your local machine (Docker running), run:")
-            print("     weightslab ui launch")
+            print(" On your local machine, run:")
+            print("     weightslab start")
             print(f"     weightslab tunnel {bore_endpoint}")
             print("=" * 60)
 
@@ -1579,7 +1628,7 @@ def serve(serving_cli: bool = True, serving_grpc: bool = False,
     return bore_endpoint
 
 
-def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
+def keep_serving(timeout: int = None, release_gpu: bool = False) -> None:
     """Keep process alive while background WeightsLab services are running.
 
     Args:
@@ -3710,6 +3759,7 @@ def write_history(
     graph_name=None,
     experiment_hash: str | None = None,
     sample_id=None,
+    orient: str = "columns",
     instance_id=None,
     verbose: bool = False,
 ) -> str:
@@ -3751,6 +3801,14 @@ def write_history(
     instance_id : int or list of int, optional
         Restrict per-instance rows to one or more annotation IDs.
         Has no effect on global or per-sample history.
+    orient : str, optional
+        JSON layout for each section (``"global"``/``"sample"``/``"instance"``),
+        forwarded to ``pandas.DataFrame.to_json``. Default ``"columns"``
+        (``{column: {row_index: value}}``) — compact, since each column name
+        is written once per section instead of once per row. Pass
+        ``"records"`` for the row-list-of-dicts shape
+        (``[{"graph_name": ..., "step": ..., ...}, ...]``) if that's more
+        convenient downstream. Ignored for ``format="csv"``.
 
     Returns
     -------
@@ -3775,6 +3833,10 @@ def write_history(
             type_of_history="sample",
             experiment_hash="abc123",
         )
+
+    Get the row-list-of-dicts JSON shape instead of the compact default::
+
+        wl.write_history("history.json", orient="records")
     """
     import csv as _csv
     import json as _json
@@ -3974,8 +4036,20 @@ def write_history(
             payload["sample"] = sample_rows
         if write_instance:
             payload["instance"] = instance_rows
+
+        # Each section is a list of row dicts sharing the same keys; route it
+        # through pandas so `orient` is genuinely honored. Default "columns"
+        # ({column: {row_index: value}}) writes each column name once per
+        # section instead of once per row — much smaller for many rows.
+        # orient="records" reproduces the original row-list-of-dicts shape.
+        import pandas as _pd
+        json_payload = {
+            section: _json.loads(_pd.DataFrame(rows).to_json(orient=orient, default_handler=str))
+            for section, rows in payload.items()
+        }
+
         with open(path, "w", encoding="utf-8") as fh:
-            _json.dump(payload, fh, indent=2)
+            _json.dump(json_payload, fh, indent=2)
 
     elif fmt == "csv":
         _CSV_FIELDS = [
@@ -4015,6 +4089,20 @@ def write_history(
         )
 
     return path
+
+
+# Signal names registered via watch_or_edit(..., flag="loss") — populated
+# automatically (see the loss branch above), so the background flush thread
+# can auto-classify every per-sample loss without the user calling anything.
+_AUTO_LOSS_SHAPE_SIGNALS: set = set()
+
+
+def auto_loss_shape_signal_names() -> list:
+    """Every signal name currently registered via ``flag="loss"`` — the
+    automatic loss-shape classification target set. Used internally by
+    :class:`weightslab.backend.logger.LoggerQueue`'s background flush thread;
+    read it yourself only for introspection/debugging."""
+    return sorted(_AUTO_LOSS_SHAPE_SIGNALS)
 
 
 LOSS_SHAPES = ["monotonic", "plateaued", "Flat_high", "high_variance", "U_Shape", "Spiked"]
@@ -4079,7 +4167,7 @@ def write_signal_shapes(signal_name, tag_name=None, classifier=None):
     ``'<signal>_shape'``."""
     clf = classifier or classify_loss_shape
     if tag_name is None:
-        tag_name = signal_name.split("/")[-1] + "_shape"
+        tag_name = signal_name + "_shape" if signal_name.endswith('_loss') else signal_name + "_loss_shape"
     series = {}
     for sid, step, val, _ in query_signal_history(signal_name):
         series.setdefault(sid, []).append((step, val))
@@ -4097,6 +4185,45 @@ def write_loss_shapes(loss_signal="loss_sample", classifier=None):
     """Convenience wrapper over :func:`write_signal_shapes` for the loss signal
     (tag ``loss_shape``, default loss classifier)."""
     return write_signal_shapes(loss_signal, tag_name="loss_shape", classifier=classifier)
+
+
+def enable_loss_shape_autotag(loss_signal=None, tag_name=None, classifier=None):
+    """Customize automatic loss-shape tagging — **not required to turn it on**.
+
+    Every signal registered via ``wl.watch_or_edit(criterion, flag="loss", ...)``
+    is already auto-classified in the background with zero setup: the logger's
+    periodic flush thread (``WL_LOGGER_FLUSH_INTERVAL_SECONDS`` env var, default
+    2s) discovers it automatically and re-tags it as ``'<signal>_shape'`` every
+    tick, once it has enough per-sample history to classify (see
+    :func:`classify_loss_shape`'s ``min_points``) — no call needed, and no
+    ``write_dataframe(loss_shape_signal=...)`` required either.
+
+    Call this only to override the tag name or classifier used for one specific
+    *loss_signal* (e.g. it isn't a decreasing loss, so the default classifier is
+    wrong for it). Re-enables that signal if it was previously disabled via
+    :func:`disable_loss_shape_autotag`.
+    """
+    if loss_signal is None:
+        raise ValueError(
+            "enable_loss_shape_autotag: loss_signal is required — every "
+            "flag='loss' signal is already auto-classified without calling "
+            "this; only call it to override the tag_name/classifier for one."
+        )
+    lg = get_logger()
+    if lg is None:
+        raise RuntimeError(
+            "enable_loss_shape_autotag: no logger registered yet — call this "
+            "after wl.watch_or_edit(criterion, flag='loss', log=True)."
+        )
+    lg.set_loss_shape_override(loss_signal, tag_name=tag_name, classifier=classifier)
+
+
+def disable_loss_shape_autotag(loss_signal=None):
+    """Stop automatic loss-shape tagging for *loss_signal*, or for every
+    signal (including ones registered later) if *loss_signal* is ``None``."""
+    lg = get_logger()
+    if lg is not None:
+        lg.disable_loss_shape_autotag(loss_signal)
 
 
 def enable_loss_shape_signal(loss_signal="loss_sample", name="sig/loss_shape",
@@ -4124,14 +4251,19 @@ def write_dataframe(
     columns=None,
     sample_id=None,
     instance_id=None,
+    orient: str = "columns",
     verbose: bool = False,
     loss_shape_signal: str | None = None,
 ) -> str:
     """Dump the WeightsLab sample dataframe to *path* as JSON or CSV.
 
-    When *loss_shape_signal* is set (e.g. ``"loss_sample"``), the default loss-
-    shape classifier runs first (tags each sample + logs a distribution summary),
-    so a report written every N steps carries an up-to-date shape summary.
+    Every ``flag="loss"`` signal is already auto-classified into a
+    ``'<signal>_shape'`` tag in the background with zero setup (see
+    :func:`enable_loss_shape_autotag`'s docstring), so you normally don't need
+    *loss_shape_signal* at all. It remains as a one-off: when set (e.g.
+    ``"loss_sample"``), the classifier runs synchronously first so this
+    specific report is guaranteed fresh at the moment it's written, rather than
+    whatever the background thread last computed.
 
     Parameters
     ----------
@@ -4351,7 +4483,7 @@ def write_dataframe(
     df_out = df_out.reset_index()
 
     if fmt == "json":
-        _json_str = df_out.to_json(orient="records", default_handler=str)
+        _json_str = df_out.to_json(orient=orient, default_handler=str)
         with open(path, "w", encoding="utf-8") as fh:
             _json.dump(_json.loads(_json_str), fh, indent=2)
 

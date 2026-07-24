@@ -1298,33 +1298,15 @@ class CheckpointSystemTests(unittest.TestCase):
         self.chkpt_manager.update_experiment_hash(force=False, dump_immediately=False)
         self.chkpt_manager.save_pending_changes(force=True)
 
-        snapshot_dir = Path(self.chkpt_manager.loggers_dir)
-        manifest_path = snapshot_dir / "loggers.manifest.json"
-        legacy_snapshot_path = snapshot_dir / "loggers.json"
-        self.assertTrue(
-            manifest_path.exists() or legacy_snapshot_path.exists(),
-            "Logger snapshot should be saved with checkpoint"
-        )
+        # Logger history is persisted to an on-disk DuckDB file alongside the
+        # checkpoint (the chunked-zstd snapshot was replaced by DuckDB in #257).
+        db_path = Path(self.chkpt_manager.get_logger_db_path())
+        self.assertTrue(db_path.exists(), "Logger DuckDB should be saved with checkpoint")
 
-        if manifest_path.exists():
-            with open(manifest_path, "r") as f:
-                manifest = json.load(f)
-            chunk_files = manifest.get("chunks", [])
-            self.assertGreaterEqual(len(chunk_files), 1, "Chunked logger snapshot should contain at least one chunk")
-            self.assertTrue(
-                all((snapshot_dir / chunk_name).exists() for chunk_name in chunk_files),
-                "All logger snapshot chunks referenced by manifest should exist"
-            )
-            self.assertTrue(self.chkpt_manager.load_logger_snapshot())
-            lg = ledgers.get_logger('main')
-            loggers = {'main': {'signal_history': lg.get_signal_history() if hasattr(lg, 'get_signal_history') else []}}
-        else:
-            with open(legacy_snapshot_path, "r") as f:
-                snapshot = json.load(f)
-            loggers = snapshot.get("loggers", {})
-
-        self.assertIn('main', loggers, "Logger entry should be present")
-        signals = loggers['main'].get("signal_history", [])
+        # The registered logger carries the persisted signal history.
+        lg = ledgers.get_logger('main')
+        self.assertIsNotNone(lg, "Logger entry should be present")
+        signals = lg.get_signal_history() if hasattr(lg, 'get_signal_history') else []
         if isinstance(signals, dict):
             total_signals = 0
             for experiments in signals.values():

@@ -48,6 +48,19 @@ def _call(path, manager, **kwargs):
         return write_dataframe(path, **kwargs)
 
 
+def _records(path):
+    """Read a JSON export back into a list of row records.
+
+    write_dataframe defaults to ``orient="columns"`` (``{column: {row: value}}``)
+    — compact (~6x smaller than records for wide sparse tables) and round-trips
+    with ``pd.read_json``'s default orient. These tests assert row-level
+    behavior, so normalize the columnar layout back to records here. Empty
+    exports (``{}`` / ``{"index": {}}``) collapse to ``[]``.
+    """
+    raw = json.loads(open(path, encoding="utf-8").read())
+    return pd.DataFrame(raw).to_dict(orient="records")
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -89,20 +102,22 @@ class TestWriteDataframeFlush:
 # ---------------------------------------------------------------------------
 
 class TestWriteDataframeJsonStructure:
-    def test_json_is_list_of_records(self, mgr, tmp_json):
+    def test_json_is_columnar_dict(self, mgr, tmp_json):
         _call(tmp_json, mgr)
-        data = json.loads(open(tmp_json).read())
-        assert isinstance(data, list)
+        raw = json.loads(open(tmp_json).read())
+        # Default orient="columns": {column: {row_index: value}}
+        assert isinstance(raw, dict)
+        assert isinstance(raw["sample_id"], dict)
 
     def test_json_includes_index_as_columns(self, mgr, tmp_json):
         _call(tmp_json, mgr)
-        data = json.loads(open(tmp_json).read())
+        data = _records(tmp_json)
         assert "sample_id" in data[0]
         assert "annotation_id" in data[0]
 
     def test_json_all_rows_present_by_default(self, mgr, tmp_json):
         _call(tmp_json, mgr)
-        data = json.loads(open(tmp_json).read())
+        data = _records(tmp_json)
         assert len(data) == 4
 
     def test_returns_written_path(self, mgr, tmp_json):
@@ -207,30 +222,30 @@ class TestWriteDataframeNoManager:
 class TestWriteDataframeColumnFilters:
     def test_columns_all_keeps_everything(self, mgr, tmp_json):
         _call(tmp_json, mgr, columns="all")
-        data = json.loads(open(tmp_json).read())
+        data = _records(tmp_json)
         assert "signals_loss" in data[0] or any("signals_loss" in r for r in data)
 
     def test_columns_tags_only(self, mgr, tmp_json):
         _call(tmp_json, mgr, columns="tags")
-        data = json.loads(open(tmp_json).read())
+        data = _records(tmp_json)
         non_index = [k for k in data[0] if k not in ("sample_id", "annotation_id")]
         assert all(k.startswith("tag:") or k.startswith("TAG:") for k in non_index)
 
     def test_columns_signals_only(self, mgr, tmp_json):
         _call(tmp_json, mgr, columns="signals")
-        data = json.loads(open(tmp_json).read())
+        data = _records(tmp_json)
         non_index = [k for k in data[0] if k not in ("sample_id", "annotation_id")]
         assert all(str(k).lower().startswith("signals") for k in non_index)
 
     def test_columns_discarded_only(self, mgr, tmp_json):
         _call(tmp_json, mgr, columns="discarded")
-        data = json.loads(open(tmp_json).read())
+        data = _records(tmp_json)
         non_index = [k for k in data[0] if k not in ("sample_id", "annotation_id")]
         assert non_index == ["discarded"]
 
     def test_columns_list_of_groups(self, mgr, tmp_json):
         _call(tmp_json, mgr, columns=["tags", "discarded"])
-        data = json.loads(open(tmp_json).read())
+        data = _records(tmp_json)
         non_index = set(k for r in data for k in r if k not in ("sample_id", "annotation_id"))
         assert "discarded" in non_index
         assert any(k.startswith("tag:") for k in non_index)
@@ -238,20 +253,20 @@ class TestWriteDataframeColumnFilters:
 
     def test_columns_exact_name(self, mgr, tmp_json):
         _call(tmp_json, mgr, columns=["signals_loss"])
-        data = json.loads(open(tmp_json).read())
+        data = _records(tmp_json)
         non_index = [k for k in data[0] if k not in ("sample_id", "annotation_id")]
         assert non_index == ["signals_loss"]
 
     def test_columns_nonexistent_name_yields_empty_cols(self, mgr, tmp_json):
         _call(tmp_json, mgr, columns=["nonexistent_col"])
-        data = json.loads(open(tmp_json).read())
+        data = _records(tmp_json)
         # Index columns always present; no extra columns
         for row in data:
             assert set(row.keys()) <= {"sample_id", "annotation_id"}
 
     def test_columns_none_keeps_all(self, mgr, tmp_json):
         _call(tmp_json, mgr, columns=None)
-        data = json.loads(open(tmp_json).read())
+        data = _records(tmp_json)
         assert "signals_loss" in data[0] or any("signals_loss" in r for r in data)
 
 
@@ -262,38 +277,38 @@ class TestWriteDataframeColumnFilters:
 class TestWriteDataframeIndexFilters:
     def test_sample_id_single(self, mgr, tmp_json):
         _call(tmp_json, mgr, sample_id="s1")
-        data = json.loads(open(tmp_json).read())
+        data = _records(tmp_json)
         assert all(r["sample_id"] == "s1" for r in data)
         assert len(data) == 2 # s1 has annotation_ids 0 and 1
 
     def test_sample_id_list(self, mgr, tmp_json):
         _call(tmp_json, mgr, sample_id=["s1", "s2"])
-        data = json.loads(open(tmp_json).read())
+        data = _records(tmp_json)
         sids = {r["sample_id"] for r in data}
         assert sids == {"s1", "s2"}
         assert len(data) == 4
 
     def test_instance_id_zero_keeps_sample_rows(self, mgr, tmp_json):
         _call(tmp_json, mgr, instance_id=0)
-        data = json.loads(open(tmp_json).read())
+        data = _records(tmp_json)
         assert all(r["annotation_id"] == 0 for r in data)
         assert len(data) == 2 # s1 and s2 both have annotation_id=0
 
     def test_instance_id_list(self, mgr, tmp_json):
         _call(tmp_json, mgr, instance_id=[1, 2])
-        data = json.loads(open(tmp_json).read())
+        data = _records(tmp_json)
         assert all(r["annotation_id"] in (1, 2) for r in data)
 
     def test_sample_and_instance_combined(self, mgr, tmp_json):
         _call(tmp_json, mgr, sample_id="s1", instance_id=1)
-        data = json.loads(open(tmp_json).read())
+        data = _records(tmp_json)
         assert len(data) == 1
         assert data[0]["sample_id"] == "s1"
         assert data[0]["annotation_id"] == 1
 
     def test_empty_result_when_no_match(self, mgr, tmp_json):
         _call(tmp_json, mgr, sample_id="nonexistent")
-        data = json.loads(open(tmp_json).read())
+        data = _records(tmp_json)
         assert data == []
 
 
@@ -305,7 +320,7 @@ class TestWriteDataframeEmpty:
     def test_empty_df_writes_empty_json(self, tmp_json):
         mgr = _make_manager(df=pd.DataFrame())
         _call(tmp_json, mgr)
-        data = json.loads(open(tmp_json).read())
+        data = _records(tmp_json)
         assert data == []
 
     def test_empty_df_writes_empty_csv(self, tmp_csv):

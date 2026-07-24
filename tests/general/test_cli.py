@@ -8,6 +8,7 @@ import socket
 import time
 import json
 import tempfile
+import argparse
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -23,6 +24,7 @@ from weightslab.backend.cli import (
     cli_serve,
 )
 import weightslab.backend.cli as cli_backend
+import weightslab.cli as wl_cli
 from weightslab.backend.ledgers import GLOBAL_LEDGER, Proxy
 
 
@@ -518,6 +520,56 @@ class TestCLIEndpointDiscovery(unittest.TestCase):
             cli_backend._server_thread = None
 
 
+class TestUIStartPortResolution(unittest.TestCase):
+    """Tests for UI port resolution used by `weightslab start`."""
+
+    def setUp(self):
+        self._saved_env = {
+            k: os.environ.get(k)
+            for k in ("WL_LAST_UI_PORT", "WEIGHTSLAB_UI_PORT", "WEIGHTSLAB_EXPERIMENT_CONFIG")
+        }
+        for key in self._saved_env:
+            os.environ.pop(key, None)
+
+    def tearDown(self):
+        for key, value in self._saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def test_explicit_port_wins(self):
+        args = argparse.Namespace(port=61234, config=None)
+        port, source = wl_cli._resolve_ui_port(args)
+        self.assertEqual(port, 61234)
+        self.assertEqual(source, "--port")
+
+    def test_config_port_wins_over_env(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "config.yaml"
+            cfg.write_text("ui_port: 61235\n", encoding="utf-8")
+            os.environ["WL_LAST_UI_PORT"] = "62000"
+            args = argparse.Namespace(port=None, config=str(cfg))
+
+            port, source = wl_cli._resolve_ui_port(args)
+            self.assertEqual(port, 61235)
+            self.assertEqual(source, "experiment config")
+
+    def test_last_ui_port_env_fallback(self):
+        os.environ["WL_LAST_UI_PORT"] = "61236"
+        args = argparse.Namespace(port=None, config=None)
+
+        port, source = wl_cli._resolve_ui_port(args)
+        self.assertEqual(port, 61236)
+        self.assertEqual(source, "WL_LAST_UI_PORT")
+
+    def test_default_is_50051(self):
+        args = argparse.Namespace(port=None, config=None)
+        port, source = wl_cli._resolve_ui_port(args)
+        self.assertEqual(port, 50051)
+        self.assertEqual(source, "default")
+
+
 def run_tests():
     """Run all CLI tests."""
     # Create test suite
@@ -529,6 +581,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestCLICommands))
     suite.addTests(loader.loadTestsFromTestCase(TestCLIServer))
     suite.addTests(loader.loadTestsFromTestCase(TestCLIEndpointDiscovery))
+    suite.addTests(loader.loadTestsFromTestCase(TestUIStartPortResolution))
     # suite.addTests(loader.loadTestsFromTestCase(TestCLIIntegration))
 
     # Run tests

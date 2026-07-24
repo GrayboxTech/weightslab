@@ -96,6 +96,19 @@ def _package_version() -> str:
     ``_version`` module, then the git-describe fallback. Deliberately avoids
     ``import weightslab`` because this module is imported *during* the package's
     own initialization (before ``__version__`` is assigned there)."""
+    raw = _package_version_raw()
+    # The git-describe fallback returns the raw tag name (e.g. "v1.3.4" or
+    # "v1.3.4-2-gabcdef"), since release tags are "v*" — already-prefixed. The
+    # caller (_CREDIT_LABEL below) always adds its own "v", so strip one here
+    # if present or the banner reads "vv1.3.4". The other two branches
+    # (installed dist metadata / setuptools_scm) are unprefixed PEP 440
+    # versions, so this is a no-op for them.
+    if raw[:1] in ("v", "V") and raw[1:2].isdigit():
+        raw = raw[1:]
+    return raw
+
+
+def _package_version_raw() -> str:
     try:
         from importlib.metadata import version as _dist_version, PackageNotFoundError
         try:

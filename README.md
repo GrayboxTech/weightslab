@@ -46,16 +46,18 @@ Most data problems are invisible until your model tells you: through loss spikes
 ## Quickstart
 
 ![Python](https://img.shields.io/badge/Python-v3.10--v3.14-5865F2?style=flat&logo=python&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-v4-0db7ed?style=flat&logo=docker&logoColor=white)
 
-**1. Install & Launch Studio**
+**1. Install**
 ```bash
 pip install weightslab
-
-weightslab ui launch  # then open https://localhost:5173 🚀
 ```
 
-**2. Wrap your training script**
+**2. Launch the Studio**
+```bash
+weightslab start
+```
+
+**3.a. Wrap your training script locally**
 ```python
 # wrap the objects in your training script
 
@@ -70,10 +72,13 @@ wl.serve(serving_grpc=True, serving_cli=False)
 ...
 ```
 
+**3.b. Or in the cloud**
+
+[![Start coding with GCollab](https://img.shields.io/badge/Start_coding_with_GCollab-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=white)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/Colab/wl-colab-quickstart.ipynb)
+
+
 <br>
-
 For a detailed installation guide and advanced configuration &rarr; [Installation Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
-
 <br>
 
 > [!TIP]
@@ -84,8 +89,9 @@ For a detailed installation guide and advanced configuration &rarr; [Installatio
 > weightslab start example --seg      # segmentation
 > weightslab start example --det      # detection
 > weightslab start example --clus     # clustering
-> weightslab start example --gen      # generation
 > ```
+>
+> Explore our [sandbox](www.sandbox.graybx.com).
 
 <br>
 
@@ -117,10 +123,10 @@ For a detailed installation guide and advanced configuration &rarr; [Installatio
 3. **Run your script, then launch the UI in a separate terminal:**
 ```bash
    python train.py
-   weightslab ui launch
+   weightslab start
 ```
 
-4. **Open your browser** `https://localhost:5173` and inspect your training in real time.
+4. **Open your browser** at the URL printed by `weightslab start` and inspect your training in real time.
 
 </details>
 
@@ -316,9 +322,8 @@ Find our documentation [online](https://grayboxtech.github.io/weightslab/latest/
 
 New here (human or AI coding agent)? Start with [AGENTS.md](AGENTS.md) — it
 captures the cross-repo architecture (weightslab backend ↔ weights_studio
-frontend via the shared proto), the module maps, the `wl.watch_or_edit`
-integration pattern, where tests live, and the gotchas that aren't obvious from
-any single file. It's the fastest way to orient before a first change.
+frontend via the shared proto), the module maps, the integration pattern, where tests live, and the gotchas that aren't obvious from
+any single file. It's the fastest way to orient before a first change and contribution.
 
 </details>
 

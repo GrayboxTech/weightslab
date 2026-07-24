@@ -10,13 +10,63 @@ This file re-exports selected symbols from `weightslab.src`.
 import os
 import logging
 import threading
+import importlib
 
-from .src import watch_or_edit, start_training, serve, keep_serving, save_signals, save_instance_signals, save_group_signals, tag_samples, register_categorical_tag, set_categorical_tag, discard_samples, get_samples_by_tag, get_discarded_samples, signal, eval_fn, compute_signals, SignalContext, BatchSignalContext, StaleSignalError, drain_signals, clear_all, run_pending_evaluation, trigger_pending_evaluation_async, query_signal_history, query_sample_history, query_instance_history, write_history, write_dataframe, classify_loss_shape, trajectory_stats, write_loss_shapes, write_signal_shapes, enable_loss_shape_signal, LOSS_SHAPES, get_current_experiment_hash, pointcloud_thumbnail, pointcloud_boxes
-from .backend.ledgers import GLOBAL_LEDGER as ledger
+# Only lightweight, torch-free helpers are imported eagerly (needed by the
+# package-init side effects below). The banner and logging utilities pull in no
+# heavy scientific stack.
 from .art import _BANNER
 from .utils.logs import setup_logging, set_log_directory, is_main_process
-from .utils.tools import seed_everything
-from .components.global_monitoring import guard_training_context, guard_testing_context
+
+# --- Lazy re-exports (PEP 562) --------------------------------------------- #
+# The training API (`.src`, ledger, guards, seed_everything) transitively
+# imports torch/numpy, which costs several seconds. Resolving these lazily means
+# `import weightslab` — and in particular the `weightslab` CLI process, which
+# only serves the UI and never touches a model — stays torch-free until the
+# training helpers are actually used. A user's training script triggers the
+# import the moment it first calls e.g. `wl.watch_or_edit(...)`, right where
+# they'd import torch themselves anyway, so nothing changes for them.
+_LAZY_EXPORTS = {
+    # ledger + guards + seeding live outside .src
+    "ledger": (".backend.ledgers", "GLOBAL_LEDGER"),
+    "seed_everything": (".utils.tools", "seed_everything"),
+    "guard_training_context": (".components.global_monitoring", "guard_training_context"),
+    "guard_testing_context": (".components.global_monitoring", "guard_testing_context"),
+}
+# Everything re-exported straight from .src (attribute name == export name).
+for _name in (
+    "watch_or_edit", "start_training", "serve", "keep_serving", "save_signals",
+    "save_instance_signals", "save_group_signals", "tag_samples",
+    "register_categorical_tag", "set_categorical_tag", "discard_samples",
+    "get_samples_by_tag", "get_discarded_samples", "signal", "eval_fn",
+    "compute_signals", "SignalContext", "BatchSignalContext", "StaleSignalError",
+    "drain_signals", "clear_all", "run_pending_evaluation",
+    "trigger_pending_evaluation_async", "query_signal_history",
+    "query_sample_history", "query_instance_history", "write_history",
+    "write_dataframe", "classify_loss_shape", "trajectory_stats",
+    "write_loss_shapes", "write_signal_shapes", "enable_loss_shape_signal",
+    "enable_loss_shape_autotag", "disable_loss_shape_autotag",
+    "auto_loss_shape_signal_names",
+    "LOSS_SHAPES", "get_current_experiment_hash", "pointcloud_thumbnail",
+    "pointcloud_boxes",
+):
+    _LAZY_EXPORTS[_name] = (".src", _name)
+del _name
+
+
+def __getattr__(name):  # PEP 562 module-level lazy attribute access
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attr = target
+    module = importlib.import_module(module_name, __name__)
+    value = getattr(module, attr)
+    globals()[name] = value  # cache so __getattr__ isn't hit again
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_LAZY_EXPORTS))
 
 # If you already have other top-level exports, keep them.
 # This snippet ensures __version__ is available even when setuptools_scm hasn't written the file yet.
@@ -46,19 +96,19 @@ if _IS_MAIN_PROCESS:
 
 grpc_tls_enabled = os.environ.get('GRPC_TLS_ENABLED', 'true').lower() == 'true'
 if _IS_MAIN_PROCESS and grpc_tls_enabled and os.environ.get('WEIGHTSLAB_SKIP_SECURE_INIT', 'false').lower() != 'true':
-	try:
-		from weightslab.security import CertAuthManager
+    try:
+        from weightslab.security import CertAuthManager
 
-		enable_auth = os.environ.get('WL_ENABLE_GRPC_AUTH_TOKEN', 'true').lower() == 'true'
-		manager = CertAuthManager.from_env_or_default(enable_auth=enable_auth)
+        enable_auth = os.environ.get('WL_ENABLE_GRPC_AUTH_TOKEN', 'true').lower() == 'true'
+        manager = CertAuthManager.from_env_or_default(enable_auth=enable_auth)
 
-		success, msg = manager.check_and_apply()
-		if success:
-			logger.debug(f"Secure environment applied: {msg}")
-		else:
-			logger.debug(f"Running in unsecured mode — no certs found. To set up: weightslab ui se")
-	except Exception as e:
-		logger.debug(f"Secure environment check skipped: {e}")
+        success, msg = manager.check_and_apply()
+        if success:
+            logger.debug(f"Secure environment applied: {msg}")
+        else:
+            logger.debug("Running in unsecured mode - no certs found. To set up: weightslab se")
+    except Exception as e:
+        logger.debug(f"Secure environment check skipped: {e}")
 
 # Get Package Metadata. Resolve the version from the most authoritative source
 # available, so a live/editable checkout reports the CURRENT git tag rather than
@@ -174,6 +224,9 @@ __all__ = [
     "write_signal_shapes",
     "trajectory_stats",
     "enable_loss_shape_signal",
+    "enable_loss_shape_autotag",
+    "disable_loss_shape_autotag",
+    "auto_loss_shape_signal_names",
     "LOSS_SHAPES",
 
     "pointcloud_thumbnail",

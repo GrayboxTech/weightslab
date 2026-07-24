@@ -28,9 +28,16 @@ classifiers = [
 # - Prefer compatible ranges, then pin exact versions only in CI/lockfiles.
 dependencies = [
   # Core data / persistence
-  "numpy>=1.25.2,<2.0; python_version < '3.13'",
-  "numpy>=2.1,<3; python_version >= '3.13'",
-  "pandas>=2.2.3,<3",
+  # numpy 2 is supported: weightslab's source uses no numpy-1-only APIs, and its
+  # compiled deps (torch, pandas, h5py, tables, onnx) ship numpy-2 wheels at the
+  # versions pip resolves. Range left open (<3) so Colab's numpy 2.x installs
+  # without a downgrade. Verified: import + torch/pandas interop + gRPC on np 2.4.
+  "numpy>=1.24,<3",
+  # Floor at 2.2.2 (not 2.2.3) so Colab's pinned pandas==2.2.2 is accepted
+  # as-is: google-colab 1.0.0 requires pandas==2.2.2, and a >=2.2.3 floor forced
+  # an upgrade to 2.3.x that breaks that pin. Clean installs still pick the
+  # newest numpy-2-safe pandas (2.3.x).
+  "pandas>=2.2.2,<3",
   "duckdb>=1.1,<2",  # signal/sample/instance history store
   "PyYAML>=6.0.3,<7",
   "dill>=0.3.8,<0.5",
@@ -39,16 +46,25 @@ dependencies = [
   "xxhash>=3.4,<4.1",
   "tables>=3.9,<4",  # h5 deps
 
-  # PyTorch stack
-  "torch>=2.1,<2.9; python_version < '3.13'",
-  "torch==2.9; python_version >= '3.13'",
-  "torchvision>=0.16,<0.24; python_version < '3.13'",
-  "torchvision>=0.24,<1; python_version >= '3.13'",
+  # PyTorch stack. Upper bounds left open (<3 / <1) so a pre-installed modern
+  # torch (e.g. Colab's torch 2.9 / torchvision 0.24) is accepted as-is instead
+  # of being downgraded — the reinstall churn is what dragged numpy across the
+  # 1.x/2.x boundary and broke the ABI. Floors kept; pip picks a compatible
+  # numpy-2 build on a clean install.
+  "torch>=2.1,<=2.9",
+  "torchvision>=0.16,<1",
   "torchmetrics>=1.9",
 
   # Serving / schema
   "grpcio>=1.80,<2",
-  "protobuf>=4.25,<7",
+  # Floor tracks the checked-in gencode: the *_pb2.py are regenerated with
+  # grpcio-tools ~=1.68 (protoc gencode 5.28.1), so any runtime >=5.28.1 satisfies
+  # protobuf's runtime>=gencode rule — including Colab's stock protobuf 5.29.6, so
+  # NO upgrade is forced on Colab. IMPORTANT: regenerate the stubs with
+  # grpcio-tools ~=1.68 to keep the gencode Colab-compatible; a newer grpcio-tools
+  # bumps the gencode and reintroduces the VersionError on Colab. Upper bound <8
+  # keeps modern runtimes (7.x) working.
+  "protobuf>=5.28.1,<8",
   "pydantic>=2.7,<3",
 
   # Imaging
@@ -99,15 +115,16 @@ utest = [
 ]
 
 [project.scripts]
-weightslab = "weightslab.ui_docker_bridge:main"
+weightslab = "weightslab.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/GrayboxTech/weightslab"
 
 [tool.setuptools]
-# Ship non-.py assets that live inside the package (docker stack + bundled
-# examples). Combined with the explicit globs below so the CLI subcommands
-# (`ui launch`, `start example`) find their files in a pip-installed package.
+# Ship non-.py assets that live inside the package (cert scripts, bundled
+# examples, pre-built UI). Combined with the explicit globs below so the CLI
+# subcommands (`start`, `start example`, `se`) find their files in a
+# pip-installed package.
 include-package-data = true
 
 [tool.setuptools.packages.find]
@@ -115,18 +132,19 @@ where = ["."]
 include = ["weightslab", "weightslab.*"]
 
 [tool.setuptools.package-data]
-# Bundle the docker stack (compose files, envoy/nginx configs, shell scripts)
-# and the example projects (main.py, config.yaml, sample data) that the
-# `weightslab` CLI resolves relative to the installed package.
+# Bundle the cert-generation scripts, the example projects (main.py, config.yaml,
+# sample data), and the pre-built Weights Studio SPA that `weightslab start`
+# serves directly — no Docker required.
 weightslab = [
-  "docker/**/*",
+  "ui/utils/**/*",
   "examples/**/*",
+  # Pre-built Weights Studio SPA served by `weightslab start`.
+  "ui/static/**/*",
 ]
 
 [tool.setuptools.exclude-package-data]
 # Never ship generated/local artifacts even if present on disk at build time.
 weightslab = [
-  "docker/docker/.env",
   "**/__pycache__/**",
   "**/*.pyc",
 ]

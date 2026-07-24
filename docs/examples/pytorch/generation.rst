@@ -99,7 +99,7 @@ filter by pair distance to find the hardest negatives.
 
    .. code-block:: bash
 
-      weightslab ui launch           # 1. deploy the studio
+      weightslab start               # 1. deploy the studio
       weightslab start example --gen # 2. start the generation / anomaly demo
 
 

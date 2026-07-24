@@ -685,29 +685,39 @@ class LedgeredDataFrameManager:
             if self._df.empty:
                 self._df = df_norm.copy()
             else:
-                # Right-preferred upsert with multi-index support
-                existing_idx = df_norm.index.intersection(self._df.index)
-                all_cols = df_norm.columns
-                if len(existing_idx) > 0:
-                    # Widen any categorical target columns to object before assigning:
-                    # writing a value outside a Categorical's category list raises
-                    # "Cannot setitem on a Categorical with a new category". This
-                    # must include `origin` — re-registering rows whose (sample_id,
-                    # annotation_id) already exist under a NEW origin hits exactly
-                    # that error otherwise. The _optimize_dataframe_memory pass below
-                    # re-applies categorical dtypes (origin included), so widening
-                    # here is only transient and costs no memory afterward.
-                    for col in all_cols:
-                        if col in self._df.columns and isinstance(self._df[col].dtype, pd.CategoricalDtype):
-                            self._df[col] = self._df[col].astype(object)
-                    self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
+                # Right-preferred upsert with multi-index support.
+                # If either side has duplicate index labels, label-based setitem
+                # can treat the replacement as a vector assignment into a scalar
+                # cell. Rebuild the overlap with concat instead of trying to write
+                # through .loc in that case.
+                if not self._df.index.is_unique or not df_norm.index.is_unique:
+                    self._df = pd.concat([
+                        self._df.drop(index=df_norm.index, errors='ignore'),
+                        df_norm[~df_norm.index.duplicated(keep='last')],
+                    ])
+                else:
+                    existing_idx = df_norm.index.intersection(self._df.index)
+                    all_cols = df_norm.columns
+                    if len(existing_idx) > 0:
+                        # Widen any categorical target columns to object before assigning:
+                        # writing a value outside a Categorical's category list raises
+                        # "Cannot setitem on a Categorical with a new category". This
+                        # must include `origin` — re-registering rows whose (sample_id,
+                        # annotation_id) already exist under a NEW origin hits exactly
+                        # that error otherwise. The _optimize_dataframe_memory pass below
+                        # re-applies categorical dtypes (origin included), so widening
+                        # here is only transient and costs no memory afterward.
+                        for col in all_cols:
+                            if col in self._df.columns and isinstance(self._df[col].dtype, pd.CategoricalDtype):
+                                self._df[col] = self._df[col].astype(object)
+                        self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
 
-                # Append rows that do not exist yet. Use a boolean mask (not
-                # .loc[difference]) so a duplicate key in df_norm can't be
-                # re-expanded into multiple rows by the label lookup.
-                new_rows = df_norm[~df_norm.index.isin(self._df.index)]
-                if not new_rows.empty:
-                    self._df = pd.concat([self._df, new_rows])
+                    # Append rows that do not exist yet. Use a boolean mask (not
+                    # .loc[difference]) so a duplicate key in df_norm can't be
+                    # re-expanded into multiple rows by the label lookup.
+                    new_rows = df_norm[~df_norm.index.isin(self._df.index)]
+                    if not new_rows.empty:
+                        self._df = pd.concat([self._df, new_rows])
 
             logger.debug(f"[LedgeredDataFrameManager] Global DataFrame updated: {len(self._df)} rows, {len(self._df.columns)} columns. Index: {self._df.index.names}")
 
@@ -2151,7 +2161,7 @@ class LedgeredDataFrameManager:
 
         return df
 
-    def get_collapse_annotations_to_samples_df(self) -> pd.DataFrame:
+    def get_collapse_annotations_to_samples_df(self, df: pd.DataFrame | None = None) -> pd.DataFrame:
         """Collapse a (sample_id, annotation_id) multi-index df to one row per sample.
 
         The shared dataframe manager now expands every sample into one row per
@@ -2182,8 +2192,16 @@ class LedgeredDataFrameManager:
 
         Returns a single-level ``sample_id``-indexed dataframe (origin stays a
         column). Dataframes that are not annotation-expanded are returned as-is.
+
+        Args:
+            df: An already-materialized combined frame (as returned by
+                :meth:`get_combined_df`) to collapse. When ``None`` (default) a
+                fresh combined frame is pulled here. Callers that just pulled the
+                combined frame should pass it in to avoid a second full copy +
+                buffer merge + proxy conversion over the whole dataset.
         """
-        df = self.get_combined_df()
+        if df is None:
+            df = self.get_combined_df()
 
         SID = SampleStatsEx.SAMPLE_ID.value
         ANNOT = SampleStatsEx.INSTANCE_ID.value
