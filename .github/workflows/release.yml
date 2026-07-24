@@ -72,33 +72,35 @@ jobs:
             echo "::warning::Tag '${GITHUB_REF_NAME}' has no 'dev' in its name and its commit is not on main — skipping release entirely."
           fi
 
-  # # ── Shared: run tests before any publish (main or dev pre-release) ────────
-  # test:
-  #   name: Run Tests Before Release
-  #   needs: detect-target
-  #   runs-on: ubuntu-latest
-  #   if: ${{ needs.detect-target.outputs.should_run == 'true' }}
-  #   steps:
-  #     - uses: actions/checkout@v4
 
-  #     - uses: actions/setup-python@v6
-  #       with:
-  #         python-version: '3.11'
+  # ── Shared: run tests before any publish (main or dev pre-release) ────────
+  test:
+    name: Run Tests Before Release
+    needs: detect-target
+    runs-on: ubuntu-latest
+    if: ${{ needs.detect-target.outputs.should_run == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
 
-  #     - name: Install dependencies
-  #       run: |
-  #         python -m pip install --upgrade pip
-  #         # Install the test extra so pytest, graphviz, torchmetrics,
-  #         # pytorch-lightning and tensorboard are available (several test modules
-  #         # import pytest / use pytest fixtures and cannot run under bare unittest).
-  #         python -m pip install .[utest] --extra-index-url https://download.pytorch.org/whl/cpu
-  #         python -m pip install pytest-timeout
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
 
-  #     - name: Run tests
-  #       run: |
-  #         export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-  #         python -m pip install pytorch_lightning
-  #         python -m unittest discover -s ./tests -p "test_*.py" -t . -v
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install the test extra so pytest, graphviz, torchmetrics,
+          # pytorch-lightning and tensorboard are available (several test modules
+          # import pytest / use pytest fixtures and cannot run under bare unittest).
+          python -m pip install .[utest] --extra-index-url https://download.pytorch.org/whl/cpu
+          python -m pip install pytest-timeout
+
+      - name: Run tests
+        run: |
+          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+          python -m pip install pytorch_lightning
+          python -m unittest discover -s ./tests -p "test_*.py" -t . -v
+
 
   # ═══════════════════════════════════════════════════════════════════════════
   # DEV RELEASE — tag on dev branch, not yet merged to main
