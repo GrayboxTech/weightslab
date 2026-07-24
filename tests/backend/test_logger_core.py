@@ -930,6 +930,59 @@ class TestBackgroundFlushAndLossShapeAutotag(unittest.TestCase):
             lg._autotag_loss_shapes()
         self.assertFalse(mock_write_shapes.called)
 
+    def test_autotag_skips_a_signal_with_no_new_data_since_last_pass(self):
+        """The optimization under test: a signal with no new per-sample writes
+        since the last tag pass must not be reclassified again — this is what
+        keeps the background flush thread from unconditionally re-reading and
+        re-tagging every signal on a bare timer regardless of whether training
+        produced anything new."""
+        lg = self._lg_no_autoflush()
+        _add(lg, "train-loss-CE", "s1", 1, 0.5)
+        with patch("weightslab.src.auto_loss_shape_signal_names", return_value=["train-loss-CE"]), \
+             patch("weightslab.src.write_signal_shapes") as mock_write_shapes:
+            lg._autotag_loss_shapes()
+            self.assertEqual(mock_write_shapes.call_count, 1)
+
+            # No new data staged for this signal — must be skipped this time.
+            lg._autotag_loss_shapes()
+            self.assertEqual(mock_write_shapes.call_count, 1)
+
+            # New data arrives -> the signal's _qps_version moves -> re-tagged.
+            _add(lg, "train-loss-CE", "s1", 2, 0.4)
+            lg._autotag_loss_shapes()
+            self.assertEqual(mock_write_shapes.call_count, 2)
+
+    def test_autotag_skip_cache_is_per_signal(self):
+        """One signal having no new data must not suppress another signal that
+        does — the version check is keyed per signal_name. Uses a second
+        sample at the SAME step (not a new global step) so only the touched
+        signal's own _qps_version bumps — a new global step drops the whole
+        query-cache/version table (see _stage_sample_row's "New step -> last
+        step's cache entries can't recur" comment), which is a separate,
+        coarser invalidation this test isn't about."""
+        lg = self._lg_no_autoflush()
+        _add(lg, "train-loss-CE", "s1", 1, 0.5)
+        _add(lg, "val-loss-CE", "s1", 1, 0.7)
+        with patch("weightslab.src.auto_loss_shape_signal_names",
+                    return_value=["train-loss-CE", "val-loss-CE"]), \
+             patch("weightslab.src.write_signal_shapes") as mock_write_shapes:
+            lg._autotag_loss_shapes()
+            # Both signals are new — order isn't guaranteed (iterates a set).
+            self.assertEqual(
+                {c.args[0] for c in mock_write_shapes.call_args_list},
+                {"train-loss-CE", "val-loss-CE"},
+            )
+            mock_write_shapes.reset_mock()
+
+            # Only val-loss-CE gets a new sample this round (same step) —
+            # train-loss-CE must be skipped now.
+            _add(lg, "val-loss-CE", "s2", 1, 0.6)
+            lg._autotag_loss_shapes()
+            self.assertEqual(
+                [c.args[0] for c in mock_write_shapes.call_args_list],
+                ["val-loss-CE"],
+            )
+
 
 class TestAutoLossShapeSignalRegistration(unittest.TestCase):
     """watch_or_edit(..., flag="loss") must register the signal name for

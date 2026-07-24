@@ -92,6 +92,10 @@ class LoggerQueue:
         self._loss_shape_overrides: dict = {}  # {signal_name: (tag_name, classifier)}
         self._loss_shape_disabled: set = set()
         self._loss_shape_all_disabled: bool = False
+        # {signal_name: _qps_version at the last successful tag pass} — lets
+        # _autotag_loss_shapes() skip a signal entirely when no new per-sample
+        # data has been staged for it since last time (see _autotag_loss_shapes).
+        self._loss_shape_last_version: dict = {}
         self._flush_stop = threading.Event()
         self._flush_thread: threading.Thread | None = None
 
@@ -188,12 +192,22 @@ class LoggerQueue:
                 self._loss_shape_overrides.pop(loss_signal, None)
 
     def _autotag_loss_shapes(self) -> None:
-        """Re-classify every auto-detected ``flag="loss"`` signal.
+        """Re-classify every auto-detected ``flag="loss"`` signal that has NEW
+        per-sample data since its last tag pass.
 
-        Cheap to call on a schedule: the classifier skips any sample with too
-        little history yet (see ``classify_loss_shape``'s ``min_points``), and
-        an empty/no-op history read is fast. Failures are per-signal and never
-        propagate — one bad classifier/signal can't stop the others.
+        Each signal is skipped when its ``_qps_version`` (bumped only by
+        ``_stage_sample_row`` on an actual new per-sample write, and already
+        the cache-invalidation key for ``query_per_sample``/
+        ``query_signal_history``) hasn't moved since the last time this
+        signal was classified — no new points means the classification result
+        (and thus every categorical tag written from it) would come out
+        identical, so re-running the full read + classify + tag-write cycle
+        on a bare 2s timer regardless of whether training even produced
+        anything new was pure waste, and contended ``self._lock`` against
+        unrelated reads (e.g. ``get_signal_history()`` for
+        ``GetLatestLoggerData``) the whole time training was paused/idle too.
+        Failures are per-signal and never propagate — one bad
+        classifier/signal can't stop the others.
         """
         with self._lock:
             if self._loss_shape_all_disabled:
@@ -214,9 +228,14 @@ class LoggerQueue:
         for signal_name in signal_names:
             if signal_name in disabled:
                 continue
+            with self._lock:
+                current_version = self._qps_version[signal_name]
+            if self._loss_shape_last_version.get(signal_name) == current_version:
+                continue  # no new per-sample data logged since the last pass
             tag_name, classifier = overrides.get(signal_name, (None, None))
             try:
                 write_signal_shapes(signal_name, tag_name=tag_name, classifier=classifier)
+                self._loss_shape_last_version[signal_name] = current_version
             except Exception as exc:
                 logger.debug(
                     f"[LoggerQueue] loss-shape autotag failed for {signal_name!r}: {exc}")
@@ -443,6 +462,7 @@ class LoggerQueue:
         self._qps_cache.cache_clear()
         self._qps_step_cache.cache_clear()
         self._qps_version.clear()
+        self._loss_shape_last_version.clear()
 
     def _stage_instance_row(self, graph_name, exp_hash, sample_id, annotation_id, step, value):
         self._stage_instance.append((
