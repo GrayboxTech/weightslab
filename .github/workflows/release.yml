@@ -7,9 +7,25 @@ on:
 
 jobs:
   # ── Routing ───────────────────────────────────────────────────────────────
-  # Detect whether the tagged commit lives on main (→ PyPI production release)
-  # or anywhere else (→ TestPyPI pre-release).  All downstream jobs branch on
-  # this output so only the correct path runs.
+  # Two independent signals decide what runs, checked in this priority order:
+  #   1. is_dev_release: the tag NAME contains "dev" (e.g. v1.3.1-dev0) —
+  #      ALWAYS true in that case, regardless of which branch/commit is
+  #      tagged. Always publishes to TestPyPI + a GitHub pre-release.
+  #   2. is_main: only considered when the name does NOT contain "dev", and
+  #      requires the tag's commit to actually be an ancestor of main. This is
+  #      a safety gate: a non-dev-named tag cut from a branch other than main
+  #      must never auto-publish a real PyPI release under a "real" version
+  #      number just because someone forgot the branch they were on.
+  # A non-dev-named tag whose commit is NOT on main matches neither and
+  # triggers nothing at all (should_run=false) — accidental/misplaced tags
+  # never release.
+  #
+  # This used to check "is the commit an ancestor of main" FIRST, which
+  # silently routed a dev-named tag to the main/PyPI pipeline whenever dev and
+  # main happened to be in sync (e.g. right after a merge) — the ancestor
+  # check won out over the "dev" in the tag name. Checking the name first
+  # fixes that, while still keeping the ancestor check as the guard for the
+  # non-dev path.
   detect-target:
     name: Detect release target
     runs-on: ubuntu-latest
@@ -23,33 +39,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check whether the tag commit is on main
+      - name: Check the release target
         id: check
         run: |
-          git fetch origin main
-          TAG_COMMIT="$(git rev-list -n 1 "${GITHUB_REF}")"
-          IS_ON_MAIN=$(git merge-base --is-ancestor "${TAG_COMMIT}" origin/main \
-                       && echo "true" || echo "false")
-          echo "is_main=${IS_ON_MAIN}" >> $GITHUB_OUTPUT
-
-          # Dev pre-release: a tag NOT on main whose name contains 'dev'
-          # (e.g. v1.3.1-dev0). Runs the full pipeline up to the TestPyPI install
-          # tests + a GitHub pre-release, then STOPS before the production PyPI
-          # publish. A tag off main WITHOUT 'dev' triggers nothing (should_run=false),
-          # so accidental/non-dev tags on dev never release.
           IS_DEV_RELEASE=false
-          if [ "${IS_ON_MAIN}" != "true" ] && [[ "${GITHUB_REF_NAME}" == *dev* ]]; then
+          if [[ "${GITHUB_REF_NAME}" == *dev* ]]; then
             IS_DEV_RELEASE=true
           fi
           echo "is_dev_release=${IS_DEV_RELEASE}" >> $GITHUB_OUTPUT
 
-          if [ "${IS_ON_MAIN}" = "true" ] || [ "${IS_DEV_RELEASE}" = "true" ]; then
+          # Only a non-dev-named tag needs the ancestor check at all -- a
+          # dev-named tag is never a main release, no matter where it sits.
+          IS_MAIN=false
+          if [ "${IS_DEV_RELEASE}" != "true" ]; then
+            git fetch origin main
+            TAG_COMMIT="$(git rev-list -n 1 "${GITHUB_REF}")"
+            if git merge-base --is-ancestor "${TAG_COMMIT}" origin/main; then
+              IS_MAIN=true
+            fi
+          fi
+          echo "is_main=${IS_MAIN}" >> $GITHUB_OUTPUT
+
+          if [ "${IS_DEV_RELEASE}" = "true" ] || [ "${IS_MAIN}" = "true" ]; then
             SHOULD_RUN=true
           else
             SHOULD_RUN=false
           fi
           echo "should_run=${SHOULD_RUN}" >> $GITHUB_OUTPUT
-          echo "Tag: ${GITHUB_REF_NAME}  commit: ${TAG_COMMIT}  on_main: ${IS_ON_MAIN}  dev_release: ${IS_DEV_RELEASE}  should_run: ${SHOULD_RUN}"
+
+          echo "Tag: ${GITHUB_REF_NAME}  is_main: ${IS_MAIN}  dev_release: ${IS_DEV_RELEASE}  should_run: ${SHOULD_RUN}"
+          if [ "${SHOULD_RUN}" != "true" ]; then
+            echo "::warning::Tag '${GITHUB_REF_NAME}' has no 'dev' in its name and its commit is not on main — skipping release entirely."
+          fi
 
   # ── Shared: run tests before any publish (main or dev pre-release) ────────
   test:
@@ -113,6 +134,7 @@ jobs:
           # to it, so both the ls-remote branch probe and the clone below must
           # authenticate with a real cross-repo PAT instead.
           WEIGHTS_STUDIO_TOKEN: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
+          IS_DEV_RELEASE: ${{ needs.detect-target.outputs.is_dev_release }}
         run: |
           set -euo pipefail
 
@@ -122,18 +144,15 @@ jobs:
           fi
           CLONE_URL="https://x-access-token:${WEIGHTS_STUDIO_TOKEN}@github.com/GrayboxTech/weights_studio.git"
 
-          git fetch origin --prune
-          CANDIDATE_REF="$(git for-each-ref --format='%(refname:short)' refs/remotes/origin --contains "${GITHUB_SHA}" \
-            | sed 's#^origin/##' \
-            | grep -Ev '^(HEAD|main)$' \
-            | head -n 1 || true)"
-          if [ -z "${CANDIDATE_REF}" ]; then
-            CANDIDATE_REF="main"
-          fi
-
+          # Mirror the weightslab tag routing: a dev-named tag vendors the
+          # weights_studio "dev" branch (falling back to main if weights_studio
+          # itself has no dev branch); every other tag always vendors main.
+          # This used to guess the ref from which weightslab branches happened
+          # to contain the tagged commit -- fragile, and NOT tied to
+          # is_dev_release, so it could silently vendor the wrong UI.
           UI_REF="main"
-          if git ls-remote --exit-code --heads "${CLONE_URL}" "${CANDIDATE_REF}" >/dev/null 2>&1; then
-            UI_REF="${CANDIDATE_REF}"
+          if [ "${IS_DEV_RELEASE}" = "true" ] && git ls-remote --exit-code --heads "${CLONE_URL}" "dev" >/dev/null 2>&1; then
+            UI_REF="dev"
           fi
           echo "Using weights_studio ref: ${UI_REF}"
 
