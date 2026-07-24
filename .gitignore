@@ -15,7 +15,10 @@ root_log_dir
 __pycache__
 venv
 runs
-/data
+data
+outputs
+!./tests/data/
+!./weightslab/data/
 MagicMock
 drop
 htmlcov
