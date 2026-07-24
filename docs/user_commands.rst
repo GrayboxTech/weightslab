@@ -207,6 +207,84 @@ up), and runs until ``Ctrl+C``. See the classification Colab notebook
 (``examples/Notebooks/PyTorch/wl-classification.ipynb``) for the end-to-end
 setup.
 
+weightslab tunnel
+~~~~~~~~~~~~~~~~~~
+
+**Syntax**
+
+.. code-block:: bash
+
+   weightslab tunnel [ENDPOINT] [--listen-port N] [--listen-host H] [--remote-port N]
+
+Forwards a **remote** gRPC training backend to a **local** TCP port so the
+Weights Studio UI — whose Envoy proxy dials ``localhost:50051`` — connects to
+it as if it were local. This is what lets you **train on a remote machine (e.g.
+Google Colab) and watch it live in Studio running on your laptop**: Colab has no
+Docker daemon, so you run the UI locally and bridge the remote backend to it.
+
+It is a raw byte forwarder (no protocol parsing) because the browser speaks
+gRPC-Web to Envoy and Envoy speaks native HTTP/2 gRPC to its upstream — those
+HTTP/2 frames must pass through untouched. Two consequences:
+
+- The remote tunnel must be **raw TCP**, *not* an HTTP/gRPC-Web tunnel. A
+  zero-signup option is `bore <https://github.com/ekzhang/bore>`_ with its free
+  public relay: ``bore local 50051 --to bore.pub`` (prints ``bore.pub:<port>``).
+  ``ngrok tcp 50051`` also works but now requires a credit card on the free tier.
+- The backend must run **plaintext** — the default ``weightslab ui launch``
+  (no ``--certs``) — so no TLS terminates mid-path.
+
+**Arguments**
+
+- ``ENDPOINT`` *(positional, optional)* — the remote backend as ``host:port``
+  (e.g. ``0.tcp.ngrok.io:12345``); a ``tcp://`` prefix is accepted and
+  stripped. Default: the ``WEIGHTSLAB_TUNNEL_ENDPOINT`` environment variable, so
+  a bare ``weightslab tunnel`` works once that is exported.
+- ``--listen-port``, ``-p`` *(int)* — local port to expose. Default: **50051**
+  (the port the bundled Envoy upstream dials — leave it unless you changed
+  ``GRPC_BACKEND_PORT``).
+- ``--listen-host`` *(str)* — interface to bind. Default: **auto** —
+  ``127.0.0.1`` on Windows/macOS (Docker Desktop reaches host loopback via
+  ``host.docker.internal``), ``0.0.0.0`` on Linux (compose ``host-gateway``
+  resolves to the bridge IP, which cannot reach a loopback-only listener).
+- ``--remote-port`` *(int)* — the remote port, when ``ENDPOINT`` has only a
+  host and no ``:port``.
+
+**Examples**
+
+.. code-block:: bash
+
+   weightslab tunnel bore.pub:12345               # bridge remote backend -> localhost:50051
+   weightslab tunnel tcp://bore.pub:12345         # tcp:// prefix is fine
+   weightslab tunnel                              # uses $WEIGHTSLAB_TUNNEL_ENDPOINT
+   weightslab tunnel host.example.com --remote-port 50051
+   weightslab tunnel host:50051 -p 50055          # expose locally on a different port
+
+**Typical workflow** (Colab backend, local UI):
+
+.. code-block:: bash
+
+   # 1) In Colab: expose the training backend over raw TCP (prints bore.pub:<port>)
+   #    !bore local 50051 --to bore.pub
+
+   # 2) On your machine, in two terminals:
+   weightslab ui launch                           # plaintext HTTP (default)
+   weightslab tunnel bore.pub:12345               # the host:port bore printed
+
+   # 3) Open http://localhost:5173 — Studio streams live from Colab.
+
+.. note::
+
+   Step 1 can be done for you: call ``wl.serve(serving_grpc=True,
+   serving_bore=True)`` in the training script. It downloads ``bore``, opens the
+   relay, and prints the exact ``weightslab tunnel bore.pub:<port>`` line to run
+   on your machine — see ``serve`` in :doc:`user_functions`.
+
+The command probes the remote on startup (warning, not fatal, if it isn't up
+yet), re-resolves the endpoint per connection (so a changing tunnel IP is picked
+up), and runs until ``Ctrl+C``. See the classification Colab notebook
+(``examples/Notebooks/PyTorch/ws-classification.ipynb``) for the end-to-end
+setup.
+
 .. _cli-console:
 
 Interactive CLI console

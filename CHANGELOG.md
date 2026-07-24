@@ -1,1 +1,1 @@
-# Changelog - 2026-07-13 v1.3.3.dev1
+# Changelog - 2026-07-23 v1.4.0

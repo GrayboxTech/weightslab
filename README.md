@@ -52,7 +52,7 @@ Most data problems are invisible until your model tells you: through loss spikes
 pip install weightslab
 ```
 
-**2. Launch Studio**
+**2. Launch the Studio**
 ```bash
 weightslab start
 ```

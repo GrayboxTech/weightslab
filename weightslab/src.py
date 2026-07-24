@@ -1493,9 +1493,26 @@ def start_training(timeout: int = None) -> None:
     pause_ctrl.resume() # Ensure we're not paused if start_training is called after serve
 
 
+def _running_in_notebook() -> bool:
+    """True when running inside a Jupyter notebook kernel or Google Colab.
+
+    Distinguishes a notebook kernel (``ZMQInteractiveShell``) / Colab from a
+    plain script or a terminal IPython session, so we only nudge users who can't
+    reach a locally-launched Weights Studio without a tunnel.
+    """
+    if "google.colab" in sys.modules:
+        return True
+    try:
+        from IPython import get_ipython
+        shell = get_ipython()
+        return shell is not None and shell.__class__.__name__ == "ZMQInteractiveShell"
+    except Exception:
+        return False
+
+
 def serve(serving_cli: bool = True, serving_grpc: bool = False,
           spawn_cli_client: bool = False, serving_bore: bool = False,
-          bore_port: int = None, allow_unconfigured: bool = True, **kwargs):
+          bore_port: int = None, **kwargs):
     """Start WeightsLab services.
 
     Args:
