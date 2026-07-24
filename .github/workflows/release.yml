@@ -132,8 +132,8 @@ jobs:
         env:
           # weights_studio is a separate PRIVATE repo — the automatic
           # secrets.GITHUB_TOKEN is scoped to THIS repo only and has no access
-          # to it, so both the ls-remote branch probe and the clone below must
-          # authenticate with a real cross-repo PAT instead.
+          # to it, so the clone below must authenticate with a real
+          # cross-repo PAT instead.
           WEIGHTS_STUDIO_TOKEN: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
           IS_DEV_RELEASE: ${{ needs.detect-target.outputs.is_dev_release }}
         run: |
@@ -146,24 +146,15 @@ jobs:
           CLONE_URL="https://x-access-token:${WEIGHTS_STUDIO_TOKEN}@github.com/GrayboxTech/weights_studio.git"
 
           # Mirror the weightslab tag routing: a dev-named tag vendors the
-          # weights_studio "dev" branch (falling back to main if weights_studio
-          # itself has no dev branch); every other tag always vendors main.
-          # This used to guess the ref from which weightslab branches happened
-          # to contain the tagged commit -- fragile, and NOT tied to
-          # is_dev_release, so it could silently vendor the wrong UI.
+          # weights_studio "dev" branch; every other tag vendors main. No
+          # ls-remote probe -- it added a flaky network round-trip and a
+          # branch that's known to exist. This used to guess the ref from
+          # which weightslab branches happened to contain the tagged commit
+          # -- fragile, and NOT tied to is_dev_release, so it could silently
+          # vendor the wrong UI.
           UI_REF="main"
-          echo "is_dev_release=${IS_DEV_RELEASE}"
           if [ "${IS_DEV_RELEASE}" = "true" ]; then
-            if DEV_HEAD="$(git ls-remote --heads "${CLONE_URL}" "dev" 2>&1)"; then
-              if [ -n "${DEV_HEAD}" ]; then
-                UI_REF="dev"
-              else
-                echo "weights_studio has no 'dev' branch (ls-remote returned nothing) -- falling back to main."
-              fi
-            else
-              echo "::warning::git ls-remote for weights_studio 'dev' branch failed -- falling back to main. Output was:"
-              echo "${DEV_HEAD}"
-            fi
+            UI_REF="dev"
           fi
           echo "Using weights_studio ref: ${UI_REF}"
 
