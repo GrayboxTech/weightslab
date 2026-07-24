@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from .data import NUM_FEATURES, IMG_SIDE
+from .data import NUM_FEATURES
 
 
 class FraudMLP(nn.Module):
