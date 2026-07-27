@@ -28,21 +28,37 @@ serving_grpc: true
 optimizer:
   lr: 0.005
 
-# Class weighting to counter ~12% fraud prevalence [legit, fraud].
-class_weights: [1.0, 4.0]
+# Class weighting: leave unset (null) to auto-compute [1.0, legit/fraud] from
+# the actual training split (post oversampling, capped by class_weight_cap
+# below) — the real ~1:578 prevalence swings with oversample_fraud_ratio and
+# max_train_samples, so a hardcoded value would silently go stale.
+class_weights: null
+class_weight_cap: 20.0
 
-# Synthetic dataset generation (reproducible, no download).
+# Real dataset: Kaggle "Credit Card Fraud Detection" (ULB), 284,807 rows.
+# See utils/kaggle_data.py for how the CSV is located/downloaded.
 dataset:
+  csv_path: C:\\Users\\GuillaumePELLUET\\Documents\\Codes\\datasets\\creditcard_csv\\creditcard.csv  # explicit override; else auto-resolved
+  # cache_dir: .cache                  # where the CSV + parsed .npz are cached
   seed: 0
-  n_train: 4000
-  n_test: 1000
+  test_size: 0.2            # stratified: same ~0.17% fraud rate in both splits
+  # Fraud-row duplication (+ small jitter) in the TRAIN split only, so batches
+  # actually contain fraud examples to learn from. The test split always keeps
+  # the natural prevalence. Set to null/0 to disable and train on the raw
+  # ~1:578 imbalance as-is.
+  oversample_fraud_ratio: 0.1
+  # Cap dataset size for fast local iteration; set both to null to train on
+  # the full 284,807 rows (slower first-run ledger init, most realistic run).
+  # max_train_samples: 60000
+  # max_test_samples: 15000
 
-# DataLoader parameters
+# DataLoader parameters. Bigger batches than a toy example on purpose: even
+# with 10% oversampled fraud, small batches would still see it inconsistently.
 data:
   train_loader:
     shuffle: true
-    batch_size: 32
+    batch_size: 256
   test_loader:
     shuffle: false
-    batch_size: 128
+    batch_size: 512
     drop_last: false

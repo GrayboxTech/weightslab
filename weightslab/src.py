@@ -3737,7 +3737,7 @@ def query_instance_history(
 
 def write_history(
     path: str | None = None,
-    format: str = "json",
+    format: str | None = None,
     type_of_history=None,
     graph_name=None,
     experiment_hash: str | None = None,
@@ -3746,7 +3746,7 @@ def write_history(
     instance_id=None,
     verbose: bool = False,
 ) -> str:
-    """Dump signal history to *path* as JSON or CSV.
+    """Dump signal history to *path* as Parquet, JSON, or CSV.
 
     Parameters
     ----------
@@ -3765,8 +3765,18 @@ def write_history(
           combination always produces the same filename; different filters
           produce different filenames.
         - The directory is created automatically if it does not exist.
-    format : {"json", "csv"}
-        Output format (default ``"json"``).
+    format : {"parquet", "json", "csv"}, optional
+        Output format. When omitted, it is inferred from *path*'s extension
+        (``.parquet`` / ``.json`` / ``.csv``), defaulting to ``"parquet"`` when
+        *path* carries no extension (a bare directory or ``None`` — the common
+        periodic-export case). Parquet is fast, compact and dtype-preserving,
+        and scales to large per-sample/instance logs far better than JSON; it
+        needs a parquet engine (``pip install pyarrow``) and falls back to JSON
+        with a warning if none is installed or a column can't be encoded, so a
+        checkpoint dump never crashes the run. ``"json"`` keeps the nested
+        per-section shape (``{"global": ..., "sample": ..., "instance": ...}``);
+        ``"parquet"`` and ``"csv"`` are flat tables with a ``type`` column
+        discriminating the sections.
     type_of_history : {None, "all", "global", "sample", "instance", "instances"}
         Which history to include. ``None`` or ``"all"`` writes every type.
         ``"global"`` writes the aggregated training-curve history.
@@ -3860,7 +3870,13 @@ def write_history(
             path = "."
         _log("write_history: no path given, using output directory %r.", path)
 
-    fmt = format.lower().strip()
+    # Resolve format: explicit arg wins; otherwise infer from the path's
+    # extension, defaulting to parquet when the path carries no format hint.
+    if format is not None:
+        fmt = format.lower().strip()
+    else:
+        _ext = _os.path.splitext(str(path))[1].lower()
+        fmt = {".parquet": "parquet", ".json": "json", ".csv": "csv"}.get(_ext, "parquet")
 
     # --- Normalize all parameters first (needed for the auto-filename hash) ---
 
@@ -4011,36 +4027,71 @@ def write_history(
         logger.debug("write_history: collected %d instance row(s) across %d "
                      "graph(s).", len(instance_rows), len(graphs_i))
 
-    if fmt == "json":
-        payload = {}
-        if write_global:
-            payload["global"] = global_rows
-        if write_sample:
-            payload["sample"] = sample_rows
-        if write_instance:
-            payload["instance"] = instance_rows
+    import pandas as _pd
 
-        # Each section is a list of row dicts sharing the same keys; route it
-        # through pandas so `orient` is genuinely honored. Default "columns"
+    # Requested sections, in stable order. JSON keeps this nested shape;
+    # parquet/csv flatten it into rows with a `type` discriminator.
+    payload = {}
+    if write_global:
+        payload["global"] = global_rows
+    if write_sample:
+        payload["sample"] = sample_rows
+    if write_instance:
+        payload["instance"] = instance_rows
+
+    _FLAT_FIELDS = [
+        "type", "graph_name", "experiment_hash", "step", "metric_value",
+        "sample_id", "annotation_id",
+    ]
+
+    def _write_json(_target):
+        # Stream the nested {section: <orient-shaped>} structure straight to
+        # disk via pandas' C writer with native `indent`. The old
+        # to_json → json.loads → json.dump round-trip rebuilt every row as
+        # Python objects just to pretty-print — the slow, memory-heavy path on
+        # large per-sample/instance logs. Default orient "columns"
         # ({column: {row_index: value}}) writes each column name once per
-        # section instead of once per row — much smaller for many rows.
-        # orient="records" reproduces the original row-list-of-dicts shape.
-        import pandas as _pd
-        json_payload = {
-            section: _json.loads(_pd.DataFrame(rows).to_json(orient=orient, default_handler=str))
-            for section, rows in payload.items()
-        }
+        # section; orient="records" gives the row-list-of-dicts shape.
+        _sections = list(payload.items())
+        with open(_target, "w", encoding="utf-8") as fh:
+            fh.write("{\n")
+            for _i, (_section, _rows) in enumerate(_sections):
+                _body = _pd.DataFrame(_rows).to_json(
+                    orient=orient, default_handler=str, indent=2)
+                fh.write(f"  {_json.dumps(_section)}: {_body}")
+                fh.write(",\n" if _i < len(_sections) - 1 else "\n")
+            fh.write("}\n")
 
-        with open(path, "w", encoding="utf-8") as fh:
-            _json.dump(json_payload, fh, indent=2)
+    if fmt == "parquet":
+        _all_rows = (
+            [{"type": "global", **r} for r in global_rows]
+            + [{"type": "sample", **r} for r in sample_rows]
+            + [{"type": "instance", **r} for r in instance_rows]
+        )
+        _flat = _pd.DataFrame(_all_rows, columns=_FLAT_FIELDS)
+        try:
+            _flat.to_parquet(path, index=False)
+        except Exception as _e:
+            # Never let a periodic checkpoint dump crash the run: no engine
+            # (pyarrow/fastparquet) or an unencodable column → JSON + a warning.
+            _fallback = _os.path.splitext(path)[0] + ".json"
+            if isinstance(_e, ImportError):
+                _reason = ("no parquet engine installed — run `pip install pyarrow` "
+                           "to enable the fast default")
+            else:
+                _reason = f"parquet write failed ({type(_e).__name__}: {_e})"
+            logger.warning(
+                "write_history: %s. Falling back to JSON at %s.", _reason, _fallback,
+            )
+            path = _fallback
+            _write_json(path)
+
+    elif fmt == "json":
+        _write_json(path)
 
     elif fmt == "csv":
-        _CSV_FIELDS = [
-            "type", "graph_name", "experiment_hash", "step", "metric_value",
-            "sample_id", "annotation_id",
-        ]
         with open(path, "w", newline="", encoding="utf-8") as fh:
-            writer = _csv.DictWriter(fh, fieldnames=_CSV_FIELDS, extrasaction="ignore")
+            writer = _csv.DictWriter(fh, fieldnames=_FLAT_FIELDS, extrasaction="ignore")
             writer.writeheader()
             for row in global_rows:
                 writer.writerow({"type": "global", **row})
@@ -4050,18 +4101,19 @@ def write_history(
                 writer.writerow({"type": "instance", **row})
 
     else:
-        logger.error("write_history: unsupported format %r (expected 'json' "
-                     "or 'csv').", format)
+        logger.error("write_history: unsupported format %r (expected 'parquet', "
+                     "'json' or 'csv').", format)
         raise ValueError(
-            f"write_history: unsupported format {format!r}. Use 'json' or 'csv'."
+            f"write_history: unsupported format {format!r}. Use 'parquet', 'json' or 'csv'."
         )
 
     _total = len(global_rows) + len(sample_rows) + len(instance_rows)
+    _written_fmt = _os.path.splitext(path)[1].lstrip(".") or fmt
     _log(
         "write_history: wrote %d row(s) (global=%d, sample=%d, instance=%d) "
         "as %s to %s",
         _total, len(global_rows), len(sample_rows), len(instance_rows),
-        fmt, _os.path.abspath(path),
+        _written_fmt, _os.path.abspath(path),
     )
     if _total == 0:
         logger.warning(
@@ -4230,7 +4282,7 @@ def enable_loss_shape_signal(loss_signal="loss_sample", name="sig/loss_shape",
 
 def write_dataframe(
     path: str | None = None,
-    format: str = "json",
+    format: str | None = None,
     columns=None,
     sample_id=None,
     instance_id=None,
@@ -4238,7 +4290,7 @@ def write_dataframe(
     verbose: bool = False,
     loss_shape_signal: str | None = None,
 ) -> str:
-    """Dump the WeightsLab sample dataframe to *path* as JSON or CSV.
+    """Dump the WeightsLab sample dataframe to *path* as Parquet, JSON, or CSV.
 
     Every ``flag="loss"`` signal is already auto-classified into a
     ``'<signal>_shape'`` tag in the background with zero setup (see
@@ -4262,8 +4314,16 @@ def write_dataframe(
           same filename (idempotent overwrite); different filters → different
           file.
         - The directory is created automatically if it does not exist.
-    format : {"json", "csv"}
-        Output format. Default ``"json"``.
+    format : {"parquet", "json", "csv"}, optional
+        Output format. When omitted, it is inferred from *path*'s extension
+        (``.parquet`` / ``.json`` / ``.csv``), falling back to ``"parquet"`` when
+        *path* carries no extension (a bare directory or ``None`` — the common
+        periodic-export case). Parquet is a compact, fast, dtype-preserving
+        columnar dump that scales to large frames (300k+ rows) far better than
+        JSON; it needs a parquet engine (``pip install pyarrow``) and falls back
+        to JSON with a warning if none is installed or a column can't be
+        encoded, so a checkpoint dump never crashes the run. Pass ``"json"``
+        explicitly for a human-readable dump or ``"csv"`` for flat tabular data.
     columns : str or list of str, optional
         Which columns to include (index levels ``sample_id`` / ``annotation_id``
         are always written).
@@ -4311,7 +4371,6 @@ def write_dataframe(
             sample_id=["img_001", "img_042"],
         )
     """
-    import json as _json
     import os as _os
     import hashlib as _hashlib
 
@@ -4357,7 +4416,13 @@ def write_dataframe(
             path = "."
         _log("write_dataframe: no path given, using output directory %r.", path)
 
-    fmt = format.lower().strip()
+    # Resolve format: explicit arg wins; otherwise infer from the path's
+    # extension, defaulting to parquet when the path carries no format hint.
+    if format is not None:
+        fmt = format.lower().strip()
+    else:
+        _ext = _os.path.splitext(str(path))[1].lower()
+        fmt = {".parquet": "parquet", ".json": "json", ".csv": "csv"}.get(_ext, "parquet")
 
     # Normalize sample_id → list[str] or None
     _sid_filter = None
@@ -4465,23 +4530,45 @@ def write_dataframe(
     # Reset index so sample_id / annotation_id appear as regular columns in output
     df_out = df_out.reset_index()
 
-    if fmt == "json":
-        _json_str = df_out.to_json(orient=orient, default_handler=str)
-        with open(path, "w", encoding="utf-8") as fh:
-            _json.dump(_json.loads(_json_str), fh, indent=2)
+    if fmt == "parquet":
+        try:
+            df_out.to_parquet(path, index=False)
+        except Exception as _e:
+            # Parquet is the fast default, but a periodic checkpoint dump must
+            # never crash a run: if there's no engine (pyarrow/fastparquet) or a
+            # column can't be encoded, fall back to a JSON dump and warn loudly.
+            _fallback = _os.path.splitext(path)[0] + ".json"
+            if isinstance(_e, ImportError):
+                _reason = ("no parquet engine installed — run `pip install pyarrow` "
+                           "to enable the fast default")
+            else:
+                _reason = f"parquet write failed ({type(_e).__name__}: {_e})"
+            logger.warning(
+                "write_dataframe: %s. Falling back to JSON at %s.", _reason, _fallback,
+            )
+            path = _fallback
+            df_out.to_json(path, orient=orient, indent=2, default_handler=str)
+
+    elif fmt == "json":
+        # Stream straight to the file via pandas' C writer with native `indent`.
+        # The previous to_json → json.loads → json.dump round-trip rebuilt the
+        # whole frame as Python objects just to pretty-print it — the slow,
+        # memory-heavy path on large frames (300k+ rows).
+        df_out.to_json(path, orient=orient, indent=2, default_handler=str)
 
     elif fmt == "csv":
         df_out.to_csv(path, index=False, encoding="utf-8")
 
     else:
-        logger.error("write_dataframe: unsupported format %r (expected 'json' or 'csv').", format)
+        logger.error("write_dataframe: unsupported format %r (expected 'parquet', 'json' or 'csv').", format)
         raise ValueError(
-            f"write_dataframe: unsupported format {format!r}. Use 'json' or 'csv'."
+            f"write_dataframe: unsupported format {format!r}. Use 'parquet', 'json' or 'csv'."
         )
 
+    _written_fmt = _os.path.splitext(path)[1].lstrip(".") or fmt
     logger.info(
         "write_dataframe: wrote %d row(s) × %d column(s) as %s to %s",
-        len(df_out), len(df_out.columns), fmt, _os.path.abspath(path),
+        len(df_out), len(df_out.columns), _written_fmt, _os.path.abspath(path),
     )
     if df_out.empty:
         logger.warning(
