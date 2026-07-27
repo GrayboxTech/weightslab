@@ -72,7 +72,7 @@ wl.serve(serving_grpc=True, serving_cli=False)
 ...
 ```
 
-**3.b. Or in the cloud**
+**3.b. Or start directly in the cloud**
 
 [![Start coding with GCollab](https://img.shields.io/badge/Start_coding_with_GCollab-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=white)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/Colab/wl-colab-quickstart.ipynb)
 
