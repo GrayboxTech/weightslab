@@ -623,6 +623,13 @@ def ui_start_native(args):
         logger.error(f"Could not load the WeightsLab UI server: {exc}")
         sys.exit(1)
 
+    try:
+        from weightslab import __version__ as _version
+        from weightslab.utils.telemetry import ping_ui_launch
+        ping_ui_launch(_version)
+    except Exception as exc:
+        logger.debug(f"Telemetry ping failed: {exc}")
+
     ui_host = getattr(args, "host", None) or os.getenv("WEIGHTSLAB_UI_HOST", "0.0.0.0")
     preferred_ui_port, ui_port_source = _resolve_ui_port(args)
     ui_port = preferred_ui_port

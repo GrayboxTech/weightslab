@@ -197,6 +197,13 @@ def tunnel_connect(args) -> None:
     works once that is set. Everything else (local port 50051, auto listen
     host) already defaults.
     """
+    try:
+        from weightslab import __version__ as _version
+        from weightslab.utils.telemetry import ping_tunnel_launch
+        ping_tunnel_launch(_version)
+    except Exception as exc:
+        logger.debug(f"Telemetry ping failed: {exc}")
+
     endpoint = getattr(args, "endpoint", None) or os.environ.get(_ENDPOINT_ENV_VAR)
     if not endpoint:
         logger.error(
