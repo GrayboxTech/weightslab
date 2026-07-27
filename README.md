@@ -77,10 +77,8 @@ wl.serve(serving_grpc=True, serving_cli=False)
 [![Start coding with GCollab](https://img.shields.io/badge/Start_coding_with_GCollab-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=white)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/Colab/wl-colab-quickstart.ipynb)
 
 
-<br>
-For a detailed installation guide and advanced configuration &rarr; [Installation Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
-<br>
 
+For a detailed installation guide and advanced configuration &rarr; [Installation Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
 > [!TIP]
 > Quick examples to get started
 > ```bash
