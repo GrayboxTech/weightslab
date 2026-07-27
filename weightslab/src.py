@@ -3735,6 +3735,43 @@ def query_instance_history(
     return results
 
 
+def _parquet_safe_frame(df):
+    """Return *df* with object columns that hold non-scalar values (lists,
+    dicts, tuples, numpy arrays — e.g. per-instance detection ``target`` / box
+    columns) JSON-encoded as strings, so pyarrow can write them.
+
+    Arrow rejects a single column that mixes list and non-list values
+    ("cannot mix list and non-list, non-null values"); encoding the *whole*
+    offending column with ``json.dumps`` makes it a uniform string column that
+    still round-trips via ``json.loads``. Columns with no non-scalar values are
+    left untouched, so numeric / bool / plain-string columns keep their native
+    Arrow types. The input is never mutated (copy-on-write only when needed).
+    """
+    import json as _json2
+    import numpy as _np2
+
+    _NONSCALAR = (list, dict, tuple, set, _np2.ndarray)
+    out = df
+    _copied = False
+    for _col in df.columns:
+        _s = df[_col]
+        if _s.dtype != object:
+            continue
+        # Skip columns that are already uniformly scalar (the common case).
+        if not _s.map(lambda v: isinstance(v, _NONSCALAR)).any():
+            continue
+        if not _copied:
+            out = df.copy()
+            _copied = True
+        # Encode every non-null cell (not just the list ones) so the column is
+        # uniformly string-typed; keep None/NaN as real nulls.
+        out[_col] = _s.map(
+            lambda v: None if (v is None or (isinstance(v, float) and v != v))
+            else _json2.dumps(v, default=str)
+        )
+    return out
+
+
 def write_history(
     path: str | None = None,
     format: str | None = None,
@@ -4070,7 +4107,12 @@ def write_history(
         )
         _flat = _pd.DataFrame(_all_rows, columns=_FLAT_FIELDS)
         try:
-            _flat.to_parquet(path, index=False)
+            try:
+                _flat.to_parquet(path, index=False)
+            except Exception:
+                # JSON-encode any object column that mixes list/non-list values
+                # and retry before giving up on the fast parquet path.
+                _parquet_safe_frame(_flat).to_parquet(path, index=False)
         except Exception as _e:
             # Never let a periodic checkpoint dump crash the run: no engine
             # (pyarrow/fastparquet) or an unencodable column → JSON + a warning.
@@ -4532,11 +4574,18 @@ def write_dataframe(
 
     if fmt == "parquet":
         try:
-            df_out.to_parquet(path, index=False)
+            try:
+                df_out.to_parquet(path, index=False)
+            except Exception:
+                # pyarrow rejects object columns that mix list/non-list values
+                # (e.g. a per-instance `target` column). JSON-encode just those
+                # columns and retry so we still get the fast parquet path
+                # instead of falling all the way back to JSON.
+                _parquet_safe_frame(df_out).to_parquet(path, index=False)
         except Exception as _e:
             # Parquet is the fast default, but a periodic checkpoint dump must
             # never crash a run: if there's no engine (pyarrow/fastparquet) or a
-            # column can't be encoded, fall back to a JSON dump and warn loudly.
+            # column still can't be encoded, fall back to a JSON dump and warn.
             _fallback = _os.path.splitext(path)[0] + ".json"
             if isinstance(_e, ImportError):
                 _reason = ("no parquet engine installed — run `pip install pyarrow` "

@@ -373,15 +373,54 @@ def convert_dataframe_to_proxies(
     if isinstance(autoload, (list, set, tuple)):
         autoload_set = set(autoload)
 
+    import numpy as _np
+
     for col in array_columns:
         if col not in df_out.columns:
             continue
 
-        col_autoload = autoload if isinstance(autoload, bool) else (autoload_set is not None and col in autoload_set)
+        s = df_out[col]
+        # Path references / proxies only ever live in object columns. A numeric
+        # or bool column (e.g. the tabular target/prediction) can't hold them,
+        # so skip it without touching a single cell — this is what made the old
+        # per-cell .apply() walk all rows of every array column for nothing.
+        if s.dtype != object:
+            continue
 
+        col_autoload = autoload if isinstance(autoload, bool) else (autoload_set is not None and col in autoload_set)
+        if not (col_autoload or return_proxies):
+            continue
+
+        vals = s.to_numpy()
+
+        # One tight scan to find the cells that actually need work. The predicate
+        # short-circuits on ``isinstance(v, str)``, so non-string cells (numpy
+        # arrays, lists, ints, None) cost almost nothing — no ``.str`` accessor
+        # (which runs a slow infer_dtype pass on array-valued columns) and no
+        # per-cell Python call into ``convert_to_proxy``.
         if col_autoload:
-            df_out[col] = df_out[col].apply(lambda v: _materialize_array(v, array_store, use_cache))
-        elif return_proxies:
-            df_out[col] = df_out[col].apply(lambda v: convert_to_proxy(v, array_store, autoload=False, use_cache=use_cache))
+            mask = _np.fromiter(
+                (isinstance(v, ArrayH5Proxy) or (isinstance(v, str) and '.h5:/' in v) for v in vals),
+                dtype=bool, count=vals.shape[0],
+            )
+        else:  # return_proxies
+            mask = _np.fromiter(
+                (isinstance(v, str) and '.h5:/' in v for v in vals),
+                dtype=bool, count=vals.shape[0],
+            )
+
+        if not mask.any():
+            continue
+
+        # Only build objects for the (usually few) matching cells; copy so we
+        # never mutate the caller's underlying array in place.
+        new_vals = vals.copy()
+        if col_autoload:
+            for p in _np.flatnonzero(mask):
+                new_vals[p] = _materialize_array(vals[p], array_store, use_cache)
+        else:
+            for p in _np.flatnonzero(mask):
+                new_vals[p] = ArrayH5Proxy(vals[p], array_store)
+        df_out[col] = new_vals
 
     return df_out
