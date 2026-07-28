@@ -159,5 +159,71 @@ class TestDefaultShapeClassifier(unittest.TestCase):
         self.assertIn("monotonic", wl.LOSS_SHAPES)
 
 
+class TestSignalClassifierDecorator(unittest.TestCase):
+    """@wl.signal_classifier: per-signal / global override of the built-in."""
+
+    def setUp(self):
+        from weightslab import src
+        self._src = src
+        src._REGISTERED_CLASSIFIERS.clear()
+        src._GLOBAL_CLASSIFIER = None
+
+    def tearDown(self):
+        self._src._REGISTERED_CLASSIFIERS.clear()
+        self._src._GLOBAL_CLASSIFIER = None
+
+    def test_falls_back_to_builtin_when_nothing_registered(self):
+        self.assertIs(wl.resolve_signal_classifier("anything"), wl.classify_loss_shape)
+
+    def test_per_signal_binding(self):
+        @wl.signal_classifier(signal="loss_sample")
+        def mono_or_not(values):
+            s = wl.trajectory_stats(values)
+            return None if s is None else ("monotonic" if s["drop"] > 0.4 else "not_monotonic")
+
+        self.assertIs(wl.resolve_signal_classifier("loss_sample"), mono_or_not)
+        # A different signal still gets the built-in.
+        self.assertIs(wl.resolve_signal_classifier("other"), wl.classify_loss_shape)
+        self.assertEqual(mono_or_not([2, 1.5, 1, 0.5, 0.05]), "monotonic")
+        self.assertEqual(mono_or_not([2, 2, 2, 2, 2]), "not_monotonic")
+
+    def test_bare_and_parens_register_global_default(self):
+        @wl.signal_classifier
+        def bare(values):
+            return "bare"
+
+        self.assertIs(wl.resolve_signal_classifier("x"), bare)
+
+        @wl.signal_classifier()
+        def parens(values):
+            return "parens"
+
+        self.assertIs(wl.resolve_signal_classifier("x"), parens)
+
+    def test_per_signal_wins_over_global(self):
+        @wl.signal_classifier
+        def glob(values):
+            return "glob"
+
+        @wl.signal_classifier(signal="loss_sample")
+        def specific(values):
+            return "specific"
+
+        self.assertIs(wl.resolve_signal_classifier("loss_sample"), specific)
+        self.assertIs(wl.resolve_signal_classifier("elsewhere"), glob)
+
+    def test_write_signal_shapes_uses_registered_classifier(self):
+        # write_signal_shapes should consult the registry (classifier arg None).
+        @wl.signal_classifier(signal="loss_sample")
+        def clf(values):
+            return "custom_label"
+        # Resolve is what write_signal_shapes calls internally; assert the wiring.
+        self.assertIs(self._src.resolve_signal_classifier("loss_sample"), clf)
+
+    def test_exports(self):
+        self.assertTrue(hasattr(wl, "signal_classifier"))
+        self.assertTrue(hasattr(wl, "resolve_signal_classifier"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -520,6 +520,79 @@ Spiked          Sudden jump at some step — data/augmentation/version change.
    See the detection use case (``examples/PyTorch/wl-detection/src/main.py``) for
    this signal wired into a real training loop.
 
+.. tip::
+
+   The hand-rolled ``@wl.signal(subscribe_to=...)`` above is the fully manual
+   route. If all you want is to **customize the loss-shape classifier**, use
+   :func:`signal_classifier` instead: register your rule once and the background
+   auto-tagger, :func:`write_signal_shapes` / :func:`write_loss_shapes`, and the
+   live :func:`enable_loss_shape_signal` all use it — no ``subscribe_to`` /
+   history / ``set_categorical_tag`` wiring, and no ``classifier=`` argument to
+   thread through each call. Labels are free-form:
+
+   .. code-block:: python
+
+      @wl.signal_classifier(signal="train/clsf_sample")
+      def monotonic_or_not(values):
+          s = wl.trajectory_stats(values)
+          if s is None or s["n"] < 5:
+              return None
+          return "monotonic" if s["drop"] > 0.4 else "not_monotonic"
+
+   See :ref:`signal_classifier <signal-classifier-ref>` below and
+   :doc:`examples/usecases/loss_shape_classification`.
+
+signal_classifier
+-----------------
+
+.. _signal-classifier-ref:
+
+**Signature**
+
+.. code-block:: python
+
+   @wl.signal_classifier                       # global default (bare)
+   @wl.signal_classifier()                     # global default (called)
+   @wl.signal_classifier(signal="loss_sample") # bind to one signal
+   def my_classifier(values: list[float]) -> str | None:
+       ...
+
+**Purpose**
+
+Register a custom signal-shape classifier that **overrides** the built-in
+:func:`classify_loss_shape`. The decorated function receives a sample's ordered
+value trajectory (``list[float]``) and returns a label string, or ``None`` to
+leave the sample untagged. Labels are **free-form** — the six-way
+:data:`LOSS_SHAPES` set is only the built-in's vocabulary; a custom classifier
+may emit any labels (e.g. a binary ``monotonic`` / ``not_monotonic``).
+
+**Binding modes**
+
+- ``@wl.signal_classifier(signal="loss_sample")`` — classify only that one
+  signal (per-signal).
+- ``@wl.signal_classifier`` / ``@wl.signal_classifier()`` — become the global
+  default for every signal without its own per-signal classifier.
+
+**Resolution order** for a signal name: per-signal registered → global
+registered → built-in :func:`classify_loss_shape`. A registered classifier is
+consulted everywhere shapes are computed: the background auto-tagger,
+:func:`write_signal_shapes` / :func:`write_loss_shapes` (and
+``write_dataframe(loss_shape_signal=...)``), and :func:`enable_loss_shape_signal`.
+
+**Introspection** — :func:`resolve_signal_classifier` returns the active
+classifier for a given signal name.
+
+**Example**
+
+.. code-block:: python
+
+   @wl.signal_classifier(signal="loss_sample")
+   def monotonic_or_not(values):
+       s = wl.trajectory_stats(values)
+       if s is None or s["n"] < 5:
+           return None
+       return "monotonic" if s["drop"] > 0.4 else "not_monotonic"
+
 compute_signals
 ---------------
 

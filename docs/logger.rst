@@ -56,8 +56,10 @@ Loss-shape classification
 A single scalar hides how a sample got there. The *shape* of a per-sample
 loss trajectory over training — steadily dropping, stuck, forgotten, noisy —
 tells you whether the model is learning that sample, struggling with it, or
-whether it's a candidate mislabel. Weightslab classifies every sample's
-trajectory into one of six shapes:
+whether it's a candidate mislabel. By default Weightslab classifies every
+sample's trajectory into one of six built-in shapes (the vocabulary of the
+built-in :func:`classify_loss_shape`; you can replace it with your own labels —
+see :ref:`custom-signal-classifier`):
 
 ==============  ====================================================================
 Label           Meaning
@@ -92,6 +94,51 @@ categorical tag — e.g. ``train_loss/CE`` gets a ``train_loss/CE_shape`` tag:
 ``flag="metric"`` signals are **not** auto-classified: the default classifier
 assumes a decreasing trajectory (a loss), which would misclassify an
 increasing metric like accuracy.
+
+The classifier the auto-tagger uses is **overridable**: register your own with
+``@wl.signal_classifier`` (see :ref:`custom-signal-classifier`) and the
+background thread applies it — same zero-setup tagging, your labels.
+
+.. _custom-signal-classifier:
+
+Custom classifier — ``@wl.signal_classifier``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To replace the built-in shape classifier with your own, register a callable with
+the :func:`signal_classifier` decorator. A classifier takes a sample's ordered
+value trajectory (``list[float]``) and returns a label string, or ``None`` to
+leave the sample untagged. Labels are **free-form** — the six-way
+:data:`LOSS_SHAPES` set is only the *built-in's* vocabulary; your classifier may
+emit any labels, e.g. a binary ``monotonic`` / ``not_monotonic``:
+
+.. code-block:: python
+
+   @wl.signal_classifier(signal="loss_sample")
+   def monotonic_or_not(values):
+       s = wl.trajectory_stats(values)
+       if s is None or s["n"] < 5:
+           return None
+       return "monotonic" if s["drop"] > 0.4 else "not_monotonic"
+
+Two binding modes:
+
+- ``@wl.signal_classifier(signal="loss_sample")`` — classify **only** that one
+  signal (per-signal).
+- ``@wl.signal_classifier`` or ``@wl.signal_classifier()`` — become the
+  **global default** for every signal that has no per-signal classifier of its
+  own.
+
+**Resolution order** for any signal name: per-signal registered → global
+registered → built-in :func:`classify_loss_shape`. Use
+:func:`resolve_signal_classifier` to introspect which classifier is active for a
+name.
+
+A registered classifier is consulted **everywhere shapes are computed** — the
+background auto-tagger, :func:`write_signal_shapes` / :func:`write_loss_shapes`
+(and ``write_dataframe(loss_shape_signal=...)``), and the live
+:func:`enable_loss_shape_signal`. The built-in six-way
+:func:`classify_loss_shape` is unchanged and remains the default when no custom
+classifier is registered.
 
 Overriding or opting out
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -135,15 +182,21 @@ Building a custom classifier
 
 :func:`trajectory_stats` computes scale-invariant features (net drop,
 coefficient of variation, argmin fraction, rebound, max jump, tail flatness)
-from a sample's ordered value history. Reuse them in your own rule, or pass a
-full ``classifier`` callable (``list[float] -> str | None``) to any function
-above:
+from a sample's ordered value history. Reuse them in your own rule. The
+supported way to install a custom rule is ``@wl.signal_classifier`` (above),
+which the auto-tagger and every shape-writing helper honour:
 
 .. code-block:: python
 
+   @wl.signal_classifier(signal="train_loss/CE")
    def my_classifier(values):
        s = wl.trajectory_stats(values)
        return None if s is None else ("fast" if s["drop"] > 0.6 else "slow")
+
+You can still pass a one-off ``classifier`` callable (``list[float] -> str |
+None``) to a single call when you don't want to register it globally:
+
+.. code-block:: python
 
    wl.enable_loss_shape_autotag("train_loss/CE", classifier=my_classifier)
 

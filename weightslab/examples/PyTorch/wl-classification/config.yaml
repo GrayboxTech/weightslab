@@ -29,11 +29,14 @@ serving_grpc: true
 data:
   train_loader:
     shuffle: true
-    batch_size: 16
+    batch_size: 64
+    max_samples: 256
   val_loader:
     shuffle: false
-    batch_size: 16
+    max_samples: 256
+    batch_size: 64
   test_loader:
     shuffle: false
+    max_samples: 256
     batch_size: 128   # was 16 — bigger eval batches => ~8x fewer eval steps per pass
     drop_last: false

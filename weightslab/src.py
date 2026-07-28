@@ -4234,15 +4234,76 @@ def classify_loss_shape(values, min_points=5, drop_learned=0.4, drop_plateau=0.1
     return "Flat_high"
 
 
+# User-registered signal-shape classifiers (see @signal_classifier). A classifier
+# is a callable ``trajectory(list[float]) -> label (str) | None``. Per-signal
+# entries win over the global default; the built-in classify_loss_shape is the
+# final fallback. Consulted by write_signal_shapes (and thus the background
+# auto-tagger) and enable_loss_shape_signal.
+_REGISTERED_CLASSIFIERS: dict = {}   # {signal_name: classifier}
+_GLOBAL_CLASSIFIER = None            # classifier for any signal without its own
+
+
+def signal_classifier(signal=None):
+    """Register a custom signal-shape classifier, overriding the built-in
+    :func:`classify_loss_shape`. A classifier is
+    ``trajectory(list[float]) -> label (str) | None`` (return ``None`` to leave a
+    sample untagged).
+
+    Two binding modes:
+
+    - ``@signal_classifier(signal="loss_sample")`` — classify only that signal.
+    - ``@signal_classifier`` / ``@signal_classifier()`` — become the global
+      default for every signal without its own classifier.
+
+    Resolution order is per-signal → global → built-in. The registered classifier
+    applies everywhere shapes are computed: the background auto-tagger, the
+    report-time :func:`write_signal_shapes` / :func:`write_loss_shapes`, and the
+    live :func:`enable_loss_shape_signal`. Labels are free-form strings — the
+    six-way :data:`LOSS_SHAPES` set is just the built-in's vocabulary; a custom
+    classifier can emit any labels (e.g. a binary ``monotonic``/``not_monotonic``).
+
+    Example — a binary monotonic / not_monotonic classifier for one signal::
+
+        @wl.signal_classifier(signal="loss_sample")
+        def monotonic_or_not(values):
+            s = wl.trajectory_stats(values)
+            if s is None:
+                return None
+            return "monotonic" if s["drop"] > 0.4 else "not_monotonic"
+    """
+    def _register(fn):
+        global _GLOBAL_CLASSIFIER
+        if signal is None:
+            _GLOBAL_CLASSIFIER = fn
+        else:
+            _REGISTERED_CLASSIFIERS[str(signal)] = fn
+        return fn
+    # Bare @signal_classifier (no parens): `signal` is actually the function.
+    if callable(signal):
+        fn, signal = signal, None
+        return _register(fn)
+    return _register
+
+
+def resolve_signal_classifier(signal_name):
+    """The active classifier for *signal_name*: its own registered one, else the
+    global default (if set via bare ``@signal_classifier``), else the built-in
+    :func:`classify_loss_shape`."""
+    if signal_name in _REGISTERED_CLASSIFIERS:
+        return _REGISTERED_CLASSIFIERS[signal_name]
+    return _GLOBAL_CLASSIFIER or classify_loss_shape
+
+
 def write_signal_shapes(signal_name, tag_name=None, classifier=None):
     """Reusable engine: classify every sample's trajectory of *signal_name* into
     a categorical tag and return the ``{label: count}`` distribution. Works for
     ANY per-sample signal — loss, accuracy, a second loss, any metric. Reads the
     full history once (cheap end-of-report reduction). *classifier* (trajectory
-    -> label|None) defaults to the loss-shaped one (for a decreasing metric);
-    pass your own for e.g. accuracy (increasing). *tag_name* defaults to
+    -> label|None) defaults to whatever :func:`resolve_signal_classifier` returns
+    for *signal_name* — a user ``@signal_classifier``, else the built-in
+    loss-shaped one (for a decreasing metric). *tag_name* defaults to
     ``'<signal>_shape'``."""
-    clf = classifier or classify_loss_shape
+    clf = classifier or resolve_signal_classifier(signal_name)
     if tag_name is None:
         tag_name = signal_name + "_shape" if signal_name.endswith('_loss') else signal_name + "_loss_shape"
     series = {}
@@ -4312,12 +4373,14 @@ def enable_loss_shape_signal(loss_signal="loss_sample", name="sig/loss_shape",
     This is the live counterpart to :func:`write_loss_shapes` (report-time). It's
     heavier — it reads history on every fire — so throttle with *every* or prefer
     the report-time path for a definitive, full-coverage tag."""
-    clf = classifier or classify_loss_shape
+    clf = classifier or resolve_signal_classifier(loss_signal)
 
     @signal(name=name, inputs=[loss_signal], batched=True, compute_every_n_steps=every)
     def _live_shape(b):
         hist = b.history(loss_signal)
-        return np.array([(LOSS_SHAPES.index(lbl) if (lbl := clf(hist[s])) is not None else -1)
+        # int-code into LOSS_SHAPES; a custom classifier may emit labels outside
+        # that vocabulary (or None before enough history) -> -1.
+        return np.array([(LOSS_SHAPES.index(lbl) if (lbl := clf(hist[s])) in LOSS_SHAPES else -1)
                          for s in b.sample_ids], dtype=float)
     return _live_shape
 
