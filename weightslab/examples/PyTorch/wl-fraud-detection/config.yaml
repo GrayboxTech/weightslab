@@ -38,7 +38,7 @@ class_weight_cap: 20.0
 # Real dataset: Kaggle "Credit Card Fraud Detection" (ULB), 284,807 rows.
 # See utils/kaggle_data.py for how the CSV is located/downloaded.
 dataset:
-  csv_path: C:\\Users\\GuillaumePELLUET\\Documents\\Codes\\datasets\\creditcard_csv\\creditcard.csv  # explicit override; else auto-resolved
+  csv_path: null  # optional explicit override; else auto-resolved (or set WL_FRAUD_CSV_PATH)
   # cache_dir: .cache                  # where the CSV + parsed .npz are cached
   seed: 0
   test_size: 0.2            # stratified: same ~0.17% fraud rate in both splits
