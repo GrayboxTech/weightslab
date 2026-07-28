@@ -1261,6 +1261,7 @@ class CheckpointManager:
             # sidecar instead of inlining it as pretty-printed JSON — the old
             # to_dict(orient="records") + json.dump(indent=2) was the slow part.
             # The metadata JSON below just references it.
+            snapshot_df = safe_reset_index(snapshot_df)
             data_file, data_format = self._write_snapshot_table(
                 snapshot_df, data_hash_dir, active_data_hash)
 
