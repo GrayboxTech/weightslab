@@ -1107,12 +1107,69 @@ class CheckpointManager:
             logger.error(f"Failed to save config: {e}")
             return None
 
+    def _write_snapshot_table(self, snapshot_df, data_hash_dir: Path, active_data_hash: str):
+        """Write the snapshot sample table to a **Parquet sidecar** next to the
+        metadata JSON — fast, compact and dtype-preserving, so 300k+ row states
+        no longer pay the old ``to_dict(orient="records")`` + pretty-printed
+        ``json.dump`` cost.
+
+        Falls back to a streamed JSON sidecar when no parquet engine is
+        installed (or a column can't be encoded), so a checkpoint never fails
+        to save. Returns ``(sidecar_filename, format)``.
+        """
+        parquet_name = f"{active_data_hash}_data_snapshot.parquet"
+        try:
+            snapshot_df.to_parquet(data_hash_dir / parquet_name, index=False)
+            return parquet_name, "parquet"
+        except Exception as e:
+            json_name = f"{active_data_hash}_data_snapshot.data.json"
+            reason = (
+                "no parquet engine installed — run `pip install pyarrow` for the fast path"
+                if isinstance(e, ImportError)
+                else f"parquet write failed ({type(e).__name__}: {e})"
+            )
+            logger.warning(
+                f"save_data_snapshot: {reason}. Falling back to JSON sidecar {json_name}."
+            )
+            # orient="columns" ({column: {row_index: value}}) — same compact
+            # layout as write_dataframe/write_history, smaller than "records".
+            snapshot_df.to_json(data_hash_dir / json_name, orient="columns", default_handler=str)
+            return json_name, "json"
+
+    def _read_snapshot_table(self, snapshot_data: Dict[str, Any], data_dir: Path):
+        """Reconstruct the snapshot sample DataFrame from a data snapshot.
+
+        Handles both the current sidecar format (``data_file`` + ``data_format``)
+        and the legacy inline format (a ``data`` list embedded in the JSON), so
+        checkpoints written before the parquet change still load.
+        """
+        # Legacy inline format: the table was embedded in the metadata JSON.
+        if 'data' in snapshot_data:
+            return pd.DataFrame(snapshot_data.get('data', []))
+
+        data_file = snapshot_data.get('data_file')
+        if not data_file:
+            return pd.DataFrame()
+
+        sidecar = data_dir / data_file
+        if not sidecar.exists():
+            logger.warning(f"Data snapshot sidecar not found: {sidecar}")
+            return pd.DataFrame()
+
+        fmt = (snapshot_data.get('data_format') or '').lower()
+        if fmt == 'parquet' or str(data_file).endswith('.parquet'):
+            return pd.read_parquet(sidecar)
+        # JSON sidecar is written with orient="columns" (see _write_snapshot_table).
+        return pd.read_json(sidecar, orient='columns')
+
     def save_data_snapshot(self, force_new_state: bool = False) -> Optional[Path]:
-        """Save lightweight JSON snapshot of data state (sample_id, tags, discarded) + RNG state.
+        """Save a snapshot of data state (sample_id, tags, discarded) + RNG state.
 
         H5 files (data.h5 and arrays.h5) are saved in parent directory (shared).
-        Only checkpoint-specific metadata is saved here as JSON, including random state
-        for reproducible data generation.
+        Only checkpoint-specific metadata is saved here: a small JSON file
+        (exp_hash, timestamp, RNG + dataloader state) plus a **Parquet sidecar**
+        holding the per-sample table, so large (300k+ row) states save/load
+        fast. Legacy snapshots with the table inlined in the JSON still load.
 
         Args:
             force_new_state: When True, always creates a new data state even if the data
@@ -1195,11 +1252,26 @@ class CheckpointManager:
                 active_data_hash = self.current_exp_hash[-8:]
                 active_exp_hash = self.current_exp_hash
 
-            # Convert to JSON-serializable format
+            # Save to hash-specific directory
+            data_hash_dir = self.data_checkpoint_dir / active_data_hash
+            os.makedirs(data_hash_dir, exist_ok=True)
+            json_file = data_hash_dir / f"{active_data_hash}_data_snapshot.json"
+
+            # Write the (potentially 300k+ row) sample table to a binary Parquet
+            # sidecar instead of inlining it as pretty-printed JSON — the old
+            # to_dict(orient="records") + json.dump(indent=2) was the slow part.
+            # The metadata JSON below just references it.
+            snapshot_df = safe_reset_index(snapshot_df)
+            data_file, data_format = self._write_snapshot_table(
+                snapshot_df, data_hash_dir, active_data_hash)
+
+            # Metadata only — the big table lives in the sidecar (data_file).
             snapshot_data = {
                 'exp_hash': active_exp_hash,
                 'timestamp': datetime.now().isoformat(),
-                'data': snapshot_df.to_dict(orient='records'),
+                'data_format': data_format,
+                'data_file': data_file,
+                'data_rows': int(len(snapshot_df)),
                 'rng_state': rng_state
             }
 
@@ -1216,15 +1288,10 @@ class CheckpointManager:
             except Exception as e:
                 logger.debug(f"Could not capture dataloader iteration state: {e}")
 
-            # Save to hash-specific directory
-            data_hash_dir = self.data_checkpoint_dir / active_data_hash
-            os.makedirs(data_hash_dir, exist_ok=True)
-            json_file = data_hash_dir / f"{active_data_hash}_data_snapshot.json"
-
             with open(json_file, 'w') as f:
                 json.dump(snapshot_data, f, indent=2, default=str)
 
-            logger.info(f"Saved data snapshot: {json_file.name} ({len(snapshot_df)} rows) with RNG state")
+            logger.info(f"Saved data snapshot: {json_file.name} (+{data_file}, {len(snapshot_df)} rows) with RNG state")
 
             if force_new_state:
                 self._update_manifest(active_exp_hash)
@@ -1757,7 +1824,10 @@ class CheckpointManager:
                     # Extract RNG state from data snapshot if available
                     rng_state = snapshot_data.get('rng_state', {})
                     if load_data_snapshot:
-                        snapshot_df = pd.DataFrame(snapshot_data.get('data', [])).set_index([SampleStatsEx.SAMPLE_ID.value, SampleStatsEx.INSTANCE_ID.value]) if 'data' in snapshot_data else pd.DataFrame()
+                        snapshot_df = self._read_snapshot_table(snapshot_data, data_dir)
+                        _idx_cols = [SampleStatsEx.SAMPLE_ID.value, SampleStatsEx.INSTANCE_ID.value]
+                        if not snapshot_df.empty and all(c in snapshot_df.columns for c in _idx_cols):
+                            snapshot_df = snapshot_df.set_index(_idx_cols)
                         if not snapshot_df.empty:
                             result['data_state'] = {'snapshot': snapshot_df}
                             result['loaded_components'].add('data')
