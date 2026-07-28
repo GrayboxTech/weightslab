@@ -1126,20 +1126,30 @@ class LoggerQueue:
 
         Args:
             graph_name: The registered signal/metric name.
-            reduce: One of ``min`` | ``max`` | ``mean``/``avg`` | ``count``.
+            reduce: One of ``min`` | ``max`` | ``mean``/``avg`` | ``count``, or
+                ``list``/``values``/``raw``/``history`` to return each sample's
+                FULL time series (ordered by step) as a list instead of a scalar.
             sample_ids: Optional iterable to restrict the query.
             exp_hash: ``None`` = all hashes; otherwise restrict to one.
 
         Returns:
-            ``{sample_id (str): reduced_value (float)}``; empty if the metric is
-            unknown or has no recorded history.
+            ``{sample_id (str): reduced_value (float)}`` for a scalar reduce, or
+            ``{sample_id (str): [value, ...]}`` (chronological) for a list reduce;
+            empty if the metric is unknown or has no recorded history.
         """
+        reduce_l = str(reduce).lower()
+        is_list = reduce_l in ("list", "values", "raw", "history")
         agg = {
             "min": "min(value)", "max": "max(value)",
             "mean": "avg(value)", "avg": "avg(value)", "count": "count(value)",
-        }.get(str(reduce).lower())
-        if agg is None:
-            raise ValueError(f"Unsupported reduce '{reduce}'. Use min/max/mean/count.")
+        }.get(reduce_l)
+        if is_list:
+            # DuckDB collects the ordered time series into a list per sample.
+            agg = "list(value ORDER BY step)"
+        elif agg is None:
+            raise ValueError(
+                f"Unsupported reduce '{reduce}'. Use min/max/mean/count/list."
+            )
 
         with self._lock:
             self._flush_stage()
@@ -1152,6 +1162,11 @@ class LoggerQueue:
             sql += " GROUP BY sample_id"
             rows = self._conn.execute(sql, params).fetchall()
 
+        if is_list:
+            return {
+                str(sid): [float(x) for x in (v or [])]
+                for (sid, v) in rows if v is not None
+            }
         return {str(sid): float(v) for (sid, v) in rows if v is not None}
 
     def resolve_graph_name(self, name: str) -> str | None:

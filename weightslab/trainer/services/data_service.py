@@ -2274,10 +2274,12 @@ class DataService:
         Backs the ``signal_history(metric, reduce)`` helper exposed to agent code.
         Reads the experiment logger's DuckDB per-sample store (append-only
         ``(metric, hash, sample_id, step, value)``), reduces each sample's whole
-        time series (min/max/mean/count), and maps it back onto the current
-        dataframe rows by sample_id. Rows whose sample has no recorded history
-        get NaN — so, e.g., ``signal_history('train_loss','min') >= 0.5`` is
-        False for them (no evidence they stayed above 0.5), never a crash.
+        time series (min/max/mean/count) — or, for reduce in
+        ``list``/``values``/``raw``/``history``, returns the full ordered series
+        as a per-sample list — and maps it back onto the current dataframe rows
+        by sample_id. Rows whose sample has no recorded history get NaN — so,
+        e.g., ``signal_history('train_loss','min') >= 0.5`` is False for them
+        (no evidence they stayed above 0.5), never a crash.
 
         Only populated when signals were logged with ``save_signals(..., log=True)``;
         with no logger / no history it returns an all-NaN Series (a safe no-op).
@@ -2326,6 +2328,11 @@ class DataService:
             return empty
 
         mapped = sid_values.astype(str).map(reduced)
+        # List/raw reduces yield a Python list per sample — keep them as an
+        # object Series (numeric coercion would collapse each list to NaN).
+        # Scalar reduces (min/max/mean/count) stay numeric as before.
+        if str(reduce).lower() in ("list", "values", "raw", "history"):
+            return pd.Series(mapped.to_numpy(dtype=object), index=df.index)
         return pd.Series(pd.to_numeric(mapped, errors="coerce").to_numpy(), index=df.index)
 
     def _resolve_checkpoint_manager(self):

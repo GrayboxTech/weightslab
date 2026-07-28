@@ -795,6 +795,20 @@ class TestReducePerSample(unittest.TestCase):
         never_below = sorted(s for s, v in mins.items() if v >= 0.5)
         self.assertEqual(never_below, ["0", "2"])
 
+    def test_list_per_sample_returns_ordered_history(self):
+        # reduce="list" returns each sample's FULL time series (ordered by step)
+        # instead of a scalar — the axis needed for "history as a list per sample".
+        lg = self._seed()
+        hist = lg.reduce_per_sample("train_loss", "list", exp_hash="h1")
+        self.assertEqual([round(x, 5) for x in hist["0"]], [0.9, 0.6, 0.55])
+        self.assertEqual([round(x, 5) for x in hist["1"]], [0.4, 0.3, 0.2])
+        self.assertEqual([round(x, 5) for x in hist["2"]], [0.7, 0.5, 0.5])
+        # "values" is an alias for "list".
+        self.assertEqual(
+            lg.reduce_per_sample("train_loss", "values", exp_hash="h1").keys(),
+            hist.keys(),
+        )
+
     def test_sample_ids_filter(self):
         lg = self._seed()
         subset = lg.reduce_per_sample("train_loss", "min", sample_ids=["1"], exp_hash="h1")
