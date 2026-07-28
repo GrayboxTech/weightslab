@@ -473,7 +473,7 @@ class DataService:
                 self._preview_cache_ready.set()
                 return
 
-            total = min(int(len(df)*0.01), self._preview_cache_max)
+            total = min(max(1, int(len(df) * 0.01)), self._preview_cache_max)
             logger.info("[PreviewCache] Building 64×64 or less or less preview cache for %d samples …", total)
             t0 = time.time()
 
