@@ -1115,6 +1115,7 @@ class LoggerQueue:
         reduce: str = "min",
         sample_ids=None,
         exp_hash: str | None = None,
+        max_points: int | None = None,
     ) -> dict:
         """Reduce each sample's signal HISTORY to a single value.
 
@@ -1131,6 +1132,9 @@ class LoggerQueue:
                 FULL time series (ordered by step) as a list instead of a scalar.
             sample_ids: Optional iterable to restrict the query.
             exp_hash: ``None`` = all hashes; otherwise restrict to one.
+            max_points: List reduces only — cap each sample's returned series to
+                at most this many points by keeping an evenly-spaced subset (first
+                and last always kept). ``None`` (default) keeps the full history.
 
         Returns:
             ``{sample_id (str): reduced_value (float)}`` for a scalar reduce, or
@@ -1164,10 +1168,29 @@ class LoggerQueue:
 
         if is_list:
             return {
-                str(sid): [float(x) for x in (v or [])]
+                str(sid): self._subsample_series(
+                    [float(x) for x in (v or [])], max_points
+                )
                 for (sid, v) in rows if v is not None
             }
         return {str(sid): float(v) for (sid, v) in rows if v is not None}
+
+    @staticmethod
+    def _subsample_series(values: list, max_points: int | None) -> list:
+        """Downsample *values* to at most *max_points* evenly-spaced entries,
+        always keeping the first and last (so the curve's shape/endpoints are
+        preserved). Returns the list unchanged when no cap applies or it already
+        fits."""
+        n = len(values)
+        if not max_points or max_points <= 0 or n <= max_points:
+            return values
+        if max_points == 1:
+            return [values[-1]]
+        step = (n - 1) / (max_points - 1)
+        # Set-dedupe guards against rounding collisions when n is only slightly
+        # above max_points; result is <= max_points points, endpoints included.
+        keep = sorted({int(round(i * step)) for i in range(max_points)})
+        return [values[i] for i in keep]
 
     def resolve_graph_name(self, name: str) -> str | None:
         """Best-effort map a user-facing metric name to a stored graph name.
