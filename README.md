@@ -8,7 +8,6 @@
   </a>
 <br>  
 
-
 </div>
 <div align="center">
   <h1>Built for AI Engineers working with messy real-world data</h1>
@@ -40,19 +39,14 @@
 
 <br>
 
-## How can you use it ?
+## Weighstlab in Motion
 
-**DATA** · Advanced Dataset Querying · Static & Dynamic Metatags · Golden dataset creation · Edge Case Discovery
+WeightsLab hooks into your existing PyTorch training loop and exposes a live UI where you can inspect per-sample signals, edit the dataset, and steer training. Without restarting.
 
-**SMART WORKFLOWS** · POC / Prototyping · Smart Collection & Annotation · Re-labelling Review Queues
-
-**MODEL DEVELOPMENT** · Model Fine-Tuning · Failure Case Discovery
-
-**TRAINING RUN** · Health Check · Regression Discovery
-
-**COMPUTE** · FLOPs Optimization
-
-<br>
+<div align="center">
+  <img src="https://github.com/GrayboxTech/assets/blob/main/GIF/weightslab_demo_bdd.gif" width="1280" alt="WeightsLab Studio demo" />
+  <!-- <sub><a href="https://youtu.be/GBBDDaJQLWk">▶ Watch full demo</a></sub> -->
+</div>
 
 ## Quickstart
 
@@ -99,14 +93,16 @@ For a detailed installation guide and advanced configuration &rarr; [Documentati
 
 <br>
 
-## Weighstlab in Motion
+## How can you use it ?
 
+<h4>1. Find bad data fast</h4> Pause training mid-run, sort samples by loss, spot mislabels and outliers before they impact your model.
 
-<div align="center">
-  <img src="https://github.com/GrayboxTech/assets/blob/main/GIF/weightslab_demo_bdd.gif" width="1280" alt="WeightsLab Studio demo" />
-  <!-- <sub><a href="https://youtu.be/GBBDDaJQLWk">▶ Watch full demo</a></sub> -->
-</div>
+<h4>2. Fix and resume without re-starting</h4> Relabel or drop samples live, then continue training from the same checkpoint.
 
+<h4>3. Catch model regressions early on</h4> Analyze per-sample loss trajectories to see exactly where the model is struggling
+
+<br>
+<br>
 
 ## Resources & Community
 <details>
