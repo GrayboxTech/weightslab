@@ -108,6 +108,11 @@ class LoggerQueue:
         self._stage_instance: list = []
         self._seq = 0
 
+        # Absolute paths of sibling DBs already merged in via merge_from_disk,
+        # so repeated merge triggers (logger can be bound to disk from three
+        # different call sites depending on init ordering) stay idempotent.
+        self._merged_source_dbs: set = set()
+
         # Per-sample query cache. Many consumers read the SAME (signal, ids) in
         # one step (e.g. reactive signals all reading the loss); memoize so N
         # identical reads cost 1 scan. Keyed by (signal, ids, [step,] hash,
@@ -146,6 +151,17 @@ class LoggerQueue:
                     self.set_db_path(os.path.join(str(loggers_dir), "loggers.duckdb"))
             except Exception:
                 pass
+
+        # Checkpoint manager was created before this logger and already
+        # resolved a multi-root parent directory — merge sibling roots' curves
+        # in now (the reverse ordering is handled by
+        # CheckpointManager._bind_logger_to_disk; merge_from_disk is
+        # idempotent so both call sites firing is harmless).
+        if getattr(self.chkpt_manager, "is_multi_root", False):
+            try:
+                self.chkpt_manager._merge_sibling_logger_histories()
+            except Exception as exc:
+                logger.warning(f"[LoggerQueue] Failed to merge multi-root sibling logger histories: {exc}")
 
         self._start_background_flush()
 
@@ -378,6 +394,63 @@ class LoggerQueue:
                     self._conn.execute("CHECKPOINT")
             except Exception as exc:
                 logger.warning(f"[LoggerQueue] flush_to_disk failed: {exc}")
+
+    def merge_from_disk(self, other_db_path) -> bool:
+        """Merge signal-history rows from another on-disk DuckDB file into
+        this logger's live tables.
+
+        Used to stitch training curves together from sibling experiment
+        roots discovered under a shared parent directory (see
+        CheckpointManager._merge_sibling_logger_histories). Purely additive:
+        rows are namespaced by ``experiment_hash``, so independent hash
+        chains from different roots never collide, and nothing already in
+        this logger is touched. A no-op (returns False) if the path doesn't
+        exist, is this same database, or the merge fails outright.
+        """
+        if not other_db_path:
+            return False
+        other_db_path = os.path.abspath(str(other_db_path))
+        if not os.path.exists(other_db_path):
+            return False
+        if self._db_path not in (None, ":memory:") and other_db_path == os.path.abspath(self._db_path):
+            return False
+
+        with self._lock:
+            if other_db_path in self._merged_source_dbs:
+                # Already merged (this can be triggered from more than one
+                # init-ordering call site) — skip to avoid duplicating rows.
+                return False
+
+            try:
+                self._flush_stage()
+                escaped = other_db_path.replace("'", "''")
+                self._conn.execute(f"ATTACH '{escaped}' AS incoming (READ_ONLY)")
+            except Exception as exc:
+                logger.warning(f"[LoggerQueue] Failed to attach {other_db_path} for merge: {exc}")
+                return False
+
+            try:
+                copied_any = False
+                for tbl in self._HISTORY_TABLES:
+                    try:
+                        self._conn.execute(f"INSERT INTO {tbl} SELECT * FROM incoming.{tbl}")
+                        copied_any = True
+                    except Exception as exc:
+                        # Table may be missing in an older-schema sibling DB;
+                        # skip it, other tables still merge.
+                        logger.debug(f"[LoggerQueue] Skipped merging table '{tbl}' from {other_db_path}: {exc}")
+            finally:
+                try:
+                    self._conn.execute("DETACH incoming")
+                except Exception:
+                    pass
+
+            if copied_any:
+                self._merged_source_dbs.add(other_db_path)
+                self._invalidate_qps_cache()
+                self._restore_runtime_state_from_db()
+                logger.info(f"[LoggerQueue] Merged signal history from {other_db_path}")
+            return copied_any
 
     def _restore_runtime_state_from_db(self) -> None:
         """Repopulate seq counter and graph names from an existing (file) DB."""
@@ -1115,6 +1188,7 @@ class LoggerQueue:
         reduce: str = "min",
         sample_ids=None,
         exp_hash: str | None = None,
+        max_points: int | None = None,
     ) -> dict:
         """Reduce each sample's signal HISTORY to a single value.
 
@@ -1126,20 +1200,33 @@ class LoggerQueue:
 
         Args:
             graph_name: The registered signal/metric name.
-            reduce: One of ``min`` | ``max`` | ``mean``/``avg`` | ``count``.
+            reduce: One of ``min`` | ``max`` | ``mean``/``avg`` | ``count``, or
+                ``list``/``values``/``raw``/``history`` to return each sample's
+                FULL time series (ordered by step) as a list instead of a scalar.
             sample_ids: Optional iterable to restrict the query.
             exp_hash: ``None`` = all hashes; otherwise restrict to one.
+            max_points: List reduces only — cap each sample's returned series to
+                at most this many points by keeping an evenly-spaced subset (first
+                and last always kept). ``None`` (default) keeps the full history.
 
         Returns:
-            ``{sample_id (str): reduced_value (float)}``; empty if the metric is
-            unknown or has no recorded history.
+            ``{sample_id (str): reduced_value (float)}`` for a scalar reduce, or
+            ``{sample_id (str): [value, ...]}`` (chronological) for a list reduce;
+            empty if the metric is unknown or has no recorded history.
         """
+        reduce_l = str(reduce).lower()
+        is_list = reduce_l in ("list", "values", "raw", "history")
         agg = {
             "min": "min(value)", "max": "max(value)",
             "mean": "avg(value)", "avg": "avg(value)", "count": "count(value)",
-        }.get(str(reduce).lower())
-        if agg is None:
-            raise ValueError(f"Unsupported reduce '{reduce}'. Use min/max/mean/count.")
+        }.get(reduce_l)
+        if is_list:
+            # DuckDB collects the ordered time series into a list per sample.
+            agg = "list(value ORDER BY step)"
+        elif agg is None:
+            raise ValueError(
+                f"Unsupported reduce '{reduce}'. Use min/max/mean/count/list."
+            )
 
         with self._lock:
             self._flush_stage()
@@ -1152,7 +1239,31 @@ class LoggerQueue:
             sql += " GROUP BY sample_id"
             rows = self._conn.execute(sql, params).fetchall()
 
+        if is_list:
+            return {
+                str(sid): self._subsample_series(
+                    [float(x) for x in (v or [])], max_points
+                )
+                for (sid, v) in rows if v is not None
+            }
         return {str(sid): float(v) for (sid, v) in rows if v is not None}
+
+    @staticmethod
+    def _subsample_series(values: list, max_points: int | None) -> list:
+        """Downsample *values* to at most *max_points* evenly-spaced entries,
+        always keeping the first and last (so the curve's shape/endpoints are
+        preserved). Returns the list unchanged when no cap applies or it already
+        fits."""
+        n = len(values)
+        if not max_points or max_points <= 0 or n <= max_points:
+            return values
+        if max_points == 1:
+            return [values[-1]]
+        step = (n - 1) / (max_points - 1)
+        # Set-dedupe guards against rounding collisions when n is only slightly
+        # above max_points; result is <= max_points points, endpoints included.
+        keep = sorted({int(round(i * step)) for i in range(max_points)})
+        return [values[i] for i in keep]
 
     def resolve_graph_name(self, name: str) -> str | None:
         """Best-effort map a user-facing metric name to a stored graph name.

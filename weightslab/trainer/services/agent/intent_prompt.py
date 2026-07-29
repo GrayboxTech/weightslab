@@ -68,11 +68,12 @@ Choose the `kind` based on the user's VERB and INTENT:
    - If the user wants OR between multiple VALUES of the **same** column (e.g. "validation or test samples", "class 2 or 3"), you MUST emit **ONE** condition with `op='in'` and `value` set to the list of values (e.g. `{{"column": "origin", "op": "in", "value": ["val_loader", "test_loader"]}}`). **NEVER** emit two separate `==`/`=` conditions for the same column — a column cannot equal two different literals at once, so AND-ing two `==` conditions on the same column always produces an impossible, always-empty result (see Ex35).
    - If the user wants OR across **different** columns (e.g. "loss > 5 OR origin is test"), do NOT use `conditions` at all. Use `analysis_expression` with an explicit `|` instead, e.g. `"(df['loss'] > 5) | (df['origin'] == 'test')"`.
    - Be careful with natural language that uses "and" to mean something other than boolean AND-of-filters — e.g. "keep val or test, where test is test_loader **and** val is val_loader" is DEFINING two terms, not ANDing two filters; the actual filter here is still an OR (`op='in'`, both values).
-10. **Signal HISTORY queries (`signal_history`)**: the DATA CONTEXT columns hold each sample's *latest* signal value only. When the user asks about a signal's behavior OVER TRAINING — "never had", "was ever", "at any point", "min/max/mean over training", "always stayed above/below" — you MUST use the special function `signal_history('<metric>', '<reduce>')` inside `transform_code` or `analysis_expression`. It returns a per-sample Series of that signal's history reduced by `<reduce>` — one of `min`, `max`, `mean`, `count`; `<metric>` is the bare signal name (e.g. `train_loss`, not the `signals//...` column). Translate the wording:
+10. **Signal HISTORY queries (`signal_history`)**: the DATA CONTEXT columns hold each sample's *latest* signal value only. When the user asks about a signal's behavior OVER TRAINING — "never had", "was ever", "at any point", "min/max/mean over training", "always stayed above/below", or "the full history / the list of values per sample" — you MUST use the special function `signal_history('<metric>', '<reduce>')` inside `transform_code` or `analysis_expression`. `<reduce>` is one of `min`, `max`, `mean`, `count` (a per-sample SCALAR), or `list` (a per-sample LIST of that signal's whole time series, ordered by step). `<metric>` is the bare signal name (e.g. `train_loss`, not the `signals//...` column). Translate the wording:
    - "never had train loss below 0.5" / "train loss always ≥ 0.5" → `signal_history('train_loss','min') >= 0.5`
    - "ever had loss above 5" / "loss spiked over 5 at some point" → `signal_history('train_loss','max') > 5`
    - "average train loss over training below 0.2" → `signal_history('train_loss','mean') < 0.2`
-   Use it exactly like a normal column expression (create a tag, discard, or keep on it — see Ex39). A sample with no recorded history yields NaN (comparisons are False), so it's safely excluded.
+   - "the history / the list of train losses per sample" / "train_loss_history as a list" → `signal_history('train_loss','list')` (store it directly in a new column, e.g. `transform_code: "signal_history('train_loss', 'list')"`, `target_column: "train_loss_history"`). Do NOT try to reduce it to statistics when the user explicitly wants the raw per-sample list. Long histories are automatically subsampled (evenly, endpoints kept) to at most ~100 points per sample.
+   Use it exactly like a normal column expression (create a tag, discard, keep on it, or store the list column — see Ex39). A sample with no recorded history yields NaN (comparisons are False), so it's safely excluded.
 11. **Hyperparameter tuning (`action_name="set_hyperparam"`)**: to change a training hyperparameter, emit a `kind="action"` step with `action_name="set_hyperparam"` and `action_params={{"param": <name>, "op": <"set"|"scale">, "value": <number>}}`.
    - Relative change ("increase X by 10%", "decrease by 20%") → `op="scale"`, `value` = the multiplier (10% increase → `1.1`; 20% decrease → `0.8`). Compute the multiplier yourself.
    - See Ex45–Ex48.
@@ -648,6 +649,21 @@ User: "Tag samples that never had a training loss smaller than 0.5"
       "kind": "transform",
       "target_column": "tag:never_below_0_5",
       "transform_code": "np.where(signal_history('train_loss', 'min') >= 0.5, True, df.get('tag:never_below_0_5', False))"
+    }}
+  ]
+}}
+
+
+**Ex39b: Signal History As A Per-Sample List (Raw Values, Not Statistics)**
+User: "Compute, using the logger history, the per-sample training-loss history as a list in a metadata column train_loss_history"
+{{
+  "reasoning": "The user wants each sample's FULL train_loss time series as a list (not min/max/mean/count). Use signal_history('train_loss','list') and store it directly in the requested column.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "transform",
+      "target_column": "train_loss_history",
+      "transform_code": "signal_history('train_loss', 'list')"
     }}
   ]
 }}

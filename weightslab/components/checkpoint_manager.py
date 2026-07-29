@@ -82,11 +82,26 @@ class CheckpointManager:
     LOGGER_SNAPSHOT_CHUNK_SUFFIX = ".json.zst"
     LOGGER_SNAPSHOT_MANIFEST_FILE = "loggers.manifest.json"
 
+    # How many levels of subdirectories below a given root_log_dir to scan
+    # when looking for nested experiment roots (see _discover_nested_root_dirs).
+    NESTED_ROOT_DISCOVERY_MAX_DEPTH = 3
+
     def __init__(self, root_log_dir: str = 'root_experiment', load_model: bool = True, load_config: bool = False, load_data: bool = True):
         """Initialize the checkpoint manager.
 
         Args:
-            root_log_dir: Root directory for experiment outputs
+            root_log_dir: Root directory for experiment outputs. This may
+                either be a single experiment's own root (containing
+                ``checkpoints/manifest.yaml`` directly) or a parent directory
+                that fans out into several such experiment roots nested a few
+                levels down (e.g. ``root/lr_tests/v1``, ``root/lr_tests/v2``).
+                In the latter case the manager auto-discovers every nested
+                root (see :meth:`_discover_nested_root_dirs`), adopts the one
+                with the most recently updated manifest as its effective
+                root (so model/config/data loading and future writes behave
+                exactly as the single-root case), and merges signal-history
+                curves from the other discovered roots so logger curves read
+                as one continuous history across all of them.
         """
         # root_log_dir may arrive as a ledger Proxy / ValueProxy — e.g. when a caller
         # passes ``config.get('root_log_dir')`` straight from the watched hyperparameters.
@@ -94,8 +109,16 @@ class CheckpointManager:
         # type() (the proxy overrides __class__/isinstance to masquerade as its wrapped
         # value, so isinstance checks are unreliable), and fall back to the default when
         # the proxy is unset / resolves to None or empty.
-        self.root_log_dir = Path(str(root_log_dir)).absolute()
+        given_root_log_dir = Path(str(root_log_dir)).absolute()
+        given_root_log_dir.mkdir(parents=True, exist_ok=True)
+
+        # The directory actually passed in, kept around for reference even
+        # when we adopt a nested directory below as the effective root.
+        self.given_root_log_dir = given_root_log_dir
+        self.root_log_dir, self.discovered_root_dirs = self._resolve_effective_root_dir(given_root_log_dir)
         self.root_log_dir.mkdir(parents=True, exist_ok=True)
+        self.is_multi_root = len(self.discovered_root_dirs) > 1
+
         self.config = ledgers.get_hyperparams() or {}
 
         # Create main subdirectories
@@ -149,18 +172,174 @@ class CheckpointManager:
         # Load any existing logger snapshots for visibility when starting
         self._load_all_logger_snapshots()
 
+        # If root_log_dir fanned out into several nested experiment roots,
+        # stitch signal-history curves from the other ones into this logger
+        # too (model/config/data only ever come from the chosen effective root).
+        if self.is_multi_root:
+            self._merge_sibling_logger_histories()
+
         # Automatically resume latest state when an existing root_log_dir is provided
         self._bootstrap_latest_state(load_model=load_model, load_config=load_config, load_data=load_data, force=self.first_time)
         logger.info(f"CheckpointManager initialized at {self.root_log_dir}")
 
     def __repr__(self) -> str:
+        multi_root_info = (
+            f" discovered_root_dirs={len(self.discovered_root_dirs)} (given_root_log_dir={self.given_root_log_dir})\n"
+            if self.is_multi_root else ""
+        )
         return (
             f"CheckpointManager(\n"
             f" root_log_dir={self.root_log_dir}\n"
+            f"{multi_root_info}"
             f" current_exp_hash={self.current_exp_hash}\n"
             f" step_counter={self._step_counter}\n"
             f")"
         )
+
+    # =========================
+    # MULTI-ROOT DISCOVERY
+    # =========================
+    def _discover_nested_root_dirs(self, base_dir: Path, max_depth: Optional[int] = None) -> List[Path]:
+        """Find directories under ``base_dir`` that look like a checkpoint
+        manager root, i.e. contain ``checkpoints/manifest.yaml``.
+
+        ``base_dir`` itself is checked at depth 0, so a plain single-experiment
+        root_log_dir (the existing, common case) is always returned as its own
+        sole candidate. Nested roots are searched up to ``max_depth`` levels of
+        subdirectories below ``base_dir`` (e.g. ``base_dir/lr_tests/v1`` is 2
+        levels down), which lets one parent directory fan out into several
+        independent experiment roots (different HP sweeps, restarts, etc.).
+        """
+        if max_depth is None:
+            max_depth = self.NESTED_ROOT_DISCOVERY_MAX_DEPTH
+
+        found: List[Path] = []
+
+        def _is_candidate(d: Path) -> bool:
+            return (d / "checkpoints" / "manifest.yaml").is_file()
+
+        def _walk(d: Path, depth: int) -> None:
+            if not d.is_dir():
+                return
+            if _is_candidate(d):
+                found.append(d)
+            if depth >= max_depth:
+                return
+            try:
+                children = sorted(p for p in d.iterdir() if p.is_dir())
+            except OSError:
+                return
+            for child in children:
+                # Don't descend into a root's own checkpoints/ internals —
+                # they hold model/HP/data/logger files, never further roots.
+                if child.name == "checkpoints" or child.name.startswith('.'):
+                    continue
+                _walk(child, depth + 1)
+
+        _walk(base_dir, 0)
+        return found
+
+    def _read_root_manifest_timestamp(self, candidate_dir: Path) -> str:
+        """Best-effort recency timestamp for a discovered root, used to rank
+        candidates. ISO-8601 strings (as produced everywhere in this module)
+        sort correctly with plain string comparison."""
+        manifest_file = candidate_dir / "checkpoints" / "manifest.yaml"
+        try:
+            with open(manifest_file, 'r') as f:
+                manifest = yaml.safe_load(f) or {}
+        except Exception:
+            return ""
+
+        timestamp = manifest.get('last_updated')
+        if timestamp:
+            return str(timestamp)
+
+        # Fall back to the latest experiment's own timestamps if the manifest
+        # predates the top-level 'last_updated' field.
+        latest_hash = manifest.get('latest_hash')
+        experiments = manifest.get('experiments', {}) or {}
+        exp_info = experiments.get(latest_hash, {}) if latest_hash else {}
+        return str(exp_info.get('last_used') or exp_info.get('created') or "")
+
+    def _resolve_effective_root_dir(self, given_root_log_dir: Path) -> tuple[Path, List[Path]]:
+        """Resolve the directory the manager should actually operate on.
+
+        Returns ``(effective_root, discovered_root_dirs)``:
+        - No nested roots found at all (brand-new/empty directory):
+          ``(given_root_log_dir, [])`` — identical to prior behavior.
+        - Exactly one root found (possibly ``given_root_log_dir`` itself):
+          that one is adopted as-is, ``discovered_root_dirs`` has length 1.
+        - Multiple roots found: the one with the most recently updated
+          manifest is adopted as the effective root (so model/config/data
+          loading, and future checkpoint writes, behave exactly like the
+          single-root case); all discovered roots are kept so their logger
+          curves can be merged (see :meth:`_merge_sibling_logger_histories`).
+        """
+        candidates = self._discover_nested_root_dirs(given_root_log_dir)
+        if not candidates:
+            return given_root_log_dir, []
+        if len(candidates) == 1:
+            return candidates[0], candidates
+
+        ranked = sorted(candidates, key=lambda d: (self._read_root_manifest_timestamp(d), str(d)))
+        winner = ranked[-1]
+        logger.info(
+            f"Discovered {len(candidates)} nested checkpoint roots under {given_root_log_dir}; "
+            f"using most recently updated as effective root: {winner}"
+        )
+        return winner, candidates
+
+    def _merge_sibling_logger_histories(self) -> None:
+        """Pull signal-history curves from the other discovered nested roots
+        into the active logger(s), so training curves read as one continuous
+        history across independent experiment roots that share a parent
+        directory. Model/config/data are never merged this way — they only
+        ever come from the chosen effective root (see _resolve_effective_root_dir).
+
+        Prefers merging directly from each sibling's on-disk DuckDB file
+        (additive at the SQL level: rows are namespaced by experiment_hash,
+        so independent hash chains never collide). Falls back to the legacy
+        JSON snapshot format for siblings that predate DuckDB persistence.
+
+        Requires an already-registered logger to merge into. If none exists
+        yet (e.g. this manager was constructed before any LoggerQueue),
+        every merge below is a no-op (the ``hasattr`` guards fail against an
+        unset ledger placeholder) rather than spinning up a throwaway
+        in-memory logger — doing so would occupy the default registry slot
+        with an object that never gets disk-bound, silently orphaning it
+        once the "real" logger is created afterwards. Safe to skip: this
+        method is also called from _bind_logger_to_disk and
+        LoggerQueue.__init__, both of which fire once a logger genuinely
+        exists (merge_from_disk is idempotent, so running this more than
+        once is harmless).
+        """
+        lg = ledgers.get_logger()
+
+        for candidate in self.discovered_root_dirs:
+            if candidate == self.root_log_dir:
+                continue
+
+            sibling_loggers_dir = candidate / "checkpoints" / "loggers"
+            sibling_db_path = sibling_loggers_dir / "loggers.duckdb"
+            merged = False
+
+            if sibling_db_path.exists() and hasattr(lg, 'merge_from_disk'):
+                try:
+                    merged = lg.merge_from_disk(str(sibling_db_path))
+                except Exception as e:
+                    logger.warning(f"Failed to merge on-disk logger history from sibling root {candidate}: {e}")
+
+            if not merged and hasattr(lg, 'load_snapshot'):
+                try:
+                    payload = self._load_logger_snapshot_payload(loggers_dir=sibling_loggers_dir)
+                    for lname, lpayload in payload.get('loggers', {}).items() if payload else ():
+                        # Merge into the already-registered logger for that name
+                        # when there is one, otherwise the current default logger.
+                        target_lg = ledgers.get_logger(lname) if lname in ledgers.list_loggers() else lg
+                        if hasattr(target_lg, 'load_snapshot'):
+                            target_lg.load_snapshot(lpayload)
+                except Exception as e:
+                    logger.warning(f"Failed to merge legacy logger snapshot from sibling root {candidate}: {e}")
 
     def _get_data_state_snapshot(self, dfm):
         """Return a combined data state from registered dataloaders, if present."""
@@ -212,6 +391,11 @@ class CheckpointManager:
             lg = ledgers.get_logger()
             if lg is not None and hasattr(lg, "set_db_path"):
                 lg.set_db_path(str(self.get_logger_db_path()))
+                # Logger already existed (created before this manager) — merge
+                # sibling curves now rather than waiting for the later call in
+                # __init__ (see _merge_sibling_logger_histories; idempotent).
+                if getattr(self, "is_multi_root", False):
+                    self._merge_sibling_logger_histories()
         except Exception as e:
             logger.warning(f"Could not bind logger to on-disk DuckDB: {e}")
 
@@ -224,28 +408,34 @@ class CheckpointManager:
         except Exception as e:
             logger.warning(f"Could not flush logger to disk: {e}")
 
-    def _get_logger_snapshot_dir(self) -> Path:
-        return self.loggers_dir
+    def _get_logger_snapshot_dir(self, loggers_dir: Optional[Path] = None) -> Path:
+        return loggers_dir if loggers_dir is not None else self.loggers_dir
 
-    def _get_logger_snapshot_path(self) -> Path:
-        return self._get_logger_snapshot_dir() / "loggers.json"
+    def _get_logger_snapshot_path(self, loggers_dir: Optional[Path] = None) -> Path:
+        return self._get_logger_snapshot_dir(loggers_dir) / "loggers.json"
 
-    def _get_logger_snapshot_manifest_path(self) -> Path:
-        return self._get_logger_snapshot_dir() / self.LOGGER_SNAPSHOT_MANIFEST_FILE
+    def _get_logger_snapshot_manifest_path(self, loggers_dir: Optional[Path] = None) -> Path:
+        return self._get_logger_snapshot_dir(loggers_dir) / self.LOGGER_SNAPSHOT_MANIFEST_FILE
 
     def _get_logger_snapshot_chunk_path(self, chunk_index: int) -> Path:
         fname = f"{self.LOGGER_SNAPSHOT_CHUNK_PREFIX}{chunk_index:04d}{self.LOGGER_SNAPSHOT_CHUNK_SUFFIX}"
         return self._get_logger_snapshot_dir() / fname
 
-    def _list_logger_snapshot_chunks(self) -> List[Path]:
-        snapshot_dir = self._get_logger_snapshot_dir()
+    def _list_logger_snapshot_chunks(self, loggers_dir: Optional[Path] = None) -> List[Path]:
+        snapshot_dir = self._get_logger_snapshot_dir(loggers_dir)
         if not snapshot_dir.exists():
             return []
         return sorted(snapshot_dir.glob(f"{self.LOGGER_SNAPSHOT_CHUNK_PREFIX}*{self.LOGGER_SNAPSHOT_CHUNK_SUFFIX}"))
 
-    def _load_logger_snapshot_payload(self) -> Dict[str, Any]:
-        snapshot_dir = self._get_logger_snapshot_dir()
-        manifest_path = self._get_logger_snapshot_manifest_path()
+    def _load_logger_snapshot_payload(self, loggers_dir: Optional[Path] = None) -> Dict[str, Any]:
+        """Load the (chunked, zstd-compressed) logger snapshot payload from
+        ``loggers_dir`` (defaults to this manager's own loggers_dir), falling
+        back to the legacy uncompressed JSON layout. Used both for this
+        manager's own startup load and to read a sibling root's snapshot when
+        merging multi-root logger curves (see _merge_sibling_logger_histories).
+        """
+        snapshot_dir = self._get_logger_snapshot_dir(loggers_dir)
+        manifest_path = self._get_logger_snapshot_manifest_path(loggers_dir)
 
         chunk_paths: List[Path] = []
         if manifest_path.exists():
@@ -258,7 +448,7 @@ class CheckpointManager:
                 logger.warning(f"Failed to read logger snapshot manifest for {manifest_path}: {e}")
 
         if not chunk_paths:
-            chunk_paths = self._list_logger_snapshot_chunks()
+            chunk_paths = self._list_logger_snapshot_chunks(loggers_dir)
 
         if chunk_paths:
             snapshot = {"timestamp": datetime.now().isoformat(), "loggers": {}}
@@ -286,8 +476,8 @@ class CheckpointManager:
 
         # Legacy layout fallback (new per-exp first, then old global file)
         legacy_candidates = [
-            self._get_logger_snapshot_path(),
-            self.loggers_dir / "loggers.json",
+            self._get_logger_snapshot_path(loggers_dir),
+            snapshot_dir / "loggers.json",
         ]
         for legacy_path in legacy_candidates:
             if not legacy_path.exists():
@@ -1107,12 +1297,69 @@ class CheckpointManager:
             logger.error(f"Failed to save config: {e}")
             return None
 
+    def _write_snapshot_table(self, snapshot_df, data_hash_dir: Path, active_data_hash: str):
+        """Write the snapshot sample table to a **Parquet sidecar** next to the
+        metadata JSON — fast, compact and dtype-preserving, so 300k+ row states
+        no longer pay the old ``to_dict(orient="records")`` + pretty-printed
+        ``json.dump`` cost.
+
+        Falls back to a streamed JSON sidecar when no parquet engine is
+        installed (or a column can't be encoded), so a checkpoint never fails
+        to save. Returns ``(sidecar_filename, format)``.
+        """
+        parquet_name = f"{active_data_hash}_data_snapshot.parquet"
+        try:
+            snapshot_df.to_parquet(data_hash_dir / parquet_name, index=False)
+            return parquet_name, "parquet"
+        except Exception as e:
+            json_name = f"{active_data_hash}_data_snapshot.data.json"
+            reason = (
+                "no parquet engine installed — run `pip install pyarrow` for the fast path"
+                if isinstance(e, ImportError)
+                else f"parquet write failed ({type(e).__name__}: {e})"
+            )
+            logger.warning(
+                f"save_data_snapshot: {reason}. Falling back to JSON sidecar {json_name}."
+            )
+            # orient="columns" ({column: {row_index: value}}) — same compact
+            # layout as write_dataframe/write_history, smaller than "records".
+            snapshot_df.to_json(data_hash_dir / json_name, orient="columns", default_handler=str)
+            return json_name, "json"
+
+    def _read_snapshot_table(self, snapshot_data: Dict[str, Any], data_dir: Path):
+        """Reconstruct the snapshot sample DataFrame from a data snapshot.
+
+        Handles both the current sidecar format (``data_file`` + ``data_format``)
+        and the legacy inline format (a ``data`` list embedded in the JSON), so
+        checkpoints written before the parquet change still load.
+        """
+        # Legacy inline format: the table was embedded in the metadata JSON.
+        if 'data' in snapshot_data:
+            return pd.DataFrame(snapshot_data.get('data', []))
+
+        data_file = snapshot_data.get('data_file')
+        if not data_file:
+            return pd.DataFrame()
+
+        sidecar = data_dir / data_file
+        if not sidecar.exists():
+            logger.warning(f"Data snapshot sidecar not found: {sidecar}")
+            return pd.DataFrame()
+
+        fmt = (snapshot_data.get('data_format') or '').lower()
+        if fmt == 'parquet' or str(data_file).endswith('.parquet'):
+            return pd.read_parquet(sidecar)
+        # JSON sidecar is written with orient="columns" (see _write_snapshot_table).
+        return pd.read_json(sidecar, orient='columns')
+
     def save_data_snapshot(self, force_new_state: bool = False) -> Optional[Path]:
-        """Save lightweight JSON snapshot of data state (sample_id, tags, discarded) + RNG state.
+        """Save a snapshot of data state (sample_id, tags, discarded) + RNG state.
 
         H5 files (data.h5 and arrays.h5) are saved in parent directory (shared).
-        Only checkpoint-specific metadata is saved here as JSON, including random state
-        for reproducible data generation.
+        Only checkpoint-specific metadata is saved here: a small JSON file
+        (exp_hash, timestamp, RNG + dataloader state) plus a **Parquet sidecar**
+        holding the per-sample table, so large (300k+ row) states save/load
+        fast. Legacy snapshots with the table inlined in the JSON still load.
 
         Args:
             force_new_state: When True, always creates a new data state even if the data
@@ -1195,11 +1442,26 @@ class CheckpointManager:
                 active_data_hash = self.current_exp_hash[-8:]
                 active_exp_hash = self.current_exp_hash
 
-            # Convert to JSON-serializable format
+            # Save to hash-specific directory
+            data_hash_dir = self.data_checkpoint_dir / active_data_hash
+            os.makedirs(data_hash_dir, exist_ok=True)
+            json_file = data_hash_dir / f"{active_data_hash}_data_snapshot.json"
+
+            # Write the (potentially 300k+ row) sample table to a binary Parquet
+            # sidecar instead of inlining it as pretty-printed JSON — the old
+            # to_dict(orient="records") + json.dump(indent=2) was the slow part.
+            # The metadata JSON below just references it.
+            snapshot_df = safe_reset_index(snapshot_df)
+            data_file, data_format = self._write_snapshot_table(
+                snapshot_df, data_hash_dir, active_data_hash)
+
+            # Metadata only — the big table lives in the sidecar (data_file).
             snapshot_data = {
                 'exp_hash': active_exp_hash,
                 'timestamp': datetime.now().isoformat(),
-                'data': snapshot_df.to_dict(orient='records'),
+                'data_format': data_format,
+                'data_file': data_file,
+                'data_rows': int(len(snapshot_df)),
                 'rng_state': rng_state
             }
 
@@ -1216,15 +1478,10 @@ class CheckpointManager:
             except Exception as e:
                 logger.debug(f"Could not capture dataloader iteration state: {e}")
 
-            # Save to hash-specific directory
-            data_hash_dir = self.data_checkpoint_dir / active_data_hash
-            os.makedirs(data_hash_dir, exist_ok=True)
-            json_file = data_hash_dir / f"{active_data_hash}_data_snapshot.json"
-
             with open(json_file, 'w') as f:
                 json.dump(snapshot_data, f, indent=2, default=str)
 
-            logger.info(f"Saved data snapshot: {json_file.name} ({len(snapshot_df)} rows) with RNG state")
+            logger.info(f"Saved data snapshot: {json_file.name} (+{data_file}, {len(snapshot_df)} rows) with RNG state")
 
             if force_new_state:
                 self._update_manifest(active_exp_hash)
@@ -1460,8 +1717,10 @@ class CheckpointManager:
             logger.warning("No experiment hash specified")
             return None
 
-        # Find latest checkpoint
-        model_dir = self.models_dir / target_hash
+        # Find latest checkpoint. Weight files live under the model-hash-segment
+        # directory (models_dir/<model_hash>/), not one named after the full
+        # 24-byte combined hash — see save_model_checkpoint / _select_weight_checkpoint_file.
+        model_dir = self.models_dir / target_hash[8:-8]
 
         if not model_dir.exists():
             logger.warning(f"No checkpoints found for hash {target_hash}")
@@ -1515,24 +1774,36 @@ class CheckpointManager:
             logger.error(f"Failed to load checkpoint: {e}")
             return None
 
-    def load_logger_snapshot(self) -> bool:
-        """Load logger queues from snapshot for the current experiment hash."""
+    def _apply_logger_snapshot_payload(self, snapshot: Dict[str, Any]) -> bool:
+        """Restore (or merge into) registered logger queues from an already
+        loaded ``{"loggers": {name: payload}}`` snapshot dict. Additive:
+        existing history in each named logger is kept, the snapshot's rows
+        are staged on top of it. Shared by this manager's own startup load
+        and by the multi-root sibling merge path."""
+        loggers_payload = snapshot.get("loggers", {}) if snapshot else {}
+        for lname, payload in loggers_payload.items():
+            try:
+                lg = ledgers.get_logger(lname) if lname in ledgers.list_loggers() else None
+                if lg is None or not hasattr(lg, "load_snapshot"):
+                    lg = LoggerQueue(register=False)
+                    ledgers.register_logger(lg, name=lname)
+                lg.load_snapshot(payload)
+            except Exception as inner_e:
+                logger.warning(f"Failed to restore logger '{lname}': {inner_e}")
+        return True
+
+    def load_logger_snapshot(self, loggers_dir: Optional[Path] = None) -> bool:
+        """Load logger queues from snapshot for the current experiment hash.
+
+        ``loggers_dir`` defaults to this manager's own loggers_dir; pass a
+        sibling root's loggers dir to merge its curves in instead (see
+        _merge_sibling_logger_histories).
+        """
         try:
-            snapshot = self._load_logger_snapshot_payload()
+            snapshot = self._load_logger_snapshot_payload(loggers_dir)
             if not snapshot:
                 return False
-
-            loggers_payload = snapshot.get("loggers", {})
-            for lname, payload in loggers_payload.items():
-                try:
-                    lg = ledgers.get_logger(lname) if lname in ledgers.list_loggers() else None
-                    if lg is None or not hasattr(lg, "load_snapshot"):
-                        lg = LoggerQueue(register=False)
-                        ledgers.register_logger(lg, name=lname)
-                    lg.load_snapshot(payload)
-                except Exception as inner_e:
-                    logger.warning(f"Failed to restore logger '{lname}': {inner_e}")
-            return True
+            return self._apply_logger_snapshot_payload(snapshot)
         except Exception as e:
             logger.warning(f"Failed to load logger snapshot: {e}")
             return False
@@ -1757,7 +2028,10 @@ class CheckpointManager:
                     # Extract RNG state from data snapshot if available
                     rng_state = snapshot_data.get('rng_state', {})
                     if load_data_snapshot:
-                        snapshot_df = pd.DataFrame(snapshot_data.get('data', [])).set_index([SampleStatsEx.SAMPLE_ID.value, SampleStatsEx.INSTANCE_ID.value]) if 'data' in snapshot_data else pd.DataFrame()
+                        snapshot_df = self._read_snapshot_table(snapshot_data, data_dir)
+                        _idx_cols = [SampleStatsEx.SAMPLE_ID.value, SampleStatsEx.INSTANCE_ID.value]
+                        if not snapshot_df.empty and all(c in snapshot_df.columns for c in _idx_cols):
+                            snapshot_df = snapshot_df.set_index(_idx_cols)
                         if not snapshot_df.empty:
                             result['data_state'] = {'snapshot': snapshot_df}
                             result['loaded_components'].add('data')

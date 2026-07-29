@@ -133,6 +133,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    agent
    hyperparameters
    logger
+   checkpointing
    .. weights_studio
 
 

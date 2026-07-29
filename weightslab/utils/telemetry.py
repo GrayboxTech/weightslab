@@ -1,4 +1,5 @@
-"""Anonymous usage telemetry — fired on first daily import and on `weightslab start`.
+"""Anonymous usage telemetry — fired on first daily import, on `weightslab start`,
+and on `weightslab tunnel`.
 
 Opt-out: set WL_NO_TELEMETRY=1 in your environment.
 No personally identifiable information is collected. The raw IP is used
@@ -11,7 +12,7 @@ import uuid
 import platform
 import threading
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ _STATE_DIR = Path.home() / ".weightslab"
 _UUID_FILE = _STATE_DIR / "telemetry_id"
 _LAST_IMPORT_PING_FILE = _STATE_DIR / "last_import_ping"
 _LAST_UI_PING_FILE = _STATE_DIR / "last_ui_ping"
+_LAST_TUNNEL_PING_FILE = _STATE_DIR / "last_tunnel_ping"
 _COOLDOWN_S = 86_400  # ping at most once per 24 h per event type
 
 _CI_ENV_VARS = (
@@ -39,6 +41,32 @@ def _disabled() -> bool:
 
 def _is_ci() -> bool:
     return any(os.environ.get(v) for v in _CI_ENV_VARS)
+
+
+def _launched_via_cli() -> bool:
+    """True when this process is the `weightslab` console command itself.
+
+    Importing the `weightslab.cli` submodule always imports the parent
+    `weightslab` package first (Python's normal parent-before-child import
+    order), so `ping_import` would otherwise fire on every `weightslab
+    <subcommand>` invocation even though no user code executed `import
+    weightslab`. Detected from the launcher in sys.argv[0], which is set by
+    the interpreter before any imports run — reliable regardless of import
+    order. Covers the installed console script (`weightslab` /
+    `weightslab.exe`) and `python -m weightslab.cli`.
+    """
+    # Parsed with PurePosixPath after normalizing "\" to "/", since sys.argv[0]
+    # can carry Windows-style separators regardless of host OS (e.g. captured
+    # on Windows and replayed in a test on Linux CI) — plain Path()'s parsing
+    # rules follow the *host* platform, not the string's own style, so it
+    # would silently fail to split Windows-style paths on non-Windows runners.
+    try:
+        argv0 = PurePosixPath(sys.argv[0].replace("\\", "/"))
+        if argv0.stem.lower() == "weightslab":
+            return True
+        return argv0.stem == "cli" and argv0.parent.name == "weightslab"
+    except Exception:
+        return False
 
 
 def _get_or_create_uuid() -> str:
@@ -87,7 +115,7 @@ def _payload(event: str, version: str) -> bytes:
         tz = "unknown"
     return json.dumps({
         "uuid": _get_or_create_uuid(),
-        "event": event,           # "import" | "ui_start"
+        "event": event,           # "import" | "ui_start" | "tunnel_start"
         "version": version,
         "python": sys.version.split()[0],
         "os": platform.system(),  # Windows / Linux / Darwin
@@ -121,9 +149,15 @@ def _fire(event: str, version: str) -> None:
 
 
 def ping_import(version: str) -> None:
-    """Async ping on package import — once per process AND at most once per 24 h or version change. No-op in CI."""
+    """Async ping on package import — once per process AND at most once per 24 h or version change.
+
+    No-op in CI, and no-op when this process is the `weightslab` CLI itself
+    (see `_launched_via_cli`) — CLI subcommands report their own events
+    (e.g. `ping_ui_launch` for `weightslab start`) rather than being counted
+    as a library import.
+    """
     global _import_pinged_this_process
-    if _import_pinged_this_process or _disabled() or _is_ci():
+    if _import_pinged_this_process or _disabled() or _is_ci() or _launched_via_cli():
         return
     _import_pinged_this_process = True
     if not _ping_due(_LAST_IMPORT_PING_FILE, version):
@@ -150,3 +184,18 @@ def ping_ui_launch(version: str) -> None:
         "Set WL_NO_TELEMETRY=1 to disable."
     )
     _fire("ui_start", version)
+
+
+def ping_tunnel_launch(version: str) -> None:
+    """Async ping on `weightslab tunnel` — at most once per 24 h or version change. No-op in CI."""
+    if _disabled() or _is_ci():
+        return
+    if not _ping_due(_LAST_TUNNEL_PING_FILE, version):
+        logger.debug("Telemetry tunnel_start ping skipped (24 h cooldown active)")
+        return
+    _record_ping(_LAST_TUNNEL_PING_FILE, version)
+    logger.info(
+        "WeightsLab uses anonymous usage data (package version used, and OS name). "
+        "Set WL_NO_TELEMETRY=1 to disable."
+    )
+    _fire("tunnel_start", version)

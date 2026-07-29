@@ -1,36 +1,47 @@
 # =============================================================================
-# Loss-shape classification
+# Custom signal-shape classifier (@wl.signal_classifier)
 # =============================================================================
-# The watched criterion is a stock ``nn.CrossEntropyLoss(reduction="none")``
-# wrapped per-sample in main.py. This module holds the loss-*trajectory*
-# classifier used by the ``sig/loss_shape`` signal: given each sample's loss
-# history it labels the curve as one of ``SHAPES``.
-import numpy as np
+# WeightsLab ships a 6-way default loss-shape classifier (``wl.classify_loss_shape``
+# -> monotonic / plateaued / Flat_high / high_variance / U_Shape / Spiked). This
+# example OVERRIDES it for our loss signal with a simple BINARY
+# ``monotonic`` / ``not_monotonic`` classifier, registered with the
+# ``@wl.signal_classifier`` decorator.
+#
+# Once registered, everything that classifies shapes uses our function for this
+# signal: the background auto-tagger, ``wl.write_loss_shapes`` /
+# ``wl.write_dataframe(loss_shape_signal=...)``, and ``wl.enable_loss_shape_signal``.
+# The result is a categorical ``tag:loss_shape`` column filled with our two
+# labels — no extra wiring, and the six-way default is left untouched for every
+# other signal.
+import weightslab as wl
 
-SHAPES = ["monotonic", "plateaued", "Flat_high", "high_variance", "U_Shape", "Spiked"]
+# A trajectory needs at least this many points before we commit to a label;
+# below it we return None so the sample simply stays untagged for now.
+MIN_POINTS = 5
 
 
-def classify_shape(values):
-    """Loss trajectory -> shape index (or -1 with < 5 points)."""
-    y = np.asarray(values, dtype=float)
-    if y.size < 5:
-        return -1
-    n = y.size
-    rng = max(float(y.max() - y.min()), 1e-8)
-    drop = (float(y[0]) - float(y[-1])) / (abs(float(y[0])) + 1e-8)
-    cv = float(y.std()) / (abs(float(y.mean())) + 1e-8)
-    argmin = int(np.argmin(y))
-    rebound = (float(y[-1]) - float(y.min())) / rng
-    tail = y[int(0.6 * n):]
-    tail_flat = float(tail.std()) / (abs(float(tail.mean())) + 1e-8) < 0.1
-    if 0.2 * n < argmin < 0.8 * n and rebound > 0.3:
-        return SHAPES.index("U_Shape")
-    if drop > 0.4:
-        return SHAPES.index("monotonic")
-    if drop > 0.15 and tail_flat:
-        return SHAPES.index("plateaued")
-    if float(np.diff(y).max()) / rng > 0.5:
-        return SHAPES.index("Spiked")
-    if cv > 0.5:
-        return SHAPES.index("high_variance")
-    return SHAPES.index("Flat_high")
+@wl.signal_classifier(signal="loss_sample")
+def monotonic_or_not(values):
+    """Binary loss-shape classifier: ``"monotonic"`` when the loss learned
+    (dropped substantially from start to end), else ``"not_monotonic"``.
+
+    Reuses ``wl.trajectory_stats`` — the scale-invariant feature layer the
+    built-in classifier is built on — so we read the trend without re-deriving
+    it. Returns ``None`` with fewer than ``MIN_POINTS`` points.
+
+    Note the decorator binds this to the ``"loss_sample"`` signal by name. If you
+    rename the loss signal, either rename here to match or call
+    :func:`register_shape_classifier` with the new name (below).
+    """
+    s = wl.trajectory_stats(values)
+    if s is None or s["n"] < MIN_POINTS:
+        return None
+    return "monotonic" if s["drop"] > 0.4 else "not_monotonic"
+
+
+def register_shape_classifier(loss_name):
+    """Bind :func:`monotonic_or_not` to *loss_name*, overriding the built-in
+    default for just that signal. Handy when the loss signal name comes from
+    config and isn't known at import time — call it before training starts."""
+    wl.signal_classifier(signal=loss_name)(monotonic_or_not)
+    return monotonic_or_not

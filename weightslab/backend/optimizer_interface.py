@@ -36,6 +36,9 @@ class OptimizerInterface:
         if register:
             register_optimizer(self, weak=weak)
 
+        # LR Checkpoint to be sure not overwriting the LR in the optimizer with a different value than the one in the ledger
+        self._last_lr = self.get_lr()
+
     def init_attributes(self, obj):
         """Expose attributes and methods from the wrapped `obj`.
 
@@ -120,14 +123,16 @@ class OptimizerInterface:
                 optim_cfg = hp['optimizer']
                 if isinstance(optim_cfg, dict) and 'lr' in optim_cfg:
                     new_lr = float(optim_cfg['lr'])
-                    current_lrs = self.get_lr()
-                    # Only update if different (avoid unnecessary param group mutations)
-                    if not any(abs(lr - new_lr) < 1e-10 for lr in current_lrs):
-                         old_lr = current_lrs[0]
-                         self.set_lr(new_lr)
-                         # Fires every step when a scheduler decays lr away
-                         # from the hp_config value — keep at DEBUG to avoid spam.
-                         logger.debug("Learning rate updated: %s -> %s", old_lr, new_lr)
+                    if new_lr != self._last_lr[0]:  # Only update if different from last known LR and changed manually
+                        current_lrs = self.get_lr()
+                        # Only update if different (avoid unnecessary param group mutations)
+                        if not any(abs(lr - new_lr) < 1e-10 for lr in current_lrs):
+                            old_lr = current_lrs[0]
+                            self.set_lr(new_lr)
+                            self._last_lr[0] = new_lr
+                            # Fires every step when a scheduler decays lr away
+                            # from the hp_config value — keep at DEBUG to avoid spam.
+                            logger.debug("Learning rate updated: %s -> %s", old_lr, new_lr)
 
         except Exception:
             pass

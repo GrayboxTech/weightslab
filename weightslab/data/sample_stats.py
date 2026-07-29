@@ -28,6 +28,7 @@ class SampleStats:
         ORIGIN = "origin"
         TASK_TYPE = "task_type"
         LAST_SEEN = "last_seen"
+        NB_SEEN = "nb_seen"
 
         GROUP_ID = "group_id"
         MEMBER_RANK = "member_rank"
@@ -52,6 +53,7 @@ class SampleStats:
         Ex.ORIGIN.value: str,
         Ex.TASK_TYPE.value: str,
         Ex.LAST_SEEN.value: int,
+        Ex.NB_SEEN.value: int,
         Ex.GROUP_ID.value: str,
         Ex.MEMBER_RANK.value: int,
     }
@@ -71,6 +73,7 @@ class SampleStats:
         Ex.TASK_TYPE.value: "",
         Ex.LAST_SEEN.value: -1,
         Ex.GROUP_ID.value: "",
+        Ex.NB_SEEN.value: 0,
         Ex.MEMBER_RANK.value: 0,
     }
 
@@ -94,6 +97,7 @@ class SampleStats:
             cls.Ex.TAG.value,
             cls.Ex.ORIGIN.value,
             cls.Ex.LAST_SEEN.value,
+            cls.Ex.NB_SEEN.value,
         ]
 
         if os.getenv("WEIGHTSLAB_SAVE_PREDICTIONS_IN_H5", "1") == "1":

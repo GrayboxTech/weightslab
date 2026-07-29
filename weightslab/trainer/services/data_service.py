@@ -60,6 +60,20 @@ logger = logging.getLogger(__name__)
 # the WL_POINT_CLOUD_CHUNK_BYTES env variable (see docs/configuration.rst).
 _DEFAULT_POINT_CLOUD_CHUNK_BYTES = 1 << 20 # 1 MiB
 
+# Cap for signal_history(..., 'list'): a raw per-sample history is subsampled
+# (evenly, endpoints kept) to at most this many points so a long training run
+# doesn't produce unwieldy per-cell lists. Override with WL_SIGNAL_HISTORY_MAX_POINTS.
+SIGNAL_HISTORY_MAX_POINTS = int(os.environ.get("WL_SIGNAL_HISTORY_MAX_POINTS", "100"))
+
+# Cap for the on-demand GetSignalTrajectory plot (right-click a signal -> plot):
+# each sample's trajectory is downsampled (evenly, endpoints kept) to at most this
+# many points before it goes on the wire. Override with WL_SIGNAL_TRAJ_MAX_POINTS.
+SIGNAL_TRAJ_MAX_POINTS = int(os.environ.get("WL_SIGNAL_TRAJ_MAX_POINTS", "100"))
+
+# A trajectory needs at least this many recorded points to be worth plotting;
+# samples with fewer are omitted from GetSignalTrajectory entirely.
+SIGNAL_TRAJ_MIN_POINTS = 3
+
 
 def _point_cloud_chunk_bytes() -> int:
     """Read WL_POINT_CLOUD_CHUNK_BYTES; non-positive/invalid falls back to the default."""
@@ -468,7 +482,7 @@ class DataService:
                 self._preview_cache_ready.set()
                 return
 
-            total = min(len(df), self._preview_cache_max)
+            total = min(max(1, int(len(df) * 0.01)), self._preview_cache_max)
             logger.info("[PreviewCache] Building 64×64 or less or less preview cache for %d samples …", total)
             t0 = time.time()
 
@@ -2274,10 +2288,12 @@ class DataService:
         Backs the ``signal_history(metric, reduce)`` helper exposed to agent code.
         Reads the experiment logger's DuckDB per-sample store (append-only
         ``(metric, hash, sample_id, step, value)``), reduces each sample's whole
-        time series (min/max/mean/count), and maps it back onto the current
-        dataframe rows by sample_id. Rows whose sample has no recorded history
-        get NaN — so, e.g., ``signal_history('train_loss','min') >= 0.5`` is
-        False for them (no evidence they stayed above 0.5), never a crash.
+        time series (min/max/mean/count) — or, for reduce in
+        ``list``/``values``/``raw``/``history``, returns the full ordered series
+        as a per-sample list — and maps it back onto the current dataframe rows
+        by sample_id. Rows whose sample has no recorded history get NaN — so,
+        e.g., ``signal_history('train_loss','min') >= 0.5`` is False for them
+        (no evidence they stayed above 0.5), never a crash.
 
         Only populated when signals were logged with ``save_signals(..., log=True)``;
         with no logger / no history it returns an all-NaN Series (a safe no-op).
@@ -2317,8 +2333,16 @@ class DataService:
         except Exception:
             exp_hash = None
 
+        is_list = str(reduce).lower() in ("list", "values", "raw", "history")
+
         try:
-            reduced = logger_q.reduce_per_sample(resolved, reduce=reduce, exp_hash=exp_hash)
+            # Cap each sample's raw history to a manageable number of points
+            # (evenly subsampled, endpoints kept) so a long training run doesn't
+            # produce huge per-cell lists; scalar reduces are unaffected.
+            reduced = logger_q.reduce_per_sample(
+                resolved, reduce=reduce, exp_hash=exp_hash,
+                max_points=SIGNAL_HISTORY_MAX_POINTS if is_list else None,
+            )
         except Exception as exc:
             logger.debug(f"[Agent] signal_history('{metric}','{reduce}') failed: {exc}")
             return empty
@@ -2326,6 +2350,11 @@ class DataService:
             return empty
 
         mapped = sid_values.astype(str).map(reduced)
+        # List/raw reduces yield a Python list per sample — keep them as an
+        # object Series (numeric coercion would collapse each list to NaN).
+        # Scalar reduces (min/max/mean/count) stay numeric as before.
+        if is_list:
+            return pd.Series(mapped.to_numpy(dtype=object), index=df.index)
         return pd.Series(pd.to_numeric(mapped, errors="coerce").to_numpy(), index=df.index)
 
     def _resolve_checkpoint_manager(self):
@@ -3555,39 +3584,47 @@ class DataService:
         idx = np.linspace(0, len(vals) - 1, max_points).round().astype(int)
         return [float(vals[j]) for j in idx]
 
-    def _loss_trajectory_curves(self, sample_ids):
-        """Downsampled per-sample loss curve for the on-cell sparkline.
+    def _signal_trajectory_curves(self, signal_name, sample_ids, max_points=None):
+        """Downsampled per-sample trajectory of *signal_name* for the on-demand plot.
 
-        Returns ``{str(sample_id): [float, ...]}`` for samples with history; an
-        empty dict when there is no logger or no per-sample loss signal. Read-only —
-        shape classification lives on the write path (enable_loss_shape_signal),
-        not here. Signal name overridable via WL_LOSS_TRAJ_SIGNAL (default "loss").
+        Returns ``(resolved_name, {str(sample_id): [float, ...]})``. Only samples
+        with at least ``SIGNAL_TRAJ_MIN_POINTS`` recorded points are included;
+        each kept curve is chronological (step-ordered) and downsampled to at most
+        *max_points* (default ``SIGNAL_TRAJ_MAX_POINTS``). Empty dict when there is
+        no logger, the signal name can't be resolved, or nothing has enough history.
+        Read-only — shape classification lives on the write path, not here.
         """
         from weightslab.backend import ledgers
 
         logger_q = ledgers.get_logger()
-        if logger_q is None:
-            return {}
+        if logger_q is None or not signal_name:
+            return signal_name, {}
 
-        signal = os.environ.get("WL_LOSS_TRAJ_SIGNAL", "loss")
+        # Resolve the UI-facing name to the stored graph name (exact -> case-
+        # insensitive -> unambiguous substring); the per-sample table keys on the
+        # stored name, so a bare query wouldn't match "signals//train-loss".
+        resolved = logger_q.resolve_graph_name(signal_name) or signal_name
         try:
-            rows = logger_q.query_per_sample(signal, sample_ids=sample_ids)
+            rows = logger_q.query_per_sample(resolved, sample_ids=sample_ids)
         except Exception:
-            logger.debug("loss_trajectory query skipped", exc_info=True)
-            return {}
+            logger.debug("signal trajectory query skipped for %r", signal_name, exc_info=True)
+            return resolved, {}
 
         by_sid = {}
         for sid, step, val, _ in rows:
             by_sid.setdefault(str(sid), []).append((int(step), float(val)))
 
-        curves = {
-            sid: self._downsample_curve([v for _, v in sorted(pts)])
-            for sid, pts in by_sid.items()
-        }
+        cap = max_points if max_points and max_points > 0 else SIGNAL_TRAJ_MAX_POINTS
+        curves = {}
+        for sid, pts in by_sid.items():
+            if len(pts) < SIGNAL_TRAJ_MIN_POINTS:
+                continue  # not enough history to be worth plotting
+            curves[sid] = self._downsample_curve(
+                [v for _, v in sorted(pts)], max_points=cap)
         if curves:
-            logger.info("[loss_traj] page_ids=%d with_history=%d signal=%s",
-                        len(sample_ids), len(curves), signal)
-        return curves
+            logger.info("[signal_traj] signal=%s page_ids=%d with_history=%d",
+                        resolved, len(sample_ids), len(curves))
+        return resolved, curves
 
     def _build_metadata_only_response(self, df_slice: pd.DataFrame, requested_cols=None):
         """Build a DataSamplesResponse of metadata DataRecords from dataframe columns only.
@@ -3707,19 +3744,10 @@ class DataService:
                             _DataStat(name=col, type="string", shape=[1], value_string="1")
                         )
 
-        # -- Per-sample loss trajectory (the on-cell sparkline; read-only) -----
-        # Ship each visible sample's loss curve as an 'array' DataStat for the grid
-        # sparkline. The loss-SHAPE haze is NOT computed here: classification runs on
-        # the write/train path (enable_loss_shape_signal / write_loss_shapes) which
-        # maintains the tag:loss_shape column, so this path does no per-request work.
-        loss_curves = self._loss_trajectory_curves(sample_ids)
-        for i, sid in enumerate(sample_ids):
-            curve = loss_curves.get(str(sid))
-            if not curve:
-                continue
-            row_stats[i].append(
-                _DataStat(name="loss_trajectory", type="array",
-                          shape=[len(curve)], value=curve))
+        # NOTE: per-sample signal trajectories are intentionally NOT attached here.
+        # They are computed on demand only, when the user right-clicks a signal and
+        # asks to plot it (GetSignalTrajectory) — never on the metadata poll — so
+        # this path stays cheap and does no per-request history reads.
 
         # -- Build DataRecord list in one comprehension -----------------------
         _DataRecord = pb2.DataRecord
@@ -3859,6 +3887,43 @@ class DataService:
                 all_metadata_names=[],
                 grid_records=[],
             )
+
+    def GetSignalTrajectory(self, request, context):
+        """On-demand per-sample trajectory of one signal, for the samples shown.
+
+        Triggered when the user right-clicks a signal and picks "Plot signal
+        trajectory" — never on the metadata poll. Returns one downsampled curve
+        per sample that has at least ``SIGNAL_TRAJ_MIN_POINTS`` recorded points
+        (samples with too little history are omitted, so the UI draws nothing
+        rather than a misleading one/two-point line).
+        """
+        try:
+            signal_name = str(getattr(request, "signal_name", "") or "").strip()
+            sample_ids = [str(s) for s in getattr(request, "sample_ids", [])]
+            max_points = int(getattr(request, "max_points", 0) or 0)
+            if not signal_name:
+                return pb2.GetSignalTrajectoryResponse(
+                    success=False, message="signal_name is required")
+
+            resolved, curves = self._signal_trajectory_curves(
+                signal_name, sample_ids or None, max_points=max_points)
+
+            trajectories = [
+                pb2.SignalTrajectory(sample_id=sid, value=curve)
+                for sid, curve in curves.items()
+            ]
+            return pb2.GetSignalTrajectoryResponse(
+                success=True,
+                message=(f"{len(trajectories)} trajectories for {resolved!r}"
+                         if trajectories else
+                         f"No sample has >= {SIGNAL_TRAJ_MIN_POINTS} points for {resolved!r}"),
+                signal_name=resolved,
+                trajectories=trajectories,
+            )
+        except Exception as e:
+            logger.error("Error in GetSignalTrajectory: %s", str(e), exc_info=True)
+            return pb2.GetSignalTrajectoryResponse(
+                success=False, message=f"Failed to retrieve signal trajectory: {str(e)}")
 
     def _merge_multi_instance_signals(self, df_slice):
         """Merge per-instance signals into dictionaries for multi-index dataframes.
