@@ -642,6 +642,20 @@ Data and Cache
        gRPC messages but more memory held per message; smaller chunks lower
        peak memory at the cost of more round-trips. Must be a positive integer
        — non-positive or non-numeric values fall back to the 1 MiB default.
+   * - ``WL_SIGNAL_TRAJ_MAX_POINTS``
+     - ``100``
+     - Maximum number of points returned **per curve** by the on-demand
+       right-click *Plot signal trajectory* feature (the ``GetSignalTrajectory``
+       RPC). Each shown sample's per-step trajectory for the picked signal is
+       downsampled evenly to at most this many points, keeping the first and
+       last point (no values are interpolated). A sample needs at least 3
+       recorded points to return a trajectory; samples with fewer are omitted.
+   * - ``WL_SIGNAL_HISTORY_MAX_POINTS``
+     - ``100``
+     - Maximum number of points returned when the agent's
+       ``signal_history(metric, 'list')`` helper returns a per-sample history
+       list. Longer histories are downsampled evenly (endpoints kept) to this
+       cap.
 
 
 Evaluation Mode
