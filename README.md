@@ -6,7 +6,27 @@
       <img alt="WeightsLab Banner" src="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/weightslab-banner-light.png" width="100%" />
     </picture>
   </a>
+  
 <br>
+
+</div>
+<div align="center">
+  <h1>For AI Engineers working with messy real-world data</h1>
+  <p>Pause training, mine live loss signals to surface mislabels, class imbalance & outliers,<br>then curate your image, video & LiDAR data, without restarting.</p>
+</div>
+
+<p align="center">
+  <a href="https://graybx.com">Website</a>
+  ·
+  <a href="https://graybx.com">Docs</a>
+  ·
+  <a href="https://youtu.be/GBBDDaJQLWk">Demo (Images)</a>
+  ·
+  <a href="https://youtu.be/pSng0aIXGCY">Demo (VLA)</a>
+  ·
+  <a href="https://youtu.be/WetZU_J7Tg8">Demo (LiDAR)</a>
+  
+</p>
 <br>
 </div>
 <div align="center">
@@ -15,13 +35,6 @@
   <a href="https://pypi.org/project/weightslab/"><img src="https://img.shields.io/pypi/v/weightslab?style=flat&color=5865F2&logo=pypi&logoColor=white" alt="Version" /></a>
   <a href="https://pepy.tech/project/weightslab"><img src="https://img.shields.io/pepy/dt/weightslab?style=flat&color=5865F2&logo=pypi&logoColor=white" alt="PyPI - Downloads" /></a>
   <a href="https://github.com/GrayboxTech/weightslab/actions"><img src="https://img.shields.io/badge/CI-passing-brightgreen?style=flat&logo=githubactions&logoColor=white" alt="CI" /></a>
-</div>
-<br>
-
-</div>
-<div align="center">
-  <h1>For AI Engineers working with messy real-world data</h1>
-  <p>Pause training, mine live loss signals to surface mislabels, class imbalance & outliers,<br>then curate your image, video & LiDAR data, without restarting.</p>
 </div>
 
 <br>
