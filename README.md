@@ -6,11 +6,6 @@
       <img alt="WeightsLab Banner" src="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/weightslab-banner-light.png" width="100%" />
     </picture>
   </a>
-</div>
-<div align="center">
-  <h3>Trace training signals back to the exact samples causing them</h3>
-  <p>Pause training, mine live loss signals to surface mislabels, class imbalance & outliers,<br>then curate your image, video & LiDAR data, without restarting.</p>
-</div>
 
 </div>
 <div align="center">
@@ -20,6 +15,13 @@
   <a href="https://pepy.tech/project/weightslab"><img src="https://img.shields.io/pepy/dt/weightslab?style=flat&color=5865F2&logo=pypi&logoColor=white" alt="PyPI - Downloads" /></a>
   <a href="https://github.com/GrayboxTech/weightslab/actions"><img src="https://img.shields.io/badge/CI-passing-brightgreen?style=flat&logo=githubactions&logoColor=white" alt="CI" /></a>
 </div>
+
+</div>
+<div align="center">
+  <h3>For AI Engineers working with messy real-world data (images, videos, LiDAR) </h3>
+  <p>Pause training, mine live loss signals to surface mislabels, class imbalance & outliers,<br>then curate your image, video & LiDAR data, without restarting.</p>
+</div>
+
 <br>
 
 ## What it does
