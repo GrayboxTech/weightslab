@@ -43,7 +43,7 @@
 
 WeightsLab hooks into your existing PyTorch training loop and exposes a live UI where you can inspect per-sample signals, edit the dataset, and steer training. Without restarting.
 
-## Weighstlab in Motion
+## Weightslab in Motion
 <div align="center">
   <img src="https://github.com/GrayboxTech/assets/blob/main/GIF/weightslab_demo_bdd.gif" width="1280" alt="WeightsLab Studio demo" />
   <!-- <sub><a href="https://youtu.be/GBBDDaJQLWk">▶ Watch full demo</a></sub> -->
