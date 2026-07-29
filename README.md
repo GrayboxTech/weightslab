@@ -44,12 +44,7 @@
 WeightsLab is an open-source PyTorch tool for dataset debugging, data quality monitoring, mislabel detection, and mid-training data curation for computer vision datasets: images, video & LiDAR point clouds.
 Longer-term, we're building toward bringing dataset management, training, fine-tuning, and validation together in a single, unified workflow.
 
-<br>
-<div align="center">
-  <img src="https://github.com/GrayboxTech/assets/blob/main/GIF/weightslab_demo_bdd.gif" width="1280" alt="WeightsLab Studio demo" />
-  <!-- <sub><a href="https://youtu.be/GBBDDaJQLWk">▶ Watch full demo</a></sub> -->
-</div>
-<br>
+
 Most data problems are invisible until your model tells you: through loss spikes, poor generalization, or silent underperformance. WeightsLab connects those training signals back to the exact samples causing them.
 
 **Wrap your training script with the SDK** to capture per-sample signals live.
@@ -108,6 +103,15 @@ For a detailed installation guide and advanced configuration &rarr; [Installatio
 >
 > Explore our [sandbox](www.sandbox.graybx.com).
 
+<br>
+
+## Weighstlab in Motion
+
+<br>
+<div align="center">
+  <img src="https://github.com/GrayboxTech/assets/blob/main/GIF/weightslab_demo_bdd.gif" width="1280" alt="WeightsLab Studio demo" />
+  <!-- <sub><a href="https://youtu.be/GBBDDaJQLWk">▶ Watch full demo</a></sub> -->
+</div>
 <br>
 
 ## Resources & Community
