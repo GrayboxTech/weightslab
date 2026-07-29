@@ -1,4 +1,10 @@
-"""Tests for wl.write_history — JSON/CSV dump of signal history with filtering."""
+"""Tests for wl.write_history — Parquet/JSON/CSV dump of signal history with filtering.
+
+Format defaults to inference from the path extension, falling back to parquet
+when the path has none. These tests use explicit ``.json`` / ``.csv`` paths, so
+they exercise the JSON/CSV branches deterministically regardless of whether a
+parquet engine is installed.
+"""
 import csv
 import json
 import os
@@ -471,9 +477,9 @@ class TestWriteHistoryEdgeCases:
         with patch("weightslab.src.get_logger", return_value=lg):
             out = write_history(dirpath)
         assert os.path.isfile(out)
-        assert out.endswith(".json")
-        # filename should be <8-char hex hash>_history.json
-        assert re.match(r"[0-9a-f]{8}_history\.json$", os.path.basename(out))
+        # No path extension → default format is parquet; without a parquet engine
+        # the write falls back to JSON, so accept either extension.
+        assert re.match(r"[0-9a-f]{8}_history\.(parquet|json)$", os.path.basename(out))
 
     def test_directory_path_same_params_same_filename(self, lg, tmp_path):
         """Same call parameters always produce the same filename (deterministic hash)."""

@@ -60,6 +60,11 @@ logger = logging.getLogger(__name__)
 # the WL_POINT_CLOUD_CHUNK_BYTES env variable (see docs/configuration.rst).
 _DEFAULT_POINT_CLOUD_CHUNK_BYTES = 1 << 20 # 1 MiB
 
+# Cap for signal_history(..., 'list'): a raw per-sample history is subsampled
+# (evenly, endpoints kept) to at most this many points so a long training run
+# doesn't produce unwieldy per-cell lists. Override with WL_SIGNAL_HISTORY_MAX_POINTS.
+SIGNAL_HISTORY_MAX_POINTS = int(os.environ.get("WL_SIGNAL_HISTORY_MAX_POINTS", "100"))
+
 
 def _point_cloud_chunk_bytes() -> int:
     """Read WL_POINT_CLOUD_CHUNK_BYTES; non-positive/invalid falls back to the default."""
@@ -468,7 +473,7 @@ class DataService:
                 self._preview_cache_ready.set()
                 return
 
-            total = min(len(df), self._preview_cache_max)
+            total = min(max(1, int(len(df) * 0.01)), self._preview_cache_max)
             logger.info("[PreviewCache] Building 64×64 or less or less preview cache for %d samples …", total)
             t0 = time.time()
 
@@ -2274,10 +2279,12 @@ class DataService:
         Backs the ``signal_history(metric, reduce)`` helper exposed to agent code.
         Reads the experiment logger's DuckDB per-sample store (append-only
         ``(metric, hash, sample_id, step, value)``), reduces each sample's whole
-        time series (min/max/mean/count), and maps it back onto the current
-        dataframe rows by sample_id. Rows whose sample has no recorded history
-        get NaN — so, e.g., ``signal_history('train_loss','min') >= 0.5`` is
-        False for them (no evidence they stayed above 0.5), never a crash.
+        time series (min/max/mean/count) — or, for reduce in
+        ``list``/``values``/``raw``/``history``, returns the full ordered series
+        as a per-sample list — and maps it back onto the current dataframe rows
+        by sample_id. Rows whose sample has no recorded history get NaN — so,
+        e.g., ``signal_history('train_loss','min') >= 0.5`` is False for them
+        (no evidence they stayed above 0.5), never a crash.
 
         Only populated when signals were logged with ``save_signals(..., log=True)``;
         with no logger / no history it returns an all-NaN Series (a safe no-op).
@@ -2317,8 +2324,16 @@ class DataService:
         except Exception:
             exp_hash = None
 
+        is_list = str(reduce).lower() in ("list", "values", "raw", "history")
+
         try:
-            reduced = logger_q.reduce_per_sample(resolved, reduce=reduce, exp_hash=exp_hash)
+            # Cap each sample's raw history to a manageable number of points
+            # (evenly subsampled, endpoints kept) so a long training run doesn't
+            # produce huge per-cell lists; scalar reduces are unaffected.
+            reduced = logger_q.reduce_per_sample(
+                resolved, reduce=reduce, exp_hash=exp_hash,
+                max_points=SIGNAL_HISTORY_MAX_POINTS if is_list else None,
+            )
         except Exception as exc:
             logger.debug(f"[Agent] signal_history('{metric}','{reduce}') failed: {exc}")
             return empty
@@ -2326,6 +2341,11 @@ class DataService:
             return empty
 
         mapped = sid_values.astype(str).map(reduced)
+        # List/raw reduces yield a Python list per sample — keep them as an
+        # object Series (numeric coercion would collapse each list to NaN).
+        # Scalar reduces (min/max/mean/count) stay numeric as before.
+        if is_list:
+            return pd.Series(mapped.to_numpy(dtype=object), index=df.index)
         return pd.Series(pd.to_numeric(mapped, errors="coerce").to_numpy(), index=df.index)
 
     def _resolve_checkpoint_manager(self):

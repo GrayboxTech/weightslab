@@ -45,6 +45,7 @@ dependencies = [
   "h5py>=3.10,<4",
   "xxhash>=3.4,<4.1",
   "tables>=3.9,<4",  # h5 deps
+  "pyarrow>=14,<23",  # default parquet engine for write_dataframe() checkpoints
 
   # PyTorch stack. Upper bounds left open (<3 / <1) so a pre-installed modern
   # torch (e.g. Colab's torch 2.9 / torchvision 0.24) is accepted as-is instead

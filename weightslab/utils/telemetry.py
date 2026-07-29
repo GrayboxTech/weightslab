@@ -12,7 +12,7 @@ import uuid
 import platform
 import threading
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +55,13 @@ def _launched_via_cli() -> bool:
     order. Covers the installed console script (`weightslab` /
     `weightslab.exe`) and `python -m weightslab.cli`.
     """
+    # Parsed with PurePosixPath after normalizing "\" to "/", since sys.argv[0]
+    # can carry Windows-style separators regardless of host OS (e.g. captured
+    # on Windows and replayed in a test on Linux CI) — plain Path()'s parsing
+    # rules follow the *host* platform, not the string's own style, so it
+    # would silently fail to split Windows-style paths on non-Windows runners.
     try:
-        argv0 = Path(sys.argv[0])
+        argv0 = PurePosixPath(sys.argv[0].replace("\\", "/"))
         if argv0.stem.lower() == "weightslab":
             return True
         return argv0.stem == "cli" and argv0.parent.name == "weightslab"
