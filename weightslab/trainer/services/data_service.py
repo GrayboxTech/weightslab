@@ -3115,6 +3115,12 @@ class DataService:
                                 df.pop(junk)
                         if 'sample_id' in df.columns:
                             df['sample_id'] = df['sample_id'].astype(int)
+                        # FIX: resolve bare signal names to their df column (signals//<name>)
+                        _rb = params.get("by")
+                        if _rb is not None:
+                            _rbl = [_rb] if isinstance(_rb, str) else list(_rb)
+                            _rbl = [(c if c in df.columns else ("signals//"+c if ("signals//"+c) in df.columns else c)) for c in _rbl]
+                            params["by"] = _rbl if isinstance(_rb, (list, tuple)) else _rbl[0]
                         df.sort_values(inplace=True, **params)
                         if 'sample_id' in df.columns:
                             df['sample_id'] = df['sample_id'].astype(str)
@@ -3132,7 +3138,7 @@ class DataService:
                                                   key=self._sample_id_sortable_series)
                                 else:
                                     df.sort_index(level=by, inplace=True, ascending=ascending)
-                            elif by in df.columns:
+                            elif all((b in df.columns) for b in ([by] if isinstance(by, str) else (by or []))):  # FIX: list-safe
                                 df.sort_values(inplace=True, **params, key=lambda x: x)
                             else:
                                 raise e
