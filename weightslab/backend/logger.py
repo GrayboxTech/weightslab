@@ -108,6 +108,11 @@ class LoggerQueue:
         self._stage_instance: list = []
         self._seq = 0
 
+        # Absolute paths of sibling DBs already merged in via merge_from_disk,
+        # so repeated merge triggers (logger can be bound to disk from three
+        # different call sites depending on init ordering) stay idempotent.
+        self._merged_source_dbs: set = set()
+
         # Per-sample query cache. Many consumers read the SAME (signal, ids) in
         # one step (e.g. reactive signals all reading the loss); memoize so N
         # identical reads cost 1 scan. Keyed by (signal, ids, [step,] hash,
@@ -146,6 +151,17 @@ class LoggerQueue:
                     self.set_db_path(os.path.join(str(loggers_dir), "loggers.duckdb"))
             except Exception:
                 pass
+
+        # Checkpoint manager was created before this logger and already
+        # resolved a multi-root parent directory — merge sibling roots' curves
+        # in now (the reverse ordering is handled by
+        # CheckpointManager._bind_logger_to_disk; merge_from_disk is
+        # idempotent so both call sites firing is harmless).
+        if getattr(self.chkpt_manager, "is_multi_root", False):
+            try:
+                self.chkpt_manager._merge_sibling_logger_histories()
+            except Exception as exc:
+                logger.warning(f"[LoggerQueue] Failed to merge multi-root sibling logger histories: {exc}")
 
         self._start_background_flush()
 
@@ -378,6 +394,63 @@ class LoggerQueue:
                     self._conn.execute("CHECKPOINT")
             except Exception as exc:
                 logger.warning(f"[LoggerQueue] flush_to_disk failed: {exc}")
+
+    def merge_from_disk(self, other_db_path) -> bool:
+        """Merge signal-history rows from another on-disk DuckDB file into
+        this logger's live tables.
+
+        Used to stitch training curves together from sibling experiment
+        roots discovered under a shared parent directory (see
+        CheckpointManager._merge_sibling_logger_histories). Purely additive:
+        rows are namespaced by ``experiment_hash``, so independent hash
+        chains from different roots never collide, and nothing already in
+        this logger is touched. A no-op (returns False) if the path doesn't
+        exist, is this same database, or the merge fails outright.
+        """
+        if not other_db_path:
+            return False
+        other_db_path = os.path.abspath(str(other_db_path))
+        if not os.path.exists(other_db_path):
+            return False
+        if self._db_path not in (None, ":memory:") and other_db_path == os.path.abspath(self._db_path):
+            return False
+
+        with self._lock:
+            if other_db_path in self._merged_source_dbs:
+                # Already merged (this can be triggered from more than one
+                # init-ordering call site) — skip to avoid duplicating rows.
+                return False
+
+            try:
+                self._flush_stage()
+                escaped = other_db_path.replace("'", "''")
+                self._conn.execute(f"ATTACH '{escaped}' AS incoming (READ_ONLY)")
+            except Exception as exc:
+                logger.warning(f"[LoggerQueue] Failed to attach {other_db_path} for merge: {exc}")
+                return False
+
+            try:
+                copied_any = False
+                for tbl in self._HISTORY_TABLES:
+                    try:
+                        self._conn.execute(f"INSERT INTO {tbl} SELECT * FROM incoming.{tbl}")
+                        copied_any = True
+                    except Exception as exc:
+                        # Table may be missing in an older-schema sibling DB;
+                        # skip it, other tables still merge.
+                        logger.debug(f"[LoggerQueue] Skipped merging table '{tbl}' from {other_db_path}: {exc}")
+            finally:
+                try:
+                    self._conn.execute("DETACH incoming")
+                except Exception:
+                    pass
+
+            if copied_any:
+                self._merged_source_dbs.add(other_db_path)
+                self._invalidate_qps_cache()
+                self._restore_runtime_state_from_db()
+                logger.info(f"[LoggerQueue] Merged signal history from {other_db_path}")
+            return copied_any
 
     def _restore_runtime_state_from_db(self) -> None:
         """Repopulate seq counter and graph names from an existing (file) DB."""
