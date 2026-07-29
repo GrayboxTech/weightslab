@@ -2706,6 +2706,7 @@ def save_group_signals(
 
         if step is not None:
             updates[SampleStatsEx.LAST_SEEN.value] = step
+            updates[SampleStatsEx.NB_SEEN.value] = 0 if SampleStatsEx.NB_SEEN.value not in updates else updates[SampleStatsEx.NB_SEEN.value] + 1
 
         all_updates.append(updates)
         active_group_ids.append(gid)
