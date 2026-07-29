@@ -404,11 +404,6 @@ if __name__ == "__main__":
                 test_loader_len
             )
 
-        # Periodic history + dataframe export (JSON/CSV snapshots to root_log_dir)
-        if age > 0 and age % write_export_ratio == 0:
-            wl.write_history()
-            wl.write_dataframe()
-
         # Verbose
         if verbose and not tqdm_display:
             import sys

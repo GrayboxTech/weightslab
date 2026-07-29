@@ -424,7 +424,7 @@ the verdict back as the categorical tag ``loss_shape`` (via
 sortable label you can triage in the studio — e.g. surface every ``Flat_high``
 sample to hunt for mislabels.
 
-The six shapes:
+The seven shapes:
 
 ==============  ====================================================================
 Label           Meaning
@@ -433,58 +433,25 @@ monotonic       Loss steadily decreasing — the model is learning the sample.
 plateaued       Decreased then leveled off still-high — stuck / hard sample.
 Flat_high       Never moved, stayed high — likely a mislabel or unlearnable.
 high_variance   Noisy oscillation — model uncertain, often an ambiguous label.
-U_Shape         Learned then forgotten — catastrophic interference from later data.
-Spiked          Sudden jump at some step — data/augmentation/version change.
+U_Shape         Dipped, then is recovering/still moving — not settled yet.
+Forgotten       Dipped, then permanently regressed to a new, worse, flat level.
+Spiked          One-step jump that reverts — transient, not a lasting change.
 ==============  ====================================================================
+
+``U_Shape`` and ``Forgotten`` are the same underlying event (loss improved, then
+got worse again) split on *permanence*: if the trajectory has settled flat at
+the new, worse level it's ``Forgotten`` (catastrophic interference from later
+data); if it's still actively climbing or oscillating, it's ``U_Shape`` — not
+enough evidence yet to call it permanent. ``Spiked`` is the opposite case: a
+sharp one-step rise that *does* come back down (a one-off data/augmentation
+glitch), as opposed to a rise that sticks.
 
 .. code-block:: python
 
-   import numpy as np
    import weightslab as wl
 
-   LOSS_SHAPE_LABELS = [
-       "monotonic", "plateaued", "Flat_high",
-       "high_variance", "U_Shape", "Spiked",
-   ]
+   LOSS_SHAPE_LABELS = list(wl.LOSS_SHAPES)
    LOSS_SHAPE_CODES = {label: i for i, label in enumerate(LOSS_SHAPE_LABELS)}
-
-   def _classify_loss_shape(values):
-       """Classify a per-sample loss trajectory (ordered by step).
-
-       Returns a label string, or None when there is not enough history yet.
-       All thresholds are scale-invariant (fractions of the trajectory's own
-       range) and illustrative — tune them for your own task.
-       """
-       y = np.asarray(values, dtype=float)
-       if y.size < 5:
-           return None
-
-       n = y.size
-       first, last = float(y[0]), float(y[-1])
-       ymin, ymax = float(y.min()), float(y.max())
-       rng = max(ymax - ymin, 1e-8)
-       mean = float(y.mean())
-
-       cv = float(y.std()) / (abs(mean) + 1e-8)        # noisiness
-       drop = (first - last) / (abs(first) + 1e-8)     # net improvement
-       argmin = int(np.argmin(y))
-       rebound = (last - ymin) / rng                    # climb-back from trough
-       max_up_jump = float(np.diff(y).max()) / rng      # largest single-step rise
-
-       tail = y[int(0.6 * n):]
-       tail_flat = (float(tail.std()) / (abs(float(tail.mean())) + 1e-8)) < 0.1
-
-       if max_up_jump > 0.5:
-           return "Spiked"
-       if cv > 0.5:
-           return "high_variance"
-       if 0.2 * n < argmin < 0.8 * n and rebound > 0.3:
-           return "U_Shape"
-       if drop > 0.4:
-           return "monotonic"
-       if drop > 0.15 and tail_flat:
-           return "plateaued"
-       return "Flat_high"
 
    # Declare the tag up-front so the UI shows all choices (after the dataloader
    # is registered). Then the signal below populates it during training.
@@ -502,7 +469,9 @@ Spiked          Sudden jump at some step — data/augmentation/version change.
        series = sorted(((step, val) for _, step, val, _ in history), key=lambda t: t[0])
        values = [v for _, v in series]
 
-       label = _classify_loss_shape(values)
+       # wl.classify_loss_shape (built-in) already implements the table above;
+       # see its docstring for the full rule set and every tunable threshold.
+       label = wl.classify_loss_shape(values)
        if label is None:
            return -1
        wl.set_categorical_tag([ctx.sample_id], "loss_shape", label)
@@ -537,7 +506,7 @@ Spiked          Sudden jump at some step — data/augmentation/version change.
           s = wl.trajectory_stats(values)
           if s is None or s["n"] < 5:
               return None
-          return "monotonic" if s["drop"] > 0.4 else "not_monotonic"
+          return "monotonic" if s["drop_z"] > 2 else "not_monotonic"
 
    See :ref:`signal_classifier <signal-classifier-ref>` below and
    :doc:`examples/usecases/loss_shape_classification`.
@@ -562,7 +531,7 @@ signal_classifier
 Register a custom signal-shape classifier that **overrides** the built-in
 :func:`classify_loss_shape`. The decorated function receives a sample's ordered
 value trajectory (``list[float]``) and returns a label string, or ``None`` to
-leave the sample untagged. Labels are **free-form** — the six-way
+leave the sample untagged. Labels are **free-form** — the seven-way
 :data:`LOSS_SHAPES` set is only the built-in's vocabulary; a custom classifier
 may emit any labels (e.g. a binary ``monotonic`` / ``not_monotonic``).
 
@@ -591,7 +560,7 @@ classifier for a given signal name.
        s = wl.trajectory_stats(values)
        if s is None or s["n"] < 5:
            return None
-       return "monotonic" if s["drop"] > 0.4 else "not_monotonic"
+       return "monotonic" if s["drop_z"] > 2 else "not_monotonic"
 
 compute_signals
 ---------------

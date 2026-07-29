@@ -128,17 +128,20 @@ class TestDefaultShapeClassifier(unittest.TestCase):
 
     def test_too_short_is_none(self):
         self.assertIsNone(wl.classify_loss_shape([1, 2, 3]))
-        self.assertIsNone(wl.classify_loss_shape([1, 0.5, 0.1], min_points=5))
+        self.assertIsNone(wl.classify_loss_shape([1, 0.5, 0.1, 0.05]))  # < 5 points
 
-    def test_thresholds_configurable(self):
-        traj = [1.0, 0.9, 0.8, 0.75, 0.7]                       # net drop 0.3
-        self.assertNotEqual(wl.classify_loss_shape(traj), "monotonic")   # default 0.4 unmet
-        self.assertEqual(wl.classify_loss_shape(traj, drop_learned=0.25), "monotonic")
+    def test_scale_and_offset_invariant(self):
+        # Same shape, wildly different scale/offset -> same label. Nothing to
+        # tune per-dataset: the classifier normalizes off the data itself.
+        base = [2, 1.5, 1, 0.5, 0.05]
+        scaled = [v * 1000 + 50 for v in base]
+        self.assertEqual(wl.classify_loss_shape(base), wl.classify_loss_shape(scaled))
+        self.assertEqual(wl.classify_loss_shape(base), "monotonic")
 
     def test_trajectory_stats_reusable(self):
         s = wl.trajectory_stats([2.0, 1.0, 0.5, 0.5, 0.4])
-        self.assertAlmostEqual(s["drop"], (2.0 - 0.4) / 2.0, places=5)
-        self.assertIn("cv", s); self.assertIn("tail_cv", s); self.assertIn("argmin_frac", s)
+        self.assertIn("drop_z", s); self.assertIn("noise", s)
+        self.assertIn("level_cv", s); self.assertIn("settled_frac", s)
         self.assertIsNone(wl.trajectory_stats([1.0]))   # < 2 points
 
     def test_enable_live_signal_registers(self):
@@ -157,6 +160,24 @@ class TestDefaultShapeClassifier(unittest.TestCase):
                      "write_signal_shapes", "enable_loss_shape_signal"):
             self.assertTrue(hasattr(wl, name), name)
         self.assertIn("monotonic", wl.LOSS_SHAPES)
+
+    def test_spike_requires_reversion(self):
+        # Big one-step jump that reverts -> Spiked.
+        reverting = [1, 1, 1, 1, 1, 6, 1, 1, 1, 1, 1]
+        self.assertEqual(wl.classify_loss_shape(reverting), "Spiked")
+        # Same size jump that never comes back down -> not a spike, it's a
+        # lasting change (falls through to the other checks instead).
+        permanent = [1, 1, 1, 1, 1, 1, 4, 4, 4, 4, 4]
+        self.assertNotEqual(wl.classify_loss_shape(permanent), "Spiked")
+
+    def test_forgotten_vs_u_shape(self):
+        # Dips, recovers, then settles at a new (worse) level -> Forgotten.
+        forgotten = [3, 2, 1, 0.5, 0.3, 0.3, 0.32, 0.31, 2.5, 2.6, 2.55, 2.58, 2.6]
+        self.assertEqual(wl.classify_loss_shape(forgotten), "Forgotten")
+        # Dips, then is still climbing/oscillating at the very end -> not
+        # confirmed permanent yet, so U_Shape rather than Forgotten.
+        still_recovering = [5, 4, 3, 1, 0.5, 0.8, 1.2, 1.8, 2.5, 3.2, 4.0]
+        self.assertEqual(wl.classify_loss_shape(still_recovering), "U_Shape")
 
 
 class TestSignalClassifierDecorator(unittest.TestCase):
@@ -179,7 +200,7 @@ class TestSignalClassifierDecorator(unittest.TestCase):
         @wl.signal_classifier(signal="loss_sample")
         def mono_or_not(values):
             s = wl.trajectory_stats(values)
-            return None if s is None else ("monotonic" if s["drop"] > 0.4 else "not_monotonic")
+            return None if s is None else ("monotonic" if s["drop_z"] > 2 else "not_monotonic")
 
         self.assertIs(wl.resolve_signal_classifier("loss_sample"), mono_or_not)
         # A different signal still gets the built-in.

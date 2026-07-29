@@ -4182,55 +4182,164 @@ def auto_loss_shape_signal_names() -> list:
     return sorted(_AUTO_LOSS_SHAPE_SIGNALS)
 
 
-LOSS_SHAPES = ["monotonic", "plateaued", "Flat_high", "high_variance", "U_Shape", "Spiked"]
+LOSS_SHAPES = ["monotonic", "plateaued", "Flat_high", "high_variance", "U_Shape", "Spiked", "Forgotten"]
+
+# Two standard statistical conventions -- not per-label tuned magic numbers --
+# applied uniformly everywhere classify_loss_shape has to decide "is this a
+# real change, or just noise": a ~95%-confidence z-score, and the textbook
+# "cv > 1" rule of thumb for a series being more noise than signal.
+_Z_SIGNIFICANT = 2.0
+_CV_HIGH_VARIABILITY = 1.0
+_MIN_POINTS = 5
+
+
+def _noise_floor(y):
+    """Robust per-step noise estimate for *y*, independent of any trend.
+
+    Uses the discrete second difference (cancels a locally linear trend --
+    including a plain monotonic rise or fall -- leaving curvature + noise),
+    then estimates the *typical* spread from it after trimming the single
+    most extreme deviation. That trim (rather than a median/MAD) is what
+    keeps this usable at the short lengths this classifier actually runs on:
+    a lone spike contaminates ~3 consecutive second-difference entries, and
+    with only a handful of points total, those 3 can outnumber a plain
+    median's breakdown margin. Explicitly setting aside the one largest
+    deviation -- exactly the one candidate anomaly this classifier looks for
+    -- lets the rest describe the noise floor even when there are few of
+    them. Falls back to the first difference for a 2-point series.
+
+    The floor for a near-zero spread (most steps exactly flat) is scaled to
+    *y*'s own magnitude, not a bare absolute constant: an absolute floor
+    would be swamped by ordinary floating-point rounding from the smoothing
+    convolution on real-scale data, making trivial arithmetic residue
+    register as a "statistically significant" difference.
+    """
+    if y.size >= 3:
+        d, scale = np.diff(y, n=2), np.sqrt(6.0)   # Var(e[i+2]-2e[i+1]+e[i]) = 6*Var(e)
+    else:
+        d, scale = np.diff(y), np.sqrt(2.0)         # Var(e[i+1]-e[i]) = 2*Var(e)
+    abs_dev = np.abs(d - np.median(d)) if d.size else d
+    if abs_dev.size >= 2:
+        spread = float(np.mean(np.delete(abs_dev, int(np.argmax(abs_dev)))))
+    elif abs_dev.size == 1:
+        spread = float(abs_dev[0])
+    else:
+        spread = 0.0
+    rel_floor = 1e-6 * (float(np.abs(y).max()) + 1e-12)
+    return max(1.4826 * spread / scale, rel_floor)
 
 
 def trajectory_stats(values):
-    """Scale-invariant summary stats of one sample's trajectory — the reusable
-    feature layer. Returns a dict (or ``None`` with < 2 points) so you can build
-    a custom classifier on top without re-deriving the features::
+    """Scale- and noise-invariant summary stats of one sample's trajectory —
+    the reusable feature layer. Returns a dict (or ``None`` with < 2 points)
+    so you can build a custom classifier on top without re-deriving the
+    features::
 
         def my_clf(v):
             s = wl.trajectory_stats(v)
-            return None if s is None else ("fast" if s["drop"] > 0.6 else "slow")
+            return None if s is None else ("fast" if s["drop_z"] > 3 else "slow")
+
+    Every ``*_z`` value is a z-score against *this trajectory's own* noise
+    floor (see :func:`_noise_floor`) rather than a fraction of some fixed
+    constant -- the same underlying change reads as "significant" whether the
+    sample's loss lives in the single digits or the thousands, and whether
+    the curve is clean or inherently noisy. There is nothing to tune here:
+    the normalization comes from the data itself.
     """
     y = np.asarray(values, dtype=float)
     if y.size < 2:
         return None
     n = y.size
-    rng = max(float(y.max() - y.min()), 1e-8)
-    tail = y[int(0.6 * n):]
+    noise = _noise_floor(y)
+
+    w = max(1, min(n // 4, 9))
+    if w > 1:
+        pad = w // 2
+        kernel = np.ones(w) / w
+        sm = np.convolve(np.pad(y, (pad, pad), mode="edge"), kernel, mode="valid")[:n]
+    else:
+        sm = y
+
+    first, last = float(sm[0]), float(sm[-1])
+    valley_idx = int(np.argmin(sm))
+    valley = float(sm[valley_idx])
+
+    diffs = np.diff(y)
+    jump_idx = int(np.argmax(diffs))
+    pre_jump = float(sm[jump_idx])
+    after_jump = sm[jump_idx + 2:] if jump_idx + 2 < n else sm[-1:]
+
+    # How much of the time since the low point has the series actually spent
+    # settled? Walk backward from the end, growing the window while its own
+    # spread stays within noise -- the longest such suffix, as a fraction of
+    # the whole post-valley period. Doesn't care whether the climb up was one
+    # sharp jump or a slow ramp, only whether it has since stopped moving,
+    # and for how long.
+    post_valley = sm[valley_idx:]
+    lo = hi = float(post_valley[-1])
+    settled_n = 1
+    for i in range(len(post_valley) - 2, -1, -1):
+        v = float(post_valley[i])
+        new_lo, new_hi = min(lo, v), max(hi, v)
+        if (new_hi - new_lo) > _Z_SIGNIFICANT * noise:
+            break
+        lo, hi = new_lo, new_hi
+        settled_n += 1
+    settled_frac = settled_n / len(post_valley) if len(post_valley) else 0.0
+
     return {
         "n": n,
-        "first": float(y[0]), "last": float(y[-1]),
-        "drop": (float(y[0]) - float(y[-1])) / (abs(float(y[0])) + 1e-8),
-        "cv": float(y.std()) / (abs(float(y.mean())) + 1e-8),
-        "argmin_frac": float(np.argmin(y)) / n,
-        "rebound": (float(y[-1]) - float(y.min())) / rng,
-        "max_up_jump": float(np.diff(y).max()) / rng,
-        "tail_cv": float(tail.std()) / (abs(float(tail.mean())) + 1e-8),
+        "noise": noise,
+        "drop_z": (first - last) / noise,           # net change, start -> end
+        "dip_z": (first - valley) / noise,           # start -> low point
+        "rebound_z": (last - valley) / noise,        # low point -> end
+        "jump_z": float(diffs[jump_idx]) / noise,    # biggest single-step rise
+        "revert_z": abs(float(after_jump.mean()) - pre_jump) / noise,  # gap left after that jump
+        "trend_z": (float(sm.max()) - float(sm.min())) / noise,  # any discernible movement at all
+        "level_cv": noise / (abs(float(y.mean())) + 1e-8),        # noise relative to the series' own scale
+        "settled_n": settled_n,
+        "settled_frac": settled_frac,
     }
 
 
-def classify_loss_shape(values, min_points=5, drop_learned=0.4, drop_plateau=0.15,
-                        tail_flat_cv=0.1, spike_jump=0.5, noisy_cv=0.5, u_rebound=0.3):
-    """Default classifier -> one of ``LOSS_SHAPES`` (or ``None`` with <
-    *min_points*). Built on :func:`trajectory_stats` (reuse those features
-    for your own rules) with every threshold a named, tunable param. Override the
-    whole thing by passing your own ``classifier`` to :func:`write_signal_shapes`."""
+def classify_loss_shape(values):
+    """Default classifier -> one of :data:`LOSS_SHAPES` (or ``None`` with too
+    few points). Built on :func:`trajectory_stats`; every decision below is a
+    z-score against that trajectory's own noise floor, checked against the
+    same ``_Z_SIGNIFICANT`` (~95% confidence) convention everywhere -- not a
+    different hand-picked fraction per label, and nothing to tune: the
+    classifier normalizes itself to each sample's own scale and noise.
+
+    - ``Spiked`` needs a one-step jump that's statistically real (``jump_z``)
+      *and* a reversion afterwards (``revert_z`` small, i.e. indistinguishable
+      from noise) -- a jump that never comes back down isn't a spike, it's a
+      lasting change, so it falls through to the checks below instead.
+    - A real dip (``dip_z``) followed by a real rebound (``rebound_z``) is
+      ``Forgotten`` if the series has since settled (``settled_frac`` -- at
+      least half its time since the dip spent flat), else ``U_Shape`` (still
+      moving, not confirmed permanent).
+    - No statistically discernible trend at all (``trend_z``) is either
+      ``Flat_high`` or ``high_variance``, split on whether the noise itself
+      exceeds the series' own level (``level_cv`` > 1 -- the standard
+      "coefficient of variation" high-variability convention).
+    - A real net drop (``drop_z``) that has since settled is ``plateaued``;
+      still moving is ``monotonic``.
+
+    Override the whole thing by passing your own ``classifier`` to
+    :func:`write_signal_shapes`.
+    """
     s = trajectory_stats(values)
-    if s is None or s["n"] < min_points:
+    if s is None or s["n"] < _MIN_POINTS:
         return None
-    if 0.2 < s["argmin_frac"] < 0.8 and s["rebound"] > u_rebound:
-        return "U_Shape"
-    if s["drop"] > drop_learned:
-        return "monotonic"
-    if s["drop"] > drop_plateau and s["tail_cv"] < tail_flat_cv:
-        return "plateaued"
-    if s["max_up_jump"] > spike_jump:
+    settled = s["settled_n"] >= 3 and s["settled_frac"] >= 0.5
+    if s["jump_z"] > _Z_SIGNIFICANT and s["revert_z"] < _Z_SIGNIFICANT:
         return "Spiked"
-    if s["cv"] > noisy_cv:
-        return "high_variance"
+    if s["dip_z"] > _Z_SIGNIFICANT and s["rebound_z"] > _Z_SIGNIFICANT:
+        return "Forgotten" if settled else "U_Shape"
+    if s["trend_z"] <= _Z_SIGNIFICANT:
+        return "high_variance" if s["level_cv"] > _CV_HIGH_VARIABILITY else "Flat_high"
+    if s["drop_z"] > _Z_SIGNIFICANT:
+        return "plateaued" if settled else "monotonic"
     return "Flat_high"
 
 
@@ -4482,14 +4591,6 @@ def write_dataframe(
     # If reactive signals run on the worker thread, process every queued job
     # before reading, so the report includes the latest steps' derived signals.
     drain_signals()
-
-    # Default report summary: tag each sample's loss shape + log the distribution.
-    if loss_shape_signal is not None:
-        try:
-            dist = write_loss_shapes(loss_shape_signal)
-            logger.info("[WeightsLab] loss-shape summary (%s): %s", loss_shape_signal, dist)
-        except Exception as e:
-            logger.debug("loss-shape summary skipped: %s", e)
 
     logger.debug(
         "write_dataframe called: path=%r, format=%r, columns=%r, "

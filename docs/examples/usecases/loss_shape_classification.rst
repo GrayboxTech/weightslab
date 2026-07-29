@@ -25,7 +25,7 @@ The built-in default and your labels
 -------------------------------------
 
 Out of the box, :func:`classify_loss_shape` sorts each trajectory into one of
-six built-in shapes:
+seven built-in shapes:
 
 .. list-table::
    :header-rows: 1
@@ -41,13 +41,17 @@ six built-in shapes:
    * - ``high_variance``
      - Noisy oscillation — ambiguous annotation
    * - ``U_Shape``
-     - Model learned it then forgot — catastrophic interference
+     - Dipped, then is recovering/still moving — not settled yet
+   * - ``Forgotten``
+     - Dipped, then permanently regressed to a new, worse, flat level — catastrophic interference
    * - ``Spiked``
-     - Sudden jump — data pipeline or augmentation change
+     - One-step jump that reverts — a transient glitch, not a lasting change
 
-Those six labels are just the *built-in's* vocabulary. A custom classifier can
-emit **any** labels. This example uses a binary ``monotonic`` /
-``not_monotonic`` rule.
+``U_Shape`` and ``Forgotten`` are the same event (loss improved, then got worse
+again) split on whether it has settled at the new level yet. Those seven
+labels are just the *built-in's* vocabulary. A custom classifier can emit
+**any** labels. This example uses a binary ``monotonic`` / ``not_monotonic``
+rule.
 
 Base setup
 ----------
@@ -89,7 +93,7 @@ the trend without re-deriving it:
        s = wl.trajectory_stats(values)
        if s is None or s["n"] < MIN_POINTS:
            return None
-       return "monotonic" if s["drop"] > 0.4 else "not_monotonic"
+       return "monotonic" if s["drop_z"] > 2 else "not_monotonic"
 
 ``@wl.signal_classifier(signal="loss_sample")`` binds this rule to the
 ``loss_sample`` signal only. (Use a bare ``@wl.signal_classifier`` — or
@@ -114,7 +118,7 @@ Once registered, the classifier is consulted **everywhere shapes are
 computed** — you don't wire up ``subscribe_to`` / history queries /
 ``set_categorical_tag`` yourself. The background auto-tagger applies it
 automatically and fills a categorical ``tag:loss_shape`` column with our two
-labels. The built-in six-way default is left untouched for every other signal.
+labels. The built-in seven-way default is left untouched for every other signal.
 
 Universal loss on the test split
 ---------------------------------
