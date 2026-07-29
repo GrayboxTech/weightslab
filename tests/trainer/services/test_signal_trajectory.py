@@ -13,8 +13,15 @@ from weightslab.trainer.services.data_service import (
 
 
 def _logger_with(rows_by_sample, metric="loss_sample"):
-    """A LoggerQueue with per-sample rows staged: {sid: [values...]}."""
-    lg = LoggerQueue(register=False)
+    """An isolated in-memory LoggerQueue with per-sample rows staged: {sid: [values...]}.
+
+    ``get_checkpoint_manager`` is stubbed out during construction: otherwise a
+    global checkpoint manager left over from an earlier test binds the logger to
+    a shared on-disk ``loggers.duckdb`` (see LoggerQueue.__init__), and per-sample
+    rows accumulate across tests instead of staying isolated to this one.
+    """
+    with mock.patch("weightslab.backend.logger.get_checkpoint_manager", return_value=None):
+        lg = LoggerQueue(register=False)
     for sid, vals in rows_by_sample.items():
         for step, v in enumerate(vals):
             lg._stage_sample_row(metric, "h", sid, step, float(v))
