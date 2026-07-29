@@ -8,6 +8,14 @@
   </a>
   
 <br>
+</div>
+<div align="center">
+  <a href="https://github.com/GrayboxTech/weightslab/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License" /></a>
+  <a href="https://github.com/GrayboxTech/weightslab/stargazers"><img src="https://img.shields.io/github/stars/GrayboxTech/weightslab?style=flat&color=5865F2" alt="Stars" /></a>
+  <a href="https://pypi.org/project/weightslab/"><img src="https://img.shields.io/pypi/v/weightslab?style=flat&color=5865F2&logo=pypi&logoColor=white" alt="Version" /></a>
+  <a href="https://pepy.tech/project/weightslab"><img src="https://img.shields.io/pepy/dt/weightslab?style=flat&color=5865F2&logo=pypi&logoColor=white" alt="PyPI - Downloads" /></a>
+  <a href="https://github.com/GrayboxTech/weightslab/actions"><img src="https://img.shields.io/badge/CI-passing-brightgreen?style=flat&logo=githubactions&logoColor=white" alt="CI" /></a>
+</div>
 
 </div>
 <div align="center">
@@ -18,7 +26,7 @@
 <p align="center">
   <a href="https://graybx.com">Website</a>
   ·
-  <a href="https://graybx.com">Docs</a>
+  <a href="https://grayboxtech.github.io/weightslab/latest/quickstart.html">Docs</a>
   ·
   <a href="https://youtu.be/GBBDDaJQLWk">Demo (Images)</a>
   ·
@@ -27,49 +35,38 @@
   <a href="https://youtu.be/WetZU_J7Tg8">Demo (LiDAR)</a>
   
 </p>
-<br>
-</div>
-<div align="center">
-  <a href="https://github.com/GrayboxTech/weightslab/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License" /></a>
-  <a href="https://github.com/GrayboxTech/weightslab/stargazers"><img src="https://img.shields.io/github/stars/GrayboxTech/weightslab?style=flat&color=5865F2" alt="Stars" /></a>
-  <a href="https://pypi.org/project/weightslab/"><img src="https://img.shields.io/pypi/v/weightslab?style=flat&color=5865F2&logo=pypi&logoColor=white" alt="Version" /></a>
-  <a href="https://pepy.tech/project/weightslab"><img src="https://img.shields.io/pepy/dt/weightslab?style=flat&color=5865F2&logo=pypi&logoColor=white" alt="PyPI - Downloads" /></a>
-  <a href="https://github.com/GrayboxTech/weightslab/actions"><img src="https://img.shields.io/badge/CI-passing-brightgreen?style=flat&logo=githubactions&logoColor=white" alt="CI" /></a>
-</div>
 
 <br>
 
-## What it does
+## How can you use it ?
 
-WeightsLab is an open-source PyTorch tool for dataset debugging, data quality monitoring, mislabel detection, and mid-training data curation for computer vision datasets: images, video & LiDAR point clouds.
-Longer-term, we're building toward bringing dataset management, training, fine-tuning, and validation together in a single, unified workflow.
+**DATA** · Advanced Dataset Querying · Static & Dynamic Metatags · Golden dataset creation · Edge Case Discovery
 
+**SMART WORKFLOWS** · POC / Prototyping · Smart Collection & Annotation · Re-labelling Review Queues
 
-Most data problems are invisible until your model tells you: through loss spikes, poor generalization, or silent underperformance. WeightsLab connects those training signals back to the exact samples causing them.
+**MODEL DEVELOPMENT** · Model Fine-Tuning · Failure Case Discovery
 
-**Wrap your training script with the SDK** to capture per-sample signals live.
-**Open Studio** to inspect, filter, and curate your dataset mid-training, without restarting.
+**TRAINING RUN** · Health Check · Regression Discovery
 
-- **Detect** - Surface mislabels, outliers & class imbalance using live loss signals
-- **Curate** - Discard bad samples, create data subsets, rebalance distributions
-- **Continue** - Resume training on your cleaned dataset, no restart required
+**COMPUTE** · FLOPs Optimization
+
 <br>
 
 ## Quickstart
 
-![Python](https://img.shields.io/badge/Python-v3.10--v3.14-5865F2?style=flat&logo=python&logoColor=white)
-
-**1. Install**
+**1. Install & Launch**
 ```bash
 pip install weightslab
 ```
-
-**2. Launch the Studio**
 ```bash
-weightslab start
+weightslab start  # launch the UI
 ```
 
-**3.a. Wrap your training script locally**
+**2. Start in the cloud** 
+
+[![Start coding with GCollab](https://img.shields.io/badge/Start_coding_with_GCollab-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=white)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/Colab/wl-colab-quickstart.ipynb)
+
+**OR Wrap your training script locally**
 ```python
 # wrap the objects in your training script
 
@@ -84,13 +81,6 @@ wl.serve(serving_grpc=True, serving_cli=False)
 ...
 ```
 
-**3.b. Or start directly in the cloud**
-
-[![Start coding with GCollab](https://img.shields.io/badge/Start_coding_with_GCollab-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=white)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/Colab/wl-colab-quickstart.ipynb)
-
-
-
-For a detailed installation guide and advanced configuration &rarr; [Installation Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
 > [!TIP]
 > Quick examples to get started
 > ```bash
@@ -103,16 +93,18 @@ For a detailed installation guide and advanced configuration &rarr; [Installatio
 >
 > Explore our [sandbox](www.sandbox.graybx.com).
 
+For a detailed installation guide and advanced configuration &rarr; [Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
+
 <br>
 
 ## Weighstlab in Motion
 
-<br>
+
 <div align="center">
   <img src="https://github.com/GrayboxTech/assets/blob/main/GIF/weightslab_demo_bdd.gif" width="1280" alt="WeightsLab Studio demo" />
   <!-- <sub><a href="https://youtu.be/GBBDDaJQLWk">▶ Watch full demo</a></sub> -->
 </div>
-<br>
+
 
 ## Resources & Community
 <details>
