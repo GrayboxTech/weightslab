@@ -100,7 +100,7 @@ For a detailed installation guide and advanced configuration &rarr; [Documentati
 
 <h4>2. Fix and resume without re-starting</h4> Relabel or drop samples live, then continue training from the same checkpoint.
 
-<h4>3. Catch model regressions early on</h4> Analyze per-sample loss trajectories to see exactly where the model is struggling
+<h4>3. Catch model regressions early on</h4> Analyze per-sample loss trajectories to see exactly where the model is struggling.
 
 <br>
 <br>
