@@ -278,6 +278,13 @@ message RecordMetadata {
   repeated TaskField extra_fields = 7;
   bytes prediction_raw = 9;
   string task_type = 10;
+  // Text label/prediction (e.g. a generative model's target/reference text
+  // and its generated reply) -- additive, alongside the int32 fields above
+  // rather than replacing them, so existing classification/segmentation/
+  // detection consumers that populate sample_label/sample_prediction are
+  // completely unaffected. Empty/unset for numeric-label tasks.
+  repeated string sample_label_text = 11;
+  repeated string sample_prediction_text = 12;
 }
 
 message SampleStatistics {

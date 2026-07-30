@@ -12,6 +12,7 @@ from weightslab.trainer.trainer_tools import (
     _class_ids,
     _get_input_tensor_for_sample,
     _labels_from_mask_path_histogram,
+    _numeric_or_text_list,
     execute_df_operation,
     force_kill_all_python_processes,
     generate_overview,
@@ -110,6 +111,8 @@ class TestTrainerTools(unittest.TestCase):
                 self.task_type = kwargs.get("task_type", "")
                 self.sample_label = []
                 self.sample_prediction = []
+                self.sample_label_text = []
+                self.sample_prediction_text = []
 
         class _FakeSampleStats:
             def __init__(self):
@@ -142,6 +145,54 @@ class TestTrainerTools(unittest.TestCase):
             self.assertEqual(seg_stats.task_type, "segmentation")
             self.assertEqual(list(seg_stats.records[0].sample_label), [0, 1, 2])
             self.assertEqual(list(seg_stats.records[0].sample_prediction), [1, 2, 4])
+
+    def test_numeric_or_text_list(self):
+        self.assertEqual(_numeric_or_text_list("a generated reply"), ([], ["a generated reply"]))
+        self.assertEqual(_numeric_or_text_list(3), ([3], []))
+        self.assertEqual(_numeric_or_text_list([3]), ([3], []))
+        self.assertEqual(_numeric_or_text_list(np.array([3])), ([3], []))
+        self.assertEqual(_numeric_or_text_list(["only one string in a list"]), ([], ["only one string in a list"]))
+
+    def test_get_data_set_representation_text_label_and_prediction(self):
+        """A generative task (e.g. an LLM's reply as prediction, a reference
+        string as label) must route through the new text fields instead of
+        crashing on int(target)/int(pred)."""
+        exp = _Experiment()
+
+        class _FakeRecord:
+            def __init__(self, **kwargs):
+                self.sample_id = kwargs.get("sample_id")
+                self.sample_last_loss = kwargs.get("sample_last_loss", -1.0)
+                self.sample_discarded = kwargs.get("sample_discarded", False)
+                self.task_type = kwargs.get("task_type", "")
+                self.sample_label = []
+                self.sample_prediction = []
+                self.sample_label_text = []
+                self.sample_prediction_text = []
+
+        class _FakeSampleStats:
+            def __init__(self):
+                self.sample_count = 0
+                self.task_type = ""
+                self.records = []
+
+        text_rows = [
+            {
+                "sample_id": "30",
+                "prediction_loss": 0.1,
+                "label": "The reference/target answer.",
+                "prediction_raw": "The model's generated reply.",
+                "discarded": False,
+            },
+        ]
+
+        with patch("weightslab.trainer.trainer_tools.pb2.SampleStatistics", side_effect=_FakeSampleStats), \
+             patch("weightslab.trainer.trainer_tools.pb2.RecordMetadata", side_effect=lambda **kw: _FakeRecord(**kw)):
+            text_stats = get_data_set_representation(_SimpleDataset(text_rows), exp)
+            self.assertEqual(list(text_stats.records[0].sample_label), [])
+            self.assertEqual(list(text_stats.records[0].sample_prediction), [])
+            self.assertEqual(list(text_stats.records[0].sample_label_text), ["The reference/target answer."])
+            self.assertEqual(list(text_stats.records[0].sample_prediction_text), ["The model's generated reply."])
 
     def test_load_raw_image_from_images_and_tensor_input(self):
         with tempfile.TemporaryDirectory() as tmp:

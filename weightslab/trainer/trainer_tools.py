@@ -222,6 +222,22 @@ def mask_to_png_bytes(mask, num_classes=21):
     return buf.getvalue()
 
 
+def _numeric_or_text_list(value) -> Tuple[List[int], List[str]]:
+    """Split a label/prediction value into (int_list, text_list) -- exactly
+    one of the two is non-empty. Strings (a generated reply, a reference
+    target string) go to text_list; everything else takes the existing
+    numeric-coercion path unchanged (single scalar, or a list/ndarray reduced
+    to its single item, matching the prior int(...) behavior exactly)."""
+    if isinstance(value, str):
+        return [], [value]
+    if isinstance(value, (list, np.ndarray)):
+        arr = np.asarray(value)
+        if arr.dtype.kind in ("U", "S", "O") and arr.size and isinstance(arr.reshape(-1)[0], str):
+            return [], [str(v) for v in arr.reshape(-1).tolist()]
+        return [int(arr.item())], []
+    return [int(value)], []
+
+
 def _class_ids(x, num_classes=None, ignore_index=255):
     if x is None:
         return []
@@ -336,6 +352,8 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
         )
 
         task_type = sample_stats.task_type
+        target_list_text = []
+        pred_list_text = []
         if task_type == "segmentation":
             label = row.get("target")
             if isinstance(label, str):
@@ -346,10 +364,18 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
         else:
             target = row.get("label", row.get("target", -1))
             pred = row.get("prediction_raw", -1)
-            target_list = [int(target)] if not isinstance(target, (list, np.ndarray)) else [int(np.array(target).item())]
-            pred_list = [int(pred)] if not isinstance(pred, (list, np.ndarray)) else [int(np.array(pred).item())]
+            # Text label/prediction (e.g. a generative model's reference text
+            # and its generated reply): int32 sample_label/sample_prediction
+            # can't carry these -- route to the additive text fields instead
+            # of crashing on int(target)/int(pred). Numeric tasks (the vast
+            # majority: classification/tabular/etc.) are unaffected since
+            # target/pred there are never plain strings.
+            target_list, target_list_text = _numeric_or_text_list(target)
+            pred_list, pred_list_text = _numeric_or_text_list(pred)
         record.sample_label.extend(target_list)
         record.sample_prediction.extend(pred_list)
+        record.sample_label_text.extend(target_list_text)
+        record.sample_prediction_text.extend(pred_list_text)
 
         sample_stats.records.append(record)
     return sample_stats

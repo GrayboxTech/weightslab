@@ -2221,9 +2221,23 @@ def save_signals(
 
     # Normalize to np arrays
     def to_numpy(t):
+        # Text predictions/labels (e.g. an LLM's generated reply, or a
+        # reference/target string): keep as a native str rather than
+        # wrapping in a 0-d numpy array, so it survives the
+        # DataFrameManager/H5 round-trip as a plain string and the
+        # `isinstance(x, str)` checks in trainer_tools.py/data_service.py
+        # (which build the actual RecordMetadata/DataStat the UI renders)
+        # see a real str, not an ndarray. Forcing it through the
+        # classification-label uint16 cast below would raise ValueError on
+        # non-numeric text -- see the dict-label JSON-string fallback in
+        # data_service.py for the precedent this generalizes.
+        if isinstance(t, str):
+            return t
         arr = t.detach().cpu().numpy() if isinstance(t, th.Tensor) else np.asarray(t)
         if np.issubdtype(arr.dtype, np.floating):
             return arr.astype(np.float32)
+        if np.issubdtype(arr.dtype, np.str_) or np.issubdtype(arr.dtype, np.object_):
+            return arr
         return arr.astype(np.uint16)
 
     def normalize(x):
