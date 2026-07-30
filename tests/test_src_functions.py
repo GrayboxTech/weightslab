@@ -1,3 +1,4 @@
+import os
 import unittest
 import numpy as np
 import pandas as pd
@@ -8,6 +9,34 @@ import weightslab.src as src
 from unittest.mock import MagicMock, patch
 
 from weightslab.data.sample_stats import SampleStatsEx
+
+
+class TestResolveConfiguredRootLogDir(unittest.TestCase):
+    """root_log_dir resolution: explicit config > WEIGHTSLAB_ROOT_LOG_DIR > temp dir."""
+
+    def setUp(self):
+        self._env_prev = os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR")
+
+    def tearDown(self):
+        if self._env_prev is None:
+            os.environ.pop("WEIGHTSLAB_ROOT_LOG_DIR", None)
+        else:
+            os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = self._env_prev
+
+    def test_explicit_config_value_wins_over_env(self):
+        os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = "/env/dir"
+        self.assertEqual(src._resolve_configured_root_log_dir("/explicit/dir"), "/explicit/dir")
+
+    def test_env_used_when_config_absent(self):
+        os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = "/env/dir"
+        self.assertEqual(src._resolve_configured_root_log_dir(None), "/env/dir")
+        self.assertEqual(src._resolve_configured_root_log_dir(""), "/env/dir")
+
+    def test_falls_back_to_tempdir_when_neither_set(self):
+        os.environ.pop("WEIGHTSLAB_ROOT_LOG_DIR", None)
+        with patch("weightslab.src.tempfile.mkdtemp", return_value="/tmp/generated") as mk:
+            self.assertEqual(src._resolve_configured_root_log_dir(None), "/tmp/generated")
+            mk.assert_called_once()
 
 
 class TestSrcTagAndDiscardFunctions(unittest.TestCase):

@@ -30,7 +30,7 @@ from weightslab.backend.model_interface import ModelInterface
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
-from weightslab.utils.tools import detach_to_cpu, _running_in_notebook
+from weightslab.utils.tools import detach_to_cpu, _running_in_notebook, _running_in_colab
 from weightslab.backend.logger import LoggerQueue
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
@@ -68,6 +68,22 @@ from tqdm import tqdm
 
 # Get global logger
 logger = logging.getLogger(__name__)
+
+
+def _resolve_configured_root_log_dir(configured):
+    """Resolve the experiment ``root_log_dir`` for a serving config.
+
+    Resolution order:
+      1. ``configured`` — an explicit value from the wrapped hyperparameters.
+      2. ``$WEIGHTSLAB_ROOT_LOG_DIR`` — set by ``weightslab start [DIR]`` so an
+         otherwise-unconfigured training run lands in the directory the UI
+         established (shared checkpoints/logs/notebook.ipynb).
+      3. A throwaway ``tempfile.mkdtemp()`` — last resort so serving never fails
+         for lack of a directory.
+    """
+    return configured or os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR") or tempfile.mkdtemp()
+
+
 # Get global dataframe proxy (auto-updated when ledger registers real manager)
 DATAFRAME_M = None
 # Global registry for custom signals
@@ -1349,8 +1365,10 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         if fl in ('hp', 'hyperparams', 'params', 'hyperparameters', 'parameters', 'config'):
             # If obj is a string, treat as a file path and start watcher
             try:
-                # Initialize CheckpointManager if we have a root dir (fallback to default root)
-                obj['root_log_dir'] = obj.get('root_log_dir') or tempfile.mkdtemp()
+                # Initialize CheckpointManager if we have a root dir (see
+                # _resolve_configured_root_log_dir for the resolution order).
+                obj['root_log_dir'] = _resolve_configured_root_log_dir(
+                    obj.get('root_log_dir'))
                 try:
                     # Check if a checkpoint manager is already registered in ledger
                     try:
@@ -1571,15 +1589,15 @@ def serve(serving_cli: bool = True, serving_grpc: bool = False,
     if serving_grpc:
         grpc_serve(**kwargs)
 
-    # In a notebook/Colab the backend has no local Weights Studio to talk to
-    # (the UI runs on the user's own machine). Nudge them to open a tunnel.
-    if serving_grpc and not serving_bore and _running_in_notebook():
+    # On a REMOTE host (Colab) the local Weights Studio cannot reach this backend
+    # directly, so nudge for a tunnel. A LOCAL notebook serving as the backend
+    # (mode C) is reachable at localhost, so it needs no tunnel and no warning.
+    if serving_grpc and not serving_bore and _running_in_colab():
         logger.warning(
-            "Running in a notebook/Colab with serving_grpc=True but "
-            "serving_bore=False. Weights Studio runs on your OWN machine and "
-            "cannot reach this backend directly. Pass serving_bore=True to open "
-            "a tunnel and sync with the UI: wl.serve(serving_grpc=True, "
-            "serving_bore=True)."
+            "Running in Colab with serving_grpc=True but serving_bore=False. "
+            "Weights Studio runs on your OWN machine and cannot reach this "
+            "backend directly. Pass serving_bore=True to open a tunnel and sync "
+            "with the UI: wl.serve(serving_grpc=True, serving_bore=True)."
         )
 
     bore_endpoint = None

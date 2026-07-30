@@ -40,6 +40,16 @@ def _running_in_notebook() -> bool:
         return False
 
 
+def _running_in_colab() -> bool:
+    """True only inside Google Colab (a *remote* host).
+
+    Narrower than :func:`_running_in_notebook`: a local Jupyter kernel serving as
+    the backend (mode C) is reachable from a local Weights Studio at ``localhost``
+    and needs no tunnel, so only Colab warrants the "open a bore tunnel" nudge.
+    """
+    return "google.colab" in sys.modules
+
+
 def safe_reset_index(df: "pd.DataFrame") -> "pd.DataFrame":
     """Reset DataFrame index levels into columns, skipping any level whose name
     is already a column.
