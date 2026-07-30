@@ -2933,6 +2933,20 @@ class DataService:
             expr = params.get("expr", "")
             try:
                 kept = df.query(expr)
+                if len(kept) == 0 and len(df) > 0:
+                    # A comparison against a numeric-LOOKING but string-typed
+                    # column (sample_id is always stored as str -- see
+                    # save_signals -- and a user naturally types
+                    # "sample_id == 11448" with no quotes) doesn't raise here:
+                    # pandas happily evaluates str "11448" == int 11448 as
+                    # False for every row, so df.query "succeeds" with a
+                    # silently empty result instead of hitting the
+                    # _mask_from_coerced_query fallback below (which only
+                    # triggers on an exception). Retry once against the
+                    # coerced view before accepting "0 rows" at face value.
+                    coerced_mask = self._mask_from_coerced_query(df, expr)
+                    if coerced_mask is not None and coerced_mask.any():
+                        kept = df[coerced_mask]
                 df.drop(index=df.index.difference(kept.index), inplace=True)
                 return f"Applied query: {expr}"
             except Exception as e:
