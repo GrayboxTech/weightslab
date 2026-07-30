@@ -441,6 +441,16 @@ def process_sample(sid, dataset, do_resize, resize_dims, experiment):
 
         if isinstance(tensor, torch.Tensor):
             img = tensor.detach().cpu()
+        elif isinstance(tensor, str):
+            # Text-only datasets (e.g. a generative/RLHF prompt dataset) have
+            # no image to preview here -- their sample content is text, shown
+            # via the DataStat pred/target string fields instead (see
+            # data_service.py), not this image-thumbnail path. This is an
+            # expected "nothing to show" case, not a failure: return early
+            # rather than falling through to torch.tensor(tensor), which
+            # raises on a string and would log a misleading error for every
+            # sample of a text dataset.
+            return sid, None, None, -1, b"", b""
         else:
             img = torch.tensor(tensor)
 

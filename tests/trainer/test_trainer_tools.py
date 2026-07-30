@@ -218,6 +218,34 @@ class TestTrainerTools(unittest.TestCase):
         tensor = _get_input_tensor_for_sample(_IndexDataset(), sample_id=0, device="cpu")
         self.assertEqual(tuple(tensor.shape), (1, 3, 8, 8))
 
+    def test_process_sample_text_only_dataset_returns_empty_without_error(self):
+        """A generative/RLHF prompt dataset's items are text, not images --
+        process_sample (used by the GetSamples image-preview endpoint) must
+        return an empty/placeholder result instead of crashing on
+        torch.tensor(a_string) (confirmed empirically: raises 'new(): invalid
+        data type str')."""
+
+        class _TextDataset:
+            task_type = "generation"
+
+            def _getitem_raw(self, id):
+                return "flip a coin", id, "Certainly! Let's flip a fair coin..."
+
+        sid, transformed, raw, cls_label, mask_bytes, pred_bytes = process_sample(
+            sid=0,
+            dataset=_TextDataset(),
+            do_resize=False,
+            resize_dims=(8, 8),
+            experiment=_Experiment(),
+        )
+
+        self.assertEqual(sid, 0)
+        self.assertIsNone(transformed)
+        self.assertIsNone(raw)
+        self.assertEqual(cls_label, -1)
+        self.assertEqual(mask_bytes, b"")
+        self.assertEqual(pred_bytes, b"")
+
     def test_process_sample_classification_and_force_kill(self):
         exp = _Experiment()
         ds = _RawDataset()
