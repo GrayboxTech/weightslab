@@ -137,10 +137,17 @@ def looks_like_file_path_label(label) -> bool:
     trailing segment to be short/alphanumeric/whitespace-free keeps this from
     misfiring on text labels/predictions.
     """
-    if not isinstance(label, str) or '.' not in label or label.endswith('.'):
+    if not isinstance(label, str):
+        return False
+    if any(ch.isspace() for ch in label):
+        return False
+    # Avoid treating numeric literals like "3.14" as file paths.
+    if re.fullmatch(r"[+-]?\d+(\.\d+)?([eE][+-]?\d+)?", label.strip()):
+        return False
+    if '.' not in label or label.endswith('.'):
         return False
     ext = label.rsplit('.', 1)[-1]
-    return 1 <= len(ext) <= 6 and ext.isalnum()
+    return 1 <= len(ext) <= 6 and ext.isalnum() and any(c.isalpha() for c in ext)
 
 
 def normalize_metadata_copy_source_name(source_name: str, experiment_hash: str = None) -> str:
