@@ -16,7 +16,7 @@ The full Ultralytics integration documentation is at :doc:`/ultralytics`.
 This page summarises what ``WLAwareTrainer`` handles automatically and where
 the example lives.
 
-**Example:** ``weightslab/examples/Ultralytics/ws-detection/main.py``
+**Example:** ``weightslab/examples/Ultralytics/wl-detection/main.py``
 
 What the example does
 ---------------------

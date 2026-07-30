@@ -1,10 +1,10 @@
 Weights Studio Guide
 ====================
 
-Weights Studio is the visual frontend for Weightslab experiments.
-It connects to your running Weightslab backend over gRPC-Web via Envoy,
-and gives you interactive control over samples, tags, discard/restore actions,
-training/audit mode, and training signal plots.
+Weights Studio is the visual frontend for WeightsLab experiments.
+It ships **inside the Python package** — no Docker, no Envoy.
+Running ``weightslab start`` serves the bundled SPA and proxies gRPC-Web to
+your training backend, all from one Python process.
 
 Architecture
 ------------
@@ -15,428 +15,305 @@ Architecture
 
 Runtime path:
 
-1. Browser UI (Vite app)
-2. Envoy proxy (gRPC-Web bridge)
-3. Weightslab Python gRPC service
+1. Browser (served from ``weightslab start``)
+2. ``weightslab start`` — pure-Python HTTP server that:
 
-Project location
+   - Serves the pre-built Weights Studio SPA (vendored in ``weightslab/ui/static/``)
+   - Translates gRPC-Web (browser) to raw gRPC (backend) via an embedded proxy
+
+3. WeightsLab Python gRPC service (started by ``wl.serve()``)
+
+Quick start
+-----------
+
+1. Install WeightsLab::
+
+     pip install weightslab
+
+2. In your training script, start the backend::
+
+     import weightslab as wl
+     wl.serve(serving_grpc=True)
+     # ... training loop ...
+     wl.keep_serving()
+
+3. In another terminal, start the UI::
+
+     weightslab start
+
+4. Open the URL printed by ``weightslab start`` in your browser.
+
+The UI auto-discovers the backend on ``localhost:50051`` (default).
+Pass ``--backend-port`` to override::
+
+    weightslab start --backend-port 50052
+
+To suppress auto-opening the browser::
+
+    weightslab start --no-browser
+
+Ports
+-----
+
+- UI HTTP server: ``8080`` by default (``--port PORT`` or ``$WEIGHTSLAB_UI_PORT``)
+- Backend gRPC: ``50051`` by default (``--backend-port PORT`` or ``$GRPC_BACKEND_PORT``)
+
+If port ``8080`` is already in use, ``weightslab start`` automatically finds the
+next free port and logs the one it chose.
+
+Secure mode (HTTPS + mTLS)
+--------------------------
+
+The default is plain HTTP (no cert files required, easiest for local dev).
+To enable HTTPS between the browser and the UI server, and mTLS between the
+UI server and the backend:
+
+1. Generate TLS certificates once::
+
+     weightslab se
+
+   Certificates are placed in ``~/.weightslab-certs``
+   (or ``$WEIGHTSLAB_CERTS_DIR``).
+   Follow the printed instructions to export ``WEIGHTSLAB_CERTS_DIR`` globally.
+
+2. Start the UI in secure mode::
+
+     weightslab start --certs
+
+   ``--certs`` reads ``$WEIGHTSLAB_CERTS_DIR`` (single source of truth) and:
+
+   - Serves HTTPS using ``ui-server.crt`` / ``ui-server.key``
+   - Presents ``ui-client.crt`` / ``ui-client.key`` to the backend (mTLS)
+   - Expects the backend CA at ``ca.crt``
+
+3. Configure the backend to require mTLS::
+
+     export GRPC_TLS_ENABLED=1
+     export GRPC_TLS_REQUIRE_CLIENT_AUTH=1
+     export WEIGHTSLAB_CERTS_DIR=~/.weightslab-certs
+
+Certificate files (all in ``$WEIGHTSLAB_CERTS_DIR``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
++----------------------------+--------------------------------------------+
+| File                       | Purpose                                    |
++============================+============================================+
+| ``ca.crt``                 | CA certificate (trusted by all parties)    |
++----------------------------+--------------------------------------------+
+| ``ui-server.crt/.key``     | UI server TLS cert (browser to server)     |
++----------------------------+--------------------------------------------+
+| ``ui-client.crt/.key``     | UI client mTLS cert (server to backend)    |
++----------------------------+--------------------------------------------+
+| ``backend-server.crt/.key``| Backend gRPC TLS cert (loaded by backend)  |
++----------------------------+--------------------------------------------+
+| ``.grpc_auth_token``       | Optional token for gRPC metadata auth      |
++----------------------------+--------------------------------------------+
+
+Regenerate certificates at any time with ``weightslab se --force-certs``.
+
+Configuration reference
+-----------------------
+
+Backend environment variables (set before starting ``wl.serve()``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
++----------------------------------+-------------------------+----------------------------------------------------+
+| Variable                         | Default                 | Description                                        |
++==================================+=========================+====================================================+
+| ``WEIGHTSLAB_LOG_LEVEL``         | ``INFO``                | Log level (``DEBUG``, ``INFO``, ...)               |
++----------------------------------+-------------------------+----------------------------------------------------+
+| ``GRPC_BACKEND_HOST``            | ``0.0.0.0``             | Host the backend gRPC server binds to              |
++----------------------------------+-------------------------+----------------------------------------------------+
+| ``GRPC_BACKEND_PORT``            | ``50051``               | Port the backend gRPC server listens on            |
++----------------------------------+-------------------------+----------------------------------------------------+
+| ``GRPC_TLS_ENABLED``             | ``0``                   | ``1`` = enable TLS on the gRPC socket              |
++----------------------------------+-------------------------+----------------------------------------------------+
+| ``GRPC_TLS_REQUIRE_CLIENT_AUTH`` | ``0``                   | ``1`` = require client mTLS certificate            |
++----------------------------------+-------------------------+----------------------------------------------------+
+| ``WEIGHTSLAB_CERTS_DIR``         | ``~/.weightslab-certs`` | Directory containing cert/key files                |
++----------------------------------+-------------------------+----------------------------------------------------+
+| ``GRPC_AUTH_TOKEN``              | *(unset)*               | Optional metadata-token auth (on top of mTLS)      |
++----------------------------------+-------------------------+----------------------------------------------------+
+| ``GRPC_MAX_MESSAGE_BYTES``       | ``268435456``           | Raise for large tensors / image batches            |
++----------------------------------+-------------------------+----------------------------------------------------+
+| ``WEIGHTSLAB_DISABLE_WATCHDOGS`` | ``0``                   | ``1`` = disable watchdogs (use with breakpoints)   |
++----------------------------------+-------------------------+----------------------------------------------------+
+
+UI server environment variables (set before ``weightslab start``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
++---------------------------+-------------------------+--------------------------------------------------+
+| Variable                  | Default                 | Description                                      |
++===========================+=========================+==================================================+
+| ``WEIGHTSLAB_UI_HOST``    | ``0.0.0.0``             | Interface the UI server binds to                 |
++---------------------------+-------------------------+--------------------------------------------------+
+| ``WEIGHTSLAB_UI_PORT``    | ``8080``                | HTTP port (``--port`` flag overrides)            |
++---------------------------+-------------------------+--------------------------------------------------+
+| ``GRPC_BACKEND_HOST``     | ``localhost``           | Backend gRPC host to proxy to                    |
++---------------------------+-------------------------+--------------------------------------------------+
+| ``GRPC_BACKEND_PORT``     | ``50051``               | Backend gRPC port to proxy to                    |
++---------------------------+-------------------------+--------------------------------------------------+
+| ``WEIGHTSLAB_CERTS_DIR``  | ``~/.weightslab-certs`` | Certs dir (read when ``--certs``)                |
++---------------------------+-------------------------+--------------------------------------------------+
+
+Frontend runtime feature toggles
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These are injected as ``window.*`` globals when the UI is served.
+Set them as environment variables before ``weightslab start``.
+
++--------------------------------------+----------+----------------------------------------------------+
+| Variable                             | Default  | Effect when ``0`` / ``false``                      |
++======================================+==========+====================================================+
+| ``ENABLE_PLOTS``                     | ``1``    | Remove plots board + Signals card                  |
++--------------------------------------+----------+----------------------------------------------------+
+| ``ENABLE_DATA_EXPLORATION``          | ``1``    | Remove data grid + metadata/details panel          |
++--------------------------------------+----------+----------------------------------------------------+
+| ``ENABLE_HYPERPARAMETERS_OPTIMIZATION`` | ``1`` | Remove Hyperparameters section (read-only HPs)     |
++--------------------------------------+----------+----------------------------------------------------+
+| ``ENABLE_AGENT``                     | ``1``    | Remove agent chat bar                              |
++--------------------------------------+----------+----------------------------------------------------+
+| ``WS_HISTOGRAM_MAX_BINS``            | ``512``  | Cap on metadata histogram bars                     |
++--------------------------------------+----------+----------------------------------------------------+
+| ``BB_THUMB_RENDER``                  | ``10``   | Max bounding boxes per thumbnail (per overlay)     |
++--------------------------------------+----------+----------------------------------------------------+
+| ``BB_MODAL_RENDER``                  | ``100``  | Max bounding boxes per modal image (per overlay)   |
++--------------------------------------+----------+----------------------------------------------------+
+
+Tunnel (remote backend)
+-----------------------
+
+If your backend is running remotely (e.g. a Colab notebook behind ``ngrok`` or
+``bore``), forward it to a local port with::
+
+    weightslab tunnel bore.pub:12345
+
+Then ``weightslab start`` on the same machine proxies to it as if local.
+The tunnel is raw TCP — the backend must be plaintext (``GRPC_TLS_ENABLED=0``).
+
+Agent Usage in Weights Studio
+------------------------------
+
+Weights Studio includes an agent bar and an expandable agent history window.
+The agent can run with either:
+
+- a local Ollama provider configured on the backend
+- a cloud OpenRouter provider configured at startup or initialized from the UI
+
+Local Ollama workflow
+~~~~~~~~~~~~~~~~~~~~~
+
+If the backend is configured with ``provider: ollama`` and the Ollama server is
+running, the agent is available immediately after backend startup.
+
+Typical local setup:
+
+1. Start Ollama.
+2. Start WeightsLab (``wl.serve(serving_grpc=True)``).
+3. Start Weights Studio (``weightslab start``).
+4. Ask questions in the agent bar.
+
+Cloud OpenRouter workflow
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If the backend is not initialized with a cloud key yet, Weights Studio shows
+the agent as unconfigured and the input placeholder instructs the user to type
+``/init``.
+
+``/init`` flow:
+
+1. Type ``/init`` in the agent input.
+2. Choose manual API key entry or the OpenRouter OAuth flow.
+3. Select a model from the available model list.
+4. Confirm to initialize the runtime connection.
+
+The default cloud model is ``~google/gemini-flash-latest``.
+
+Available agent commands
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+- ``/init`` — initialize OpenRouter from the UI
+- ``/model`` — open the model chooser to switch the active OpenRouter model
+- ``/reset`` — clear the current agent runtime connection and status
+
+History behavior
+~~~~~~~~~~~~~~~~
+
+- Command entries such as ``/init``, ``/model``, and ``/reset`` are shown on
+  the user side of the history.
+- Agent lifecycle events (connection setup, model changes, reset) are shown as
+  separate log-style entries.
+- A pinned instruction line at the top summarizes the available commands.
+
+Bundled examples
 ----------------
 
-Weights Studio source lives in:
+Run a bundled example in one command (installs its requirements automatically)::
 
-- ``../weights_studio``
+    weightslab start example          # classification (default)
+    weightslab start example --seg    # segmentation
+    weightslab start example --det    # detection
+    weightslab start example --3d_det # 3D LiDAR point-cloud detection
 
-Key files:
+In another terminal, start the UI::
 
-- Docker compose: ``../weights_studio/docker/docker-compose.yml``
-- Envoy config: ``../weights_studio/envoy/envoy.yaml``
-- Frontend entrypoint: ``../weights_studio/src/main.ts``
-- UI layout: ``../weights_studio/index.html``
+    weightslab start
 
-Quick start (Docker)
---------------------
+See ``weightslab start example --help`` for all options.
 
-1. Start your Weightslab backend (gRPC on host, default port ``50051``).
-2. Load environment variables from ``../weights_studio/docker/.env``.
-3. Generate local TLS certificates (dev only):
+Cloud deployment
+----------------
 
-  .. code-block:: powershell
+Because the UI is a plain Python process, cloud deployment is straightforward:
 
-    # from ../weights_studio/docker
-    .\generate-dev-certs.ps1
+1. Install WeightsLab on the server::
 
-  .. code-block:: bash
+     pip install weightslab
 
-    # from ../weights_studio/docker
-    ./generate-dev-certs.sh
+2. Run ``weightslab se`` once to generate certificates.
 
-4. Start studio stack from ``../weights_studio/docker``:
+3. Start the backend in your training process (``wl.serve(serving_grpc=True)``).
 
-   - Envoy
-   - Frontend (Vite)
+4. Start the UI process::
 
-5. Open Weights Studio in your browser.
+     WEIGHTSLAB_UI_HOST=0.0.0.0 weightslab start --port 8080 --certs --no-browser
 
-Docker services and ports
--------------------------
+5. Put a reverse proxy (nginx / ALB / Caddy) in front of port ``8080`` and
+   expose only ``443`` publicly.
 
-From ``../weights_studio/docker/docker-compose.yml`` and ``../weights_studio/envoy/envoy.yaml``:
+The UI and backend can run on different machines — set ``--backend-host`` and
+``--backend-port`` accordingly.
 
-- Frontend: ``VITE_PORT`` (default ``5173``)
-- Envoy gRPC-Web endpoint over TLS: ``ENVOY_PORT`` (default ``8080``)
-- Envoy admin: ``ENVOY_ADMIN_PORT`` (default ``9901``), bound to loopback and not published by default
-- Backend target from Envoy: ``host.docker.internal:50051``
-
-Default values in ``../weights_studio/docker/.env``:
-
-- ``VITE_PORT=5173``
-- ``VITE_HISTOGRAM_MAX_BINS=512``
-- ``BB_THUMB_RENDER=10`` (max bounding boxes drawn per thumbnail image, per overlay)
-- ``BB_MODAL_RENDER=100`` (max bounding boxes drawn per modal image, per overlay)
-- ``WS_SERVER_HOST=localhost``
-- ``WS_SERVER_PORT=8080``
-- ``WS_SERVER_PROTOCOL=https``
-- ``ENVOY_PORT=8080``
-- ``ENVOY_ADMIN_PORT=9901``
-- ``GRPC_BACKEND_PORT=50051``
-
-How the frontend endpoint is built
-----------------------------------
-
-In ``src/main.ts``, the UI builds the server URL from:
-
-- ``WS_SERVER_PROTOCOL``
-- ``WS_SERVER_HOST``
-- ``WS_SERVER_PORT``
-
-This URL is used as gRPC-Web base URL for ``ExperimentServiceClient``.
-
-Environment/configuration checklist
------------------------------------
-
-Backend:
-
-- Ensure Weightslab serves gRPC and listens on host ``0.0.0.0:50051``.
-- Enable backend TLS and client-auth for Envoy by setting:
-
-  - ``GRPC_TLS_ENABLED=1``
-  - ``GRPC_TLS_REQUIRE_CLIENT_AUTH=1``
-  - optional ``GRPC_TLS_CERT_DIR=~/certs`` to change the default certificate directory
-  - ``GRPC_TLS_CERT_FILE`` / ``GRPC_TLS_KEY_FILE`` / ``GRPC_TLS_CA_FILE``
-- Optionally set ``GRPC_AUTH_TOKEN`` (or ``GRPC_AUTH_TOKENS``) to enforce
-  metadata token authentication in addition to mTLS.
-
-If the per-file ``GRPC_TLS_*_FILE`` variables are not set, WeightsLab defaults to
-``~/certs/backend-server.crt``, ``~/certs/backend-server.key``, and ``~/certs/ca.crt``.
-If config/hyperparameters define TLS keys (``grpc_tls_*``), those values are used
-before environment variables.
-
-Envoy:
-
-- Ensure ``envoy.yaml`` cluster points to host backend:
-  ``host.docker.internal:50051``.
-- Ensure cert files exist at ``../weights_studio/envoy/certs``:
-
-  - ``envoy-server.crt`` / ``envoy-server.key`` (browser->Envoy TLS)
-  - ``envoy-client.crt`` / ``envoy-client.key`` and ``ca.crt`` (Envoy->backend mTLS)
-
-Frontend:
-
-- Ensure frontend points to Envoy (default ``https://localhost:8080``).
-
-Sanity checks:
-
-- Studio reachable at ``https://localhost:5173``.
-- Envoy endpoint reachable at ``https://localhost:8080``.
-- Envoy admin is private by default (loopback inside container).
-
-Agent Usage in Weights Studio
------------------------------
-
-Weights Studio includes an agent bar and an expandable agent history window.
-The agent can run with either:
-
-- a local Ollama provider configured on the backend
-- a cloud OpenRouter provider configured at startup or initialized from the UI
-
-Local Ollama workflow
-~~~~~~~~~~~~~~~~~~~~~
-
-If the backend is configured with ``provider: ollama`` and the Ollama server is
-running, the agent is available immediately after backend startup.
-
-Typical local setup:
-
-1. Start Ollama.
-2. Start WeightsLab.
-3. Open Weights Studio.
-4. Ask questions directly in the agent bar.
-
-Cloud OpenRouter workflow
-~~~~~~~~~~~~~~~~~~~~~~~~~
-
-If the backend is not initialized with a cloud key yet, Weights Studio shows
-the agent as unconfigured and the input placeholder instructs the user to type
-``/init``.
-
-``/init`` flow:
-
-1. Type ``/init`` in the agent input.
-2. Choose manual API key entry or the OpenRouter OAuth flow.
-3. Select a model from the available model list.
-4. Confirm to initialize the runtime connection.
-
-The default cloud model is ``~google/gemini-flash-latest``.
-
-Available agent commands
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-The agent bar supports these commands:
-
-- ``/init`` initializes OpenRouter from the UI
-- ``/model`` opens the model chooser to switch the active OpenRouter model
-- ``/reset`` clears the current agent runtime connection and status
-
-History behavior
-~~~~~~~~~~~~~~~~
-
-- Command entries such as ``/init``, ``/model``, and ``/reset`` are shown on
-  the user side of the history.
-- Agent lifecycle events such as connection setup, model changes, and reset
-  events are shown as separate log-style entries.
-- A pinned instruction line at the top of the history summarizes the available
-  commands and shows the full instruction text on hover.
-
-Agent Usage in Weights Studio
------------------------------
-
-Weights Studio includes an agent bar and an expandable agent history window.
-The agent can run with either:
-
-- a local Ollama provider configured on the backend
-- a cloud OpenRouter provider configured at startup or initialized from the UI
-
-Local Ollama workflow
-~~~~~~~~~~~~~~~~~~~~~
-
-If the backend is configured with ``provider: ollama`` and the Ollama server is
-running, the agent is available immediately after backend startup.
-
-Typical local setup:
-
-1. Start Ollama.
-2. Start WeightsLab.
-3. Open Weights Studio.
-4. Ask questions directly in the agent bar.
-
-Cloud OpenRouter workflow
-~~~~~~~~~~~~~~~~~~~~~~~~~
-
-If the backend is not initialized with a cloud key yet, Weights Studio shows
-the agent as unconfigured and the input placeholder instructs the user to type
-``/init``.
-
-``/init`` flow:
-
-1. Type ``/init`` in the agent input.
-2. Choose manual API key entry or the OpenRouter OAuth flow.
-3. Select a model from the available model list.
-4. Confirm to initialize the runtime connection.
-
-The default cloud model is ``~google/gemini-flash-latest``.
-
-Available agent commands
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-The agent bar supports these commands:
-
-- ``/init`` initializes OpenRouter from the UI
-- ``/model`` opens the model chooser to switch the active OpenRouter model
-- ``/reset`` clears the current agent runtime connection and status
-
-History behavior
-~~~~~~~~~~~~~~~~
-
-- Command entries such as ``/init``, ``/model``, and ``/reset`` are shown on
-  the user side of the history.
-- Agent lifecycle events such as connection setup, model changes, and reset
-  events are shown as separate log-style entries.
-- A pinned instruction line at the top of the history summarizes the available
-  commands and shows the full instruction text on hover.
-
-Server integration (AWS example)
---------------------------------
-
-This section describes a practical cloud deployment path for Weightslab +
-Weights Studio on AWS.
-
-Recommended production architecture
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-- **UI**: Weights Studio frontend behind HTTPS (ALB).
-- **gRPC-Web bridge**: Envoy service reachable by frontend.
-- **Backend**: Weightslab training service (Python gRPC).
-- **Storage**: EBS/EFS/S3 for logs/checkpoints depending on your workflow.
-
-Two common deployment options
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-1. **EC2 (fastest to start)**
-
-   - Run Weightslab backend process on the VM (port ``50051``).
-   - Run Envoy + frontend via Docker Compose.
-   - Use one security group to expose only HTTPS (and optionally admin ports
-     privately).
-
-2. **ECS/Fargate (container-native)**
-
-   - Service A: frontend container.
-   - Service B: Envoy container.
-   - Service C: Weightslab backend container (or external training worker).
-   - Route through ALB + target groups.
-
-Minimum port plan (AWS)
-~~~~~~~~~~~~~~~~~~~~~~~
-
-- Public ingress:
-  - ``443`` (HTTPS to frontend/ALB)
-- Internal service ports:
-  - ``8080`` (Envoy gRPC-Web listener)
-  - ``50051`` (Weightslab backend gRPC)
-  - ``9901`` (Envoy admin, keep private)
-  - ``5173`` (frontend dev port; avoid exposing directly in production)
-
-Security group guidance
-~~~~~~~~~~~~~~~~~~~~~~~
-
-- Allow ``443`` from trusted client CIDRs (or internet if required).
-- Restrict ``50051`` and ``8080`` to VPC/internal security groups.
-- Restrict ``9901`` to private admin subnet/bastion only.
-- Do not expose backend gRPC directly to the public internet.
-
-TLS and domains
-~~~~~~~~~~~~~~~
-
-- Terminate TLS at ALB using ACM certificates.
-- Use a DNS record (Route 53) for the studio hostname.
-- Forward ALB target traffic to frontend service.
-- Keep Envoy/backend internal where possible.
-
-Environment mapping (cloud)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-For Weights Studio frontend + Envoy alignment, set environment variables
-consistently with your deployed endpoints:
+Example systemd unit
+~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: ini
 
-   # frontend resolves gRPC-web through Envoy
-   WS_SERVER_PROTOCOL=https
-   WS_SERVER_HOST=studio.your-domain.com
-   WS_SERVER_PORT=443
-   VITE_HISTOGRAM_MAX_BINS=512
-   BB_THUMB_RENDER=10
-   BB_MODAL_RENDER=100
+  [Unit]
+  Description=Weights Studio UI
+  After=network.target
 
-   # envoy / backend internal wiring
-   ENVOY_PORT=8080
-   ENVOY_ADMIN_PORT=9901
-   GRPC_BACKEND_PORT=50051
+  [Service]
+  EnvironmentFile=/etc/weightslab/env
+  ExecStart=/usr/local/bin/weightslab start --port 8080 --no-browser
+  Restart=on-failure
+  RestartSec=5
 
-If Envoy is internal-only and frontend is public, ensure frontend requests are
-routed to the Envoy endpoint through your internal load-balancing design.
+  [Install]
+  WantedBy=multi-user.target
 
-AWS deployment checklist
-~~~~~~~~~~~~~~~~~~~~~~~~
+Building the frontend from source
+----------------------------------
 
-1. Provision VPC/subnets and security groups.
-2. Deploy backend gRPC service and verify ``:50051`` internally.
-3. Deploy Envoy and verify routing to backend.
-4. Deploy frontend with correct ``WS_SERVER_*`` values.
-5. Attach ALB + ACM certificate and configure HTTPS listener.
-6. Validate UI actions (query, tagging, discard/restore, plots).
-7. Add monitoring/logging (CloudWatch metrics/logs).
+The pre-built SPA is vendored into ``weightslab/ui/static/``. To rebuild from
+the ``weights_studio`` source repository and update the vendored copy::
 
-Operational notes
-~~~~~~~~~~~~~~~~~
+    # from the weights_studio repo
+    npm ci && npm run build
 
-- Prefer long-running backend workers for stable interactive sessions.
-- Keep checkpoint/log storage durable (EBS/EFS/S3 strategy).
-- If using autoscaling, ensure session and backend availability are handled
-  explicitly for active users.
-- For multi-environment setups, keep per-environment ``.env`` templates
-  versioned and reviewed.
-
-Concrete EC2 + Docker Compose + systemd recipe
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Use this pattern for a simple single-VM production-like deployment.
-
-1. Provision EC2
-
-  - Ubuntu 22.04 (or similar), attached security group.
-  - Open only ``443`` publicly.
-  - Keep ``50051``, ``8080``, ``9901`` private (VPC/admin only).
-
-2. Install runtime dependencies
-
-  - Docker Engine + Docker Compose plugin
-  - Python environment for your Weightslab backend process
-
-3. Configure environment
-
-  In ``weights_studio/docker/.env`` (or environment management equivalent):
-
-  .. code-block:: ini
-
-    VITE_PORT=5173
-    WS_SERVER_PROTOCOL=https
-    WS_SERVER_HOST=studio.your-domain.com
-    WS_SERVER_PORT=443
-    VITE_HISTOGRAM_MAX_BINS=512
-    BB_THUMB_RENDER=10
-    BB_MODAL_RENDER=100
-
-    ENVOY_PORT=8080
-    ENVOY_ADMIN_PORT=9901
-    GRPC_BACKEND_PORT=50051
-
-4. Start backend service
-
-  Start Weightslab gRPC in your training/runtime process and ensure it binds
-  to a reachable interface (for example ``0.0.0.0:50051``).
-
-5. Start studio containers
-
-  From ``weights_studio/docker``:
-
-  .. code-block:: bash
-
-    docker compose up -d
-
-6. Add process supervision (systemd)
-
-  Use systemd to ensure services restart on reboot/failure.
-
-  Example unit for studio compose stack:
-
-  .. code-block:: ini
-
-    [Unit]
-    Description=Weights Studio (Docker Compose)
-    Requires=docker.service
-    After=docker.service
-
-    [Service]
-    Type=oneshot
-    WorkingDirectory=/opt/weights_studio/docker
-    ExecStart=/usr/bin/docker compose up -d
-    ExecStop=/usr/bin/docker compose down
-    RemainAfterExit=yes
-    TimeoutStartSec=0
-
-    [Install]
-    WantedBy=multi-user.target
-
-  Enable and start:
-
-  .. code-block:: bash
-
-    sudo systemctl daemon-reload
-    sudo systemctl enable weights-studio
-    sudo systemctl start weights-studio
-
-7. Put HTTPS in front (ALB + ACM)
-
-  - Attach ACM certificate to ALB listener on ``443``.
-  - Route DNS (Route 53) to ALB.
-  - Forward traffic to frontend target.
-
-8. Validate end-to-end
-
-  - Open studio URL.
-  - Verify sample query, tag/discard actions, and plot refresh.
-  - Verify backend logs and Envoy admin stats.
+  # from the weightslab repo
+  rm -rf weightslab/ui/static/*
+  cp -R ../weights_studio/dist/. weightslab/ui/static/
 
 UI controls and actions
 -----------------------
@@ -446,50 +323,30 @@ Top header controls
 
 - **Dark mode toggle**: switch light/dark theme.
 - **Refresh button**: manually refresh dynamic stats in visible grid.
-- **Refresh config popover**:
-  - Data auto-refresh enable/disable + interval
-  - Plot auto-refresh enable/disable + interval
-  - Clear cache and reload page
-- **Training button** (Resume/Pause): toggles ``is_training`` via backend command.
-- **Mode selector** (dropdown next to training button):
-  - ``train`` mode
-  - ``audit`` mode (sets ``auditorMode``)
+- **Refresh config popover**: data/plot auto-refresh, clear cache.
+- **Training button** (Resume/Pause): toggles ``is_training`` via backend.
+- **Mode selector**: ``train`` mode / ``audit`` mode.
 
 Left panel
 ~~~~~~~~~~
 
-- **Training card**:
-  - Training state pill (running/paused/pending)
-  - Connection status text
-  - Live metrics and progress
-- **Tags card**:
-  - Tag chips
-  - New tag input
-  - Painter toggle
-  - Add/remove painter mode switch
-- **Details card**:
-  - Grid settings (cell size + resolution + apply)
-  - Segmentation overlays (Raw, GT, Pred, Diff, Split view)
-  - Split colors
-  - Metadata field toggles
+- **Training card**: training state pill, connection status, live metrics.
+- **Tags card**: tag chips, new tag input, painter toggle.
+- **Details card**: grid settings, segmentation overlays, metadata field toggles.
 
 Grid interactions
 ~~~~~~~~~~~~~~~~~
 
 - Drag selection rectangle (multi-select).
 - ``Ctrl`` multi-select support.
-- Right-click context menu actions:
-  - Manage tags
-  - Remove all tags
-  - Discard selected samples
-  - Restore selected samples
+- Right-click context menu: manage tags, discard/restore samples.
 
 The UI pauses training before data-modifying actions to keep edits safe.
 
 Bottom bar
 ~~~~~~~~~~
 
-- Batch slider for navigation over samples.
+- Batch slider for sample navigation.
 - Start/end batch index labels.
 - Total and active sample counters.
 
@@ -506,30 +363,18 @@ Signal plots
 
 Per-signal cards include:
 
-- Reset zoom
-- CSV export
-- JSON export
-- Settings (curve color, smoothing, std band, markers)
+- Reset zoom, CSV/JSON export, settings (curve color, smoothing, std band,
+  markers).
+- Right-click: reset zoom, change curve color, load weights at step, hide/show
+  curve, break by slices, copy/save chart image.
 
-Right-click menu on plots includes:
+WeightsLab CLI console
+----------------------
 
-- Reset X/Y/all zoom
-- Change curve color
-- Load weights at clicked step
-- Hide/unhide curve
-- Break by slices
-- Copy chart image
-- Save chart image
-
-Weightslab CLI console (dev)
-----------------------------
-
-The Weightslab CLI console is a local developer REPL for inspecting and
+The WeightsLab CLI console is a local developer REPL for inspecting and
 controlling a running experiment through the global ledger.
 
-- Transport: local TCP text commands with JSON responses.
-- Intended scope: development/debug only.
-- Security model: localhost binding by default, plain-text protocol.
+Transport: local TCP text commands with JSON responses.
 
 How to start it
 ~~~~~~~~~~~~~~~
@@ -543,70 +388,38 @@ From your training script (recommended):
   wl.serve(serving_grpc=True, serving_cli=True)
   wl.keep_serving()
 
-Standalone server:
+Connect from a terminal::
 
-.. code-block:: bash
+  weightslab cli              # auto-discover port
+  weightslab cli --port 60000 # or specify one
 
-  python -m weightslab.backend.cli serve --host localhost --port 60000
+Console actions
+~~~~~~~~~~~~~~~
 
-Connect a client manually:
-
-.. code-block:: bash
-
-  python -m weightslab.backend.cli client --host localhost --port 60000
-
-If no port is provided (or port is ``0``), the server picks a free port.
-
-Console actions and commands
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Full command-by-command reference (discovery/help, training control, registry
-inspection, sample-level dataset operations, hyperparameters, evaluation,
-audit mode, the AI agent, and session control) — with syntax, flags, and
-worked examples for every one — lives in :doc:`user_commands`. Quick
-summary of what's available:
+Full reference: :doc:`user_commands`. Quick summary:
 
 - Discovery/help: ``help``, ``status``, ``dump``, ``ledger_dump``.
 - Training control: ``pause`` / ``resume``.
 - Registry inspection: ``list_models``, ``list_optimizers``, ``list_loaders``,
   ``plot_model [model_name]``.
-- Sample-level dataset operations: ``list_uids``, ``discard``, ``undiscard``,
+- Sample-level operations: ``list_uids``, ``discard``, ``undiscard``,
   ``add_tag``.
 - Hyperparameters: ``hp``, ``set_hp``.
 - Evaluation: ``evaluate``, ``eval_status``, ``cancel_eval``.
 - Audit mode: ``audit [on|off]``.
-- AI agent: ``agent ...`` / ``query`` / ``ask`` — see :doc:`agent`.
+- AI agent: ``agent`` / ``query`` / ``ask`` — see :doc:`agent`.
 - Session control: ``exit`` / ``quit``, ``clear`` / ``cls``.
-
-Developer notes
-~~~~~~~~~~~~~~~
-
-- Prefer CLI for quick diagnosis and manual interventions.
-- Keep CLI port private (localhost or private subnet only).
-- Use Weights Studio for richer visual workflows; use CLI for low-latency
-  command-driven operations.
-
-Weightslab workflow recommendation
-----------------------------------
-
-Typical loop for productive usage:
-
-1. Start Weightslab backend and studio stack.
-2. Monitor training metrics and sample-level signals.
-3. Use grid metadata + modal details to inspect hard or noisy samples.
-4. Tag slices (e.g., outliers, hard cases).
-5. Discard low-value samples and continue training.
-6. Use train/audit mode toggles to inspect safely without weight updates.
-7. Use plot controls to inspect branch transitions and checkpoint behavior.
 
 Troubleshooting
 ---------------
 
-- Studio loads but no data:
-  check backend gRPC is running and Envoy target is reachable.
-- Connection/reset errors:
-  verify ``ENVOY_PORT`` and backend port mapping.
-- Wrong endpoint:
-  verify ``WS_SERVER_HOST/PORT/PROTOCOL`` in docker environment.
-- No plot updates:
-  verify plot auto-refresh setting and backend logger data availability.
+- **Studio loads but no data**: check backend gRPC is running on the expected
+  port (``--backend-port``) and that there is no firewall blocking the
+  connection.
+- **Port conflict**: ``weightslab start`` auto-selects the next free port and
+  logs it; or pass ``--port PORT`` to pick a specific one.
+- **No plot updates**: check plot auto-refresh setting and backend logger data.
+- **TLS errors with --certs**: run ``weightslab se`` first to generate certs,
+  then export ``WEIGHTSLAB_CERTS_DIR``.
+- **Connection refused on remote backend**: use ``weightslab tunnel`` to forward
+  the remote port locally.

@@ -46,6 +46,8 @@ from weightslab.trainer.services.data_image_utils import (
     rle_encode_mask,
     create_data_stat,
     resize_mask_nearest,
+    looks_like_tabular,
+    build_tabular_raw_data_stat,
 )
 
 
@@ -57,6 +59,20 @@ logger = logging.getLogger(__name__)
 # Larger chunks mean fewer messages but more memory per message. Override with
 # the WL_POINT_CLOUD_CHUNK_BYTES env variable (see docs/configuration.rst).
 _DEFAULT_POINT_CLOUD_CHUNK_BYTES = 1 << 20 # 1 MiB
+
+# Cap for signal_history(..., 'list'): a raw per-sample history is subsampled
+# (evenly, endpoints kept) to at most this many points so a long training run
+# doesn't produce unwieldy per-cell lists. Override with WL_SIGNAL_HISTORY_MAX_POINTS.
+SIGNAL_HISTORY_MAX_POINTS = int(os.environ.get("WL_SIGNAL_HISTORY_MAX_POINTS", "100"))
+
+# Cap for the on-demand GetSignalTrajectory plot (right-click a signal -> plot):
+# each sample's trajectory is downsampled (evenly, endpoints kept) to at most this
+# many points before it goes on the wire. Override with WL_SIGNAL_TRAJ_MAX_POINTS.
+SIGNAL_TRAJ_MAX_POINTS = int(os.environ.get("WL_SIGNAL_TRAJ_MAX_POINTS", "100"))
+
+# A trajectory needs at least this many recorded points to be worth plotting;
+# samples with fewer are omitted from GetSignalTrajectory entirely.
+SIGNAL_TRAJ_MIN_POINTS = 3
 
 
 def _point_cloud_chunk_bytes() -> int:
@@ -79,6 +95,59 @@ def _point_cloud_chunk_bytes() -> int:
         )
         return _DEFAULT_POINT_CLOUD_CHUNK_BYTES
     return val
+
+
+def peek_is_tabular_sample(dataset, sample_id) -> bool:
+    """True when ``sample_id``'s raw model input is a 1-D feature vector.
+
+    Used as the last step of task_type auto-detection: image/detection/
+    segmentation datasets are identified by their *label* shape, but a tabular
+    dataset's label is a plain scalar, so the only way to tell it apart is to
+    peek at the *input* it feeds the model. Any resolution failure (missing
+    sample, dataset without the expected lookup methods, …) is treated as
+    "not tabular" rather than raised, since this is a best-effort heuristic.
+    """
+    try:
+        if hasattr(dataset, "get_physical_location"):
+            idx, rank = dataset.get_physical_location(sample_id)
+        else:
+            idx, rank = dataset.get_index_from_sample_id(sample_id), 0
+        if idx is None:
+            return False
+        img, _, _, _ = load_raw_image_array(dataset, idx, rank=rank)
+        return looks_like_tabular(img)
+    except (KeyError, ValueError, AttributeError, IndexError):
+        return False
+
+
+def looks_like_file_path_label(label) -> bool:
+    """True when a string label looks like a file path (e.g. a segmentation
+    mask path such as "mask.png") rather than free text (e.g. an LLM's
+    reference/reply text).
+
+    Used by ``DataService._process_sample_row``'s task-type detection to
+    decide whether a string label should be treated as "empty" (triggering a
+    ``load_label`` reload) -- a file path with no loadable content on the row
+    should trigger that reload, but free text must NOT, since there is
+    nothing to "load" for it and doing so would silently discard the text.
+
+    A file path ends in a short alphanumeric extension with no whitespace;
+    ordinary free text (multiple sentences, or a mid-sentence period) almost
+    always has a space right after any non-trailing '.', so requiring the
+    trailing segment to be short/alphanumeric/whitespace-free keeps this from
+    misfiring on text labels/predictions.
+    """
+    if not isinstance(label, str):
+        return False
+    if any(ch.isspace() for ch in label):
+        return False
+    # Avoid treating numeric literals like "3.14" as file paths.
+    if re.fullmatch(r"[+-]?\d+(\.\d+)?([eE][+-]?\d+)?", label.strip()):
+        return False
+    if '.' not in label or label.endswith('.'):
+        return False
+    ext = label.rsplit('.', 1)[-1]
+    return 1 <= len(ext) <= 6 and ext.isalnum() and any(c.isalpha() for c in ext)
 
 
 def normalize_metadata_copy_source_name(source_name: str, experiment_hash: str = None) -> str:
@@ -443,7 +512,7 @@ class DataService:
                 self._preview_cache_ready.set()
                 return
 
-            total = min(len(df), self._preview_cache_max)
+            total = min(max(1, int(len(df) * 0.01)), self._preview_cache_max)
             logger.info("[PreviewCache] Building 64×64 or less or less preview cache for %d samples …", total)
             t0 = time.time()
 
@@ -493,7 +562,12 @@ class DataService:
                         ds_idx = dataset.get_index_from_sample_id(sample_id)
                         member_rank = 0
 
-                    _, _, _, pil_img = load_raw_image_array(dataset, ds_idx, rank=member_rank)
+                    _pv_np_img, _, _, pil_img = load_raw_image_array(dataset, ds_idx, rank=member_rank)
+                    if looks_like_tabular(_pv_np_img):
+                        # Tabular sample: cache the feature values (lossless) as a
+                        # 'vector' raw_data stat + heatmap thumbnail, not an image.
+                        stats.append(build_tabular_raw_data_stat(_pv_np_img))
+                        pil_img = None  # skip the image-thumbnail path below
                     if pil_img is not None:
                         ar = pil_img.size[0] / max(pil_img.size[1], 1)
                         if PREVIEW_SIZE >= max(pil_img.size):
@@ -595,6 +669,10 @@ class DataService:
                     task_type = str(db_task).strip().lower() if db_task and str(db_task).strip().lower() not in ("none", "nan", "unknown", "") else "unknown"
                     if task_type == "unknown" and _early_task:
                         task_type = _early_task
+                    if task_type == "unknown" and looks_like_tabular(_pv_np_img):
+                        # Tabular: the model INPUT (not the label) is a 1-D feature
+                        # vector — no spatial dims to key a heuristic off of.
+                        task_type = "tabular"
                     if task_type == "unknown" and label is not None:
                         l_arr = to_numpy_safe(label)
                         if l_arr is not None and l_arr.ndim >= 2 and l_arr.shape[-2] >= 16 and l_arr.shape[-1] >= 16:
@@ -860,8 +938,10 @@ class DataService:
 
             # The manager now expands samples into one row per (sample_id, annotation_id)
             # instance. Collapse back to one row per sample for the sample-centric UI/agent
-            # view, nesting per-instance signals into a dict column.
-            df = self._df_manager.get_collapse_annotations_to_samples_df()
+            # view, nesting per-instance signals into a dict column. Reuse the frame we just
+            # pulled — otherwise collapse would re-run get_combined_df() (full copy + buffer
+            # merge + proxy conversion) a second time over the whole dataset every refresh.
+            df = self._df_manager.get_collapse_annotations_to_samples_df(df)
 
             # Ensure sample_id is a column if it was the index
             df = safe_reset_index(df)
@@ -1143,10 +1223,20 @@ class DataService:
                 if "origin" in df_update.columns:
                      del df_update["origin"]
 
-                self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
+                try:
+                    self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
+                except Exception as e:
+                    logger.warning(
+                        "[DataService] Skipping natural sort stats write for origin=%s: %s",
+                        origin,
+                        e,
+                    )
 
         # Force refresh internal view
-        self._slowUpdateInternals(force=True)
+        try:
+            self._slowUpdateInternals(force=True)
+        except Exception as e:
+            logger.warning("[DataService] Natural sort refresh failed, continuing startup: %s", e)
 
         logger.info(f"[DataService] Completed stats computation for {processed_count} samples")
         print(f"\n\nNatural sort computation finished for {processed_count} samples\n\n")
@@ -1231,7 +1321,7 @@ class DataService:
                 is_label_empty = True
             elif isinstance(label, list) and not label:
                 is_label_empty = True
-            elif isinstance(label, str) and isinstance(label, str) and '.' in label and not label.endswith('.') and label.rsplit('.', 1)[-1] != '':
+            elif looks_like_file_path_label(label):
                 is_label_empty = True
             elif isinstance(label, float):
                 import math
@@ -1285,6 +1375,13 @@ class DataService:
                             except Exception:
                                 pass
 
+                # Tabular: the model INPUT (not the label) is a 1-D feature vector.
+                # Only peek at it when nothing else already matched, so this is a
+                # cheap no-op for image/detection/segmentation datasets.
+                if task_type == "classification" and dataset is not None:
+                    if peek_is_tabular_sample(dataset, sample_id):
+                        task_type = "tabular"
+
             # ====== Step 5a: Metadata stats — moved to GetMetaData ======
             # Generic dataframe metadata columns (signals, tags, custom fields, etc.)
             # are no longer returned by GetDataSamples; the dedicated GetMetaData RPC
@@ -1323,7 +1420,7 @@ class DataService:
 
             # ====== Step 7: Process labels ======
             t_label_convert = 0.0
-            if not skip_label_for_request and task_type != "classification":
+            if not skip_label_for_request and task_type not in ("classification", "tabular"):
                 t0_gt_conv = time.time()
                 label_raw = row.get(SampleStatsEx.TARGET.value) if label is None else label
                 if label_raw is None and dataset is not None:
@@ -1543,6 +1640,22 @@ class DataService:
                             thumbnail=b""
                         )
                     )
+                elif isinstance(label, str):
+                    # Text label (e.g. a generative model's reference/target
+                    # text) -- same 'target' stat name as the numeric/dict
+                    # cases above so the frontend's existing pred/target
+                    # column wiring picks it up unchanged; emitted directly
+                    # as a string, never through the numeric float(label)
+                    # path below (which would raise on non-numeric text).
+                    data_stats.append(
+                        create_data_stat(
+                            name='target',
+                            stat_type='string',
+                            shape=[1],
+                            value_string=label,
+                            thumbnail=b""
+                        )
+                    )
                 else:
                     # Check if label is NaN (handle both scalars and arrays)
                     if self._is_nan_value(label):
@@ -1581,7 +1694,7 @@ class DataService:
             if skip_prediction_for_request:
                 pred = None
 
-            if task_type != "classification" and pred is not None:
+            if task_type not in ("classification", "tabular") and pred is not None:
                 t0_pmask = time.time()
 
                 # 3D (point cloud) detection predictions: same dual payload as
@@ -1697,6 +1810,22 @@ class DataService:
                 if pred is None:
                     pass # No prediction to process
 
+                elif isinstance(pred, str):
+                    # Text prediction (e.g. a generative model's reply) --
+                    # same 'pred' stat name as the numeric case below so the
+                    # frontend's existing pred/target column wiring picks it
+                    # up unchanged; emitted directly as a string, never
+                    # through the numeric float(pred) path (which would
+                    # raise on non-numeric text and get silently dropped).
+                    data_stats.append(
+                        create_data_stat(
+                            name='pred',
+                            stat_type='string',
+                            shape=[1],
+                            value_string=pred,
+                            thumbnail=b""
+                        )
+                    )
                 else:
                     # Handle scalar predictions (int, float, or unwrapped from H5)
                     try:
@@ -1748,7 +1877,12 @@ class DataService:
                 else:
                     np_img, is_volumetric, original_shape, middle_pil = None, False, [], None
 
-                if middle_pil is not None:
+                # Tabular input: the model input is a 1-D feature vector, not an
+                # image. Transmit the actual values (lossless) as a 'vector'
+                # raw_data stat instead of a lossy WebP image.
+                if looks_like_tabular(np_img):
+                    data_stats.append(build_tabular_raw_data_stat(np_img))
+                elif middle_pil is not None:
                     original_size = middle_pil.size
                     target_width = original_size[0]
                     target_height = original_size[1]
@@ -2216,10 +2350,12 @@ class DataService:
         Backs the ``signal_history(metric, reduce)`` helper exposed to agent code.
         Reads the experiment logger's DuckDB per-sample store (append-only
         ``(metric, hash, sample_id, step, value)``), reduces each sample's whole
-        time series (min/max/mean/count), and maps it back onto the current
-        dataframe rows by sample_id. Rows whose sample has no recorded history
-        get NaN — so, e.g., ``signal_history('train_loss','min') >= 0.5`` is
-        False for them (no evidence they stayed above 0.5), never a crash.
+        time series (min/max/mean/count) — or, for reduce in
+        ``list``/``values``/``raw``/``history``, returns the full ordered series
+        as a per-sample list — and maps it back onto the current dataframe rows
+        by sample_id. Rows whose sample has no recorded history get NaN — so,
+        e.g., ``signal_history('train_loss','min') >= 0.5`` is False for them
+        (no evidence they stayed above 0.5), never a crash.
 
         Only populated when signals were logged with ``save_signals(..., log=True)``;
         with no logger / no history it returns an all-NaN Series (a safe no-op).
@@ -2259,8 +2395,16 @@ class DataService:
         except Exception:
             exp_hash = None
 
+        is_list = str(reduce).lower() in ("list", "values", "raw", "history")
+
         try:
-            reduced = logger_q.reduce_per_sample(resolved, reduce=reduce, exp_hash=exp_hash)
+            # Cap each sample's raw history to a manageable number of points
+            # (evenly subsampled, endpoints kept) so a long training run doesn't
+            # produce huge per-cell lists; scalar reduces are unaffected.
+            reduced = logger_q.reduce_per_sample(
+                resolved, reduce=reduce, exp_hash=exp_hash,
+                max_points=SIGNAL_HISTORY_MAX_POINTS if is_list else None,
+            )
         except Exception as exc:
             logger.debug(f"[Agent] signal_history('{metric}','{reduce}') failed: {exc}")
             return empty
@@ -2268,6 +2412,11 @@ class DataService:
             return empty
 
         mapped = sid_values.astype(str).map(reduced)
+        # List/raw reduces yield a Python list per sample — keep them as an
+        # object Series (numeric coercion would collapse each list to NaN).
+        # Scalar reduces (min/max/mean/count) stay numeric as before.
+        if is_list:
+            return pd.Series(mapped.to_numpy(dtype=object), index=df.index)
         return pd.Series(pd.to_numeric(mapped, errors="coerce").to_numpy(), index=df.index)
 
     def _resolve_checkpoint_manager(self):
@@ -2653,6 +2802,45 @@ class DataService:
             text = text[:max_len] + "\n... (truncated; ask for a specific key, e.g. 'show the root log dir')"
         return f"Configuration ({hp_name}):\n{text}"
 
+    @staticmethod
+    def _mask_from_coerced_query(df, expr: str):
+        """Best-effort boolean mask for `expr` against `df`, tolerating two
+        shapes of "numeric in practice, awkward in dtype" columns that break a
+        plain comparison in df.query()/df.eval():
+
+        1. A column referenced by `expr` is index-level-only (e.g. ``sample_id``
+           on a (sample_id, annotation_id) MultiIndex) — promoted to a real
+           column via the same ``safe_reset_index`` GetHistogram already uses,
+           so pandas' query engine can reference it at all instead of raising
+           obscure internal errors (e.g. "'UnaryOp' object has no attribute
+           'evaluate'").
+        2. An object-dtype column holds numeric values mixed with a few
+           non-numeric placeholders (e.g. a per-sample signal not yet computed
+           for every row) — cast via ``pd.to_numeric`` (errors="coerce"),
+           matching GetHistogram's own is_numeric classification, so a filter
+           the UI offered as numeric doesn't crash with e.g. "'<' not
+           supported between instances of 'str' and 'int'".
+
+        Returns a boolean array positionally aligned to `df` (safe to apply as
+        ``df[mask]`` regardless of `df`'s actual index), or None if `expr`
+        doesn't parse/evaluate even against this coerced view.
+        """
+        reset = safe_reset_index(df)
+        candidate_names = set(re.findall(r'`([^`]+)`', expr)) | set(re.findall(r'\b[A-Za-z_]\w*\b', expr))
+        to_coerce = {}
+        for col in candidate_names:
+            if col not in reset.columns or reset[col].dtype != object:
+                continue
+            numeric_vals = pd.to_numeric(reset[col], errors="coerce")
+            if numeric_vals.notna().any():
+                to_coerce[col] = numeric_vals
+        coerced = reset.assign(**to_coerce) if to_coerce else reset
+        try:
+            mask = coerced.eval(expr, local_dict={"df": coerced, "np": np, "pd": pd})
+        except Exception:
+            return None
+        return np.asarray(mask, dtype=bool)
+
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -2752,6 +2940,20 @@ class DataService:
             expr = params.get("expr", "")
             try:
                 kept = df.query(expr)
+                if len(kept) == 0 and len(df) > 0:
+                    # A comparison against a numeric-LOOKING but string-typed
+                    # column (sample_id is always stored as str -- see
+                    # save_signals -- and a user naturally types
+                    # "sample_id == 11448" with no quotes) doesn't raise here:
+                    # pandas happily evaluates str "11448" == int 11448 as
+                    # False for every row, so df.query "succeeds" with a
+                    # silently empty result instead of hitting the
+                    # _mask_from_coerced_query fallback below (which only
+                    # triggers on an exception). Retry once against the
+                    # coerced view before accepting "0 rows" at face value.
+                    coerced_mask = self._mask_from_coerced_query(df, expr)
+                    if coerced_mask is not None and coerced_mask.any():
+                        kept = df[coerced_mask]
                 df.drop(index=df.index.difference(kept.index), inplace=True)
                 return f"Applied query: {expr}"
             except Exception as e:
@@ -2762,8 +2964,23 @@ class DataService:
                     df.drop(index=df.index.difference(kept.index), inplace=True)
                     return f"Applied query (eval): {expr}"
                 except Exception as eval_e:
-                    logger.error(f"Query failed: {e} | Eval failed: {eval_e}")
-                    return f"Failed to filter: {expr}"
+                    # Both a plain df.query and df.eval can fail on a column that
+                    # is "numeric enough" by GetHistogram's own classification but
+                    # awkward in practice — either index-level-only (e.g.
+                    # sample_id on a MultiIndex) or object-dtype with a stray
+                    # non-numeric placeholder among otherwise-numeric values (e.g.
+                    # a per-sample signal not yet computed for every row). Retry
+                    # once against a coerced view (see _mask_from_coerced_query)
+                    # so a filter the UI offered as numeric doesn't fail here with
+                    # e.g. "'<' not supported between instances of 'str' and
+                    # 'int'".
+                    mask = self._mask_from_coerced_query(df, expr)
+                    if mask is None:
+                        logger.error(f"Query failed: {e} | Eval failed: {eval_e}")
+                        return f"Failed to filter: {expr}"
+                    kept = df[mask]
+                    df.drop(index=df.index.difference(kept.index), inplace=True)
+                    return f"Applied query: {expr}"
 
         # C) Column Modification (Transform)
         if func == "df.modify":
@@ -2974,6 +3191,12 @@ class DataService:
                                 df.pop(junk)
                         if 'sample_id' in df.columns:
                             df['sample_id'] = df['sample_id'].astype(int)
+                        # FIX: resolve bare signal names to their df column (signals//<name>)
+                        _rb = params.get("by")
+                        if _rb is not None:
+                            _rbl = [_rb] if isinstance(_rb, str) else list(_rb)
+                            _rbl = [(c if c in df.columns else ("signals//"+c if ("signals//"+c) in df.columns else c)) for c in _rbl]
+                            params["by"] = _rbl if isinstance(_rb, (list, tuple)) else _rbl[0]
                         df.sort_values(inplace=True, **params)
                         if 'sample_id' in df.columns:
                             df['sample_id'] = df['sample_id'].astype(str)
@@ -2991,7 +3214,7 @@ class DataService:
                                                   key=self._sample_id_sortable_series)
                                 else:
                                     df.sort_index(level=by, inplace=True, ascending=ascending)
-                            elif by in df.columns:
+                            elif all((b in df.columns) for b in ([by] if isinstance(by, str) else (by or []))):  # FIX: list-safe
                                 df.sort_values(inplace=True, **params, key=lambda x: x)
                             else:
                                 raise e
@@ -3429,6 +3652,56 @@ class DataService:
         except Exception:
             return False
 
+    @staticmethod
+    def _downsample_curve(vals, max_points=32):
+        """Uniformly downsample a series to <= max_points floats (endpoints kept)."""
+        if len(vals) <= max_points:
+            return [float(v) for v in vals]
+        idx = np.linspace(0, len(vals) - 1, max_points).round().astype(int)
+        return [float(vals[j]) for j in idx]
+
+    def _signal_trajectory_curves(self, signal_name, sample_ids, max_points=None):
+        """Downsampled per-sample trajectory of *signal_name* for the on-demand plot.
+
+        Returns ``(resolved_name, {str(sample_id): [float, ...]})``. Only samples
+        with at least ``SIGNAL_TRAJ_MIN_POINTS`` recorded points are included;
+        each kept curve is chronological (step-ordered) and downsampled to at most
+        *max_points* (default ``SIGNAL_TRAJ_MAX_POINTS``). Empty dict when there is
+        no logger, the signal name can't be resolved, or nothing has enough history.
+        Read-only — shape classification lives on the write path, not here.
+        """
+        from weightslab.backend import ledgers
+
+        logger_q = ledgers.get_logger()
+        if logger_q is None or not signal_name:
+            return signal_name, {}
+
+        # Resolve the UI-facing name to the stored graph name (exact -> case-
+        # insensitive -> unambiguous substring); the per-sample table keys on the
+        # stored name, so a bare query wouldn't match "signals//train-loss".
+        resolved = logger_q.resolve_graph_name(signal_name) or signal_name
+        try:
+            rows = logger_q.query_per_sample(resolved, sample_ids=sample_ids)
+        except Exception:
+            logger.debug("signal trajectory query skipped for %r", signal_name, exc_info=True)
+            return resolved, {}
+
+        by_sid = {}
+        for sid, step, val, _ in rows:
+            by_sid.setdefault(str(sid), []).append((int(step), float(val)))
+
+        cap = max_points if max_points and max_points > 0 else SIGNAL_TRAJ_MAX_POINTS
+        curves = {}
+        for sid, pts in by_sid.items():
+            if len(pts) < SIGNAL_TRAJ_MIN_POINTS:
+                continue  # not enough history to be worth plotting
+            curves[sid] = self._downsample_curve(
+                [v for _, v in sorted(pts)], max_points=cap)
+        if curves:
+            logger.info("[signal_traj] signal=%s page_ids=%d with_history=%d",
+                        resolved, len(sample_ids), len(curves))
+        return resolved, curves
+
     def _build_metadata_only_response(self, df_slice: pd.DataFrame, requested_cols=None):
         """Build a DataSamplesResponse of metadata DataRecords from dataframe columns only.
 
@@ -3546,6 +3819,11 @@ class DataService:
                         row_stats[i].append(
                             _DataStat(name=col, type="string", shape=[1], value_string="1")
                         )
+
+        # NOTE: per-sample signal trajectories are intentionally NOT attached here.
+        # They are computed on demand only, when the user right-clicks a signal and
+        # asks to plot it (GetSignalTrajectory) — never on the metadata poll — so
+        # this path stays cheap and does no per-request history reads.
 
         # -- Build DataRecord list in one comprehension -----------------------
         _DataRecord = pb2.DataRecord
@@ -3685,6 +3963,43 @@ class DataService:
                 all_metadata_names=[],
                 grid_records=[],
             )
+
+    def GetSignalTrajectory(self, request, context):
+        """On-demand per-sample trajectory of one signal, for the samples shown.
+
+        Triggered when the user right-clicks a signal and picks "Plot signal
+        trajectory" — never on the metadata poll. Returns one downsampled curve
+        per sample that has at least ``SIGNAL_TRAJ_MIN_POINTS`` recorded points
+        (samples with too little history are omitted, so the UI draws nothing
+        rather than a misleading one/two-point line).
+        """
+        try:
+            signal_name = str(getattr(request, "signal_name", "") or "").strip()
+            sample_ids = [str(s) for s in getattr(request, "sample_ids", [])]
+            max_points = int(getattr(request, "max_points", 0) or 0)
+            if not signal_name:
+                return pb2.GetSignalTrajectoryResponse(
+                    success=False, message="signal_name is required")
+
+            resolved, curves = self._signal_trajectory_curves(
+                signal_name, sample_ids or None, max_points=max_points)
+
+            trajectories = [
+                pb2.SignalTrajectory(sample_id=sid, value=curve)
+                for sid, curve in curves.items()
+            ]
+            return pb2.GetSignalTrajectoryResponse(
+                success=True,
+                message=(f"{len(trajectories)} trajectories for {resolved!r}"
+                         if trajectories else
+                         f"No sample has >= {SIGNAL_TRAJ_MIN_POINTS} points for {resolved!r}"),
+                signal_name=resolved,
+                trajectories=trajectories,
+            )
+        except Exception as e:
+            logger.error("Error in GetSignalTrajectory: %s", str(e), exc_info=True)
+            return pb2.GetSignalTrajectoryResponse(
+                success=False, message=f"Failed to retrieve signal trajectory: {str(e)}")
 
     def _merge_multi_instance_signals(self, df_slice):
         """Merge per-instance signals into dictionaries for multi-index dataframes.
@@ -4213,6 +4528,12 @@ class DataService:
                     if isinstance(operations, dict): operations = [operations] # Backwards compat
                     if not operations: operations = []
 
+                    # Cooperative cancel: if the client aborted during the (possibly
+                    # long) LLM call, skip executing the operations entirely.
+                    if abort_event.is_set():
+                        logger.info("[ApplyDataQuery] Canceled by client before execution")
+                        return pb2.DataQueryResponse(success=False, message="Query canceled.")
+
                     with self._lock:
                         self._slowUpdateInternals(force=True)
 
@@ -4228,6 +4549,11 @@ class DataService:
                         _SCHEMA_MUTATING_FUNCS = {"df.modify", "df.drop_column"}
 
                         for op in operations:
+                            # Cooperative cancel between operations (frees the lock
+                            # promptly when the client aborts a multi-step query).
+                            if abort_event.is_set():
+                                logger.info("[ApplyDataQuery] Canceled by client mid-execution")
+                                return pb2.DataQueryResponse(success=False, message="Query canceled.")
                             func = op.get("function")
                             params = op.get("params", {}) or {}
 
@@ -4339,18 +4665,29 @@ class DataService:
                     else np.zeros(n, bool))
 
             # Detect whether column is categorical (string/object) or numeric.
+            # A column is numeric if ANY value coerces to a finite number — even
+            # when the pandas dtype is ``object`` (e.g. a loss column holding
+            # floats mixed with None/NaN for samples that have no value yet).
+            # None/NaN are MISSING data, not a category, so they must never turn
+            # a numeric column into a categorical one (which would surface them
+            # as a spurious "unset" bar). We therefore treat as categorical only
+            # a genuine pandas ``category`` dtype, or a column whose values do
+            # not coerce to any numeric value at all (pure strings).
             col_series = df[column]
             numeric_vals = pd.to_numeric(col_series, errors="coerce")
-            is_categorical = numeric_vals.isna().all() or (
-                col_series.dtype == object or
-                str(col_series.dtype) == "category" or
-                hasattr(col_series, "cat")
+            is_category_dtype = (
+                str(col_series.dtype) == "category" or hasattr(col_series, "cat")
             )
-            # A column that has a few non-NaN numeric values mixed with mostly
-            # NaN still counts as numeric; only treat as categorical when
-            # pd.to_numeric fails on all values.
-            if not is_categorical and numeric_vals.notna().sum() == 0:
-                is_categorical = True
+            # A genuine numeric dtype (float/int/bool) is ALWAYS numeric — even
+            # when every value is NaN (e.g. a loss column no sample has filled
+            # yet). Such a column yields an empty numeric histogram, never a
+            # spurious "unset" categorical bar.
+            is_numeric_dtype = (
+                pd.api.types.is_numeric_dtype(col_series) and not is_category_dtype
+            )
+            is_categorical = (not is_numeric_dtype) and (
+                is_category_dtype or not bool(numeric_vals.notna().any())
+            )
 
             if is_categorical:
                 # --- Categorical path ---

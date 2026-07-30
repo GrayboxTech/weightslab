@@ -208,16 +208,26 @@ class H5DataFrameStore:
             return
         self._ensure_parent()
         payload = json.dumps(self._tag_registry)
-        try:
-            with self._local_lock:
-                with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout, poll_interval=self._poll_interval):
-                    with pd.HDFStore(str(self._path), mode="a") as store:
-                        if self._TAG_REGISTRY_KEY in store:
-                            store.remove(self._TAG_REGISTRY_KEY)
-                        store.put(self._TAG_REGISTRY_KEY, pd.DataFrame({"registry": [payload]}), format="table")
-                        store.flush()
-        except Exception as e:
-            logger.debug(f"[H5DataFrameStore] Failed to save tag registry: {e}")
+        # Windows can transiently deny reopening a file another handle (this
+        # process's own backup copy, antivirus scanning, etc.) just released
+        # a moment ago -- a couple of retries rides out that window without
+        # giving up on a save that would otherwise succeed a beat later.
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with self._local_lock:
+                    with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout, poll_interval=self._poll_interval):
+                        with pd.HDFStore(str(self._path), mode="a") as store:
+                            if self._TAG_REGISTRY_KEY in store:
+                                store.remove(self._TAG_REGISTRY_KEY)
+                            store.put(self._TAG_REGISTRY_KEY, pd.DataFrame({"registry": [payload]}), format="table")
+                            store.flush()
+                return
+            except Exception as e:
+                if attempt == max_attempts:
+                    logger.debug(f"[H5DataFrameStore] Failed to save tag registry after {max_attempts} attempts: {e}")
+                else:
+                    time.sleep(self._poll_interval * attempt)
 
     def load_tag_registry(self) -> dict:
         """Load the categorical tag registry from H5 into memory and return it."""

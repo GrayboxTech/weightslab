@@ -14,8 +14,8 @@ LiDAR Detection — 2D and 3D (PyTorch)
 
 **Examples:**
 
-- ``weightslab/examples/Usecases/ws-2d-lidar-detection/main.py``
-- ``weightslab/examples/Usecases/ws-3d-lidar-detection/main.py``
+- ``weightslab/examples/Usecases/wl-2d-lidar-detection/main.py``
+- ``weightslab/examples/Usecases/wl-3d-lidar-detection/main.py``
 
 **Task:** Object detection on LiDAR point clouds — 2D pillar-grid (BEV) and
 full 3D bounding boxes (KITTI-format).
@@ -120,7 +120,7 @@ and override ``load_points`` and optionally ``render_thumbnail_2d``:
 
    .. code-block:: bash
 
-      weightslab ui launch               # 1. deploy the studio
+    weightslab start                   # 1. deploy the studio
       weightslab start example --2d_det  # 2a. 2D pillar-grid detection
       # or
       weightslab start example --3d_det  # 2b. 3D bounding-box detection

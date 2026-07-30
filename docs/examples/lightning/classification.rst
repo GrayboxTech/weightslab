@@ -11,7 +11,7 @@ Classification — MNIST (PyTorch Lightning)
      <span class="wl-eg-tag">pytorch lightning</span>
    </div>
 
-**Example:** ``weightslab/examples/Lightning/ws-classification/main.py``
+**Example:** ``weightslab/examples/Lightning/wl-classification/main.py``
 
 **Task:** MNIST digit classification with a CNN, training loop managed by
 ``pl.Trainer``.

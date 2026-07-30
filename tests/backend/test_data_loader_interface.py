@@ -353,6 +353,35 @@ class TestDataLoaderInterface(unittest.TestCase):
             f"Each epoch should yield the same batch count, got {epoch_counts}",
         )
 
+    def test_reset_is_callable_through_ledger_proxy(self):
+        """`reset()` must exist and be callable via the ledger Proxy handle.
+
+        Ultralytics' trainer calls ``train_loader.reset()`` after closing mosaic
+        augmentation. The loader handed to it is a ledger Proxy wrapping this
+        interface, so a real ``reset()`` method (mapped to ``_reset_iterator``)
+        must be reachable through the proxy — otherwise the call resolves to a
+        non-callable None. Regression for the Ultralytics YOLO notebook crash
+        ``TypeError: 'NoneType' object is not callable``.
+        """
+        DataLoaderInterface(
+            self.train_ds, batch_size=self.batch_size,
+            loader_name="reset_proxy_loader", register=True, compute_hash=True,
+        )
+        loader = ledgers.get_dataloader("reset_proxy_loader")
+
+        self.assertTrue(hasattr(loader, "reset"))
+        self.assertTrue(callable(loader.reset))
+
+        # A full epoch before reset.
+        batches_before = sum(1 for _ in loader)
+        self.assertGreater(batches_before, 0)
+
+        # reset() must not raise, and the loader stays fully usable afterwards
+        # (a fresh full epoch with the same batch count can be iterated).
+        loader.reset()
+        batches_after = sum(1 for _ in loader)
+        self.assertEqual(batches_after, batches_before)
+
 
 class TestDataLoaderReproducibility(unittest.TestCase):
     """Test RNG and iteration state reproducibility for dataloaders."""

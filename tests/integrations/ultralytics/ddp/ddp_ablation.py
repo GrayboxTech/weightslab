@@ -31,10 +31,10 @@ import yaml, torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-# This harness lives under tests/ but drives the ws-detection usecase: put the usecase
+# This harness lives under tests/ but drives the wl-detection usecase: put the usecase
 # src on the path (for yolo_pipeline / utils.*) and resolve config/data/ddp_run vs IT.
 _USECASE_SRC = os.path.abspath(os.path.join(
-    os.path.dirname(__file__), "../../../../examples/PyTorch/ws-detection/src"))
+    os.path.dirname(__file__), "../../../../examples/PyTorch/wl-detection/src"))
 sys.path.insert(0, _USECASE_SRC)
 _HERE = _USECASE_SRC
 _HOST = "127.0.0.1"
@@ -149,7 +149,9 @@ def _worker(rank, world, master_port):
             _ensure_core_ddp_registered, reconcile_all, flush_outbox)
         _ensure_core_ddp_registered()
         import weightslab as wl
-        wl.serve(serving_grpc=True, serving_cli=False)
+        # DDP ablation harness: config wrapping is driven by yolo_pipeline across
+        # ranks, so opt out of the serve() serving-config guard explicitly.
+        wl.serve(serving_grpc=True, serving_cli=False, allow_unconfigured=True)
         decode = yolo_pipeline._decode_preds_to_6col
     else:
         model, loader, crit, iou, optimizer = _build_ul(cfg, device, batch_size, num_workers)

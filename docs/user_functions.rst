@@ -323,6 +323,7 @@ signal
        name: str,
        subscribe_to: str,
        compute_every_n_steps: int = 1,
+       min_step: int = 0,
        include_history: bool = False,
        include_history_metadata: bool = False
    )
@@ -345,6 +346,11 @@ sorting and root-cause analysis in the studio).
   ``ctx.subscribed_value``. If omitted, the signal is **static**.
 - ``compute_every_n_steps``: throttle for dynamic signals (e.g. ``10`` = compute
   on every 10th step the subscribed metric is produced).
+- ``min_step``: minimum training step before a dynamic signal starts firing.
+  While ``current_step < min_step`` the signal is skipped. Defaults to ``0``
+  (fire from the start). Use it when a signal needs enough history to be
+  meaningful — e.g. a loss-shape classifier that should only run once each
+  sample has a trajectory (``min_step=505``).
 
 **Static vs dynamic**
 
@@ -418,7 +424,7 @@ the verdict back as the categorical tag ``loss_shape`` (via
 sortable label you can triage in the studio — e.g. surface every ``Flat_high``
 sample to hunt for mislabels.
 
-The six shapes:
+The seven shapes:
 
 ==============  ====================================================================
 Label           Meaning
@@ -427,58 +433,25 @@ monotonic       Loss steadily decreasing — the model is learning the sample.
 plateaued       Decreased then leveled off still-high — stuck / hard sample.
 Flat_high       Never moved, stayed high — likely a mislabel or unlearnable.
 high_variance   Noisy oscillation — model uncertain, often an ambiguous label.
-U_Shape         Learned then forgotten — catastrophic interference from later data.
-Spiked          Sudden jump at some step — data/augmentation/version change.
+U_Shape         Dipped, then is recovering/still moving — not settled yet.
+Forgotten       Dipped, then permanently regressed to a new, worse, flat level.
+Spiked          One-step jump that reverts — transient, not a lasting change.
 ==============  ====================================================================
+
+``U_Shape`` and ``Forgotten`` are the same underlying event (loss improved, then
+got worse again) split on *permanence*: if the trajectory has settled flat at
+the new, worse level it's ``Forgotten`` (catastrophic interference from later
+data); if it's still actively climbing or oscillating, it's ``U_Shape`` — not
+enough evidence yet to call it permanent. ``Spiked`` is the opposite case: a
+sharp one-step rise that *does* come back down (a one-off data/augmentation
+glitch), as opposed to a rise that sticks.
 
 .. code-block:: python
 
-   import numpy as np
    import weightslab as wl
 
-   LOSS_SHAPE_LABELS = [
-       "monotonic", "plateaued", "Flat_high",
-       "high_variance", "U_Shape", "Spiked",
-   ]
+   LOSS_SHAPE_LABELS = list(wl.LOSS_SHAPES)
    LOSS_SHAPE_CODES = {label: i for i, label in enumerate(LOSS_SHAPE_LABELS)}
-
-   def _classify_loss_shape(values):
-       """Classify a per-sample loss trajectory (ordered by step).
-
-       Returns a label string, or None when there is not enough history yet.
-       All thresholds are scale-invariant (fractions of the trajectory's own
-       range) and illustrative — tune them for your own task.
-       """
-       y = np.asarray(values, dtype=float)
-       if y.size < 5:
-           return None
-
-       n = y.size
-       first, last = float(y[0]), float(y[-1])
-       ymin, ymax = float(y.min()), float(y.max())
-       rng = max(ymax - ymin, 1e-8)
-       mean = float(y.mean())
-
-       cv = float(y.std()) / (abs(mean) + 1e-8)        # noisiness
-       drop = (first - last) / (abs(first) + 1e-8)     # net improvement
-       argmin = int(np.argmin(y))
-       rebound = (last - ymin) / rng                    # climb-back from trough
-       max_up_jump = float(np.diff(y).max()) / rng      # largest single-step rise
-
-       tail = y[int(0.6 * n):]
-       tail_flat = (float(tail.std()) / (abs(float(tail.mean())) + 1e-8)) < 0.1
-
-       if max_up_jump > 0.5:
-           return "Spiked"
-       if cv > 0.5:
-           return "high_variance"
-       if 0.2 * n < argmin < 0.8 * n and rebound > 0.3:
-           return "U_Shape"
-       if drop > 0.4:
-           return "monotonic"
-       if drop > 0.15 and tail_flat:
-           return "plateaued"
-       return "Flat_high"
 
    # Declare the tag up-front so the UI shows all choices (after the dataloader
    # is registered). Then the signal below populates it during training.
@@ -496,7 +469,9 @@ Spiked          Sudden jump at some step — data/augmentation/version change.
        series = sorted(((step, val) for _, step, val, _ in history), key=lambda t: t[0])
        values = [v for _, v in series]
 
-       label = _classify_loss_shape(values)
+       # wl.classify_loss_shape (built-in) already implements the table above;
+       # see its docstring for the full rule set and every tunable threshold.
+       label = wl.classify_loss_shape(values)
        if label is None:
            return -1
        wl.set_categorical_tag([ctx.sample_id], "loss_shape", label)
@@ -511,8 +486,81 @@ Spiked          Sudden jump at some step — data/augmentation/version change.
    the verdict also live as a per-sample ``signals//loss_shape_classifier``
    column; the human-readable label lives on the ``loss_shape`` categorical tag.
 
-   See the detection use case (``examples/PyTorch/ws-detection/src/main.py``) for
+   See the detection use case (``examples/PyTorch/wl-detection/src/main.py``) for
    this signal wired into a real training loop.
+
+.. tip::
+
+   The hand-rolled ``@wl.signal(subscribe_to=...)`` above is the fully manual
+   route. If all you want is to **customize the loss-shape classifier**, use
+   :func:`signal_classifier` instead: register your rule once and the background
+   auto-tagger, :func:`write_signal_shapes` / :func:`write_loss_shapes`, and the
+   live :func:`enable_loss_shape_signal` all use it — no ``subscribe_to`` /
+   history / ``set_categorical_tag`` wiring, and no ``classifier=`` argument to
+   thread through each call. Labels are free-form:
+
+   .. code-block:: python
+
+      @wl.signal_classifier(signal="train/clsf_sample")
+      def monotonic_or_not(values):
+          s = wl.trajectory_stats(values)
+          if s is None or s["n"] < 5:
+              return None
+          return "monotonic" if s["drop_z"] > 2 else "not_monotonic"
+
+   See :ref:`signal_classifier <signal-classifier-ref>` below and
+   :doc:`examples/usecases/loss_shape_classification`.
+
+signal_classifier
+-----------------
+
+.. _signal-classifier-ref:
+
+**Signature**
+
+.. code-block:: python
+
+   @wl.signal_classifier                       # global default (bare)
+   @wl.signal_classifier()                     # global default (called)
+   @wl.signal_classifier(signal="loss_sample") # bind to one signal
+   def my_classifier(values: list[float]) -> str | None:
+       ...
+
+**Purpose**
+
+Register a custom signal-shape classifier that **overrides** the built-in
+:func:`classify_loss_shape`. The decorated function receives a sample's ordered
+value trajectory (``list[float]``) and returns a label string, or ``None`` to
+leave the sample untagged. Labels are **free-form** — the seven-way
+:data:`LOSS_SHAPES` set is only the built-in's vocabulary; a custom classifier
+may emit any labels (e.g. a binary ``monotonic`` / ``not_monotonic``).
+
+**Binding modes**
+
+- ``@wl.signal_classifier(signal="loss_sample")`` — classify only that one
+  signal (per-signal).
+- ``@wl.signal_classifier`` / ``@wl.signal_classifier()`` — become the global
+  default for every signal without its own per-signal classifier.
+
+**Resolution order** for a signal name: per-signal registered → global
+registered → built-in :func:`classify_loss_shape`. A registered classifier is
+consulted everywhere shapes are computed: the background auto-tagger,
+:func:`write_signal_shapes` / :func:`write_loss_shapes` (and
+``write_dataframe(loss_shape_signal=...)``), and :func:`enable_loss_shape_signal`.
+
+**Introspection** — :func:`resolve_signal_classifier` returns the active
+classifier for a given signal name.
+
+**Example**
+
+.. code-block:: python
+
+   @wl.signal_classifier(signal="loss_sample")
+   def monotonic_or_not(values):
+       s = wl.trajectory_stats(values)
+       if s is None or s["n"] < 5:
+           return None
+       return "monotonic" if s["drop_z"] > 2 else "not_monotonic"
 
 compute_signals
 ---------------
@@ -1080,6 +1128,7 @@ write_history
        graph_name=None,
        experiment_hash=None,
        sample_id=None,
+       orient="columns",
        instance_id=None,
    )
 
@@ -1127,8 +1176,28 @@ Dump signal history to a file for offline analysis or debugging.
 - ``instance_id`` *(int or list of int, optional)* — restrict per-instance
   rows to one or more annotation IDs.  Has no effect on global or
   per-sample history.
+- ``orient`` *(str, optional)* — JSON layout for each section, forwarded to
+  ``pandas.DataFrame.to_json``.  Default ``"columns"`` (see below — compact,
+  writes each column name once per section instead of once per row).  Pass
+  ``"records"`` for the row-list-of-dicts shape shown further down.  Ignored
+  for ``format="csv"``.
 
-**JSON output shape**
+**JSON output shape (default, ``orient="columns"``)**
+
+.. code-block:: json
+
+   {
+     "global":   {"graph_name": {"0": "loss"}, "experiment_hash": {"0": "h1"}, "step": {"0": 1}, "metric_value": {"0": 0.42}},
+     "sample":   {"graph_name": {"0": "loss"}, "experiment_hash": {"0": "h1"}, "sample_id": {"0": "img0"}, "step": {"0": 1}, "metric_value": {"0": 0.38}},
+     "instance": {"graph_name": {"0": "iou"},  "experiment_hash": {"0": "h1"}, "sample_id": {"0": "img0"}, "annotation_id": {"0": 1}, "step": {"0": 1}, "metric_value": {"0": 0.81}}
+   }
+
+Only the sections selected by *type_of_history* are present in the output.
+Each section maps column name -> {row index -> value}; round-trips with
+``pandas.read_json(path, orient="columns")`` (or per-section via
+``pd.DataFrame(data["global"])``).
+
+**JSON output shape (``orient="records"``)**
 
 .. code-block:: json
 
@@ -1138,7 +1207,9 @@ Dump signal history to a file for offline analysis or debugging.
      "instance": [{"graph_name": "iou",  "experiment_hash": "h1", "sample_id": "img0", "annotation_id": 1, "step": 1, "metric_value": 0.81}]
    }
 
-Only the sections selected by *type_of_history* are present in the output.
+The row-list-of-dicts shape used before ``orient`` was wired up — repeats
+every column name once per row, so it's larger on disk for many-row
+sections. Pass ``orient="records"`` explicitly to keep using it.
 
 **CSV output shape**
 

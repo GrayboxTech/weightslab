@@ -12,15 +12,20 @@ Loss-Shape Classification per Sample
      <span class="wl-eg-tag">trajectory</span>
    </div>
 
-**Example:** ``weightslab/examples/Usecases/ws-loss_shapes_classification_per_sample/``
+**Example:** ``weightslab/examples/Usecases/wl-classification-signals_shape_classification``
 
-This use case builds on :doc:`../pytorch/detection` (same Penn-Fudan dataset,
-same model, same ``guard_training_context`` pattern) and adds one new feature:
-a **dynamic subscribed signal** that watches each sample's loss *trajectory*
-over training, classifies its shape, and tags the sample automatically.
+This use case trains a small CNN on MNIST and adds one feature on top of the
+plain per-sample logging: a **custom loss-shape classifier**. The *shape* of a
+sample's loss trajectory over training tells you more than any single value —
+steadily dropping (the model is learning it) versus stuck-high (a candidate
+mislabel). WeightsLab tags each sample with that shape automatically; here we
+**override** the built-in classifier with our own rule.
 
-The idea is that the *shape* of a loss curve over time tells you more than any
-single value:
+The built-in default and your labels
+-------------------------------------
+
+Out of the box, :func:`classify_loss_shape` sorts each trajectory into one of
+seven built-in shapes:
 
 .. list-table::
    :header-rows: 1
@@ -36,175 +41,141 @@ single value:
    * - ``high_variance``
      - Noisy oscillation — ambiguous annotation
    * - ``U_Shape``
-     - Model learned it then forgot — catastrophic interference
+     - Dipped, then is recovering/still moving — not settled yet
+   * - ``Forgotten``
+     - Dipped, then permanently regressed to a new, worse, flat level — catastrophic interference
    * - ``Spiked``
-     - Sudden jump — data pipeline or augmentation change
+     - One-step jump that reverts — a transient glitch, not a lasting change
 
-Base detection setup
---------------------
+``U_Shape`` and ``Forgotten`` are the same event (loss improved, then got worse
+again) split on whether it has settled at the new level yet. Those seven
+labels are just the *built-in's* vocabulary. A custom classifier can emit
+**any** labels. This example uses a binary ``monotonic`` / ``not_monotonic``
+rule.
 
-Loader, model, optimizer, and loss signals are identical to
-:doc:`../pytorch/detection`. Refer to that page for the full walkthrough.
-The heavy-experiment flags are also applied:
+Base setup
+----------
+
+Loader, model, optimizer, and the watched loss are the usual per-sample
+tracking (nothing loss-shape-specific here). The one signal that matters below
+is the per-sample loss, whose name comes from ``config.yaml``
+(``loss_signal_name: loss_sample``):
 
 .. code-block:: python
 
-   train_loader = wl.watch_or_edit(
-       _train_dataset,
-       flag="data", loader_name="train_loader",
-       batch_size=8, shuffle=True, is_training=True,
-       collate_fn=det_collate,
-       array_autoload_arrays=False,
-       array_return_proxies=True,
-       array_use_cache=True,
-       preload_labels=False,
+   LOSS = cfg["loss_signal_name"]   # "loss_sample"
+
+   crit = wl.watch_or_edit(
+       nn.CrossEntropyLoss(reduction="none"),
+       flag="loss", signal_name=LOSS, per_sample=True, log=True,
    )
 
-   train_sig = {
-       "loss":         wl.watch_or_edit(PerSampleDetectionLoss(...),
-                           flag="loss", name="train_loss/sample",
-                           per_sample=True, log=True),
-       "iou_sample":   wl.watch_or_edit(PerSampleIoU(...),
-                           flag="metric", name="train_iou/sample",
-                           per_sample=True, log=True),
-       "iou_instance": wl.watch_or_edit(PerInstanceIoU(...),
-                           flag="metric", name="train_iou/instance",
-                           per_instance=True, log=True),
-   }
+The custom classifier — ``@wl.signal_classifier``
+-------------------------------------------------
 
-Declaring the categorical tag
-------------------------------
-
-Before defining the subscribed signal, declare the categorical tag and its
-allowed values so the studio shows all six choices in the filter panel even
-before any sample has been classified:
+The classifier lives in ``utils/criterions.py``. It is a plain callable —
+``trajectory (list[float]) -> label | None`` — registered with the
+:func:`signal_classifier` decorator. Returning ``None`` leaves a sample untagged
+(here, until it has enough history). It reuses :func:`trajectory_stats`, the
+scale-invariant feature layer the built-in classifier is built on, so we read
+the trend without re-deriving it:
 
 .. code-block:: python
 
-   LOSS_SHAPE_LABELS = [
-       "monotonic", "plateaued", "Flat_high",
-       "high_variance", "U_Shape", "Spiked",
-   ]
+   import weightslab as wl
 
-   wl.register_categorical_tag("loss_shape", LOSS_SHAPE_LABELS)
+   MIN_POINTS = 5
 
-This call must happen **after** ``wl.watch_or_edit(..., flag="data", ...)``
-because the dataframe (which stores the tag column) is created at that point.
-
-The subscribed signal
-----------------------
-
-.. code-block:: python
-
-   checkpoint_manager = ledgers.get_checkpoint_manager()
-
-   @wl.signal(
-       name="train_loss_sample_shape_classifier",
-       subscribe_to="train_loss/sample",
-       compute_every_n_steps=25,
-       log=False,
-   )
-   def classify_loss_shape(ctx: wl.SignalContext) -> int:
-       history = wl.query_sample_history(
-           ctx.sample_id,
-           signal_name="train_loss/sample",
-           exp_hash=checkpoint_manager.get_current_experiment_hash(),
-       )
-       series = sorted(
-           ((step, val) for _, step, val, _ in history),
-           key=lambda t: t[0],
-       )
-       values = [v for _, v in series]
-
-       label = _classify_loss_shape(values)
-       if label is None:
-           return -1
-
-       wl.set_categorical_tag([ctx.sample_id], "loss_shape", label)
-       return LOSS_SHAPE_CODES[label]
-
-Breaking down the decorator arguments
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-``subscribe_to="train_loss/sample"``
-   The signal fires once per sample for which ``train_loss/sample`` was
-   updated. ``ctx.sample_id`` identifies the exact sample; ``ctx.subscribed_value``
-   holds the latest scalar value and ``ctx.subscribed_history`` (if
-   ``include_history=True``) holds the full trajectory.
-
-``compute_every_n_steps=25``
-   The classifier runs every 25 optimisation steps, not every step. History
-   classification is cheap but not free; 25 steps is a good balance between
-   responsiveness and overhead.
-
-``log=False``
-   This signal has a side-effect (tagging the sample) and does not need an
-   aggregate curve in the studio. The returned integer is still stored as a
-   per-sample signal column so you can sort by ``loss_shape_code`` in the UI.
-
-Inside the function
-~~~~~~~~~~~~~~~~~~~~
-
-``wl.query_sample_history`` returns the full list of ``(experiment_hash,
-step, value, metadata)`` tuples recorded for a given sample and signal.
-Filtering by ``exp_hash`` ensures only the current run's history is used.
-
-``wl.set_categorical_tag([ctx.sample_id], "loss_shape", label)`` writes
-the string label back to the sample's row in the ledger. The studio
-immediately reflects the update — samples are colour-coded by loss shape
-in the sample grid.
-
-Shape classifier logic
-~~~~~~~~~~~~~~~~~~~~~~~
-
-The classifier uses scale-invariant thresholds (fractions of the trajectory's
-own range):
-
-.. code-block:: python
-
-   def _classify_loss_shape(values):
-       y = np.asarray(values, dtype=float)
-       if y.size < 5:           # need at least 5 points to decide
+   @wl.signal_classifier(signal="loss_sample")
+   def monotonic_or_not(values):
+       """"monotonic" when the loss dropped substantially start-to-end,
+       else "not_monotonic". None until MIN_POINTS points exist."""
+       s = wl.trajectory_stats(values)
+       if s is None or s["n"] < MIN_POINTS:
            return None
+       return "monotonic" if s["drop_z"] > 2 else "not_monotonic"
 
-       cv       = y.std() / (abs(y.mean()) + 1e-8)   # noisiness
-       drop     = (y[0] - y[-1]) / (abs(y[0]) + 1e-8)# net improvement
-       rebound  = (y[-1] - y.min()) / max(y.max() - y.min(), 1e-8)
-       max_jump = np.diff(y).max() / max(y.max() - y.min(), 1e-8)
-       tail_flat = (y[int(0.6*len(y)):].std() /
-                    (abs(y[int(0.6*len(y)):].mean()) + 1e-8)) < 0.1
+``@wl.signal_classifier(signal="loss_sample")`` binds this rule to the
+``loss_sample`` signal only. (Use a bare ``@wl.signal_classifier`` — or
+``@wl.signal_classifier()`` — to make it the **global default** for every signal
+that has no per-signal classifier of its own.) The resolution order for any
+signal is: per-signal registered → global registered → built-in
+:func:`classify_loss_shape`.
 
-       if max_jump > 0.5:                return "Spiked"
-       if cv > 0.5:                      return "high_variance"
-       if 0.2*len(y) < np.argmin(y) < 0.8*len(y) and rebound > 0.3:
-                                         return "U_Shape"
-       if drop > 0.4:                    return "monotonic"
-       if drop > 0.15 and tail_flat:     return "plateaued"
-       return "Flat_high"
+When the loss signal name isn't known at import time (it comes from config),
+bind it at runtime instead — this is what ``main.py`` calls:
 
-All thresholds are illustrative. Tune ``cv``, ``drop``, ``rebound``, and
-``max_jump`` to match the scale and noise characteristics of your own task.
+.. code-block:: python
+
+   def register_shape_classifier(loss_name):
+       wl.signal_classifier(signal=loss_name)(monotonic_or_not)
+       return monotonic_or_not
+
+   # in main(), after watch_or_edit(..., flag="loss", signal_name=LOSS, ...):
+   register_shape_classifier(LOSS)
+
+Once registered, the classifier is consulted **everywhere shapes are
+computed** — you don't wire up ``subscribe_to`` / history queries /
+``set_categorical_tag`` yourself. The background auto-tagger applies it
+automatically and fills a categorical ``tag:loss_shape`` column with our two
+labels. The built-in seven-way default is left untouched for every other signal.
+
+Universal loss on the test split
+---------------------------------
+
+The watched criterion also runs over the test split each epoch (inside
+``guard_testing_context``), so test samples accumulate a loss trajectory and get
+a shape too — the classifier doesn't care which split a sample came from.
+
+Reporting the tag
+-----------------
+
+At the end of the run, dump the categorical tag alongside the signals. Passing
+``loss_shape_signal=LOSS`` runs the registered classifier once, synchronously,
+so the ``tag:loss_shape`` column is guaranteed fresh in the dump:
+
+.. code-block:: python
+
+   path = wl.write_dataframe(
+       OUT + "/report.csv", format="csv",
+       columns=["signals", "tags"], loss_shape_signal=LOSS,
+   )
+   # report.csv now has a tag:loss_shape column of monotonic / not_monotonic
 
 Workflow in the studio
------------------------
+----------------------
 
-1. After ~25 steps, the ``loss_shape`` tag column appears on each sample.
-2. Use the **Filter** panel to show only ``Flat_high`` samples — candidates
-   for relabelling.
-3. Sort by ``train_loss_sample_shape_classifier`` to rank the most problematic
-   samples.
-4. Tag or discard them; the deny-aware sampler stops presenting them on the
-   next training step.
+1. As samples accumulate ≥5 points, the ``loss_shape`` tag appears on each one,
+   refreshed on every background tick.
+2. Use the **Filter** panel to isolate ``not_monotonic`` samples — the ones the
+   model is not learning cleanly — as relabelling candidates.
+3. To eyeball *why*, right-click the ``loss_sample`` signal (in the left
+   metadata panel or a List-view column header) and pick **Plot signal
+   trajectory**. WeightsLab fetches each currently-shown sample's per-step
+   trajectory for that signal on demand (via the ``GetSignalTrajectory`` RPC)
+   and overlays the curves. This works for **any** signal — the name is resolved
+   dynamically server-side, nothing is hardcoded to a "loss". Curves are
+   downsampled to at most ``WL_SIGNAL_TRAJ_MAX_POINTS`` points (default 100), and
+   samples with fewer than 3 recorded points are omitted rather than drawn as a
+   misleading 1–2 point line.
+4. Tag or discard the problem samples; the deny-aware sampler stops presenting
+   them on the next training step.
 
 .. tip::
 
-   The base detection loop (Penn-Fudan dataset, downloaded automatically) is
-   bundled with WeightsLab. The loss-shape classifier runs on top of it:
+   To run the example directly::
 
-   .. code-block:: bash
+      cd weightslab/examples/Usecases/wl-classification-signals_shape_classification
+      python main.py
 
-      weightslab ui launch           # 1. deploy the studio
-      weightslab start example --det # 2. start the detection demo
+   Knobs (epochs, output dir, signal name) live in ``config.yaml``; a few can be
+   overridden via ``WL_STRESS_*`` environment variables for scripted runs.
 
-   To run the full loss-shape example (with the ``@wl.signal(subscribe_to=...)``
-   classifier active), use the direct path above.
+
+.. raw:: html
+
+   <div style="text-align:right; margin-top:2rem;">
+     <a href="https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/Usecases/wl-segmentation-loss-shapes-classification.ipynb" target="_blank" rel="noopener noreferrer">
+       <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab">
+     </a>
+   </div>

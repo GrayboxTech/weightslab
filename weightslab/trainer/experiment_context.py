@@ -184,7 +184,7 @@ class ExperimentContext:
             last_hash = "000000000000000000000000"
             try:
                 chkpt_m = self._components.get("checkpoint_manager")
-                if chkpt_m and hasattr(chkpt_m, "get_last_checkpoint_hash"):
+                if chkpt_m and hasattr(chkpt_m, "get_current_experiment_hash"):
                     resolved = chkpt_m.get_current_experiment_hash()
                     if resolved:
                         last_hash = resolved

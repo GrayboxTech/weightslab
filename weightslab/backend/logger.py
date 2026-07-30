@@ -29,15 +29,21 @@ Design notes
   staging appends and flushes take the same lock.
 """
 
+import functools
 import json
+import logging
+import os
 import threading
 import time
+from collections import defaultdict
 
 import duckdb
 import pandas as pd
 import torch as th
 
 from weightslab.backend.ledgers import get_logger, register_logger, get_checkpoint_manager
+
+logger = logging.getLogger(__name__)
 
 
 # Column order for each table's staging buffer / bulk insert.
@@ -54,6 +60,13 @@ _INSTANCE_COLS = [
 # Auto-flush staged rows to DuckDB once the combined staging buffers exceed this
 # many rows, to bound memory during long runs that never read history.
 _STAGE_FLUSH_THRESHOLD = 50_000
+
+# How often the background flush thread wakes up (see LoggerQueue._flush_loop).
+def _default_flush_interval_seconds() -> float:
+    try:
+        return float(os.environ.get("WL_LOGGER_FLUSH_INTERVAL_SECONDS", "2.0"))
+    except (TypeError, ValueError):
+        return 2.0
 
 
 class LoggerQueue:
@@ -73,6 +86,19 @@ class LoggerQueue:
         self._eval_mode_tags: list[str] = []
         self._eval_accum: dict = {} # {graph_name: [sum, count]}
 
+        # Background flush + loss-shape autotag state. Every flag="loss" signal
+        # is auto-classified by default (see _autotag_loss_shapes); these only
+        # hold user overrides/opt-outs for specific signals (or all of them).
+        self._loss_shape_overrides: dict = {}  # {signal_name: (tag_name, classifier)}
+        self._loss_shape_disabled: set = set()
+        self._loss_shape_all_disabled: bool = False
+        # {signal_name: _qps_version at the last successful tag pass} — lets
+        # _autotag_loss_shapes() skip a signal entirely when no new per-sample
+        # data has been staged for it since last time (see _autotag_loss_shapes).
+        self._loss_shape_last_version: dict = {}
+        self._flush_stop = threading.Event()
+        self._flush_thread: threading.Thread | None = None
+
         # DuckDB connection + write-staging buffers.
         self._lock = threading.RLock()
         self._db_path = db_path
@@ -81,6 +107,25 @@ class LoggerQueue:
         self._stage_sample: list = []
         self._stage_instance: list = []
         self._seq = 0
+
+        # Absolute paths of sibling DBs already merged in via merge_from_disk,
+        # so repeated merge triggers (logger can be bound to disk from three
+        # different call sites depending on init ordering) stay idempotent.
+        self._merged_source_dbs: set = set()
+
+        # Per-sample query cache. Many consumers read the SAME (signal, ids) in
+        # one step (e.g. reactive signals all reading the loss); memoize so N
+        # identical reads cost 1 scan. Keyed by (signal, ids, [step,] hash,
+        # version[signal]); staging a row bumps that signal's version to
+        # invalidate. Step-scoped: _stage_sample_row clears both caches when the
+        # step advances (keys never recur across steps, so old entries are dead).
+        # Cache size is env-configurable (WL_QUERY_CACHE_MAXSIZE, default 2048).
+        _qps_maxsize = int(os.environ.get("WL_QUERY_CACHE_MAXSIZE", "2048"))
+        self._qps_version: dict = defaultdict(int)
+        self._qps_cache_step: int = -1
+        self._qps_cache = functools.lru_cache(maxsize=_qps_maxsize)(self._query_per_sample_uncached)
+        self._qps_step_cache = functools.lru_cache(maxsize=_qps_maxsize)(self._query_per_sample_at_step_uncached)
+
         self._ensure_tables()
         self._restore_runtime_state_from_db()
 
@@ -95,45 +140,317 @@ class LoggerQueue:
         # Init checkpoint manager for experiment hash retrieval (if available)
         self.chkpt_manager = get_checkpoint_manager()
 
+        # If no explicit db_path was given but a checkpoint manager already
+        # exists, persist history to an on-disk DuckDB file under its loggers/
+        # dir. (The reverse ordering — CM created after the logger — is handled
+        # by CheckpointManager.__init__ calling set_db_path on the live logger.)
+        if db_path == ":memory:":
+            try:
+                loggers_dir = getattr(self.chkpt_manager, "loggers_dir", None)
+                if loggers_dir:
+                    self.set_db_path(os.path.join(str(loggers_dir), "loggers.duckdb"))
+            except Exception:
+                pass
+
+        # Checkpoint manager was created before this logger and already
+        # resolved a multi-root parent directory — merge sibling roots' curves
+        # in now (the reverse ordering is handled by
+        # CheckpointManager._bind_logger_to_disk; merge_from_disk is
+        # idempotent so both call sites firing is harmless).
+        if getattr(self.chkpt_manager, "is_multi_root", False):
+            try:
+                self.chkpt_manager._merge_sibling_logger_histories()
+            except Exception as exc:
+                logger.warning(f"[LoggerQueue] Failed to merge multi-root sibling logger histories: {exc}")
+
+        self._start_background_flush()
+
+    # ------------------------------------------------------------------
+    # Background flush + loss-shape autotag
+    # ------------------------------------------------------------------
+    def _start_background_flush(self) -> None:
+        """Start the periodic flush/loss-shape thread (off the caller's thread).
+
+        Runs for the life of the process (daemon) so neither the training loop
+        nor the gRPC servicer has to remember to flush or re-tag loss shapes
+        themselves — every flag="loss" signal is auto-classified with zero
+        setup. See _autotag_loss_shapes for the tagging half."""
+        if self._flush_thread is not None and self._flush_thread.is_alive():
+            return
+        self._flush_stop.clear()
+        self._flush_thread = threading.Thread(
+            target=self._flush_loop, name="WL-Logger-Flush", daemon=True)
+        self._flush_thread.start()
+
+    def set_loss_shape_override(self, loss_signal: str, tag_name: str | None = None,
+                                 classifier=None) -> None:
+        """Override the tag name / classifier used when auto-tagging *loss_signal*.
+
+        Every ``flag="loss"`` signal is already auto-classified with zero setup
+        (see :meth:`_autotag_loss_shapes`); call this only to customize one
+        specific signal (e.g. it isn't a decreasing loss, so the default
+        classifier is wrong for it). Also re-enables that signal if it had been
+        disabled via :meth:`disable_loss_shape_autotag`.
+        """
+        with self._lock:
+            self._loss_shape_overrides[loss_signal] = (tag_name, classifier)
+            self._loss_shape_disabled.discard(loss_signal)
+
+    def disable_loss_shape_autotag(self, loss_signal: str | None = None) -> None:
+        """Stop automatic loss-shape tagging for *loss_signal*, or for every
+        signal (including ones registered later) if *loss_signal* is ``None``.
+        The background flush itself keeps running either way."""
+        with self._lock:
+            if loss_signal is None:
+                self._loss_shape_all_disabled = True
+            else:
+                self._loss_shape_disabled.add(loss_signal)
+                self._loss_shape_overrides.pop(loss_signal, None)
+
+    def _autotag_loss_shapes(self) -> None:
+        """Re-classify every auto-detected ``flag="loss"`` signal that has NEW
+        per-sample data since its last tag pass.
+
+        Each signal is skipped when its ``_qps_version`` (bumped only by
+        ``_stage_sample_row`` on an actual new per-sample write, and already
+        the cache-invalidation key for ``query_per_sample``/
+        ``query_signal_history``) hasn't moved since the last time this
+        signal was classified — no new points means the classification result
+        (and thus every categorical tag written from it) would come out
+        identical, so re-running the full read + classify + tag-write cycle
+        on a bare 2s timer regardless of whether training even produced
+        anything new was pure waste, and contended ``self._lock`` against
+        unrelated reads (e.g. ``get_signal_history()`` for
+        ``GetLatestLoggerData``) the whole time training was paused/idle too.
+        Failures are per-signal and never propagate — one bad
+        classifier/signal can't stop the others.
+        """
+        with self._lock:
+            if self._loss_shape_all_disabled:
+                return
+            disabled = set(self._loss_shape_disabled)
+            overrides = dict(self._loss_shape_overrides)
+        try:
+            # Lazy import: weightslab.src imports LoggerQueue at module load
+            # time, so importing it back here at module scope would cycle.
+            from weightslab.src import auto_loss_shape_signal_names, write_signal_shapes
+        except Exception as exc:
+            logger.debug(f"[LoggerQueue] loss-shape autotag: import failed: {exc}")
+            return
+        # Union, not just the auto-detected set: set_loss_shape_override() can
+        # also opt in a signal that wasn't registered via flag="loss" (e.g. a
+        # manually wl.save_signals()-logged one under a custom name).
+        signal_names = set(auto_loss_shape_signal_names()) | set(overrides.keys())
+        for signal_name in signal_names:
+            if signal_name in disabled:
+                continue
+            with self._lock:
+                current_version = self._qps_version[signal_name]
+            if self._loss_shape_last_version.get(signal_name) == current_version:
+                continue  # no new per-sample data logged since the last pass
+            tag_name, classifier = overrides.get(signal_name, (None, None))
+            try:
+                write_signal_shapes(signal_name, tag_name=tag_name, classifier=classifier)
+                self._loss_shape_last_version[signal_name] = current_version
+            except Exception as exc:
+                logger.debug(
+                    f"[LoggerQueue] loss-shape autotag failed for {signal_name!r}: {exc}")
+
+    def _flush_loop(self) -> None:
+        interval = _default_flush_interval_seconds()
+        while not self._flush_stop.wait(interval):
+            try:
+                self.flush_to_disk()
+            except Exception as exc:
+                logger.debug(f"[LoggerQueue] background flush failed: {exc}")
+            self._autotag_loss_shapes()
+
+    def stop_background_flush(self) -> None:
+        """Stop the background flush/loss-shape thread (e.g. at shutdown or in tests)."""
+        self._flush_stop.set()
+        if self._flush_thread is not None:
+            self._flush_thread.join(timeout=2.0)
+
     # ------------------------------------------------------------------
     # DuckDB plumbing
     # ------------------------------------------------------------------
+    @staticmethod
+    def _schema_ddl(prefix: str = "") -> str:
+        """Return the CREATE-TABLE DDL for all history tables.
+
+        ``prefix`` lets the same schema be created inside an attached database
+        (e.g. ``"ondisk."``) when migrating from in-memory to a file.
+        """
+        return f"""
+            CREATE TABLE IF NOT EXISTS {prefix}signals (
+                metric_name VARCHAR,
+                experiment_hash VARCHAR,
+                step INTEGER,
+                metric_value DOUBLE,
+                timestamp BIGINT,
+                audit_mode BOOLEAN,
+                is_evaluation_marker BOOLEAN,
+                split_name VARCHAR,
+                evaluation_tags VARCHAR,
+                point_note VARCHAR,
+                seq BIGINT
+            );
+            CREATE TABLE IF NOT EXISTS {prefix}per_sample (
+                metric_name VARCHAR,
+                experiment_hash VARCHAR,
+                sample_id VARCHAR,
+                step INTEGER,
+                value REAL,
+                seq BIGINT
+            );
+            CREATE TABLE IF NOT EXISTS {prefix}per_instance (
+                metric_name VARCHAR,
+                experiment_hash VARCHAR,
+                sample_id VARCHAR,
+                annotation_id INTEGER,
+                step INTEGER,
+                value REAL,
+                seq BIGINT
+            );
+        """
+
     def _ensure_tables(self) -> None:
         with self._lock:
-            self._conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS signals (
-                    metric_name VARCHAR,
-                    experiment_hash VARCHAR,
-                    step INTEGER,
-                    metric_value DOUBLE,
-                    timestamp BIGINT,
-                    audit_mode BOOLEAN,
-                    is_evaluation_marker BOOLEAN,
-                    split_name VARCHAR,
-                    evaluation_tags VARCHAR,
-                    point_note VARCHAR,
-                    seq BIGINT
-                );
-                CREATE TABLE IF NOT EXISTS per_sample (
-                    metric_name VARCHAR,
-                    experiment_hash VARCHAR,
-                    sample_id VARCHAR,
-                    step INTEGER,
-                    value REAL,
-                    seq BIGINT
-                );
-                CREATE TABLE IF NOT EXISTS per_instance (
-                    metric_name VARCHAR,
-                    experiment_hash VARCHAR,
-                    sample_id VARCHAR,
-                    annotation_id INTEGER,
-                    step INTEGER,
-                    value REAL,
-                    seq BIGINT
-                );
-                """
-            )
+            self._conn.execute(self._schema_ddl())
+
+    _HISTORY_TABLES = ("signals", "per_sample", "per_instance")
+
+    def set_db_path(self, db_path) -> None:
+        """Persist signal history to an on-disk DuckDB file.
+
+        Call this once, early in setup. If the file already exists (resume),
+        its data is adopted as-is. If it does not, whatever little is currently
+        in the in-memory DB is migrated into the new file. Either way the file
+        becomes the live connection afterwards.
+
+        The hot logging path is unaffected: ``add_scalars`` still stages to RAM
+        and only bulk-flushes to DuckDB lazily. DuckDB serves reads from its
+        in-memory buffer pool, so this adds durability, not per-read disk hits.
+        """
+        if not db_path or db_path == ":memory:":
+            return
+        db_path = str(db_path)
+
+        with self._lock:
+            if self._db_path == db_path:
+                return
+
+            parent = os.path.dirname(db_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+
+            file_preexists = os.path.exists(db_path)
+
+            try:
+                # Make sure staged rows are materialized before we migrate.
+                self._flush_stage()
+
+                if not file_preexists:
+                    # Fresh file: copy whatever is in the in-memory DB into it.
+                    # ATTACH doesn't accept bind parameters, so inline the path
+                    # with SQL-escaped quotes.
+                    escaped = db_path.replace("'", "''")
+                    self._conn.execute(f"ATTACH '{escaped}' AS ondisk")
+                    self._conn.execute(self._schema_ddl(prefix="ondisk."))
+                    for tbl in self._HISTORY_TABLES:
+                        self._conn.execute(
+                            f"INSERT INTO ondisk.{tbl} SELECT * FROM {tbl}"
+                        )
+                    self._conn.execute("DETACH ondisk")
+
+                # Adopt the on-disk file as the live connection. On resume this
+                # is the source of truth; the fresh in-memory rows are ignored.
+                self._conn.close()
+                self._conn = duckdb.connect(database=db_path)
+                self._db_path = db_path
+                self._ensure_tables()
+                self._invalidate_qps_cache()
+                self._restore_runtime_state_from_db()
+                logger.info(
+                    f"[LoggerQueue] Signal history persisted on disk at {db_path} "
+                    f"({'adopted existing' if file_preexists else 'new'} database)."
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"[LoggerQueue] Failed to enable on-disk persistence at "
+                    f"{db_path}: {exc}. Keeping in-memory history."
+                )
+
+    def flush_to_disk(self) -> None:
+        """Flush staged rows and force a DuckDB checkpoint to the file.
+
+        No-op for an in-memory database. Call at checkpoint time so history is
+        durable even without a clean shutdown (DuckDB also replays its WAL on
+        the next open, so this is belt-and-braces)."""
+        with self._lock:
+            try:
+                self._flush_stage()
+                if self._db_path != ":memory:":
+                    self._conn.execute("CHECKPOINT")
+            except Exception as exc:
+                logger.warning(f"[LoggerQueue] flush_to_disk failed: {exc}")
+
+    def merge_from_disk(self, other_db_path) -> bool:
+        """Merge signal-history rows from another on-disk DuckDB file into
+        this logger's live tables.
+
+        Used to stitch training curves together from sibling experiment
+        roots discovered under a shared parent directory (see
+        CheckpointManager._merge_sibling_logger_histories). Purely additive:
+        rows are namespaced by ``experiment_hash``, so independent hash
+        chains from different roots never collide, and nothing already in
+        this logger is touched. A no-op (returns False) if the path doesn't
+        exist, is this same database, or the merge fails outright.
+        """
+        if not other_db_path:
+            return False
+        other_db_path = os.path.abspath(str(other_db_path))
+        if not os.path.exists(other_db_path):
+            return False
+        if self._db_path not in (None, ":memory:") and other_db_path == os.path.abspath(self._db_path):
+            return False
+
+        with self._lock:
+            if other_db_path in self._merged_source_dbs:
+                # Already merged (this can be triggered from more than one
+                # init-ordering call site) — skip to avoid duplicating rows.
+                return False
+
+            try:
+                self._flush_stage()
+                escaped = other_db_path.replace("'", "''")
+                self._conn.execute(f"ATTACH '{escaped}' AS incoming (READ_ONLY)")
+            except Exception as exc:
+                logger.warning(f"[LoggerQueue] Failed to attach {other_db_path} for merge: {exc}")
+                return False
+
+            try:
+                copied_any = False
+                for tbl in self._HISTORY_TABLES:
+                    try:
+                        self._conn.execute(f"INSERT INTO {tbl} SELECT * FROM incoming.{tbl}")
+                        copied_any = True
+                    except Exception as exc:
+                        # Table may be missing in an older-schema sibling DB;
+                        # skip it, other tables still merge.
+                        logger.debug(f"[LoggerQueue] Skipped merging table '{tbl}' from {other_db_path}: {exc}")
+            finally:
+                try:
+                    self._conn.execute("DETACH incoming")
+                except Exception:
+                    pass
+
+            if copied_any:
+                self._merged_source_dbs.add(other_db_path)
+                self._invalidate_qps_cache()
+                self._restore_runtime_state_from_db()
+                logger.info(f"[LoggerQueue] Merged signal history from {other_db_path}")
+            return copied_any
 
     def _restore_runtime_state_from_db(self) -> None:
         """Repopulate seq counter and graph names from an existing (file) DB."""
@@ -167,7 +484,10 @@ class LoggerQueue:
             self._flush_stage()
 
     def _flush_stage(self) -> None:
-        """Bulk-insert all staged rows into DuckDB and clear the buffers."""
+        """Bulk-insert all staged rows into DuckDB and clear the buffers.
+
+        Uses register(pandas)->INSERT SELECT->unregister (DuckDB's fast bulk
+        path). A row-wise executemany was measured ~6x slower — don't switch."""
         with self._lock:
             if self._stage_signals:
                 df = pd.DataFrame(self._stage_signals, columns=_SIGNAL_COLS)
@@ -198,10 +518,24 @@ class LoggerQueue:
         self._maybe_autoflush()
 
     def _stage_sample_row(self, graph_name, exp_hash, sample_id, step, value):
-        self._stage_sample.append((
-            graph_name, exp_hash, str(sample_id), int(step), float(value), self._next_seq(),
-        ))
+        # New step -> last step's cache entries can't recur; drop them.
+        if int(step) > self._qps_cache_step:
+            self._invalidate_qps_cache()
+            self._qps_cache_step = int(step)
+        self._stage_sample.append(
+            (
+                graph_name, exp_hash, str(sample_id), int(step), float(value), self._next_seq(),
+            )
+        )
+        self._qps_version[graph_name] += 1   # invalidate this signal's cached reads
         self._maybe_autoflush()
+
+    def _invalidate_qps_cache(self) -> None:
+        """Drop both query caches + versions (step advance; bulk delete/clear)."""
+        self._qps_cache.cache_clear()
+        self._qps_step_cache.cache_clear()
+        self._qps_version.clear()
+        self._loss_shape_last_version.clear()
 
     def _stage_instance_row(self, graph_name, exp_hash, sample_id, annotation_id, step, value):
         self._stage_instance.append((
@@ -244,6 +578,7 @@ class LoggerQueue:
             self._conn.execute("DELETE FROM per_instance")
             self._current_step_buffer.clear()
             self._buffered_step = None
+            self._invalidate_qps_cache()
 
     def _to_float(self, value):
         if isinstance(value, th.Tensor):
@@ -443,6 +778,7 @@ class LoggerQueue:
             self._flush_stage()
             self._conn.execute("DELETE FROM signals WHERE experiment_hash = ?", [eval_hash])
             self._conn.execute("DELETE FROM per_sample WHERE experiment_hash = ?", [eval_hash])
+            self._invalidate_qps_cache()
 
         # Drop queued points that reference this hash.
         self._pending_queue = [
@@ -712,19 +1048,75 @@ class LoggerQueue:
 
         Returns a list of ``(sample_id, step, value, experiment_hash)`` tuples,
         filtered by *sample_ids* and optionally *exp_hash* (``None`` = all hashes).
+
+        Cached (memoized until *graph_name* is next staged). Returns a fresh list.
         """
+        ids_key = tuple(str(s) for s in sample_ids) if sample_ids is not None else None
+        cached = self._qps_cache(graph_name, ids_key, exp_hash, self._qps_version[graph_name])
+        return list(cached)
+
+    def _query_per_sample_uncached(self, graph_name, ids_key, exp_hash, _version):
+        """DuckDB read behind :meth:`query_per_sample`. ``_version`` is a cache
+        key only (bumped on write -> recompute). Returns an immutable tuple."""
         with self._lock:
             self._flush_stage()
             params = [graph_name]
             sql = "SELECT sample_id, step, value, experiment_hash FROM per_sample WHERE metric_name = ?"
             sql += self._hash_filter(exp_hash, params)
-            if sample_ids is not None:
+            if ids_key is not None:
                 sql += " AND sample_id IN (SELECT UNNEST(?))"
-                params.append([str(s) for s in sample_ids])
+                params.append(list(ids_key))
             sql += " ORDER BY seq"
             rows = self._conn.execute(sql, params).fetchall()
 
-        return [(sid, int(step), float(val), h) for (sid, step, val, h) in rows]
+        return tuple((sid, int(step), float(val), h) for (sid, step, val, h) in rows)
+
+    def query_per_sample_at_step(self, graph_name: str, sample_ids, step, exp_hash=None):
+        """``(sample_id, value)`` for *graph_name* at exactly *step* — O(batch),
+        not O(history). Keeps the reactive gather flat as history grows. Cached."""
+        ids_key = tuple(str(s) for s in sample_ids) if sample_ids is not None else None
+        cached = self._qps_step_cache(graph_name, ids_key, int(step), exp_hash,
+                                      self._qps_version[graph_name])
+        return list(cached)
+
+    def _query_per_sample_at_step_uncached(self, graph_name, ids_key, step, exp_hash, _version):
+        """DuckDB read behind :meth:`query_per_sample_at_step` (``_version`` = cache key).
+
+        Fast path: the current step's value is usually still in the in-memory
+        staging buffer, so scan it and skip the flush->register->INSERT->SELECT
+        round-trip. Fall through to DuckDB only if an id isn't staged."""
+        step = int(step)
+        with self._lock:
+            if ids_key is not None:
+                ids_set = set(ids_key)
+                at = {}
+                # Scan from the tail (append-ordered by step); first value per id
+                # wins, stop when all found or once we drop below `step`.
+                for row in reversed(self._stage_sample):
+                    s = row[3]
+                    if s < step:
+                        break
+                    if s == step and row[0] == graph_name \
+                            and (exp_hash is None or row[1] == exp_hash):
+                        sid = row[2]
+                        if sid in ids_set and sid not in at:
+                            at[sid] = row[4]
+                            if len(at) == len(ids_set):
+                                break
+                if len(at) == len(ids_set):
+                    return tuple((sid, float(val)) for sid, val in at.items())
+
+            # Fallback: not fully in the staging buffer -> flush + query DuckDB.
+            self._flush_stage()
+            params = [graph_name, step]
+            sql = "SELECT sample_id, value FROM per_sample WHERE metric_name = ? AND step = ?"
+            sql += self._hash_filter(exp_hash, params)
+            if ids_key is not None:
+                sql += " AND sample_id IN (SELECT UNNEST(?))"
+                params.append(list(ids_key))
+            rows = self._conn.execute(sql, params).fetchall()
+
+        return tuple((sid, float(val)) for (sid, val) in rows)
 
     def query_per_instance(
         self,
@@ -796,6 +1188,7 @@ class LoggerQueue:
         reduce: str = "min",
         sample_ids=None,
         exp_hash: str | None = None,
+        max_points: int | None = None,
     ) -> dict:
         """Reduce each sample's signal HISTORY to a single value.
 
@@ -807,20 +1200,33 @@ class LoggerQueue:
 
         Args:
             graph_name: The registered signal/metric name.
-            reduce: One of ``min`` | ``max`` | ``mean``/``avg`` | ``count``.
+            reduce: One of ``min`` | ``max`` | ``mean``/``avg`` | ``count``, or
+                ``list``/``values``/``raw``/``history`` to return each sample's
+                FULL time series (ordered by step) as a list instead of a scalar.
             sample_ids: Optional iterable to restrict the query.
             exp_hash: ``None`` = all hashes; otherwise restrict to one.
+            max_points: List reduces only — cap each sample's returned series to
+                at most this many points by keeping an evenly-spaced subset (first
+                and last always kept). ``None`` (default) keeps the full history.
 
         Returns:
-            ``{sample_id (str): reduced_value (float)}``; empty if the metric is
-            unknown or has no recorded history.
+            ``{sample_id (str): reduced_value (float)}`` for a scalar reduce, or
+            ``{sample_id (str): [value, ...]}`` (chronological) for a list reduce;
+            empty if the metric is unknown or has no recorded history.
         """
+        reduce_l = str(reduce).lower()
+        is_list = reduce_l in ("list", "values", "raw", "history")
         agg = {
             "min": "min(value)", "max": "max(value)",
             "mean": "avg(value)", "avg": "avg(value)", "count": "count(value)",
-        }.get(str(reduce).lower())
-        if agg is None:
-            raise ValueError(f"Unsupported reduce '{reduce}'. Use min/max/mean/count.")
+        }.get(reduce_l)
+        if is_list:
+            # DuckDB collects the ordered time series into a list per sample.
+            agg = "list(value ORDER BY step)"
+        elif agg is None:
+            raise ValueError(
+                f"Unsupported reduce '{reduce}'. Use min/max/mean/count/list."
+            )
 
         with self._lock:
             self._flush_stage()
@@ -833,7 +1239,31 @@ class LoggerQueue:
             sql += " GROUP BY sample_id"
             rows = self._conn.execute(sql, params).fetchall()
 
+        if is_list:
+            return {
+                str(sid): self._subsample_series(
+                    [float(x) for x in (v or [])], max_points
+                )
+                for (sid, v) in rows if v is not None
+            }
         return {str(sid): float(v) for (sid, v) in rows if v is not None}
+
+    @staticmethod
+    def _subsample_series(values: list, max_points: int | None) -> list:
+        """Downsample *values* to at most *max_points* evenly-spaced entries,
+        always keeping the first and last (so the curve's shape/endpoints are
+        preserved). Returns the list unchanged when no cap applies or it already
+        fits."""
+        n = len(values)
+        if not max_points or max_points <= 0 or n <= max_points:
+            return values
+        if max_points == 1:
+            return [values[-1]]
+        step = (n - 1) / (max_points - 1)
+        # Set-dedupe guards against rounding collisions when n is only slightly
+        # above max_points; result is <= max_points points, endpoints included.
+        keep = sorted({int(round(i * step)) for i in range(max_points)})
+        return [values[i] for i in keep]
 
     def resolve_graph_name(self, name: str) -> str | None:
         """Best-effort map a user-facing metric name to a stored graph name.

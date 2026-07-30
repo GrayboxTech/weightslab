@@ -5,7 +5,7 @@ import warnings
 
 from weightslab.proto import experiment_service_pb2 as weightslab_dot_proto_dot_experiment__service__pb2
 
-GRPC_GENERATED_VERSION = '1.76.0'
+GRPC_GENERATED_VERSION = '1.68.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in weightslab/proto/experiment_service_pb2_grpc.py depends on'
+        + f' but the generated code in weightslab/proto/experiment_service_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -83,6 +83,11 @@ class ExperimentServiceStub(object):
                 '/ExperimentService/GetMetaData',
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetMetaDataRequest.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetMetaDataResponse.FromString,
+                _registered_method=True)
+        self.GetSignalTrajectory = channel.unary_unary(
+                '/ExperimentService/GetSignalTrajectory',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetSignalTrajectoryRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetSignalTrajectoryResponse.FromString,
                 _registered_method=True)
         self.GetPointCloud = channel.unary_stream(
                 '/ExperimentService/GetPointCloud',
@@ -230,6 +235,17 @@ class ExperimentServiceServicer(object):
         name for the WHOLE dataset, the current grid slice's per-sample metadata, and
         the open modal sample's metadata. Separated from GetDataSamples, which now
         returns only image / label / prediction data.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetSignalTrajectory(self, request, context):
+        """On-demand per-sample trajectory of ONE signal, for the samples currently
+        shown. Computed only when the user asks (right-click a signal -> "Plot
+        signal trajectory"), never on the metadata poll. Each returned curve is
+        downsampled to at most max_points and is only included when the sample has
+        at least 3 recorded points.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -393,6 +409,11 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     servicer.GetMetaData,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetMetaDataRequest.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetMetaDataResponse.SerializeToString,
+            ),
+            'GetSignalTrajectory': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetSignalTrajectory,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetSignalTrajectoryRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetSignalTrajectoryResponse.SerializeToString,
             ),
             'GetPointCloud': grpc.unary_stream_rpc_method_handler(
                     servicer.GetPointCloud,
@@ -745,6 +766,33 @@ class ExperimentService(object):
             '/ExperimentService/GetMetaData',
             weightslab_dot_proto_dot_experiment__service__pb2.GetMetaDataRequest.SerializeToString,
             weightslab_dot_proto_dot_experiment__service__pb2.GetMetaDataResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetSignalTrajectory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetSignalTrajectory',
+            weightslab_dot_proto_dot_experiment__service__pb2.GetSignalTrajectoryRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.GetSignalTrajectoryResponse.FromString,
             options,
             channel_credentials,
             insecure,

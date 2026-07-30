@@ -3,7 +3,7 @@ PyTorch Lightning Integration
 
 Weightslab is compatible with PyTorch Lightning and already includes a full example:
 
-``weightslab/examples/PyTorch_Lightning/ws-classification/main.py``
+``weightslab/examples/PyTorch_Lightning/wl-classification/main.py``
 
 This page explains how to integrate Weightslab in a Lightning workflow and scale to multiple GPUs.
 
@@ -109,7 +109,7 @@ Optional YAML-driven trainer config
 
 The Lightning example already includes a ready template at:
 
-``weightslab/examples/PyTorch_Lightning/ws-classification/config.yaml``
+``weightslab/examples/PyTorch_Lightning/wl-classification/config.yaml``
 
 .. code-block:: yaml
 

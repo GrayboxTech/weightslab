@@ -123,24 +123,34 @@ class CertAuthManager:
             logger.info(f"Certificates already exist in {self.certs_dir}")
             return True, f"Certificates already exist in {self.certs_dir}"
 
-        # Try to use PowerShell to generate certs
+        # Use the bundled cert-generation scripts under weightslab/ui/utils.
         try:
-            script_dir = Path(__file__).parent.parent.parent / 'docker' / 'docker' / 'utils'
-            generate_script = script_dir / 'generate-certs.ps1'
+            script_dir = Path(__file__).parent.parent / 'ui' / 'utils'
+            env = os.environ.copy()
+            env['WEIGHTSLAB_CERTS_DIR'] = str(self.certs_dir)
 
-            if not generate_script.exists():
-                return False, f"Certificate generation script not found at {generate_script}"
-
-            cmd = ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(generate_script)]
-            if force:
-                cmd.append('-force_create_certs')
+            if os.name == 'nt':
+                generate_script = script_dir / 'generate-certs-auth-token.ps1'
+                if not generate_script.exists():
+                    return False, f"Certificate generation script not found at {generate_script}"
+                cmd = ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(generate_script)]
+                if force:
+                    cmd.append('-ForceCreateCerts')
+            else:
+                generate_script = script_dir / 'generate-certs-auth-token.sh'
+                if not generate_script.exists():
+                    return False, f"Certificate generation script not found at {generate_script}"
+                cmd = ['bash', str(generate_script)]
+                if force:
+                    cmd.append('--force-create-certs')
 
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 check=False,
-                cwd=str(script_dir)
+                cwd=str(script_dir),
+                env=env,
             )
 
             if result.returncode != 0:
@@ -214,10 +224,6 @@ class CertAuthManager:
             'GRPC_TLS_KEY_FILE': str(self.key_file),
             'GRPC_TLS_CA_FILE': str(self.ca_file),
             'WEIGHTSLAB_CERTS_DIR': str(self.certs_dir),
-            'ENVOY_DOWNSTREAM_TLS': 'on',
-            'ENVOY_UPSTREAM_TLS': 'on',
-            'WS_SERVER_PROTOCOL': 'https',
-            'VITE_SERVER_PROTOCOL': 'https',
         }
 
         return env_vars
@@ -234,12 +240,9 @@ class CertAuthManager:
         if self.enable_auth:
             token = self.get_or_create_auth_token()
             env_vars['WL_ENABLE_GRPC_AUTH_TOKEN'] = '1'
-            env_vars['VITE_WL_ENABLE_GRPC_AUTH_TOKEN'] = '1'
             env_vars['GRPC_AUTH_TOKEN'] = token
-            env_vars['VITE_GRPC_AUTH_TOKEN'] = token
         else:
             env_vars['WL_ENABLE_GRPC_AUTH_TOKEN'] = '0'
-            env_vars['VITE_WL_ENABLE_GRPC_AUTH_TOKEN'] = '0'
 
         return env_vars
 
@@ -252,7 +255,7 @@ class CertAuthManager:
             Tuple of (success, message)
         """
         if not self.has_valid_certs():
-            return False, f"No certs found in {self.certs_dir}. Run: weightslab ui se"
+            return False, f"No certs found in {self.certs_dir}. Run: weightslab se"
 
         env_vars = self.setup_tls_environment()
         env_vars.update(self.setup_auth_environment())
@@ -266,7 +269,7 @@ class CertAuthManager:
     def setup_secure_environment(self, force_certs: bool = False) -> Tuple[bool, str]:
         """
         Generate TLS certificates and auth token.
-        Called explicitly by 'weightslab ui se' command.
+        Called explicitly by 'weightslab se' command.
 
         Args:
             force_certs: Force regenerate certificates

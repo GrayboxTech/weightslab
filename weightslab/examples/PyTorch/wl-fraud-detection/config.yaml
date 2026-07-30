@@ -1,0 +1,64 @@
+# Global configuration
+experiment_name: fraud_detection_mlp
+device: auto
+training_steps_to_do: null  # null = train until manually stopped from the UI
+# root_log_dir: ...  # Path to save current experiment checkpoints and data
+
+# Initially compute natural sorting values (e.g. avg feature magnitude).
+compute_natural_sort: false
+
+# Experiment parameters
+eval_full_to_train_steps_ratio: 100
+experiment_dump_to_train_steps_ratio: 250
+write_export_ratio: 100
+skip_checkpoint_load: false
+tqdm_display: true
+is_training: false  # Start paused; press play in the UI.
+
+# Global dataframe storage
+ledger_enable_flushing_threads: true
+ledger_enable_h5_persistence: true
+ledger_flush_max_rows: 15000
+ledger_flush_interval: 30.0
+
+# Clients
+serving_grpc: true
+
+# Optimizer
+optimizer:
+  lr: 0.005
+
+# Class weighting: leave unset (null) to auto-compute [1.0, legit/fraud] from
+# the actual training split (post oversampling, capped by class_weight_cap
+# below) — the real ~1:578 prevalence swings with oversample_fraud_ratio and
+# max_train_samples, so a hardcoded value would silently go stale.
+class_weights: null
+class_weight_cap: 20.0
+
+# Real dataset: Kaggle "Credit Card Fraud Detection" (ULB), 284,807 rows.
+# See utils/kaggle_data.py for how the CSV is located/downloaded.
+dataset:
+  csv_path: null  # optional explicit override; else auto-resolved (or set WL_FRAUD_CSV_PATH)
+  # cache_dir: .cache                  # where the CSV + parsed .npz are cached
+  seed: 0
+  test_size: 0.2            # stratified: same ~0.17% fraud rate in both splits
+  # Fraud-row duplication (+ small jitter) in the TRAIN split only, so batches
+  # actually contain fraud examples to learn from. The test split always keeps
+  # the natural prevalence. Set to null/0 to disable and train on the raw
+  # ~1:578 imbalance as-is.
+  oversample_fraud_ratio: 0.1
+  # Cap dataset size for fast local iteration; set both to null to train on
+  # the full 284,807 rows (slower first-run ledger init, most realistic run).
+  # max_train_samples: 60000
+  # max_test_samples: 15000
+
+# DataLoader parameters. Bigger batches than a toy example on purpose: even
+# with 10% oversampled fraud, small batches would still see it inconsistently.
+data:
+  train_loader:
+    shuffle: true
+    batch_size: 256
+  test_loader:
+    shuffle: false
+    batch_size: 512
+    drop_last: false

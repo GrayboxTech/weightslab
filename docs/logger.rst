@@ -50,6 +50,169 @@ for per-annotation values (detection / segmentation). The signal name comes from
 ``log=False`` to persist per-sample values without a dashboard curve. See
 :doc:`user_functions` for the full wrapper reference.
 
+Loss-shape classification
+--------------------------
+
+A single scalar hides how a sample got there. The *shape* of a per-sample
+loss trajectory over training — steadily dropping, stuck, forgotten, noisy —
+tells you whether the model is learning that sample, struggling with it, or
+whether it's a candidate mislabel. By default Weightslab classifies every
+sample's trajectory into one of seven built-in shapes (the vocabulary of the
+built-in :func:`classify_loss_shape`; you can replace it with your own labels —
+see :ref:`custom-signal-classifier`):
+
+==============  ====================================================================
+Label           Meaning
+==============  ====================================================================
+monotonic       Loss steadily decreasing — the model is learning the sample.
+plateaued       Decreased then leveled off still-high — stuck / hard sample.
+Flat_high       Never moved, stayed high — likely a mislabel or unlearnable.
+high_variance   Noisy oscillation — model uncertain, often an ambiguous label.
+U_Shape         Dipped, then is recovering/still moving — not settled yet.
+Forgotten       Dipped, then permanently regressed to a new, worse, flat level.
+Spiked          One-step jump that reverts — transient, not a lasting change.
+==============  ====================================================================
+
+``U_Shape`` and ``Forgotten`` are the same event (loss improved, then got worse
+again) split on whether it has *settled*: still moving/oscillating is
+``U_Shape``, flat at the new worse level is ``Forgotten`` (catastrophic
+interference from later data). ``Spiked`` requires the jump to actually come
+back down — a jump that sticks is a ``Forgotten``/``monotonic`` regime change,
+not a spike.
+
+Automatic — zero setup
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Any signal wrapped with ``flag="loss"`` (as above) is classified
+automatically; there is nothing to call. The logger runs a background thread
+(off the training thread; interval via ``WL_LOGGER_FLUSH_INTERVAL_SECONDS``,
+default 2s) that discovers every ``flag="loss"`` signal and, once a sample has
+enough history to classify (5+ points), tags it with a ``<signal>_shape``
+categorical tag — e.g. ``train_loss/CE`` gets a ``train_loss/CE_shape`` tag:
+
+.. code-block:: python
+
+   train_loss = wl.watch_or_edit(
+       nn.CrossEntropyLoss(reduction="none"),
+       flag="loss", signal_name="train_loss/CE", log=True,
+   )
+   # Nothing else needed — train_loss/CE_shape starts appearing on samples
+   # as they accumulate enough history, refreshed every background tick.
+
+``flag="metric"`` signals are **not** auto-classified: the default classifier
+assumes a decreasing trajectory (a loss), which would misclassify an
+increasing metric like accuracy.
+
+The classifier the auto-tagger uses is **overridable**: register your own with
+``@wl.signal_classifier`` (see :ref:`custom-signal-classifier`) and the
+background thread applies it — same zero-setup tagging, your labels.
+
+.. _custom-signal-classifier:
+
+Custom classifier — ``@wl.signal_classifier``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To replace the built-in shape classifier with your own, register a callable with
+the :func:`signal_classifier` decorator. A classifier takes a sample's ordered
+value trajectory (``list[float]``) and returns a label string, or ``None`` to
+leave the sample untagged. Labels are **free-form** — the seven-way
+:data:`LOSS_SHAPES` set is only the *built-in's* vocabulary; your classifier may
+emit any labels, e.g. a binary ``monotonic`` / ``not_monotonic``:
+
+.. code-block:: python
+
+   @wl.signal_classifier(signal="loss_sample")
+   def monotonic_or_not(values):
+       s = wl.trajectory_stats(values)
+       if s is None or s["n"] < 5:
+           return None
+       return "monotonic" if s["drop_z"] > 2 else "not_monotonic"
+
+Two binding modes:
+
+- ``@wl.signal_classifier(signal="loss_sample")`` — classify **only** that one
+  signal (per-signal).
+- ``@wl.signal_classifier`` or ``@wl.signal_classifier()`` — become the
+  **global default** for every signal that has no per-signal classifier of its
+  own.
+
+**Resolution order** for any signal name: per-signal registered → global
+registered → built-in :func:`classify_loss_shape`. Use
+:func:`resolve_signal_classifier` to introspect which classifier is active for a
+name.
+
+A registered classifier is consulted **everywhere shapes are computed** — the
+background auto-tagger, :func:`write_signal_shapes` / :func:`write_loss_shapes`
+(and ``write_dataframe(loss_shape_signal=...)``), and the live
+:func:`enable_loss_shape_signal`. The built-in seven-way
+:func:`classify_loss_shape` is unchanged and remains the default when no custom
+classifier is registered.
+
+Overriding or opting out
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use :func:`enable_loss_shape_autotag` / :func:`disable_loss_shape_autotag`
+only to customize or opt out — not to turn classification on:
+
+.. code-block:: python
+
+   # Different tag name / classifier for one signal (e.g. it isn't a loss).
+   wl.enable_loss_shape_autotag("train_loss/CE", tag_name="curve_shape")
+
+   # Opt in a signal that wasn't registered via flag="loss" (e.g. logged
+   # manually through wl.save_signals under a custom name).
+   wl.enable_loss_shape_autotag("custom_metric")
+
+   # Opt out one signal, or every signal.
+   wl.disable_loss_shape_autotag("train_loss/CE")
+   wl.disable_loss_shape_autotag()
+
+:func:`auto_loss_shape_signal_names` lists every signal currently tracked.
+
+One-off / report-time classification
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To force a synchronous, guaranteed-fresh classification right before a
+specific report, pass ``loss_shape_signal`` to :func:`write_dataframe`, or
+call the underlying reusable engine directly — it works for **any**
+per-sample signal, not just a loss (pass your own ``classifier`` for an
+increasing metric such as accuracy):
+
+.. code-block:: python
+
+   wl.write_dataframe("report.csv", format="csv", loss_shape_signal="train_loss/CE")
+
+   wl.write_signal_shapes("train_loss/CE", tag_name="train_loss/CE_shape")
+   wl.write_loss_shapes("train_loss/CE")  # convenience wrapper (tag: loss_shape)
+
+Building a custom classifier
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:func:`trajectory_stats` computes scale-invariant features (net drop,
+coefficient of variation, argmin fraction, rebound, max jump, tail flatness)
+from a sample's ordered value history. Reuse them in your own rule. The
+supported way to install a custom rule is ``@wl.signal_classifier`` (above),
+which the auto-tagger and every shape-writing helper honour:
+
+.. code-block:: python
+
+   @wl.signal_classifier(signal="train_loss/CE")
+   def my_classifier(values):
+       s = wl.trajectory_stats(values)
+       return None if s is None else ("fast" if s["drop_z"] > 3 else "slow")
+
+You can still pass a one-off ``classifier`` callable (``list[float] -> str |
+None``) to a single call when you don't want to register it globally:
+
+.. code-block:: python
+
+   wl.enable_loss_shape_autotag("train_loss/CE", classifier=my_classifier)
+
+For a live, per-step reactive variant (heavier — reads history on every fire)
+via :func:`enable_loss_shape_signal`, or a fully hand-rolled
+``@wl.signal(subscribe_to=...)`` walkthrough, see
+:doc:`examples/usecases/loss_shape_classification`.
+
 Custom signals
 --------------
 

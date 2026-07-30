@@ -8,7 +8,7 @@ without touching the model or YOLO's training loop.
 
 The full example lives at:
 
-``weightslab/examples/Ultralytics/ws-detection/``
+``weightslab/examples/Ultralytics/wl-detection/``
 
 How it works
 ------------
@@ -201,15 +201,15 @@ Running the bundled example
 
    .. code-block:: bash
 
-      weightslab ui launch
+      weightslab start
 
 4. Run the example:
 
    .. code-block:: bash
 
-      python weightslab/examples/Ultralytics/ws-detection/main.py
+      python weightslab/examples/Ultralytics/wl-detection/main.py
 
-5. Open ``http://localhost:5173`` to monitor training, inspect per-sample
+5. Open the URL printed by ``weightslab start`` to monitor training, inspect per-sample
    signals, tag difficult images, and discard outliers.
 
 Platform notes

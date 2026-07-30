@@ -128,7 +128,7 @@ class DataSampleTrackingWrapper(Dataset):
         wrapped_dataset: Dataset,
         root_log_dir: Optional[str] = None,
         is_training: bool = True,
-        compute_hash: bool = True,
+        compute_hash: bool = False,
         use_tags: bool = False,
         tags_mapping: Optional[Dict[str, int]] = None,
         stats_store: Optional[H5DataFrameStore] = None,

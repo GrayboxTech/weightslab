@@ -314,6 +314,32 @@ class ModelInterface(NetworkWithOps):
 
         return False
 
+    @staticmethod
+    def _active_model_in_audit_mode() -> bool:
+        """Return True iff the *currently registered* experiment model is in audit mode.
+
+        The backward/optimizer overrides below are installed on the torch classes
+        exactly once, process-wide. They must therefore consult whichever model is
+        active *now* (resolved from the ledger, the same way GuardContext does) —
+        NOT the ModelInterface instance that happened to install the patch first.
+        Capturing a single instance in the closure is a bug: a transient eval-mode
+        model (e.g. one built only for dependency extraction) would then make every
+        backward()/step() in the whole process a silent no-op.
+        """
+        try:
+            model = ledgers.get_model()
+        except Exception:
+            return False
+        # get_model() may hand back a Proxy(None) placeholder when nothing is
+        # registered; unwrap it and treat "no model" as "not in audit mode".
+        try:
+            model = object.__getattribute__(model, '_obj')
+        except AttributeError:
+            pass
+        if model is None:
+            return False
+        return bool(getattr(model, 'audit_mode', False))
+
     def _setup_backward_override(self):
         """Set up monkey-patch to disable backward() when model is in audit/eval mode.
 
@@ -323,12 +349,11 @@ class ModelInterface(NetworkWithOps):
         """
         # Store the original backward method
         original_backward = th.Tensor.backward
-        model_interface_ref = self
 
         def backward_override(tensor_self, gradient=None, retain_graph=False, create_graph=False, inputs=None):
             """Override backward to be a no-op in audit mode."""
-            # Check if model is in audit mode via the audit_mode property
-            if model_interface_ref.audit_mode:
+            # Resolve the active model at call time (never a stale captured ref).
+            if ModelInterface._active_model_in_audit_mode():
                 return
 
             # Otherwise, call the original backward
@@ -355,12 +380,11 @@ class ModelInterface(NetworkWithOps):
         """
         # Store the original step method
         original_step = th.optim.Optimizer.step
-        model_interface_ref = self
 
         def step_override(self, closure=None):
             """Override step to be a no-op in audit mode."""
-            # Check if the model is in audit mode via the audit_mode property
-            if model_interface_ref.audit_mode:
+            # Resolve the active model at call time (never a stale captured ref).
+            if ModelInterface._active_model_in_audit_mode():
                 return
 
             # Otherwise, call the original step

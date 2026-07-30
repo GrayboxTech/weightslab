@@ -14,6 +14,7 @@ import inspect
 import tempfile
 import functools
 import threading
+import queue as _queue
 import traceback
 import numpy as np
 import torch as th
@@ -24,12 +25,12 @@ from typing import Callable, Optional, Any
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.components.checkpoint_manager import CheckpointManager
 from weightslab.backend.optimizer_interface import OptimizerInterface
-from weightslab.backend.ledgers import DEFAULT_NAME, get_checkpoint_manager, get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal, list_models
+from weightslab.backend.ledgers import DEFAULT_NAME, get_checkpoint_manager, get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal, list_models, has_serving_config
 from weightslab.backend.model_interface import ModelInterface
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
-from weightslab.utils.tools import detach_to_cpu
+from weightslab.utils.tools import detach_to_cpu, _running_in_notebook
 from weightslab.backend.logger import LoggerQueue
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
@@ -71,6 +72,231 @@ logger = logging.getLogger(__name__)
 DATAFRAME_M = None
 # Global registry for custom signals
 _REGISTERED_SIGNALS = {}
+_REACTIVE_FIRED = {}   # signal_name -> step it last fired at (per-step dedup)
+
+
+def _gather_inputs_fresh(lg, inputs, ids, step, fresh_cache=None):
+    """``{name: (B,) array}`` if every input has a value at *step* for every id,
+    else ``None`` (value AT step, not latest — a lagging worker still gathers it).
+    Reads via ``query_per_sample_at_step`` (O(batch), cached).
+
+    *fresh_cache*: in-memory values fired this pass — read them so the pass
+    persists once at the end, not per signal."""
+    cols = {}
+    for inp in inputs:
+        if fresh_cache is not None and inp in fresh_cache:
+            cols[inp] = fresh_cache[inp]
+            continue
+        # A reactive-derived input lives only in fresh_cache this pass (it's not
+        # in the ledger at this step until the end-of-pass persist). If it's not
+        # there yet, skip — don't query the ledger (a guaranteed-miss flush).
+        _m = getattr(_REGISTERED_SIGNALS.get(inp), '_wl_signal_meta', {})
+        if _m.get('inputs'):
+            return None
+        at = {int(sid): val for sid, val in lg.query_per_sample_at_step(inp, ids, step)}
+        for sid in ids:
+            if sid not in at:
+                return None
+        cols[inp] = np.array([at[sid] for sid in ids], dtype=float)
+    return cols
+
+
+def _react_dependents(seed_names, batch_ids, step, origin='train'):
+    """Reactive signal firing. When the signals in *seed_names* were just logged,
+    fire any ``@wl.signal(inputs=[...])`` whose inputs are now ALL present at
+    *step* — order-independently, regardless of which input arrived last. Each
+    fired signal is itself a seed (chaining) and fires at most once per step.
+    Inputs are read from the logger, so ingested signals must be logged."""
+    _warn_on_signal_cycles()  # lazy, once/process — fires even with no wl.serve
+    if batch_ids is None:
+        return
+    try:
+        ids = [int(u) for u in (batch_ids.detach().cpu().numpy()
+                                if hasattr(batch_ids, 'detach') else batch_ids)]
+    except Exception:
+        return
+    lg = get_logger()
+    if lg is None:
+        return
+    try:
+        df_proxy = get_dataframe()
+    except Exception:
+        df_proxy = None
+
+    def dependents_of(nm):
+        for name, func in list(_REGISTERED_SIGNALS.items()):
+            meta = getattr(func, '_wl_signal_meta', {})
+            inputs = meta.get('inputs')
+            if inputs and nm in inputs:
+                yield name, func, meta, inputs
+
+    # Fired this pass; kept in-memory so chains read without a ledger round-trip
+    # and the whole pass persists in ONE save_signals (not one write per signal).
+    fired = {}          # {name: (B,) array}
+    fired_log = {}      # {name: log flag}
+    queue = list(seed_names)
+    while queue:
+        logged = queue.pop()
+        for name, func, meta, inputs in dependents_of(logged):
+            if _REACTIVE_FIRED.get(name) == step:
+                continue
+            every = meta.get('compute_every_n_steps', 1) or 1
+            if step % every != 0:
+                continue
+            cols = _gather_inputs_fresh(lg, inputs, ids, step, fresh_cache=fired)
+            if cols is None:
+                continue  # inputs not all fresh yet — a later log will re-trigger
+            _REACTIVE_FIRED[name] = step
+            try:
+                if meta.get('batched'):
+                    bctx = BatchSignalContext(sample_ids=ids, subscribed_values=cols[inputs[0]],
+                                              logger=lg, dataframe=df_proxy, origin=origin, step=step,
+                                              inputs=cols)
+                    res = func(bctx)
+                    vals = res.tolist() if hasattr(res, 'tolist') else list(res)
+                else:
+                    vals = []
+                    for i, sid in enumerate(ids):
+                        ctx = SignalContext(sample_id=sid, subscribed_value=float(cols[inputs[0]][i]),
+                                            logger=lg, dataframe=df_proxy, origin=origin, step=step,
+                                            inputs={k: float(cols[k][i]) for k in cols})
+                        vals.append(func(ctx))
+                vals = [float(x) for x in vals]
+            except StaleSignalError:
+                raise
+            except Exception as e:
+                logger.debug(f"reactive signal '{name}' failed: {e}")
+                continue
+            fired[name] = np.asarray(vals, dtype=float)
+            fired_log[name] = bool(meta.get('log', True))
+            queue.append(name)
+
+    # One persist for all signals fired this pass. step=step attributes values to
+    # the firing step (matters when the worker lags). _react=False: no re-dispatch.
+    if fired:
+        try:
+            _logged = {n: v.tolist() for n, v in fired.items() if fired_log.get(n, True)}
+            _unlogged = {n: v.tolist() for n, v in fired.items() if not fired_log.get(n, True)}
+            if _logged:
+                save_signals(signals=_logged, batch_ids=ids, step=step, log=True, _react=False)
+            if _unlogged:
+                save_signals(signals=_unlogged, batch_ids=ids, step=step, log=False, _react=False)
+        except Exception as e:
+            logger.debug(f"reactive batched persist failed: {e}")
+
+
+def _detect_signal_cycles():
+    """Cycles in the reactive ``inputs`` graph, each as a name list ending where
+    it began. Only edges to other registered signals count (base metrics are
+    leaves). A signal in a cycle never fires — surfacing it beats silent no-fire."""
+    graph = {}
+    for name, func in _REGISTERED_SIGNALS.items():
+        meta = getattr(func, '_wl_signal_meta', {})
+        inputs = meta.get('inputs') or []
+        graph[name] = [dep for dep in inputs if dep in _REGISTERED_SIGNALS]  # depends-on edges
+    WHITE, GREY, BLACK = 0, 1, 2
+    color = {n: WHITE for n in graph}
+    stack, cycles, seen = [], [], set()
+
+    def dfs(n):
+        color[n] = GREY
+        stack.append(n)
+        for dep in graph.get(n, ()):
+            if color.get(dep) == GREY:                 # back-edge → cycle
+                cyc = stack[stack.index(dep):] + [dep]
+                key = frozenset(cyc)
+                if key not in seen:
+                    seen.add(key)
+                    cycles.append(cyc)
+            elif color.get(dep) == WHITE:
+                dfs(dep)
+        stack.pop()
+        color[n] = BLACK
+
+    for n in graph:
+        if color[n] == WHITE:
+            dfs(n)
+    return cycles
+
+
+_SIGNAL_CYCLE_CHECKED = False
+
+
+def _warn_on_signal_cycles(force=False):
+    """Warn once per process for each reactive cycle. Fired from start_training
+    and the first dispatch (so it works headless). Warns, doesn't raise."""
+    global _SIGNAL_CYCLE_CHECKED
+    if _SIGNAL_CYCLE_CHECKED and not force:
+        return
+    _SIGNAL_CYCLE_CHECKED = True
+    for cyc in _detect_signal_cycles():
+        logger.warning(
+            "WeightsLab reactive signals: circular dependency %s — these signals "
+            "will NEVER fire (each waits on the other's value, which never becomes "
+            "fresh). Break the cycle in their @wl.signal(inputs=[...]).",
+            " -> ".join(cyc))
+
+
+# --- optional signal-worker thread: run reactive dispatch off the train thread -
+_SIGNAL_WORKER = {"q": None, "thread": None}
+
+
+def _signal_worker_enabled():
+    try:
+        return bool(get_hyperparams().get("ledger_signal_worker", False))
+    except Exception:
+        return False
+
+
+def _ensure_signal_worker():
+    if _SIGNAL_WORKER["thread"] is not None and _SIGNAL_WORKER["thread"].is_alive():
+        return _SIGNAL_WORKER["q"]
+    q = _queue.Queue()
+
+    def _worker():
+        while True:
+            job = q.get()
+            if job is None:
+                q.task_done()
+                break
+            seed_names, ids, step, origin = job
+            try:
+                _react_dependents(seed_names, ids, step, origin)
+            except Exception as e:
+                logger.debug(f"signal worker job failed: {e}")
+            finally:
+                q.task_done()
+
+    t = threading.Thread(target=_worker, name="WL-Signal-Worker", daemon=True)
+    t.start()
+    _SIGNAL_WORKER["q"] = q
+    _SIGNAL_WORKER["thread"] = t
+    return q
+
+
+def _dispatch_or_enqueue(seed_names, batch_ids, step, origin):
+    """Reactive dispatch: inline on the train thread, or handed to the signal
+    worker thread when ``ledger_signal_worker`` is set. The seed signals are
+    already logged synchronously, so the worker only defers the derived compute
+    + persistence — the inputs it reads are already in the ledger."""
+    if not _signal_worker_enabled():
+        _react_dependents(seed_names, batch_ids, step, origin)
+        return
+    try:
+        ids = [int(u) for u in (batch_ids.detach().cpu().numpy()
+                                if hasattr(batch_ids, 'detach') else batch_ids)]
+    except Exception:
+        return
+    _ensure_signal_worker().put((list(seed_names), ids, step, origin))
+
+
+def drain_signals():
+    """Block until the signal-worker thread has processed all queued reactive
+    jobs. Called automatically by :func:`write_dataframe`; call it manually
+    before reading signals mid-run when ``ledger_signal_worker`` is enabled."""
+    q = _SIGNAL_WORKER["q"]
+    if q is not None:
+        q.join()
 
 # Evaluation function registered via the @wl.eval_fn decorator.
 _REGISTERED_EVAL_FN: Optional[Any] = None
@@ -78,18 +304,36 @@ _EVAL_WORKER_LOCK = threading.Lock()
 _EVAL_WORKER_THREAD: Optional[threading.Thread] = None
 
 
+class StaleSignalError(RuntimeError):
+    """Raised when a signal ingests another signal that is not *fresh* — i.e. the
+    ingested signal has no value at the current step (it was not logged, or was
+    written after the trigger this step). See ``SignalContext.latest`` /
+    ``BatchSignalContext.latest`` (``require_fresh=True``) and
+    ``@wl.signal(ingests=[...])``."""
+    pass
+
+
 class SignalContext:
     """
     Unified context object for WeightsLab signals.
     Carries all available metadata for a single sample during computation.
     """
-    def __init__(self, sample_id, dataframe, data=None, subscribed_value=None, logger=None, origin=None):
+    def __init__(self, sample_id, dataframe, data=None, subscribed_value=None, logger=None, origin=None,
+                 step=None, logits=None, preds=None, targets=None, inputs=None):
         self.sample_id = sample_id
         self.dataframe = dataframe
         self.data = data
         self.subscribed_value = subscribed_value
         self.logger = logger
         self.origin = origin
+        self.step = step          # step the trigger fired at (for freshness checks)
+        self.logits = logits      # this sample's raw model output row (subscribe_to path)
+        self.preds = preds
+        self.targets = targets
+        # Current-step value of each declared @wl.signal(inputs=[...]) input for
+        # THIS sample, keyed by signal name: ``ctx.inputs["sig/entropy"]``. Empty
+        # for signals that don't declare inputs (e.g. the subscribe_to path).
+        self.inputs = inputs if inputs is not None else {}
 
     @property
     def image(self) -> Optional[np.ndarray]:
@@ -162,6 +406,91 @@ class SignalContext:
     def is_dynamic(self) -> bool:
         """True if running during training (triggered by a metric)."""
         return self.subscribed_value is not None
+
+    def latest(self, signal_name, default=float("nan"), require_fresh=False):
+        """Most recent value of ANOTHER signal for THIS sample. Lets a signal
+        ingest several other signals: read each with ``ctx.latest(name)`` and
+        combine. Returns *default* if the signal has no value yet.
+
+        With ``require_fresh=True`` this raises if the ingested signal has no
+        value at the current step (``self.step``) — i.e. it was not logged, or
+        was written after (not before) the trigger this step.
+        """
+        if self.logger is None:
+            return default
+        rows = self.logger.query_per_sample(signal_name, sample_ids=[self.sample_id])
+        if require_fresh and (not rows or self.step is None or rows[-1][1] != self.step):
+            raise StaleSignalError(
+                f"ingested signal '{signal_name}' is not fresh at step {self.step} for "
+                f"sample {self.sample_id} (log it with log=True and write it BEFORE the "
+                f"subscribing signal fires).")
+        return rows[-1][2] if rows else default   # rows ordered by seq -> last is newest
+
+
+class BatchSignalContext:
+    """Batched context for a vectorized ``@wl.signal(batched=True)``.
+
+    Instead of one :class:`SignalContext` per sample, a batched signal receives
+    the whole batch at once: ``sample_ids`` and ``subscribed_values`` are arrays
+    of length B, so the signal computes over all samples with vector ops and
+    returns one array of length B. It also exposes **batched** ledger reads
+    (:meth:`history` runs a single query for the whole batch instead of one query
+    per sample), which is where the large speed-ups come from.
+    """
+    def __init__(self, sample_ids, subscribed_values, logger=None, dataframe=None, origin=None,
+                 step=None, logits=None, preds=None, targets=None, inputs=None):
+        self.sample_ids = [int(s) for s in sample_ids]          # length B
+        self.subscribed_values = np.asarray(subscribed_values, dtype=float)  # (B,)
+        self.logger = logger
+        self.dataframe = dataframe
+        self.origin = origin
+        self.step = step          # step the trigger fired at (for freshness checks)
+        # Raw model output for this batch (subscribe_to path): logit-derived
+        # signals compute from these, no save_signals. None on the inputs=[...] path.
+        self.logits = logits      # (B, C)
+        self.preds = preds
+        self.targets = targets
+        # Current-step values of each declared @wl.signal(inputs=[...]) input for
+        # the whole batch, keyed by signal name: ``ctx.inputs["sig/entropy"]`` is a
+        # ``(B,)`` array aligned to ``sample_ids``. Populated by the reactive
+        # dispatch; empty for signals that don't declare inputs.
+        self.inputs = inputs if inputs is not None else {}
+
+    def history(self, signal_name):
+        """Per-sample history of *signal_name* for every sample in the batch, in
+        a SINGLE ledger query. Returns ``{sample_id: [values in step order]}``
+        (empty list for samples with no history yet)."""
+        out = {s: [] for s in self.sample_ids}
+        if self.logger is None:
+            return out
+        # query_per_sample accepts a list of ids -> one scan for the whole batch.
+        for sid, step, val, _ in self.logger.query_per_sample(signal_name, sample_ids=self.sample_ids):
+            out.setdefault(int(sid), []).append(val)   # rows already ordered by seq (= step order)
+        return out
+
+    def latest(self, signal_name, default=float("nan"), require_fresh=False):
+        """Most recent value of ANOTHER signal for each sample in the batch, in a
+        single batched query. ``(B,)`` array aligned to ``self.sample_ids``. Use
+        this to build a signal that ingests several other signals — call it once
+        per input signal, then combine the arrays with vector ops.
+
+        With ``require_fresh=True`` this raises unless EVERY sample has a value of
+        *signal_name* at the current step (``self.step``) — catching a stale
+        ingest (input not logged, or written after the trigger this step).
+        """
+        last = {}
+        if self.logger is not None:
+            for sid, step, val, _ in self.logger.query_per_sample(signal_name, sample_ids=self.sample_ids):
+                last[int(sid)] = (step, val)   # rows ordered by seq -> last assignment wins
+        if require_fresh:
+            stale = [s for s in self.sample_ids
+                     if s not in last or self.step is None or last[s][0] != self.step]
+            if stale:
+                raise StaleSignalError(
+                    f"ingested signal '{signal_name}' is not fresh at step {self.step} for "
+                    f"{len(stale)}/{len(self.sample_ids)} sample(s) (e.g. {stale[:3]}). Log it "
+                    f"with log=True and write it BEFORE the subscribing signal fires.")
+        return np.array([last.get(s, (None, default))[1] for s in self.sample_ids], dtype=float)
 
 
 # #####################################################################################################################
@@ -273,9 +602,21 @@ def _extract_scalar_from_tensor(batch_scalar: th.Tensor | np.ndarray, out: th.Te
                     batch_scalar = _tmp
                 except Exception:
                     pass
-            # Merged batch scalar with ids
+            # Merged batch scalar with ids. Vectorize the tensor->python
+            # conversion: one .tolist() (a single device sync) instead of a
+            # per-element .item() in a comprehension (B device syncs + B python
+            # calls). This is on the per-step hot path — profiling showed the
+            # per-element version was a top self-time cost.
             if isinstance(batch_scalar, (th.Tensor, np.ndarray)) and ids is not None and len(batch_scalar) == len(ids):
-                batch_scalar = {ids[i].item() if isinstance(ids, th.Tensor) else ids[i]: batch_scalar[i].item() for i in range(len(batch_scalar))}
+                _vals = (batch_scalar.detach().cpu().tolist() if isinstance(batch_scalar, th.Tensor)
+                         else np.asarray(batch_scalar).tolist())
+                if isinstance(ids, th.Tensor):
+                    _keys = ids.detach().cpu().tolist()
+                elif isinstance(ids, np.ndarray):
+                    _keys = ids.tolist()
+                else:
+                    _keys = list(ids)
+                batch_scalar = dict(zip(_keys, _vals))
         # 2. Otherwise fall back to extracting from 'out'
         elif out is not None:
             if isinstance(out, th.Tensor):
@@ -466,6 +807,8 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
     # Extract torch function parameters
     _ = wl_kw.get('flag')
+    # Kept in-memory for ctx.logits (logit-derived signals); NOT persisted unless
+    # ledger_store_preds_raw is set (see the gated save_signals below).
     preds_raw = a[0] if len(a) > 0 else None
 
     # User parameters
@@ -620,39 +963,87 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                  for name, func in subscribers:
                      meta = getattr(func, '_wl_signal_meta', {})
                      compute_every = meta.get('compute_every_n_steps', 1)
+                     min_step = meta.get('min_step', 0)
+
+                     # Warm-up gate: don't fire until we've reached min_step
+                     # (e.g. a signal that needs enough per-sample history).
+                     if current_step < min_step:
+                         continue
 
                      # Frequency Check
                      if current_step % compute_every != 0:
                          continue
 
                      try:
-                         batch_res = {}
-                         for i, uid in enumerate(ids_np):
-                             # Generic 'value' argument
-                             val = float(val_vec[i])
-
-                             # Unified Context Pattern
-                             ctx = SignalContext(
-                                 sample_id=int(uid),
-                                 subscribed_value=val,
-                                 logger=ledgers.get_logger(),
+                         _lg = ledgers.get_logger()
+                         ingests = meta.get('ingests') or []
+                         if meta.get('batched'):
+                             # Vectorized path: build ONE context for the whole
+                             # batch and call the signal once. It returns a length-B
+                             # array. Avoids B Python calls + B SignalContext allocs,
+                             # and lets the signal do batched ledger reads.
+                             bctx = BatchSignalContext(
+                                 sample_ids=[int(u) for u in ids_np],
+                                 subscribed_values=[float(v) for v in val_vec],
+                                 logger=_lg,
                                  dataframe=df_proxy,
-                                 origin=kwargs.get('origin', 'train')
+                                 origin=kwargs.get('origin', 'train'),
+                                 step=step,
+                                 logits=preds_raw.detach() if hasattr(preds_raw, 'detach') else preds_raw,
+                                 preds=preds.detach() if hasattr(preds, 'detach') else preds,
+                                 targets=targets.detach() if hasattr(targets, 'detach') else targets,
                              )
-                             try:
-                                 res = func(ctx) # Compute per sample result with unified context
-                             except TypeError:
-                                 # Fallback for legacy subscriber functions
-                                 res = func(sample_id=int(uid), value=val, dataframe=df_proxy)
+                             # Enforce that declared ingested signals are fresh.
+                             for dep in ingests:
+                                 bctx.latest(dep, require_fresh=True)
+                             res = func(bctx)
+                             res = res.tolist() if hasattr(res, 'tolist') else list(res)
+                             signal_value = [float(x) for x in res]
+                         else:
+                             # Validate declared ingests once for the whole batch.
+                             if ingests:
+                                 _vctx = BatchSignalContext(
+                                     sample_ids=[int(u) for u in ids_np],
+                                     subscribed_values=[float(v) for v in val_vec],
+                                     logger=_lg, step=step)
+                                 for dep in ingests:
+                                     _vctx.latest(dep, require_fresh=True)
+                             batch_res = {}
+                             for i, uid in enumerate(ids_np):
+                                 # Generic 'value' argument
+                                 val = float(val_vec[i])
 
-                             batch_res[uid] = res
-                         signal_value = list(batch_res.values())
+                                 # Unified Context Pattern
+                                 _lrow = preds_raw[i] if hasattr(preds_raw, '__getitem__') and preds_raw is not None else None
+                                 ctx = SignalContext(
+                                     sample_id=int(uid),
+                                     subscribed_value=val,
+                                     logger=_lg,
+                                     dataframe=df_proxy,
+                                     origin=kwargs.get('origin', 'train'),
+                                     step=step,
+                                     logits=_lrow.detach() if hasattr(_lrow, 'detach') else _lrow,
+                                 )
+                                 try:
+                                     res = func(ctx) # Compute per sample result with unified context
+                                 except TypeError:
+                                     # Fallback for legacy subscriber functions
+                                     res = func(sample_id=int(uid), value=val, dataframe=df_proxy)
+
+                                 batch_res[uid] = res
+                             signal_value = list(batch_res.values())
                          dynamic_updates[name] = signal_value
                          if dynamic_updates and meta.get('log', True):
                              logger.debug(f"Dynamic updates computed for signal '{reg_name}': {list(dynamic_updates.keys())}")
-                             _log_signal(sum(signal_value)/len(signal_value), signal_value, name, step=step, **kwargs) # Log custom subscribed signals
+                             # Log per-sample keyed by id (dict), not a bare list —
+                             # else it reaches the dataframe but not the logger's
+                             # per_sample table, and reactive dependents can't read it.
+                             _sv = {int(ids_np[i]): float(signal_value[i]) for i in range(len(ids_np))}
+                             _log_signal(sum(signal_value)/len(signal_value), _sv, name, step=step, **kwargs) # Log custom subscribed signals
+                     except StaleSignalError:
+                         raise  # correctness enforcement: surface, don't swallow
                      except Exception as e:
-                         logger.debug(f"Dynamic signal {name} failed: {e}")
+                         logger.error(f"Dynamic signal {name} failed: {e}")
                          pass # User function error, skip
 
     # Save statistics if requested and applicable.
@@ -667,17 +1058,36 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
             signals.update(dynamic_updates) # Merge dynamic signals
 
         preds = detach_to_cpu(preds)
-        preds_raw = detach_to_cpu(preds_raw)
+        # preds_raw = detach_to_cpu(preds_raw)
+
+        # Storing preds_raw (the (B,C) logits) every step is costly and only
+        # needed for FiftyOne/report drill-down — signals already read them via
+        # ctx.logits. Default off (dev disabled it); set the hyperparam to re-enable.
+        try:
+            _store_preds = bool(get_hyperparams().get('ledger_store_preds_raw', False))
+        except Exception:
+            _store_preds = False
 
         # Enqueue signals and data
         save_signals(
             signals=signals,
             batch_ids=batch_ids,
-            preds_raw=preds_raw,
+            preds_raw=preds_raw if _store_preds else None,
             preds=preds,
             targets=targets,
             log=False # Already logged above, no need to log again in save_signals; set to False to avoid duplicate logging if save_signals is called separately without logging
         )
+
+    # Seed reactive dispatch with the watched metric AND subscribe_to results, so
+    # a chain like conf_r<-entropy<-logits fires without any user save_signals.
+    if not per_instance and batch_ids is not None:
+        try:
+            _seed = [reg_name] + [n for n in dynamic_updates.keys() if n != reg_name]
+            _dispatch_or_enqueue(_seed, batch_ids, step, origin or 'train')
+        except StaleSignalError:
+            raise
+        except Exception as e:
+            logger.debug(f"reactive dispatch after {reg_name} failed: {e}")
 
     # Return the original output (dict for per-instance losses so caller can
     # use out['batch'] for backward, tensor for standard per-sample losses).
@@ -868,6 +1278,14 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 register_signal(obj, name=reg_name)
             except Exception:
                 pass
+
+            # Auto-detect for background loss-shape classification: any signal
+            # registered specifically via flag="loss" is, by convention, a
+            # reduction="none" per-sample criterion — exactly what the loss-shape
+            # classifier expects. No opt-in call needed; see
+            # auto_loss_shape_signal_names / LoggerQueue._autotag_loss_shapes.
+            if reg_name and 'loss' in flag.lower():
+                _AUTO_LOSS_SHAPE_SIGNALS.add(reg_name)
 
             # rebind caller, i.e., in-place update
             _loss = get_signal(reg_name)
@@ -1068,29 +1486,121 @@ def start_training(timeout: int = None) -> None:
         timeout: Maximum number of seconds to keep running. If ``None``, runs
             until interrupted.
     """
+    _warn_on_signal_cycles()  # surface circular reactive-signal deps (warn, don't raise)
     if timeout is not None and isinstance(timeout, int) and timeout > 0:
         logger.info(f"Starting WeightsLab training mode with a timeout of {timeout} seconds.")
         time.sleep(timeout)
     pause_ctrl.resume() # Ensure we're not paused if start_training is called after serve
 
+
 def serve(serving_cli: bool = True, serving_grpc: bool = False,
-          spawn_cli_client: bool = False, **kwargs) -> None:
+          spawn_cli_client: bool = False, serving_bore: bool = False,
+          bore_port: int = None, allow_unconfigured: bool = True, **kwargs):
     """Start WeightsLab services.
 
     Args:
         serving_cli: Start the interactive CLI server.
-        serving_grpc: Start the gRPC server.
+        serving_grpc: Start the gRPC server. In a notebook/Colab, if this is on
+            but ``serving_bore`` is off, a warning suggests ``serving_bore=True``
+            (the UI runs on your own machine and needs a tunnel to reach here).
         spawn_cli_client: When ``serving_cli`` is True, also open the interactive
             REPL in a new console window (the default, backward-compatible
             behavior). Set to ``False`` to start the CLI server *headless* — it
             still advertises its port, so you can attach on demand from any
             terminal with ``weightslab cli`` (or ``weightslab cli --port <port>``).
+        serving_bore: Expose the gRPC backend to the internet via a zero-signup
+            `bore <https://github.com/ekzhang/bore>`_ raw-TCP relay, so a Weights
+            Studio running on another machine can reach it (e.g. training in
+            Google Colab, UI on your laptop). Prints the public endpoint and the
+            two commands to run locally (``weightslab start`` +
+            ``weightslab tunnel <endpoint>``). Implies a gRPC backend. Uses the
+            shared public relay ``bore.pub`` — the random port is the only thing
+            guarding it, so keep it to non-sensitive demos.
+        bore_port: Port to expose when ``serving_bore`` is set. Defaults to the
+            gRPC port (``grpc_port`` kwarg, else ``$GRPC_BACKEND_PORT``, else
+            50051).
+        allow_unconfigured: Escape hatch for the serving-config guard. ``serve``
+            reads hyperparameters once, here, for TLS, ports and
+            ``root_log_dir``; if none were wrapped
+            (``wl.watch_or_edit(params, flag="hyperparameters")``) those settings
+            silently fall back to env vars / defaults. Serving over the network
+            (``serving_grpc`` / ``serving_bore``) without config therefore
+            raises, because the backend may come up without TLS/auth. Pass
+            ``True`` (or set ``WL_ALLOW_UNCONFIGURED_SERVE=1``) to downgrade the
+            error to a warning and serve anyway. CLI-only serving always warns
+            (never raises), regardless of this flag.
         **kwargs: Extra server options passed to underlying backends
             (e.g. ``cli_host``, ``cli_port``, ``grpc_port``).
+
+    Returns:
+        The public ``host:port`` bore endpoint string when ``serving_bore`` is
+        set and the tunnel came up, otherwise ``None``.
+
+    Raises:
+        RuntimeError: If ``serving_grpc`` or ``serving_bore`` is requested before
+            any serving config was wrapped and the escape hatch is not set.
     """
+
+    # ------------------------------------------------------------------
+    # Serving-config guard. grpc_serve reads hyperparameters ONCE, at this
+    # call, for TLS, ports and root_log_dir. Serving over the network before
+    # config is wrapped can bring the backend up UNSECURED (TLS falls back to
+    # GRPC_TLS_ENABLED, default off), so hard-fail on gRPC/bore; CLI-only is
+    # local, so warn. Escape hatch: allow_unconfigured / WL_ALLOW_UNCONFIGURED_SERVE.
+    # ------------------------------------------------------------------
+    if not has_serving_config():
+        network_serving = serving_grpc or serving_bore
+        allow = allow_unconfigured or os.environ.get(
+            "WL_ALLOW_UNCONFIGURED_SERVE", "0"
+        ).lower() in ("1", "true", "yes")
+        base_msg = (
+            "wl.serve() was called before any serving config was wrapped. Wrap "
+            'it first with wl.watch_or_edit(parameters, flag="hyperparameters") '
+            "so TLS, ports and root_log_dir come from your config instead of "
+            "falling back to environment variables / defaults."
+        )
+        if network_serving and not allow:
+            raise RuntimeError(
+                base_msg + " Refusing to expose an unconfigured backend over "
+                "gRPC/bore — it may come up without TLS/auth. Pass "
+                "allow_unconfigured=True (or set WL_ALLOW_UNCONFIGURED_SERVE=1) "
+                "to override."
+            )
+        logger.warning(base_msg)
 
     if serving_grpc:
         grpc_serve(**kwargs)
+
+    # In a notebook/Colab the backend has no local Weights Studio to talk to
+    # (the UI runs on the user's own machine). Nudge them to open a tunnel.
+    if serving_grpc and not serving_bore and _running_in_notebook():
+        logger.warning(
+            "Running in a notebook/Colab with serving_grpc=True but "
+            "serving_bore=False. Weights Studio runs on your OWN machine and "
+            "cannot reach this backend directly. Pass serving_bore=True to open "
+            "a tunnel and sync with the UI: wl.serve(serving_grpc=True, "
+            "serving_bore=True)."
+        )
+
+    bore_endpoint = None
+    if serving_bore:
+        from weightslab.tunnel import serve_bore
+        port = (bore_port
+                or kwargs.get("grpc_port")
+                or int(os.getenv("GRPC_BACKEND_PORT", 50051)))
+        if not serving_grpc:
+            logger.warning(
+                "serving_bore=True but serving_grpc=False — the tunnel will have "
+                "no gRPC backend to expose. Set serving_grpc=True."
+            )
+        bore_endpoint = serve_bore(port=port)
+        if bore_endpoint:
+            print("=" * 60)
+            print(f" Backend exposed via bore at: {bore_endpoint}")
+            print(" On your local machine, run:")
+            print("     weightslab start")
+            print(f"     weightslab tunnel {bore_endpoint}")
+            print("=" * 60)
 
     if serving_cli:
         # The explicit parameter is the source of truth; drop any duplicate
@@ -1098,8 +1608,10 @@ def serve(serving_cli: bool = True, serving_grpc: bool = False,
         kwargs.pop("spawn_client", None)
         cli_serve(spawn_client=spawn_cli_client, **kwargs)
 
+    return bore_endpoint
 
-def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
+
+def keep_serving(timeout: int = None, release_gpu: bool = False) -> None:
     """Keep process alive while background WeightsLab services are running.
 
     Args:
@@ -1123,7 +1635,8 @@ def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
         logger.info("Shutting down WeightsLab services.")
 
 
-def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, **kwargs):
+def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1,
+           min_step: int = 0, **kwargs):
     """
     Decorator that registers a custom signal function.
 
@@ -1135,6 +1648,12 @@ def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, 
         name: Public signal name. Defaults to decorated function name.
         subscribe_to: Optional signal/metric name this signal reacts to.
         compute_every_n_steps: Frequency for dynamic computation.
+        min_step: Minimum training step before a subscribed (dynamic) signal
+            starts firing. The signal is skipped while ``current_step <
+            min_step``. Defaults to ``0`` (fire from the start). Useful when a
+            signal needs enough history to be meaningful — e.g. a loss-shape
+            classifier that should only run once each sample has a trajectory
+            (``min_step=505``).
         **kwargs: Additional signal metadata stored in the ledger.
 
     Returns:
@@ -1144,7 +1663,8 @@ def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, 
         @wl.signal(name="blue_pixels")
         def compute_blue(sample, **kwargs): ...
 
-        @wl.signal(name="weighted_loss", subscribe_to="train_loss", compute_every_n_steps=10)
+        @wl.signal(name="weighted_loss", subscribe_to="train_loss",
+                   compute_every_n_steps=10, min_step=505)
         def compute_weighted(value, sample_id, **kwargs): ...
     """
     def decorator(func):
@@ -1157,6 +1677,14 @@ def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, 
         func._wl_signal_meta = kwargs
         func._wl_signal_meta['subscribe_to'] = subscribe_to
         func._wl_signal_meta['compute_every_n_steps'] = compute_every_n_steps
+        # Reactive dependency set. ``inputs=[...]`` is the unified form: the signal
+        # fires when ALL its inputs are present at a step, order-independently
+        # (subsumes subscribe_to + ingests). A single-input signal is the alias
+        # ``inputs=["x"]`` == ``subscribe_to="x"``. Signals that use the legacy
+        # ``subscribe_to`` keyword instead stay on the legacy dispatch.
+        _inp = kwargs.get('inputs')
+        func._wl_signal_meta['inputs'] = list(_inp) if _inp else None
+        func._wl_signal_meta['min_step'] = min_step
         func._wl_signal_name = reg_name
 
         return func
@@ -1602,7 +2130,8 @@ def save_signals(
     targets: th.Tensor | np.ndarray | dict = None,
     preds: th.Tensor | np.ndarray | dict = None,
     step: int | None = None,
-    log: bool = False
+    log: bool = False,
+    _react: bool = True,
 ):
     """Save **per-sample** statistics to the tracked dataset.
 
@@ -1666,8 +2195,10 @@ def save_signals(
     if DATAFRAME_M is None:
         DATAFRAME_M = get_dataframe()
 
-    # Get current model step
-    step = _get_step(step=step)
+    # Honor an explicit step (as documented); only infer from the model when it
+    # is omitted. Reactive backfill on the signal-worker thread depends on this —
+    # it logs derived values at the job's step, not the live (ahead) model step.
+    step = step if step is not None else _get_step()
 
     # Log if requested for each signals
     if log:
@@ -1690,16 +2221,40 @@ def save_signals(
 
     # Normalize to np arrays
     def to_numpy(t):
+        # Text predictions/labels (e.g. an LLM's generated reply, or a
+        # reference/target string): keep as a native str rather than
+        # wrapping in a 0-d numpy array, so it survives the
+        # DataFrameManager/H5 round-trip as a plain string and the
+        # `isinstance(x, str)` checks in trainer_tools.py/data_service.py
+        # (which build the actual RecordMetadata/DataStat the UI renders)
+        # see a real str, not an ndarray. Forcing it through the
+        # classification-label uint16 cast below would raise ValueError on
+        # non-numeric text -- see the dict-label JSON-string fallback in
+        # data_service.py for the precedent this generalizes.
+        if isinstance(t, str):
+            return t
         arr = t.detach().cpu().numpy() if isinstance(t, th.Tensor) else np.asarray(t)
         if np.issubdtype(arr.dtype, np.floating):
             return arr.astype(np.float32)
+        if np.issubdtype(arr.dtype, np.str_) or np.issubdtype(arr.dtype, np.object_):
+            return arr
         return arr.astype(np.uint16)
 
     def normalize(x):
         if x is None:
             return None
         if isinstance(x, list) and isinstance(x[0], list):
-            return [np.max(np.array([to_numpy(t) for t in row]), axis=0) for row in x]
+            rows = [[to_numpy(t) for t in row] for row in x]
+            # A sample can legitimately have zero instances (e.g. no tracked
+            # class visible in frame); fall back to an all-background mask
+            # shaped like its neighbors instead of reducing an empty array.
+            shape = next((r[0].shape for r in rows if r), None)
+            dtype = next((r[0].dtype for r in rows if r), np.uint16)
+            return [
+                np.max(np.array(row), axis=0) if row
+                else np.zeros(shape, dtype=dtype) if shape is not None else np.zeros(0, dtype=dtype)
+                for row in rows
+            ]
         elif isinstance(x, list):
             return [to_numpy(t) for t in x]
         if isinstance(x, th.Tensor):
@@ -1749,6 +2304,18 @@ def save_signals(
         losses=losses_data,
         step=step
     )
+
+    # Reactive signals: these just-logged signals may satisfy an inputs=[...]
+    # signal. Only logged (queryable) signals can be inputs. _react=False on the
+    # reactive persist path prevents re-entrant dispatch.
+    if _react and log and isinstance(signals, dict):
+        try:
+            _dispatch_or_enqueue(list(signals.keys()), batch_ids, step,
+                                 get_active_origin() or 'train')
+        except StaleSignalError:
+            raise
+        except Exception as e:
+            logger.debug(f"reactive dispatch after save_signals failed: {e}")
 
 
 def save_instance_signals(
@@ -2153,6 +2720,7 @@ def save_group_signals(
 
         if step is not None:
             updates[SampleStatsEx.LAST_SEEN.value] = step
+            updates[SampleStatsEx.NB_SEEN.value] = 0 if SampleStatsEx.NB_SEEN.value not in updates else updates[SampleStatsEx.NB_SEEN.value] + 1
 
         all_updates.append(updates)
         active_group_ids.append(gid)
@@ -3182,16 +3750,55 @@ def query_instance_history(
     return results
 
 
+def _parquet_safe_frame(df):
+    """Return *df* with object columns that hold non-scalar values (lists,
+    dicts, tuples, numpy arrays — e.g. per-instance detection ``target`` / box
+    columns) JSON-encoded as strings, so pyarrow can write them.
+
+    Arrow rejects a single column that mixes list and non-list values
+    ("cannot mix list and non-list, non-null values"); encoding the *whole*
+    offending column with ``json.dumps`` makes it a uniform string column that
+    still round-trips via ``json.loads``. Columns with no non-scalar values are
+    left untouched, so numeric / bool / plain-string columns keep their native
+    Arrow types. The input is never mutated (copy-on-write only when needed).
+    """
+    import json as _json2
+    import numpy as _np2
+
+    _NONSCALAR = (list, dict, tuple, set, _np2.ndarray)
+    out = df
+    _copied = False
+    for _col in df.columns:
+        _s = df[_col]
+        if _s.dtype != object:
+            continue
+        # Skip columns that are already uniformly scalar (the common case).
+        if not _s.map(lambda v: isinstance(v, _NONSCALAR)).any():
+            continue
+        if not _copied:
+            out = df.copy()
+            _copied = True
+        # Encode every non-null cell (not just the list ones) so the column is
+        # uniformly string-typed; keep None/NaN as real nulls.
+        out[_col] = _s.map(
+            lambda v: None if (v is None or (isinstance(v, float) and v != v))
+            else _json2.dumps(v, default=str)
+        )
+    return out
+
+
 def write_history(
     path: str | None = None,
-    format: str = "json",
+    format: str | None = None,
     type_of_history=None,
     graph_name=None,
     experiment_hash: str | None = None,
     sample_id=None,
+    orient: str = "columns",
     instance_id=None,
+    verbose: bool = False,
 ) -> str:
-    """Dump signal history to *path* as JSON or CSV.
+    """Dump signal history to *path* as Parquet, JSON, or CSV.
 
     Parameters
     ----------
@@ -3210,8 +3817,18 @@ def write_history(
           combination always produces the same filename; different filters
           produce different filenames.
         - The directory is created automatically if it does not exist.
-    format : {"json", "csv"}
-        Output format (default ``"json"``).
+    format : {"parquet", "json", "csv"}, optional
+        Output format. When omitted, it is inferred from *path*'s extension
+        (``.parquet`` / ``.json`` / ``.csv``), defaulting to ``"parquet"`` when
+        *path* carries no extension (a bare directory or ``None`` — the common
+        periodic-export case). Parquet is fast, compact and dtype-preserving,
+        and scales to large per-sample/instance logs far better than JSON; it
+        needs a parquet engine (``pip install pyarrow``) and falls back to JSON
+        with a warning if none is installed or a column can't be encoded, so a
+        checkpoint dump never crashes the run. ``"json"`` keeps the nested
+        per-section shape (``{"global": ..., "sample": ..., "instance": ...}``);
+        ``"parquet"`` and ``"csv"`` are flat tables with a ``type`` column
+        discriminating the sections.
     type_of_history : {None, "all", "global", "sample", "instance", "instances"}
         Which history to include. ``None`` or ``"all"`` writes every type.
         ``"global"`` writes the aggregated training-curve history.
@@ -3229,6 +3846,14 @@ def write_history(
     instance_id : int or list of int, optional
         Restrict per-instance rows to one or more annotation IDs.
         Has no effect on global or per-sample history.
+    orient : str, optional
+        JSON layout for each section (``"global"``/``"sample"``/``"instance"``),
+        forwarded to ``pandas.DataFrame.to_json``. Default ``"columns"``
+        (``{column: {row_index: value}}``) — compact, since each column name
+        is written once per section instead of once per row. Pass
+        ``"records"`` for the row-list-of-dicts shape
+        (``[{"graph_name": ..., "step": ..., ...}, ...]``) if that's more
+        convenient downstream. Ignored for ``format="csv"``.
 
     Returns
     -------
@@ -3253,6 +3878,10 @@ def write_history(
             type_of_history="sample",
             experiment_hash="abc123",
         )
+
+    Get the row-list-of-dicts JSON shape instead of the compact default::
+
+        wl.write_history("history.json", orient="records")
     """
     import csv as _csv
     import json as _json
@@ -3265,6 +3894,10 @@ def write_history(
         path, format, type_of_history, graph_name, experiment_hash,
         sample_id, instance_id,
     )
+
+    # Progress lines are INFO only when verbose; otherwise DEBUG (quiet by
+    # default so periodic exports don't spam a training log).
+    _log = logger.info if verbose else logger.debug
 
     _lg = get_logger()
     if _lg is None:
@@ -3287,9 +3920,15 @@ def write_history(
             logger.debug("write_history: failed to resolve root_log_dir (%s); "
                          "falling back to current directory.", _e)
             path = "."
-        logger.info("write_history: no path given, using output directory %r.", path)
+        _log("write_history: no path given, using output directory %r.", path)
 
-    fmt = format.lower().strip()
+    # Resolve format: explicit arg wins; otherwise infer from the path's
+    # extension, defaulting to parquet when the path carries no format hint.
+    if format is not None:
+        fmt = format.lower().strip()
+    else:
+        _ext = _os.path.splitext(str(path))[1].lower()
+        fmt = {".parquet": "parquet", ".json": "json", ".csv": "csv"}.get(_ext, "parquet")
 
     # --- Normalize all parameters first (needed for the auto-filename hash) ---
 
@@ -3332,7 +3971,7 @@ def write_history(
     write_sample = _type in ("all", "sample")
     write_instance = _type in ("all", "instance")
 
-    logger.info(
+    _log(
         "write_history: resolved filters → type=%r, experiment_hash=%s, "
         "graph_name=%s, sample_id=%s, instance_id=%s",
         _type,
@@ -3357,10 +3996,10 @@ def write_history(
         )
         _phash = _hashlib.md5(str(_params_key).encode()).hexdigest()[:8]
         path = _os.path.join(path, f"{_phash}_history.{fmt}")
-        logger.info("write_history: auto-generated filename %r (params hash "
-                    "%s).", _os.path.basename(path), _phash)
+        _log("write_history: auto-generated filename %r (params hash "
+             "%s).", _os.path.basename(path), _phash)
     _os.makedirs(_os.path.dirname(_os.path.abspath(path)), exist_ok=True)
-    logger.info("write_history: output file → %s", _os.path.abspath(path))
+    _log("write_history: output file → %s", _os.path.abspath(path))
 
     global_rows: list = []
     sample_rows: list = []
@@ -3440,24 +4079,76 @@ def write_history(
         logger.debug("write_history: collected %d instance row(s) across %d "
                      "graph(s).", len(instance_rows), len(graphs_i))
 
-    if fmt == "json":
-        payload = {}
-        if write_global:
-            payload["global"] = global_rows
-        if write_sample:
-            payload["sample"] = sample_rows
-        if write_instance:
-            payload["instance"] = instance_rows
-        with open(path, "w", encoding="utf-8") as fh:
-            _json.dump(payload, fh, indent=2)
+    import pandas as _pd
+
+    # Requested sections, in stable order. JSON keeps this nested shape;
+    # parquet/csv flatten it into rows with a `type` discriminator.
+    payload = {}
+    if write_global:
+        payload["global"] = global_rows
+    if write_sample:
+        payload["sample"] = sample_rows
+    if write_instance:
+        payload["instance"] = instance_rows
+
+    _FLAT_FIELDS = [
+        "type", "graph_name", "experiment_hash", "step", "metric_value",
+        "sample_id", "annotation_id",
+    ]
+
+    def _write_json(_target):
+        # Stream the nested {section: <orient-shaped>} structure straight to
+        # disk via pandas' C writer with native `indent`. The old
+        # to_json → json.loads → json.dump round-trip rebuilt every row as
+        # Python objects just to pretty-print — the slow, memory-heavy path on
+        # large per-sample/instance logs. Default orient "columns"
+        # ({column: {row_index: value}}) writes each column name once per
+        # section; orient="records" gives the row-list-of-dicts shape.
+        _sections = list(payload.items())
+        with open(_target, "w", encoding="utf-8") as fh:
+            fh.write("{\n")
+            for _i, (_section, _rows) in enumerate(_sections):
+                _body = _pd.DataFrame(_rows).to_json(
+                    orient=orient, default_handler=str, indent=2)
+                fh.write(f"  {_json.dumps(_section)}: {_body}")
+                fh.write(",\n" if _i < len(_sections) - 1 else "\n")
+            fh.write("}\n")
+
+    if fmt == "parquet":
+        _all_rows = (
+            [{"type": "global", **r} for r in global_rows]
+            + [{"type": "sample", **r} for r in sample_rows]
+            + [{"type": "instance", **r} for r in instance_rows]
+        )
+        _flat = _pd.DataFrame(_all_rows, columns=_FLAT_FIELDS)
+        try:
+            try:
+                _flat.to_parquet(path, index=False)
+            except Exception:
+                # JSON-encode any object column that mixes list/non-list values
+                # and retry before giving up on the fast parquet path.
+                _parquet_safe_frame(_flat).to_parquet(path, index=False)
+        except Exception as _e:
+            # Never let a periodic checkpoint dump crash the run: no engine
+            # (pyarrow/fastparquet) or an unencodable column → JSON + a warning.
+            _fallback = _os.path.splitext(path)[0] + ".json"
+            if isinstance(_e, ImportError):
+                _reason = ("no parquet engine installed — run `pip install pyarrow` "
+                           "to enable the fast default")
+            else:
+                _reason = f"parquet write failed ({type(_e).__name__}: {_e})"
+            logger.warning(
+                "write_history: %s. Falling back to JSON at %s.", _reason, _fallback,
+            )
+            path = _fallback
+            _write_json(path)
+
+    elif fmt == "json":
+        _write_json(path)
 
     elif fmt == "csv":
-        _CSV_FIELDS = [
-            "type", "graph_name", "experiment_hash", "step", "metric_value",
-            "sample_id", "annotation_id",
-        ]
         with open(path, "w", newline="", encoding="utf-8") as fh:
-            writer = _csv.DictWriter(fh, fieldnames=_CSV_FIELDS, extrasaction="ignore")
+            writer = _csv.DictWriter(fh, fieldnames=_FLAT_FIELDS, extrasaction="ignore")
             writer.writeheader()
             for row in global_rows:
                 writer.writerow({"type": "global", **row})
@@ -3467,18 +4158,19 @@ def write_history(
                 writer.writerow({"type": "instance", **row})
 
     else:
-        logger.error("write_history: unsupported format %r (expected 'json' "
-                     "or 'csv').", format)
+        logger.error("write_history: unsupported format %r (expected 'parquet', "
+                     "'json' or 'csv').", format)
         raise ValueError(
-            f"write_history: unsupported format {format!r}. Use 'json' or 'csv'."
+            f"write_history: unsupported format {format!r}. Use 'parquet', 'json' or 'csv'."
         )
 
     _total = len(global_rows) + len(sample_rows) + len(instance_rows)
-    logger.info(
+    _written_fmt = _os.path.splitext(path)[1].lstrip(".") or fmt
+    _log(
         "write_history: wrote %d row(s) (global=%d, sample=%d, instance=%d) "
         "as %s to %s",
         _total, len(global_rows), len(sample_rows), len(instance_rows),
-        fmt, _os.path.abspath(path),
+        _written_fmt, _os.path.abspath(path),
     )
     if _total == 0:
         logger.warning(
@@ -3491,14 +4183,351 @@ def write_history(
     return path
 
 
+# Signal names registered via watch_or_edit(..., flag="loss") — populated
+# automatically (see the loss branch above), so the background flush thread
+# can auto-classify every per-sample loss without the user calling anything.
+_AUTO_LOSS_SHAPE_SIGNALS: set = set()
+
+
+def auto_loss_shape_signal_names() -> list:
+    """Every signal name currently registered via ``flag="loss"`` — the
+    automatic loss-shape classification target set. Used internally by
+    :class:`weightslab.backend.logger.LoggerQueue`'s background flush thread;
+    read it yourself only for introspection/debugging."""
+    return sorted(_AUTO_LOSS_SHAPE_SIGNALS)
+
+
+LOSS_SHAPES = ["monotonic", "plateaued", "Flat_high", "high_variance", "U_Shape", "Spiked", "Forgotten"]
+
+# Two standard statistical conventions -- not per-label tuned magic numbers --
+# applied uniformly everywhere classify_loss_shape has to decide "is this a
+# real change, or just noise": a ~95%-confidence z-score, and the textbook
+# "cv > 1" rule of thumb for a series being more noise than signal.
+_Z_SIGNIFICANT = 2.0
+_CV_HIGH_VARIABILITY = 1.0
+_MIN_POINTS = 5
+
+
+def _noise_floor(y):
+    """Robust per-step noise estimate for *y*, independent of any trend.
+
+    Uses the discrete second difference (cancels a locally linear trend --
+    including a plain monotonic rise or fall -- leaving curvature + noise),
+    then estimates the *typical* spread from it after trimming the single
+    most extreme deviation. That trim (rather than a median/MAD) is what
+    keeps this usable at the short lengths this classifier actually runs on:
+    a lone spike contaminates ~3 consecutive second-difference entries, and
+    with only a handful of points total, those 3 can outnumber a plain
+    median's breakdown margin. Explicitly setting aside the one largest
+    deviation -- exactly the one candidate anomaly this classifier looks for
+    -- lets the rest describe the noise floor even when there are few of
+    them. Falls back to the first difference for a 2-point series.
+
+    The floor for a near-zero spread (most steps exactly flat) is scaled to
+    *y*'s own magnitude, not a bare absolute constant: an absolute floor
+    would be swamped by ordinary floating-point rounding from the smoothing
+    convolution on real-scale data, making trivial arithmetic residue
+    register as a "statistically significant" difference.
+    """
+    if y.size >= 3:
+        d, scale = np.diff(y, n=2), np.sqrt(6.0)   # Var(e[i+2]-2e[i+1]+e[i]) = 6*Var(e)
+    else:
+        d, scale = np.diff(y), np.sqrt(2.0)         # Var(e[i+1]-e[i]) = 2*Var(e)
+    abs_dev = np.abs(d - np.median(d)) if d.size else d
+    if abs_dev.size >= 2:
+        spread = float(np.mean(np.delete(abs_dev, int(np.argmax(abs_dev)))))
+    elif abs_dev.size == 1:
+        spread = float(abs_dev[0])
+    else:
+        spread = 0.0
+    rel_floor = 1e-6 * (float(np.abs(y).max()) + 1e-12)
+    return max(1.4826 * spread / scale, rel_floor)
+
+
+def trajectory_stats(values):
+    """Scale- and noise-invariant summary stats of one sample's trajectory —
+    the reusable feature layer. Returns a dict (or ``None`` with < 2 points)
+    so you can build a custom classifier on top without re-deriving the
+    features::
+
+        def my_clf(v):
+            s = wl.trajectory_stats(v)
+            return None if s is None else ("fast" if s["drop_z"] > 3 else "slow")
+
+    Every ``*_z`` value is a z-score against *this trajectory's own* noise
+    floor (see :func:`_noise_floor`) rather than a fraction of some fixed
+    constant -- the same underlying change reads as "significant" whether the
+    sample's loss lives in the single digits or the thousands, and whether
+    the curve is clean or inherently noisy. There is nothing to tune here:
+    the normalization comes from the data itself.
+    """
+    y = np.asarray(values, dtype=float)
+    if y.size < 2:
+        return None
+    n = y.size
+    noise = _noise_floor(y)
+
+    w = max(1, min(n // 4, 9))
+    if w > 1:
+        pad = w // 2
+        kernel = np.ones(w) / w
+        sm = np.convolve(np.pad(y, (pad, pad), mode="edge"), kernel, mode="valid")[:n]
+    else:
+        sm = y
+
+    first, last = float(sm[0]), float(sm[-1])
+    valley_idx = int(np.argmin(sm))
+    valley = float(sm[valley_idx])
+
+    diffs = np.diff(y)
+    jump_idx = int(np.argmax(diffs))
+    pre_jump = float(sm[jump_idx])
+    after_jump = sm[jump_idx + 2:] if jump_idx + 2 < n else sm[-1:]
+
+    # How much of the time since the low point has the series actually spent
+    # settled? Walk backward from the end, growing the window while its own
+    # spread stays within noise -- the longest such suffix, as a fraction of
+    # the whole post-valley period. Doesn't care whether the climb up was one
+    # sharp jump or a slow ramp, only whether it has since stopped moving,
+    # and for how long.
+    post_valley = sm[valley_idx:]
+    lo = hi = float(post_valley[-1])
+    settled_n = 1
+    for i in range(len(post_valley) - 2, -1, -1):
+        v = float(post_valley[i])
+        new_lo, new_hi = min(lo, v), max(hi, v)
+        if (new_hi - new_lo) > _Z_SIGNIFICANT * noise:
+            break
+        lo, hi = new_lo, new_hi
+        settled_n += 1
+    settled_frac = settled_n / len(post_valley) if len(post_valley) else 0.0
+
+    return {
+        "n": n,
+        "noise": noise,
+        "drop_z": (first - last) / noise,           # net change, start -> end
+        "dip_z": (first - valley) / noise,           # start -> low point
+        "rebound_z": (last - valley) / noise,        # low point -> end
+        "jump_z": float(diffs[jump_idx]) / noise,    # biggest single-step rise
+        "revert_z": abs(float(after_jump.mean()) - pre_jump) / noise,  # gap left after that jump
+        "trend_z": (float(sm.max()) - float(sm.min())) / noise,  # any discernible movement at all
+        "level_cv": noise / (abs(float(y.mean())) + 1e-8),        # noise relative to the series' own scale
+        "settled_n": settled_n,
+        "settled_frac": settled_frac,
+    }
+
+
+def classify_loss_shape(values):
+    """Default classifier -> one of :data:`LOSS_SHAPES` (or ``None`` with too
+    few points). Built on :func:`trajectory_stats`; every decision below is a
+    z-score against that trajectory's own noise floor, checked against the
+    same ``_Z_SIGNIFICANT`` (~95% confidence) convention everywhere -- not a
+    different hand-picked fraction per label, and nothing to tune: the
+    classifier normalizes itself to each sample's own scale and noise.
+
+    - ``Spiked`` needs a one-step jump that's statistically real (``jump_z``)
+      *and* a reversion afterwards (``revert_z`` small, i.e. indistinguishable
+      from noise) -- a jump that never comes back down isn't a spike, it's a
+      lasting change, so it falls through to the checks below instead.
+    - A real dip (``dip_z``) followed by a real rebound (``rebound_z``) is
+      ``Forgotten`` if the series has since settled (``settled_frac`` -- at
+      least half its time since the dip spent flat), else ``U_Shape`` (still
+      moving, not confirmed permanent).
+    - No statistically discernible trend at all (``trend_z``) is either
+      ``Flat_high`` or ``high_variance``, split on whether the noise itself
+      exceeds the series' own level (``level_cv`` > 1 -- the standard
+      "coefficient of variation" high-variability convention).
+    - A real net drop (``drop_z``) that has since settled is ``plateaued``;
+      still moving is ``monotonic``.
+
+    Override the whole thing by passing your own ``classifier`` to
+    :func:`write_signal_shapes`.
+    """
+    s = trajectory_stats(values)
+    if s is None or s["n"] < _MIN_POINTS:
+        return None
+    settled = s["settled_n"] >= 3 and s["settled_frac"] >= 0.5
+    if s["jump_z"] > _Z_SIGNIFICANT and s["revert_z"] < _Z_SIGNIFICANT:
+        return "Spiked"
+    if s["dip_z"] > _Z_SIGNIFICANT and s["rebound_z"] > _Z_SIGNIFICANT:
+        return "Forgotten" if settled else "U_Shape"
+    if s["trend_z"] <= _Z_SIGNIFICANT:
+        return "high_variance" if s["level_cv"] > _CV_HIGH_VARIABILITY else "Flat_high"
+    if s["drop_z"] > _Z_SIGNIFICANT:
+        return "plateaued" if settled else "monotonic"
+    return "Flat_high"
+
+
+# User-registered signal-shape classifiers (see @signal_classifier). A classifier
+# is a callable ``trajectory(list[float]) -> label (str) | None``. Per-signal
+# entries win over the global default; the built-in classify_loss_shape is the
+# final fallback. Consulted by write_signal_shapes (and thus the background
+# auto-tagger) and enable_loss_shape_signal.
+_REGISTERED_CLASSIFIERS: dict = {}   # {signal_name: classifier}
+_GLOBAL_CLASSIFIER = None            # classifier for any signal without its own
+
+
+def signal_classifier(signal=None):
+    """Register a custom signal-shape classifier, overriding the built-in
+    :func:`classify_loss_shape`. A classifier is
+    ``trajectory(list[float]) -> label (str) | None`` (return ``None`` to leave a
+    sample untagged).
+
+    Two binding modes:
+
+    - ``@signal_classifier(signal="loss_sample")`` — classify only that signal.
+    - ``@signal_classifier`` / ``@signal_classifier()`` — become the global
+      default for every signal without its own classifier.
+
+    Resolution order is per-signal → global → built-in. The registered classifier
+    applies everywhere shapes are computed: the background auto-tagger, the
+    report-time :func:`write_signal_shapes` / :func:`write_loss_shapes`, and the
+    live :func:`enable_loss_shape_signal`. Labels are free-form strings — the
+    six-way :data:`LOSS_SHAPES` set is just the built-in's vocabulary; a custom
+    classifier can emit any labels (e.g. a binary ``monotonic``/``not_monotonic``).
+
+    Example — a binary monotonic / not_monotonic classifier for one signal::
+
+        @wl.signal_classifier(signal="loss_sample")
+        def monotonic_or_not(values):
+            s = wl.trajectory_stats(values)
+            if s is None:
+                return None
+            return "monotonic" if s["drop"] > 0.4 else "not_monotonic"
+    """
+    def _register(fn):
+        global _GLOBAL_CLASSIFIER
+        if signal is None:
+            _GLOBAL_CLASSIFIER = fn
+        else:
+            _REGISTERED_CLASSIFIERS[str(signal)] = fn
+        return fn
+    # Bare @signal_classifier (no parens): `signal` is actually the function.
+    if callable(signal):
+        fn, signal = signal, None
+        return _register(fn)
+    return _register
+
+
+def resolve_signal_classifier(signal_name):
+    """The active classifier for *signal_name*: its own registered one, else the
+    global default (if set via bare ``@signal_classifier``), else the built-in
+    :func:`classify_loss_shape`."""
+    if signal_name in _REGISTERED_CLASSIFIERS:
+        return _REGISTERED_CLASSIFIERS[signal_name]
+    return _GLOBAL_CLASSIFIER or classify_loss_shape
+
+
+def write_signal_shapes(signal_name, tag_name=None, classifier=None):
+    """Reusable engine: classify every sample's trajectory of *signal_name* into
+    a categorical tag and return the ``{label: count}`` distribution. Works for
+    ANY per-sample signal — loss, accuracy, a second loss, any metric. Reads the
+    full history once (cheap end-of-report reduction). *classifier* (trajectory
+    -> label|None) defaults to whatever :func:`resolve_signal_classifier` returns
+    for *signal_name* — a user ``@signal_classifier``, else the built-in
+    loss-shaped one (for a decreasing metric). *tag_name* defaults to
+    ``'<signal>_shape'``."""
+    clf = classifier or resolve_signal_classifier(signal_name)
+    if tag_name is None:
+        tag_name = signal_name + "_shape" if signal_name.endswith('_loss') else signal_name + "_loss_shape"
+    series = {}
+    for sid, step, val, _ in query_signal_history(signal_name):
+        series.setdefault(sid, []).append((step, val))
+    by_label = {}
+    for sid, pts in series.items():
+        label = clf([v for _, v in sorted(pts)])
+        if label is not None:
+            by_label.setdefault(label, []).append(sid)
+    for label, sids in by_label.items():
+        set_categorical_tag(sids, tag_name, label)
+    return {k: len(v) for k, v in by_label.items()}
+
+
+def write_loss_shapes(loss_signal="loss_sample", classifier=None):
+    """Convenience wrapper over :func:`write_signal_shapes` for the loss signal
+    (tag ``loss_shape``, default loss classifier)."""
+    return write_signal_shapes(loss_signal, tag_name="loss_shape", classifier=classifier)
+
+
+def enable_loss_shape_autotag(loss_signal=None, tag_name=None, classifier=None):
+    """Customize automatic loss-shape tagging — **not required to turn it on**.
+
+    Every signal registered via ``wl.watch_or_edit(criterion, flag="loss", ...)``
+    is already auto-classified in the background with zero setup: the logger's
+    periodic flush thread (``WL_LOGGER_FLUSH_INTERVAL_SECONDS`` env var, default
+    2s) discovers it automatically and re-tags it as ``'<signal>_shape'`` every
+    tick, once it has enough per-sample history to classify (see
+    :func:`classify_loss_shape`'s ``min_points``) — no call needed, and no
+    ``write_dataframe(loss_shape_signal=...)`` required either.
+
+    Call this only to override the tag name or classifier used for one specific
+    *loss_signal* (e.g. it isn't a decreasing loss, so the default classifier is
+    wrong for it). Re-enables that signal if it was previously disabled via
+    :func:`disable_loss_shape_autotag`.
+    """
+    if loss_signal is None:
+        raise ValueError(
+            "enable_loss_shape_autotag: loss_signal is required — every "
+            "flag='loss' signal is already auto-classified without calling "
+            "this; only call it to override the tag_name/classifier for one."
+        )
+    lg = get_logger()
+    if lg is None:
+        raise RuntimeError(
+            "enable_loss_shape_autotag: no logger registered yet — call this "
+            "after wl.watch_or_edit(criterion, flag='loss', log=True)."
+        )
+    lg.set_loss_shape_override(loss_signal, tag_name=tag_name, classifier=classifier)
+
+
+def disable_loss_shape_autotag(loss_signal=None):
+    """Stop automatic loss-shape tagging for *loss_signal*, or for every
+    signal (including ones registered later) if *loss_signal* is ``None``."""
+    lg = get_logger()
+    if lg is not None:
+        lg.disable_loss_shape_autotag(loss_signal)
+
+
+def enable_loss_shape_signal(loss_signal="loss_sample", name="sig/loss_shape",
+                             every=1, classifier=None):
+    """Register a LIVE per-step ``@wl.signal`` that classifies each sample's
+    loss-trajectory-so-far into an int-coded shape (index into ``LOSS_SHAPES``,
+    ``-1`` before there's enough history), updated every *every* steps.
+
+    This is the live counterpart to :func:`write_loss_shapes` (report-time). It's
+    heavier — it reads history on every fire — so throttle with *every* or prefer
+    the report-time path for a definitive, full-coverage tag."""
+    clf = classifier or resolve_signal_classifier(loss_signal)
+
+    @signal(name=name, inputs=[loss_signal], batched=True, compute_every_n_steps=every)
+    def _live_shape(b):
+        hist = b.history(loss_signal)
+        # int-code into LOSS_SHAPES; a custom classifier may emit labels outside
+        # that vocabulary (or None before enough history) -> -1.
+        return np.array([(LOSS_SHAPES.index(lbl) if (lbl := clf(hist[s])) in LOSS_SHAPES else -1)
+                         for s in b.sample_ids], dtype=float)
+    return _live_shape
+
+
 def write_dataframe(
     path: str | None = None,
-    format: str = "json",
+    format: str | None = None,
     columns=None,
     sample_id=None,
     instance_id=None,
+    orient: str = "columns",
+    verbose: bool = False,
+    loss_shape_signal: str | None = None,
 ) -> str:
-    """Dump the WeightsLab sample dataframe to *path* as JSON or CSV.
+    """Dump the WeightsLab sample dataframe to *path* as Parquet, JSON, or CSV.
+
+    Every ``flag="loss"`` signal is already auto-classified into a
+    ``'<signal>_shape'`` tag in the background with zero setup (see
+    :func:`enable_loss_shape_autotag`'s docstring), so you normally don't need
+    *loss_shape_signal* at all. It remains as a one-off: when set (e.g.
+    ``"loss_sample"``), the classifier runs synchronously first so this
+    specific report is guaranteed fresh at the moment it's written, rather than
+    whatever the background thread last computed.
 
     Parameters
     ----------
@@ -3514,8 +4543,16 @@ def write_dataframe(
           same filename (idempotent overwrite); different filters → different
           file.
         - The directory is created automatically if it does not exist.
-    format : {"json", "csv"}
-        Output format. Default ``"json"``.
+    format : {"parquet", "json", "csv"}, optional
+        Output format. When omitted, it is inferred from *path*'s extension
+        (``.parquet`` / ``.json`` / ``.csv``), falling back to ``"parquet"`` when
+        *path* carries no extension (a bare directory or ``None`` — the common
+        periodic-export case). Parquet is a compact, fast, dtype-preserving
+        columnar dump that scales to large frames (300k+ rows) far better than
+        JSON; it needs a parquet engine (``pip install pyarrow``) and falls back
+        to JSON with a warning if none is installed or a column can't be
+        encoded, so a checkpoint dump never crashes the run. Pass ``"json"``
+        explicitly for a human-readable dump or ``"csv"`` for flat tabular data.
     columns : str or list of str, optional
         Which columns to include (index levels ``sample_id`` / ``annotation_id``
         are always written).
@@ -3563,15 +4600,21 @@ def write_dataframe(
             sample_id=["img_001", "img_042"],
         )
     """
-    import json as _json
     import os as _os
     import hashlib as _hashlib
+
+    # If reactive signals run on the worker thread, process every queued job
+    # before reading, so the report includes the latest steps' derived signals.
+    drain_signals()
 
     logger.debug(
         "write_dataframe called: path=%r, format=%r, columns=%r, "
         "sample_id=%r, instance_id=%r",
         path, format, columns, sample_id, instance_id,
     )
+
+    # INFO only when verbose; DEBUG otherwise (quiet periodic exports).
+    _log = logger.info if verbose else logger.debug
 
     _dm = get_dataframe()
     if _dm is None:
@@ -3592,9 +4635,15 @@ def write_dataframe(
             logger.debug("write_dataframe: failed to resolve root_log_dir (%s); "
                          "falling back to current directory.", _e)
             path = "."
-        logger.info("write_dataframe: no path given, using output directory %r.", path)
+        _log("write_dataframe: no path given, using output directory %r.", path)
 
-    fmt = format.lower().strip()
+    # Resolve format: explicit arg wins; otherwise infer from the path's
+    # extension, defaulting to parquet when the path carries no format hint.
+    if format is not None:
+        fmt = format.lower().strip()
+    else:
+        _ext = _os.path.splitext(str(path))[1].lower()
+        fmt = {".parquet": "parquet", ".json": "json", ".csv": "csv"}.get(_ext, "parquet")
 
     # Normalize sample_id → list[str] or None
     _sid_filter = None
@@ -3611,7 +4660,7 @@ def write_dataframe(
     if columns is not None and not (isinstance(columns, str) and columns.lower() == "all"):
         _col_filter = [columns] if isinstance(columns, str) else list(columns)
 
-    logger.info(
+    _log(
         "write_dataframe: resolved filters → columns=%s, sample_id=%s, instance_id=%s",
         _col_filter if _col_filter is not None else "<all>",
         _sid_filter if _sid_filter is not None else "<all>",
@@ -3629,10 +4678,10 @@ def write_dataframe(
         )
         _phash = _hashlib.md5(str(_params_key).encode()).hexdigest()[:8]
         path = _os.path.join(path, f"{_phash}_dataframe.{fmt}")
-        logger.info("write_dataframe: auto-generated filename %r (params hash %s).",
-                    _os.path.basename(path), _phash)
+        _log("write_dataframe: auto-generated filename %r (params hash %s).",
+             _os.path.basename(path), _phash)
     _os.makedirs(_os.path.dirname(_os.path.abspath(path)), exist_ok=True)
-    logger.info("write_dataframe: output file → %s", _os.path.abspath(path))
+    _log("write_dataframe: output file → %s", _os.path.abspath(path))
 
     # Flush pending buffer to H5 before reading
     try:
@@ -3702,23 +4751,52 @@ def write_dataframe(
     # Reset index so sample_id / annotation_id appear as regular columns in output
     df_out = df_out.reset_index()
 
-    if fmt == "json":
-        _json_str = df_out.to_json(orient="records", default_handler=str)
-        with open(path, "w", encoding="utf-8") as fh:
-            _json.dump(_json.loads(_json_str), fh, indent=2)
+    if fmt == "parquet":
+        try:
+            try:
+                df_out.to_parquet(path, index=False)
+            except Exception:
+                # pyarrow rejects object columns that mix list/non-list values
+                # (e.g. a per-instance `target` column). JSON-encode just those
+                # columns and retry so we still get the fast parquet path
+                # instead of falling all the way back to JSON.
+                _parquet_safe_frame(df_out).to_parquet(path, index=False)
+        except Exception as _e:
+            # Parquet is the fast default, but a periodic checkpoint dump must
+            # never crash a run: if there's no engine (pyarrow/fastparquet) or a
+            # column still can't be encoded, fall back to a JSON dump and warn.
+            _fallback = _os.path.splitext(path)[0] + ".json"
+            if isinstance(_e, ImportError):
+                _reason = ("no parquet engine installed — run `pip install pyarrow` "
+                           "to enable the fast default")
+            else:
+                _reason = f"parquet write failed ({type(_e).__name__}: {_e})"
+            logger.warning(
+                "write_dataframe: %s. Falling back to JSON at %s.", _reason, _fallback,
+            )
+            path = _fallback
+            df_out.to_json(path, orient=orient, indent=2, default_handler=str)
+
+    elif fmt == "json":
+        # Stream straight to the file via pandas' C writer with native `indent`.
+        # The previous to_json → json.loads → json.dump round-trip rebuilt the
+        # whole frame as Python objects just to pretty-print it — the slow,
+        # memory-heavy path on large frames (300k+ rows).
+        df_out.to_json(path, orient=orient, indent=2, default_handler=str)
 
     elif fmt == "csv":
         df_out.to_csv(path, index=False, encoding="utf-8")
 
     else:
-        logger.error("write_dataframe: unsupported format %r (expected 'json' or 'csv').", format)
+        logger.error("write_dataframe: unsupported format %r (expected 'parquet', 'json' or 'csv').", format)
         raise ValueError(
-            f"write_dataframe: unsupported format {format!r}. Use 'json' or 'csv'."
+            f"write_dataframe: unsupported format {format!r}. Use 'parquet', 'json' or 'csv'."
         )
 
+    _written_fmt = _os.path.splitext(path)[1].lstrip(".") or fmt
     logger.info(
         "write_dataframe: wrote %d row(s) × %d column(s) as %s to %s",
-        len(df_out), len(df_out.columns), fmt, _os.path.abspath(path),
+        len(df_out), len(df_out.columns), _written_fmt, _os.path.abspath(path),
     )
     if df_out.empty:
         logger.warning(

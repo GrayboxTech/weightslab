@@ -1,13 +1,16 @@
 """WeightsLab ↔ Ultralytics integration.
 
-Two-name public surface:
+Public surface:
   * `WLAwareTrainer` — UL DetectionTrainer subclass that wires WL through
     the canonical pattern (both train/val loaders go through
     `wl.watch_or_edit(flag='data')`, per-sample TRAIN + VAL signals
     installed, live train + val NMS prediction overlays shipped to studio).
-  * `WLAwareDataset` — UL YOLODataset subclass that returns the WL
-    preview-protocol 4-tuple and provides a PIL fallback in
-    `fast_get_label` for ledger-init.
+  * `WLAwareSegmentationTrainer` — the same wiring on UL's SegmentationTrainer
+    for `*-seg.pt` models (masks train through the collate; per-sample signals
+    are box-level today — see trainer.py).
+  * `WLAwareDataset` / `WLAwareSegmentationDataset` — UL YOLODataset
+    subclasses that return the WL preview-protocol 4-tuple and provide a PIL
+    fallback in `fast_get_label` for ledger-init.
 
 Minimal user surface:
 
@@ -19,7 +22,7 @@ Minimal user surface:
     wl.serve()
 
     YOLO(cfg["model"]).train(
-        trainer=WLAwareTrainer,
+        trainer=WLAwareTrainer,           # or WLAwareSegmentationTrainer
         data=cfg["data_root"], imgsz=640, epochs=1000, batch=4,
         project="./logs", name="exp", # → WL log_dir/name
         workers=0, # WL invariant (parent-process uid counter)
@@ -28,7 +31,12 @@ Minimal user surface:
 
 See README.md for the supported-setup matrix.
 """
-from .dataset import WLAwareDataset
-from .trainer import WLAwareTrainer
+from .dataset import WLAwareDataset, WLAwareSegmentationDataset
+from .trainer import WLAwareSegmentationTrainer, WLAwareTrainer
 
-__all__ = ["WLAwareTrainer", "WLAwareDataset"]
+__all__ = [
+    "WLAwareTrainer",
+    "WLAwareSegmentationTrainer",
+    "WLAwareDataset",
+    "WLAwareSegmentationDataset",
+]

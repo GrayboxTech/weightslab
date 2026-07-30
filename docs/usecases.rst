@@ -3,7 +3,7 @@ Use Case Example (PyTorch)
 
 This page walks through the real MNIST classification integration from:
 
-``weightslab/examples/PyTorch/ws-classification/main.py``
+``weightslab/examples/PyTorch/wl-classification/main.py``
 
 Goal
 ----

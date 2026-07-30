@@ -18,6 +18,8 @@ import tempfile
 import warnings
 import json
 import pandas as pd
+import yaml
+from unittest import mock
 
 warnings.filterwarnings("ignore")
 
@@ -308,7 +310,7 @@ class CheckpointSystemTests(unittest.TestCase):
         cls.temp_dir = tempfile.mkdtemp(prefix="checkpoint_v3_test_")
         cls.log_dir = os.path.join(cls.temp_dir, "experiments")
 
-        # Initialize config from YAML-like dict (similar to ws-classification)
+        # Initialize config from YAML-like dict (similar to wl-classification)
         cls.config = {
             'experiment_name': EXP_NAME,
             'device': DEVICE,
@@ -1298,33 +1300,15 @@ class CheckpointSystemTests(unittest.TestCase):
         self.chkpt_manager.update_experiment_hash(force=False, dump_immediately=False)
         self.chkpt_manager.save_pending_changes(force=True)
 
-        snapshot_dir = Path(self.chkpt_manager.loggers_dir)
-        manifest_path = snapshot_dir / "loggers.manifest.json"
-        legacy_snapshot_path = snapshot_dir / "loggers.json"
-        self.assertTrue(
-            manifest_path.exists() or legacy_snapshot_path.exists(),
-            "Logger snapshot should be saved with checkpoint"
-        )
+        # Logger history is persisted to an on-disk DuckDB file alongside the
+        # checkpoint (the chunked-zstd snapshot was replaced by DuckDB in #257).
+        db_path = Path(self.chkpt_manager.get_logger_db_path())
+        self.assertTrue(db_path.exists(), "Logger DuckDB should be saved with checkpoint")
 
-        if manifest_path.exists():
-            with open(manifest_path, "r") as f:
-                manifest = json.load(f)
-            chunk_files = manifest.get("chunks", [])
-            self.assertGreaterEqual(len(chunk_files), 1, "Chunked logger snapshot should contain at least one chunk")
-            self.assertTrue(
-                all((snapshot_dir / chunk_name).exists() for chunk_name in chunk_files),
-                "All logger snapshot chunks referenced by manifest should exist"
-            )
-            self.assertTrue(self.chkpt_manager.load_logger_snapshot())
-            lg = ledgers.get_logger('main')
-            loggers = {'main': {'signal_history': lg.get_signal_history() if hasattr(lg, 'get_signal_history') else []}}
-        else:
-            with open(legacy_snapshot_path, "r") as f:
-                snapshot = json.load(f)
-            loggers = snapshot.get("loggers", {})
-
-        self.assertIn('main', loggers, "Logger entry should be present")
-        signals = loggers['main'].get("signal_history", [])
+        # The registered logger carries the persisted signal history.
+        lg = ledgers.get_logger('main')
+        self.assertIsNotNone(lg, "Logger entry should be present")
+        signals = lg.get_signal_history() if hasattr(lg, 'get_signal_history') else []
         if isinstance(signals, dict):
             total_signals = 0
             for experiments in signals.values():
@@ -1380,6 +1364,455 @@ class CheckpointStepAwareBehaviorTests(unittest.TestCase):
             self.assertIsNotNone(picked, "A checkpoint file should be selected")
             self.assertIn("_step_000005.pt", picked.name)
 
+    def test_load_latest_checkpoint_finds_file_under_model_hash_dir(self):
+        """Regression test: load_latest_checkpoint used to look for weight
+        files under models_dir/<full_24_byte_hash>/, but save_model_checkpoint
+        (and every other loader) stores them under models_dir/<model_hash>/
+        (the middle 8-byte segment) -- so it always returned None."""
+        with tempfile.TemporaryDirectory(prefix="load_latest_checkpoint_") as temp_dir:
+            manager = CheckpointManager(root_log_dir=temp_dir, load_model=False, load_config=False, load_data=False)
+            manager.current_exp_hash = "12345678abcdef0199aabbcc"
+
+            model = nn.Sequential(nn.Linear(3, 3))
+            manager.save_model_checkpoint(model=model, step=0, save_optimizer=False)
+            manager.save_model_checkpoint(model=model, step=9, save_optimizer=False)
+
+            loaded = manager.load_latest_checkpoint(model=nn.Sequential(nn.Linear(3, 3)), load_optimizer=False)
+            self.assertIsNotNone(loaded, "The latest checkpoint should be found and loaded")
+            self.assertEqual(loaded.get('step'), 9)
+
+
+class CheckpointMultiRootTests(unittest.TestCase):
+    """Tests for pointing a CheckpointManager at a parent directory that fans
+    out into several independent, nested experiment roots, e.g.:
+
+        scorer_exp/lr_tests/v1/checkpoints/manifest.yaml
+        scorer_exp/lr_tests/v2/checkpoints/manifest.yaml
+        scorer_exp/dataShuffling_tests/v1/checkpoints/manifest.yaml
+
+    The manager should transparently discover every nested root (up to
+    NESTED_ROOT_DISCOVERY_MAX_DEPTH levels down) and adopt the one with the
+    most recently updated manifest as its effective root, so model/config/
+    weight loading (and any future checkpoint writes) behave exactly like
+    the existing single root_log_dir case -- while merging signal-history
+    curves from every discovered root so training curves read as one
+    continuous history across all of them.
+    """
+
+    def setUp(self):
+        ledgers.clear_all()
+        self._tmp_ctx = tempfile.TemporaryDirectory(prefix="checkpoint_multiroot_")
+        self.tmp_dir = Path(self._tmp_ctx.name)
+
+    def tearDown(self):
+        ledgers.clear_all()
+        self._tmp_ctx.cleanup()
+
+    def _pin_manifest_timestamp(self, root_dir, exp_hash, timestamp):
+        """Overwrite a root's manifest recency timestamps with a controlled
+        value -- real datetime.now() ordering between fast successive setup
+        calls would otherwise make winner-selection non-deterministic."""
+        manifest_path = root_dir / "checkpoints" / "manifest.yaml"
+        with open(manifest_path, 'r') as f:
+            manifest = yaml.safe_load(f)
+        manifest['last_updated'] = timestamp
+        manifest['experiments'][exp_hash]['last_used'] = timestamp
+        manifest['experiments'][exp_hash]['created'] = timestamp
+        with open(manifest_path, 'w') as f:
+            yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
+
+    def _write_experiment_root(self, root_dir, exp_hash, step, timestamp, loss_values):
+        """Create a standalone, valid experiment root under root_dir: a
+        CheckpointManager with one model checkpoint and some logger signal
+        history tagged with exp_hash, with its manifest recency pinned to a
+        controlled timestamp (see _pin_manifest_timestamp)."""
+        manager = CheckpointManager(root_log_dir=str(root_dir), load_model=False, load_config=False, load_data=False)
+        manager.current_exp_hash = exp_hash
+        manager._create_exp_hash_directories(exp_hash)
+
+        model = nn.Sequential(nn.Linear(2, 2))
+        manager.save_model_checkpoint(model=model, step=step, save_optimizer=False)
+
+        lg = LoggerQueue(register=False, db_path=str(manager.get_logger_db_path()))
+        lg.chkpt_manager = manager  # tag signals with this root's own exp_hash
+        for i, value in enumerate(loss_values):
+            lg.add_scalars('loss', {'loss': value}, global_step=i, signal_per_sample={}, aggregate_by_step=False)
+        lg.flush_to_disk()
+        lg.stop_background_flush()
+        lg._conn.close()  # release the file lock so it can be ATTACHed for merging later
+
+        self._pin_manifest_timestamp(root_dir, exp_hash, timestamp)
+
+        ledgers.clear_all()
+        return manager
+
+    def test_fresh_empty_root_has_no_discovered_roots(self):
+        """A brand-new, never-used root_log_dir behaves exactly as before:
+        no nested roots are found, so nothing is adopted or merged."""
+        root = self.tmp_dir / "brand_new"
+        manager = CheckpointManager(root_log_dir=str(root), load_model=False, load_config=False, load_data=False)
+
+        self.assertEqual(manager.root_log_dir, root.absolute())
+        self.assertEqual(manager.given_root_log_dir, root.absolute())
+        self.assertEqual(manager.discovered_root_dirs, [])
+        self.assertFalse(manager.is_multi_root)
+
+    def test_single_preexisting_root_is_backward_compatible(self):
+        """Pointing directly at a single existing experiment root (the
+        current, common usage) must resolve to itself unchanged."""
+        root = self.tmp_dir / "single_exp"
+        exp_hash = "aaaa0000" + "bbbb0000" + "cccc0000"
+        self._write_experiment_root(root, exp_hash, step=3, timestamp="2024-01-01T00:00:00", loss_values=[0.9])
+
+        manager = CheckpointManager(root_log_dir=str(root), load_model=False, load_config=False, load_data=False)
+
+        self.assertEqual(manager.root_log_dir, root.absolute())
+        self.assertEqual(manager.discovered_root_dirs, [root.absolute()])
+        self.assertFalse(manager.is_multi_root)
+        self.assertEqual(manager.current_exp_hash, exp_hash)
+
+    def test_multiroot_with_single_nested_root_behaves_like_single_root(self):
+        """A parent directory that currently fans out into only one nested
+        root should adopt it exactly like the single-root case (no merging
+        needed since there's nothing to merge from)."""
+        parent = self.tmp_dir / "single_nested"
+        only_root = parent / "attempt_1"
+        exp_hash = "aaaa0004" + "bbbb0004" + "cccc0004"
+        self._write_experiment_root(only_root, exp_hash, step=7, timestamp="2024-03-01T00:00:00", loss_values=[0.5])
+
+        manager = CheckpointManager(root_log_dir=str(parent), load_model=False, load_config=False, load_data=False)
+
+        self.assertEqual(manager.root_log_dir, only_root.absolute())
+        self.assertEqual(manager.discovered_root_dirs, [only_root.absolute()])
+        self.assertFalse(manager.is_multi_root)
+        self.assertEqual(manager.current_exp_hash, exp_hash)
+
+    def test_multiroot_adopts_most_recently_updated_nested_root(self):
+        """Given several nested roots at varying depths (as deep as the
+        max-depth-3 example from the feature request: parent/group/version),
+        the manager must adopt the most recently updated one for model/
+        weights/config, while merging logger curves from all of them."""
+        parent = self.tmp_dir / "scorer_exp"
+        root_old = parent / "lr_tests" / "v1"
+        root_mid = parent / "lr_tests" / "v2"
+        root_winner = parent / "dataShuffling_tests" / "v2"
+
+        hash_old = "aaaa0001" + "bbbb0001" + "cccc0001"
+        hash_mid = "aaaa0002" + "bbbb0002" + "cccc0002"
+        hash_winner = "aaaa0003" + "bbbb0003" + "cccc0003"
+
+        self._write_experiment_root(root_old, hash_old, step=10, timestamp="2024-01-01T00:00:00", loss_values=[2.0, 1.8])
+        self._write_experiment_root(root_mid, hash_mid, step=20, timestamp="2024-06-01T00:00:00", loss_values=[1.5, 1.3])
+        self._write_experiment_root(root_winner, hash_winner, step=30, timestamp="2025-01-01T00:00:00", loss_values=[1.0, 0.8])
+
+        manager = CheckpointManager(root_log_dir=str(parent), load_model=False, load_config=False, load_data=False)
+
+        # --- Winner selection: model/config/data come entirely from the ---
+        # --- most recently updated nested root (same as single-root case) ---
+        self.assertEqual(manager.root_log_dir, root_winner.absolute())
+        self.assertTrue(manager.is_multi_root)
+        self.assertEqual(
+            set(manager.discovered_root_dirs),
+            {root_old.absolute(), root_mid.absolute(), root_winner.absolute()},
+        )
+        self.assertEqual(manager.current_exp_hash, hash_winner)
+
+        checkpoint_file = manager._select_weight_checkpoint_file(hash_winner)
+        self.assertIsNotNone(checkpoint_file, "Winner's own weight checkpoint should be found")
+        self.assertIn("_step_000030.pt", checkpoint_file.name)
+
+        result = manager.load_checkpoint(hash_winner, load_model=False, load_config=False, load_data=False)
+        self.assertIn('weights', result['loaded_components'])
+        self.assertEqual(
+            result['weights'].get('step'), 30,
+            "The most recent checkpoint across all manifests should be loaded",
+        )
+
+        # --- Logger curves: merged in from every discovered root, not ---
+        # --- just the winner's own ---
+        ledgers.register_checkpoint_manager(manager)
+        lg = LoggerQueue(register=True)
+        try:
+            history = lg.get_signal_history()
+            loss_by_hash = history.get('loss', {})
+            self.assertEqual(
+                set(loss_by_hash.keys()), {hash_old, hash_mid, hash_winner},
+                "Signal history should carry curves tagged with every discovered root's own hash",
+            )
+            total_points = sum(len(steps) for steps in loss_by_hash.values())
+            self.assertEqual(total_points, 6, "2 loss points from each of the 3 merged roots")
+        finally:
+            lg.stop_background_flush()
+
+    def test_sibling_merge_is_idempotent_across_call_sites(self):
+        """merge_from_disk can be triggered from more than one init-ordering
+        call site (logger created before vs. after the checkpoint manager);
+        merging the same sibling twice must not duplicate its rows."""
+        parent = self.tmp_dir / "idempotent_exp"
+        root_a = parent / "a"
+        root_b = parent / "b"
+        hash_a = "aaaa0005" + "bbbb0005" + "cccc0005"
+        hash_b = "aaaa0006" + "bbbb0006" + "cccc0006"
+
+        self._write_experiment_root(root_a, hash_a, step=1, timestamp="2024-01-01T00:00:00", loss_values=[1.0])
+        self._write_experiment_root(root_b, hash_b, step=2, timestamp="2024-02-01T00:00:00", loss_values=[2.0])
+
+        manager = CheckpointManager(root_log_dir=str(parent), load_model=False, load_config=False, load_data=False)
+        ledgers.register_checkpoint_manager(manager)
+
+        lg = LoggerQueue(register=True)  # first merge trigger: LoggerQueue.__init__
+        try:
+            manager._merge_sibling_logger_histories()  # second, redundant trigger
+            manager._merge_sibling_logger_histories()  # third, redundant trigger
+
+            history = lg.get_signal_history()
+            loss_by_hash = history.get('loss', {})
+            self.assertEqual(len(loss_by_hash.get(hash_a, {})), 1, "Sibling root's rows must not be duplicated")
+        finally:
+            lg.stop_background_flush()
+
+    def test_discovery_respects_max_depth_cutoff(self):
+        """A root nested deeper than NESTED_ROOT_DISCOVERY_MAX_DEPTH levels
+        must not be discovered, even if it's the most recently updated one --
+        only what's actually found can be adopted."""
+        parent = self.tmp_dir / "depth_test"
+        within_depth = parent / "a" / "b" / "c"        # 3 levels down: in range
+        beyond_depth = parent / "w" / "x" / "y" / "z"  # 4 levels down: out of range
+
+        hash_within = "aaaa0007" + "bbbb0007" + "cccc0007"
+        hash_beyond = "aaaa0008" + "bbbb0008" + "cccc0008"
+        self._write_experiment_root(within_depth, hash_within, step=1, timestamp="2024-01-01T00:00:00", loss_values=[1.0])
+        # Deliberately the more "recent" one, to prove it's ignored for being unreachable.
+        self._write_experiment_root(beyond_depth, hash_beyond, step=1, timestamp="2025-01-01T00:00:00", loss_values=[1.0])
+
+        manager = CheckpointManager(root_log_dir=str(parent), load_model=False, load_config=False, load_data=False)
+
+        discovered = set(manager.discovered_root_dirs)
+        self.assertIn(within_depth.absolute(), discovered)
+        self.assertNotIn(beyond_depth.absolute(), discovered)
+        self.assertEqual(manager.root_log_dir, within_depth.absolute())
+
+    def test_ranking_falls_back_to_experiment_timestamps_when_last_updated_missing(self):
+        """Older manifests may predate the top-level 'last_updated' field;
+        ranking should still work off the latest experiment's own timestamp."""
+        parent = self.tmp_dir / "legacy_timestamp_exp"
+        root_a = parent / "a"
+        root_b = parent / "b"
+        hash_a = "aaaa0009" + "bbbb0009" + "cccc0009"
+        hash_b = "aaaa0010" + "bbbb0010" + "cccc0010"
+        self._write_experiment_root(root_a, hash_a, step=1, timestamp="2024-01-01T00:00:00", loss_values=[1.0])
+        self._write_experiment_root(root_b, hash_b, step=1, timestamp="2025-01-01T00:00:00", loss_values=[1.0])
+
+        manifest_path = root_b / "checkpoints" / "manifest.yaml"
+        with open(manifest_path, 'r') as f:
+            manifest = yaml.safe_load(f)
+        del manifest['last_updated']
+        with open(manifest_path, 'w') as f:
+            yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
+
+        manager = CheckpointManager(root_log_dir=str(parent), load_model=False, load_config=False, load_data=False)
+        self.assertEqual(
+            manager.root_log_dir, root_b.absolute(),
+            "Should still rank by the latest experiment's own timestamp when top-level last_updated is missing",
+        )
+
+    def test_corrupt_manifest_does_not_crash_discovery(self):
+        """One candidate's manifest.yaml being unparsable must not take down
+        discovery for the others -- it just can't win the ranking."""
+        parent = self.tmp_dir / "corrupt_manifest_exp"
+        root_good = parent / "good"
+        root_bad = parent / "bad"
+        hash_good = "aaaa0011" + "bbbb0011" + "cccc0011"
+        self._write_experiment_root(root_good, hash_good, step=1, timestamp="2024-01-01T00:00:00", loss_values=[1.0])
+
+        bad_checkpoints_dir = root_bad / "checkpoints"
+        bad_checkpoints_dir.mkdir(parents=True)
+        # Tab-indentation is invalid YAML syntax -- guaranteed to raise on parse.
+        (bad_checkpoints_dir / "manifest.yaml").write_text("experiments:\n\tbad: [\n")
+
+        manager = CheckpointManager(root_log_dir=str(parent), load_model=False, load_config=False, load_data=False)
+        self.assertEqual(len(manager.discovered_root_dirs), 2, "Both roots should be discovered")
+        self.assertEqual(manager.root_log_dir, root_good.absolute(), "The corrupt manifest should rank last, not crash ranking")
+
+    def test_merges_legacy_json_snapshot_from_sibling_without_duckdb(self):
+        """A sibling root that predates DuckDB-backed logger persistence
+        (only an uncompressed loggers.json snapshot, no loggers.duckdb) must
+        still have its curves merged in via the legacy fallback path."""
+        parent = self.tmp_dir / "legacy_logger_exp"
+        root_legacy = parent / "legacy"
+        root_winner = parent / "current"
+        hash_legacy = "aaaa0012" + "bbbb0012" + "cccc0012"
+        hash_winner = "aaaa0013" + "bbbb0013" + "cccc0013"
+
+        legacy_manager = CheckpointManager(root_log_dir=str(root_legacy), load_model=False, load_config=False, load_data=False)
+        legacy_manager.current_exp_hash = hash_legacy
+        legacy_manager._create_exp_hash_directories(hash_legacy)
+        legacy_manager.save_model_checkpoint(model=nn.Sequential(nn.Linear(2, 2)), step=1, save_optimizer=False)
+        legacy_payload = {
+            "loggers": {
+                "main": {
+                    "graph_names": ["loss"],
+                    "signal_history": [
+                        {"metric_name": "loss", "experiment_hash": hash_legacy, "model_age": 0, "metric_value": 4.2},
+                    ],
+                }
+            }
+        }
+        with open(legacy_manager.loggers_dir / "loggers.json", "w") as f:
+            json.dump(legacy_payload, f)
+        self.assertFalse((legacy_manager.loggers_dir / "loggers.duckdb").exists(), "Precondition: no DuckDB file for this legacy root")
+        self._pin_manifest_timestamp(root_legacy, hash_legacy, "2024-01-01T00:00:00")
+        ledgers.clear_all()
+
+        self._write_experiment_root(root_winner, hash_winner, step=5, timestamp="2025-01-01T00:00:00", loss_values=[1.0])
+
+        manager = CheckpointManager(root_log_dir=str(parent), load_model=False, load_config=False, load_data=False)
+        ledgers.register_checkpoint_manager(manager)
+        lg = LoggerQueue(register=True)
+        try:
+            history = lg.get_signal_history()
+            loss_by_hash = history.get('loss', {})
+            self.assertIn(hash_legacy, loss_by_hash, "Legacy JSON snapshot curves from a pre-DuckDB sibling should be merged")
+            self.assertEqual(loss_by_hash[hash_legacy][0][0]['metric_value'], 4.2)
+        finally:
+            lg.stop_background_flush()
+
+    def test_merge_sibling_logger_histories_survives_merge_from_disk_exception(self):
+        """If merging one sibling's on-disk history raises unexpectedly, the
+        whole init must not blow up -- it's logged and skipped."""
+        parent = self.tmp_dir / "raising_merge_exp"
+        root_a = parent / "a"
+        root_b = parent / "b"
+        hash_a = "aaaa0014" + "bbbb0014" + "cccc0014"
+        hash_b = "aaaa0015" + "bbbb0015" + "cccc0015"
+        self._write_experiment_root(root_a, hash_a, step=1, timestamp="2024-01-01T00:00:00", loss_values=[1.0])
+        self._write_experiment_root(root_b, hash_b, step=1, timestamp="2025-01-01T00:00:00", loss_values=[1.0])
+
+        manager = CheckpointManager(root_log_dir=str(parent), load_model=False, load_config=False, load_data=False)
+        ledgers.register_checkpoint_manager(manager)
+        lg = LoggerQueue(register=True)
+        try:
+            with mock.patch.object(lg, 'merge_from_disk', side_effect=RuntimeError("boom")):
+                manager._merge_sibling_logger_histories()  # must not raise
+        finally:
+            lg.stop_background_flush()
+
+    def test_merge_triggered_when_logger_predates_manager(self):
+        """The reverse init ordering: a LoggerQueue already exists BEFORE the
+        multi-root CheckpointManager is constructed. _bind_logger_to_disk
+        must still trigger the sibling merge once it binds the pre-existing
+        logger to the winner's on-disk history."""
+        parent = self.tmp_dir / "logger_first_exp"
+        root_a = parent / "a"
+        root_b = parent / "b"
+        hash_a = "aaaa0016" + "bbbb0016" + "cccc0016"
+        hash_b = "aaaa0017" + "bbbb0017" + "cccc0017"
+        self._write_experiment_root(root_a, hash_a, step=1, timestamp="2024-01-01T00:00:00", loss_values=[1.0])
+        self._write_experiment_root(root_b, hash_b, step=1, timestamp="2025-01-01T00:00:00", loss_values=[1.0])
+
+        lg = LoggerQueue(register=True)  # created before any CheckpointManager exists
+        try:
+            manager = CheckpointManager(root_log_dir=str(parent), load_model=False, load_config=False, load_data=False)
+            self.assertEqual(manager.root_log_dir, root_b.absolute())
+
+            history = lg.get_signal_history()
+            loss_by_hash = history.get('loss', {})
+            self.assertIn(hash_a, loss_by_hash, "Sibling root's curve should be merged once the pre-existing logger is bound to disk")
+            self.assertIn(hash_b, loss_by_hash, "Winner root's own curve should be present too (adopted from its on-disk file)")
+        finally:
+            lg.stop_background_flush()
+
+
+class LoggerQueueMergeFromDiskTests(unittest.TestCase):
+    """Focused unit tests for LoggerQueue.merge_from_disk's edge/failure
+    paths, isolated from the CheckpointManager multi-root scaffolding."""
+
+    class _FakeCheckpointManager:
+        def __init__(self, exp_hash):
+            self._exp_hash = exp_hash
+
+        def get_current_experiment_hash(self):
+            return self._exp_hash
+
+    def setUp(self):
+        ledgers.clear_all()
+        self._tmp_ctx = tempfile.TemporaryDirectory(prefix="logger_merge_")
+        self.tmp_dir = Path(self._tmp_ctx.name)
+
+    def tearDown(self):
+        ledgers.clear_all()
+        self._tmp_ctx.cleanup()
+
+    def _make_closed_db_with_signal(self, db_path, exp_hash, value, drop_table=None):
+        lg = LoggerQueue(register=False, db_path=str(db_path))
+        lg.chkpt_manager = self._FakeCheckpointManager(exp_hash)
+        lg.add_scalars('loss', {'loss': value}, global_step=0, signal_per_sample={}, aggregate_by_step=False)
+        lg.flush_to_disk()
+        if drop_table:
+            lg._conn.execute(f"DROP TABLE {drop_table}")
+        lg.stop_background_flush()
+        lg._conn.close()
+
+    def test_noop_for_falsy_path(self):
+        lg = LoggerQueue(register=False)
+        self.assertFalse(lg.merge_from_disk(None))
+        self.assertFalse(lg.merge_from_disk(""))
+        lg.stop_background_flush()
+
+    def test_noop_for_nonexistent_path(self):
+        lg = LoggerQueue(register=False)
+        self.assertFalse(lg.merge_from_disk(str(self.tmp_dir / "does_not_exist.duckdb")))
+        lg.stop_background_flush()
+
+    def test_noop_for_merging_self(self):
+        db_path = self.tmp_dir / "self.duckdb"
+        lg = LoggerQueue(register=False, db_path=str(db_path))
+        self.assertFalse(lg.merge_from_disk(str(db_path)), "Merging a logger's own backing file into itself must be a no-op")
+        lg.stop_background_flush()
+
+    def test_handles_corrupt_source_file_gracefully(self):
+        corrupt_path = self.tmp_dir / "corrupt.duckdb"
+        corrupt_path.write_bytes(b"this is not a duckdb file")
+
+        lg = LoggerQueue(register=False)
+        try:
+            self.assertFalse(lg.merge_from_disk(str(corrupt_path)))
+        finally:
+            lg.stop_background_flush()
+
+    def test_copies_rows_and_is_idempotent(self):
+        source_db = self.tmp_dir / "source.duckdb"
+        self._make_closed_db_with_signal(source_db, "srchash", 3.5)
+
+        lg = LoggerQueue(register=False)
+        try:
+            self.assertTrue(lg.merge_from_disk(str(source_db)))
+            history = lg.get_signal_history()
+            self.assertEqual(len(history.get('loss', {}).get('srchash', {})), 1)
+
+            self.assertFalse(lg.merge_from_disk(str(source_db)), "Re-merging the same source must be a no-op")
+            history_again = lg.get_signal_history()
+            self.assertEqual(
+                len(history_again.get('loss', {}).get('srchash', {})), 1,
+                "Rows must not be duplicated by a repeated merge",
+            )
+        finally:
+            lg.stop_background_flush()
+
+    def test_skips_missing_table_gracefully(self):
+        """An older-schema sibling DB might be missing a table entirely
+        (schema evolved since); the other tables should still merge."""
+        source_db = self.tmp_dir / "old_schema.duckdb"
+        self._make_closed_db_with_signal(source_db, "oldschemahash", 1.1, drop_table="per_instance")
+
+        lg = LoggerQueue(register=False)
+        try:
+            self.assertTrue(lg.merge_from_disk(str(source_db)))
+            history = lg.get_signal_history()
+            self.assertIn('oldschemahash', history.get('loss', {}))
+        finally:
+            lg.stop_background_flush()
+
 
 if __name__ == '__main__':
     # Create test suite with explicit ordering
@@ -1407,6 +1840,25 @@ if __name__ == '__main__':
     # # Step-aware hash/checkpoint behavior
     suite.addTest(CheckpointStepAwareBehaviorTests('test_model_hash_depends_on_init_step'))
     suite.addTest(CheckpointStepAwareBehaviorTests('test_selects_closest_weights_checkpoint_for_target_step'))
+    suite.addTest(CheckpointStepAwareBehaviorTests('test_load_latest_checkpoint_finds_file_under_model_hash_dir'))
+    # # Multi-root discovery (root_log_dir fanning out into nested experiment roots)
+    suite.addTest(CheckpointMultiRootTests('test_fresh_empty_root_has_no_discovered_roots'))
+    suite.addTest(CheckpointMultiRootTests('test_single_preexisting_root_is_backward_compatible'))
+    suite.addTest(CheckpointMultiRootTests('test_multiroot_with_single_nested_root_behaves_like_single_root'))
+    suite.addTest(CheckpointMultiRootTests('test_multiroot_adopts_most_recently_updated_nested_root'))
+    suite.addTest(CheckpointMultiRootTests('test_sibling_merge_is_idempotent_across_call_sites'))
+    suite.addTest(CheckpointMultiRootTests('test_discovery_respects_max_depth_cutoff'))
+    suite.addTest(CheckpointMultiRootTests('test_ranking_falls_back_to_experiment_timestamps_when_last_updated_missing'))
+    suite.addTest(CheckpointMultiRootTests('test_corrupt_manifest_does_not_crash_discovery'))
+    suite.addTest(CheckpointMultiRootTests('test_merges_legacy_json_snapshot_from_sibling_without_duckdb'))
+    suite.addTest(CheckpointMultiRootTests('test_merge_sibling_logger_histories_survives_merge_from_disk_exception'))
+    suite.addTest(CheckpointMultiRootTests('test_merge_triggered_when_logger_predates_manager'))
+    suite.addTest(LoggerQueueMergeFromDiskTests('test_noop_for_falsy_path'))
+    suite.addTest(LoggerQueueMergeFromDiskTests('test_noop_for_nonexistent_path'))
+    suite.addTest(LoggerQueueMergeFromDiskTests('test_noop_for_merging_self'))
+    suite.addTest(LoggerQueueMergeFromDiskTests('test_handles_corrupt_source_file_gracefully'))
+    suite.addTest(LoggerQueueMergeFromDiskTests('test_copies_rows_and_is_idempotent'))
+    suite.addTest(LoggerQueueMergeFromDiskTests('test_skips_missing_table_gracefully'))
 
     # Run the suite
     runner = unittest.TextTestRunner(verbosity=2)
