@@ -120,6 +120,36 @@ def peek_is_tabular_sample(dataset, sample_id) -> bool:
         return False
 
 
+def looks_like_file_path_label(label) -> bool:
+    """True when a string label looks like a file path (e.g. a segmentation
+    mask path such as "mask.png") rather than free text (e.g. an LLM's
+    reference/reply text).
+
+    Used by ``DataService._process_sample_row``'s task-type detection to
+    decide whether a string label should be treated as "empty" (triggering a
+    ``load_label`` reload) -- a file path with no loadable content on the row
+    should trigger that reload, but free text must NOT, since there is
+    nothing to "load" for it and doing so would silently discard the text.
+
+    A file path ends in a short alphanumeric extension with no whitespace;
+    ordinary free text (multiple sentences, or a mid-sentence period) almost
+    always has a space right after any non-trailing '.', so requiring the
+    trailing segment to be short/alphanumeric/whitespace-free keeps this from
+    misfiring on text labels/predictions.
+    """
+    if not isinstance(label, str):
+        return False
+    if any(ch.isspace() for ch in label):
+        return False
+    # Avoid treating numeric literals like "3.14" as file paths.
+    if re.fullmatch(r"[+-]?\d+(\.\d+)?([eE][+-]?\d+)?", label.strip()):
+        return False
+    if '.' not in label or label.endswith('.'):
+        return False
+    ext = label.rsplit('.', 1)[-1]
+    return 1 <= len(ext) <= 6 and ext.isalnum() and any(c.isalpha() for c in ext)
+
+
 def normalize_metadata_copy_source_name(source_name: str, experiment_hash: str = None) -> str:
     """Normalize a source metadata name for deterministic copied-column naming."""
     name = str(source_name or "").strip()
@@ -1291,7 +1321,7 @@ class DataService:
                 is_label_empty = True
             elif isinstance(label, list) and not label:
                 is_label_empty = True
-            elif isinstance(label, str) and isinstance(label, str) and '.' in label and not label.endswith('.') and label.rsplit('.', 1)[-1] != '':
+            elif looks_like_file_path_label(label):
                 is_label_empty = True
             elif isinstance(label, float):
                 import math
@@ -1610,6 +1640,22 @@ class DataService:
                             thumbnail=b""
                         )
                     )
+                elif isinstance(label, str):
+                    # Text label (e.g. a generative model's reference/target
+                    # text) -- same 'target' stat name as the numeric/dict
+                    # cases above so the frontend's existing pred/target
+                    # column wiring picks it up unchanged; emitted directly
+                    # as a string, never through the numeric float(label)
+                    # path below (which would raise on non-numeric text).
+                    data_stats.append(
+                        create_data_stat(
+                            name='target',
+                            stat_type='string',
+                            shape=[1],
+                            value_string=label,
+                            thumbnail=b""
+                        )
+                    )
                 else:
                     # Check if label is NaN (handle both scalars and arrays)
                     if self._is_nan_value(label):
@@ -1764,6 +1810,22 @@ class DataService:
                 if pred is None:
                     pass # No prediction to process
 
+                elif isinstance(pred, str):
+                    # Text prediction (e.g. a generative model's reply) --
+                    # same 'pred' stat name as the numeric case below so the
+                    # frontend's existing pred/target column wiring picks it
+                    # up unchanged; emitted directly as a string, never
+                    # through the numeric float(pred) path (which would
+                    # raise on non-numeric text and get silently dropped).
+                    data_stats.append(
+                        create_data_stat(
+                            name='pred',
+                            stat_type='string',
+                            shape=[1],
+                            value_string=pred,
+                            thumbnail=b""
+                        )
+                    )
                 else:
                     # Handle scalar predictions (int, float, or unwrapped from H5)
                     try:
@@ -2878,6 +2940,20 @@ class DataService:
             expr = params.get("expr", "")
             try:
                 kept = df.query(expr)
+                if len(kept) == 0 and len(df) > 0:
+                    # A comparison against a numeric-LOOKING but string-typed
+                    # column (sample_id is always stored as str -- see
+                    # save_signals -- and a user naturally types
+                    # "sample_id == 11448" with no quotes) doesn't raise here:
+                    # pandas happily evaluates str "11448" == int 11448 as
+                    # False for every row, so df.query "succeeds" with a
+                    # silently empty result instead of hitting the
+                    # _mask_from_coerced_query fallback below (which only
+                    # triggers on an exception). Retry once against the
+                    # coerced view before accepting "0 rows" at face value.
+                    coerced_mask = self._mask_from_coerced_query(df, expr)
+                    if coerced_mask is not None and coerced_mask.any():
+                        kept = df[coerced_mask]
                 df.drop(index=df.index.difference(kept.index), inplace=True)
                 return f"Applied query: {expr}"
             except Exception as e:
