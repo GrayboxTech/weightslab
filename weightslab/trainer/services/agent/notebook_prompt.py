@@ -38,8 +38,15 @@ Rules:
 - For plots, build a matplotlib figure with plt; the notebook captures and renders
   it automatically. Do not call plt.savefig unless the user asked to save a file.
 - Keep it concise, correct, and directly runnable. No placeholder pseudo-code.
+- `df`'s schema below separates "Columns" from "Index levels". `sample_id` and
+  `origin` are virtually always INDEX LEVELS, not columns -- `df["sample_id"]`
+  / `df["origin"]` will raise KeyError. For an index level, use
+  `df.index.get_level_values("name")`, or call `df.reset_index()` first if you
+  need it alongside regular columns in the same expression. Never assume a
+  name listed under "Index levels" is also a column.
 
-Dataframe columns currently available:
+Dataframe schema currently available (index levels vs. columns -- read the
+labels, they are not interchangeable):
 {schema}
 
 Notebook cells above this one (for context, may be empty):

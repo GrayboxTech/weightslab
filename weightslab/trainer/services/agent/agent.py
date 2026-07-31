@@ -1893,16 +1893,45 @@ class DataManipulationAgent:
     # ------------------------------------------------------------------
 
     def _compact_schema_for_prompt(self) -> str:
-        """Return a short "- `col` (dtype)" listing of the live dataframe columns.
+        """Return a "- `name` (dtype)" listing of the live dataframe, with
+        index levels reported SEPARATELY from real columns.
+
+        `sample_id`/`origin` are index levels on the notebook's `df` (set via
+        `df.set_index([...], drop=True)` in DataService), never plain columns
+        -- but `_setup_schema()` merges index-level names into the same
+        `all_columns`/`metadata` structures it uses for its own stats-context
+        purposes, so without this split the two are indistinguishable in the
+        prompt and the LLM reliably emits `df["sample_id"]`/`df["origin"]`,
+        which raises KeyError. `index_columns` is already computed by
+        `_setup_schema()` for exactly this distinction; this method was simply
+        not using it.
 
         Reuses the cached schema built for query() so notebook code-gen does not
         pay a second full stats pass.
         """
         try:
             self._setup_schema()
-            meta = (self.df_schema or {}).get("metadata", {})
-            lines = [f"- `{col}` ({info.get('dtype', '?')})" for col, info in meta.items()]
-            return "\n".join(lines) if lines else "(no dataframe columns available yet)"
+            schema = self.df_schema or {}
+            meta = schema.get("metadata", {})
+            index_names = set(schema.get("index_columns", []))
+
+            column_lines = [f"- `{col}` ({info.get('dtype', '?')})"
+                             for col, info in meta.items() if col not in index_names]
+            index_lines = [f"- `{col}` ({info.get('dtype', '?')})"
+                            for col, info in meta.items() if col in index_names]
+
+            if not column_lines and not index_lines:
+                return "(no dataframe columns available yet)"
+
+            parts = ["Columns:\n" + "\n".join(column_lines) if column_lines
+                     else "Columns: (none)"]
+            if index_lines:
+                parts.append(
+                    "Index levels (NOT columns -- use df.index.get_level_values"
+                    "('name') or df.reset_index() first, never df['name']):\n"
+                    + "\n".join(index_lines)
+                )
+            return "\n\n".join(parts)
         except Exception as exc:
             _LOGGER.debug("notebook schema build failed: %s", exc)
             return "(dataframe schema unavailable)"

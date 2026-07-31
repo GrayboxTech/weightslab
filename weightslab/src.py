@@ -30,7 +30,8 @@ from weightslab.backend.model_interface import ModelInterface
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
-from weightslab.utils.tools import detach_to_cpu, _running_in_notebook, _running_in_colab
+from weightslab.utils.tools import detach_to_cpu, _running_in_notebook, _running_in_colab, _embedded_kernel_disabled
+from weightslab.trainer.services import notebook_service as _notebook_service
 from weightslab.backend.logger import LoggerQueue
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
@@ -1521,6 +1522,13 @@ def serve(serving_cli: bool = True, serving_grpc: bool = False,
         serving_grpc: Start the gRPC server. In a notebook/Colab, if this is on
             but ``serving_bore`` is off, a warning suggests ``serving_bore=True``
             (the UI runs on your own machine and needs a tunnel to reach here).
+            Also embeds a real Jupyter kernel (sharing this process's live
+            objects) for the studio notebook panel and any external Jupyter
+            client to attach to, unless this process is already itself a
+            notebook/Colab kernel, `ipykernel`/`jupyter_client` aren't
+            installed (``pip install weightslab[notebook-kernel]``), or
+            ``WEIGHTSLAB_DISABLE_EMBEDDED_KERNEL=1`` is set. Only one kernel is
+            ever embedded per process — a second ``serve()`` call reuses it.
         spawn_cli_client: When ``serving_cli`` is True, also open the interactive
             REPL in a new console window (the default, backward-compatible
             behavior). Set to ``False`` to start the CLI server *headless* — it
@@ -1586,8 +1594,32 @@ def serve(serving_cli: bool = True, serving_grpc: bool = False,
             )
         logger.warning(base_msg)
 
+    # Embed a real Jupyter kernel (shares this process's live objects) so the
+    # studio notebook panel — and any external Jupyter client — can attach to
+    # it, unless we're already inside a notebook/Colab kernel ourselves (mode
+    # C) or the user opted out via WEIGHTSLAB_DISABLE_EMBEDDED_KERNEL.
+    embed_kernel_decision = None
+    if serving_grpc:
+        embed_kernel_decision = not _running_in_notebook() and not _embedded_kernel_disabled()
+        _notebook_service.configure_embedded_kernel(embed_kernel_decision)
+
     if serving_grpc:
         grpc_serve(**kwargs)
+
+    if embed_kernel_decision:
+        connection_file = _notebook_service.get_embedded_kernel_connection_file(wait_timeout=15.0)
+        if connection_file is not None:
+            print("=" * 60)
+            print(" Embedded Jupyter kernel ready (shares live process memory):")
+            print(f"     jupyter console --existing {connection_file}")
+            print(" The studio notebook panel already uses this same kernel.")
+            print("=" * 60)
+        else:
+            logger.warning(
+                "Embedded notebook kernel did not come up in time (or "
+                "ipykernel/jupyter_client are not installed) — the studio "
+                "notebook panel will use the built-in executor instead."
+            )
 
     # On a REMOTE host (Colab) the local Weights Studio cannot reach this backend
     # directly, so nudge for a tunnel. A LOCAL notebook serving as the backend

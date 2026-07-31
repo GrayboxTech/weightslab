@@ -214,6 +214,45 @@ class TestAgentPromptUnit(unittest.TestCase):
         self.assertIn("== 'train'", mask)
         self.assertNotIn("signals//train_mlt_loss/CE", mask)
 
+    def test_compact_schema_for_prompt_separates_index_levels_from_columns(self):
+        # Regression: a real user hit generated notebook code that did
+        # df["sample_id"]/df["origin"] and raised KeyError, because those are
+        # index levels (set via df.set_index([...], drop=True) in
+        # DataService) on the notebook's df -- never plain columns. The old
+        # schema string listed everything as "- `col` (dtype)" with no way to
+        # tell the two apart, so the LLM had no signal to avoid df["origin"].
+        with unittest.mock.patch.dict(sys.modules, _install_agent_dependency_stubs(), clear=False):
+            agent_mod = importlib.import_module("weightslab.trainer.services.agent.agent")
+
+        ctx = SimpleNamespace(
+            _all_datasets_df=agent_mod.pd.DataFrame(
+                {"label": [0, 1, 0], "loss": [0.1, 0.2, 0.9]},
+                index=agent_mod.pd.MultiIndex.from_tuples(
+                    [("train", 1), ("train", 2), ("test", 3)],
+                    names=["origin", "sample_id"],
+                ),
+            ),
+        )
+
+        with mock.patch.object(agent_mod, "ChatOpenAI", _FakeChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
+            agent = agent_mod.DataManipulationAgent(ctx)
+
+        schema_text = agent._compact_schema_for_prompt()
+
+        self.assertIn("Index levels", schema_text)
+        self.assertIn("`origin`", schema_text)
+        self.assertIn("`sample_id`", schema_text)
+        self.assertIn("`label`", schema_text)
+        self.assertIn("`loss`", schema_text)
+        # origin/sample_id must appear ONLY in the index-levels section, not
+        # listed alongside real columns where the LLM would read them as
+        # equally df["..."]-accessible.
+        columns_section = schema_text.split("Index levels")[0]
+        self.assertNotIn("`origin`", columns_section)
+        self.assertNotIn("`sample_id`", columns_section)
+        self.assertIn("`label`", columns_section)
+        self.assertIn("`loss`", columns_section)
+
     # ========== SORTING TESTS ==========
     def test_sort_by_loss_ascending(self):
         """Test: Sort samples by loss value (ascending - easiest first)"""

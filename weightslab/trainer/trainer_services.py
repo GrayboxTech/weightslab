@@ -434,6 +434,10 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         # Server-streaming RPC: delegate the generator directly.
         return self._exp_service.notebook_service.RunNotebookCell(request, context)
 
+    def InterruptNotebookCell(self, request, context):
+        logger.debug("\nExperimentServiceServicer.InterruptNotebookCell()")
+        return self._exp_service.notebook_service.InterruptNotebookCell(request, context)
+
     def GetNotebook(self, request, context):
         logger.debug("\nExperimentServiceServicer.GetNotebook()")
         return self._exp_service.notebook_service.GetNotebook(request, context)

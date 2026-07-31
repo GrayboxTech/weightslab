@@ -45,6 +45,9 @@ service ExperimentService {
   // server-streamed in chunks (stdout / stderr / result / image), mirroring
   // GetPointCloud, so long-running cells report incrementally.
   rpc RunNotebookCell (RunNotebookCellRequest) returns (stream NotebookCellChunk);
+  // Interrupt whichever cell is currently executing (best-effort; raises
+  // KeyboardInterrupt in the executing thread at its next bytecode boundary).
+  rpc InterruptNotebookCell (InterruptNotebookCellRequest) returns (InterruptNotebookCellResponse);
   // Load the persisted notebook from root_log_dir (writes a default on first use).
   rpc GetNotebook (Empty) returns (NotebookResponse);
   // Persist the notebook JSON back under root_log_dir.
@@ -660,6 +663,14 @@ message RunNotebookCellRequest {
 message NotebookCellDone {
   int32 exec_count = 1;  // Monotonic execution counter of the shared kernel.
   bool ok = 2;           // False when the cell raised (see error_traceback).
+}
+
+message InterruptNotebookCellRequest {
+}
+
+message InterruptNotebookCellResponse {
+  bool ok = 1;           // False when no cell was running to interrupt.
+  string error = 2;
 }
 
 // One incremental piece of a running cell's output.
