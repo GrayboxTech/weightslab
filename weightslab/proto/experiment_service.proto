@@ -679,16 +679,20 @@ message NotebookResponse {
   string ipynb_json = 1;  // The notebook as ipynb (nbformat v4) JSON.
   bool existed = 2;       // False when a default template was just created.
   string path = 3;        // Absolute path of the notebook under root_log_dir.
+  string name = 4;        // Notebook base name (file stem, no .ipynb).
 }
 
 message SaveNotebookRequest {
   string ipynb_json = 1;
+  string name = 2;        // Optional: rename the notebook to this base name
+                          // (no .ipynb). Backend indexes it if it collides.
 }
 
 message SaveNotebookResponse {
   bool ok = 1;
   string path = 2;
   string error = 3;
+  string name = 4;        // The base name actually used (possibly indexed).
 }
 
 message GenerateNotebookCodeRequest {

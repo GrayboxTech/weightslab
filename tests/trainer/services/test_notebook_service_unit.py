@@ -125,6 +125,50 @@ class TestNotebookPersistence(unittest.TestCase):
         self.assertFalse(save.ok)
         self.assertIn("invalid notebook JSON", save.error)
 
+    @staticmethod
+    def _payload(marker="x"):
+        return json.dumps({"cells": [{"cell_type": "code", "source": marker,
+                                      "metadata": {}, "execution_count": None, "outputs": []}],
+                           "metadata": {}, "nbformat": 4, "nbformat_minor": 5})
+
+    def test_get_reports_default_name(self):
+        resp = self.service.GetNotebook(pb2.Empty(), None)
+        self.assertEqual(resp.name, "notebook")
+
+    def test_rename_moves_file_and_reports_name(self):
+        self.service.GetNotebook(pb2.Empty(), None)  # creates notebook.ipynb
+        save = self.service.SaveNotebook(
+            pb2.SaveNotebookRequest(ipynb_json=self._payload("renamed"), name="experiment_a"), None)
+        self.assertTrue(save.ok)
+        self.assertEqual(save.name, "experiment_a")
+        self.assertTrue((self.root / "experiment_a.ipynb").exists())
+        self.assertFalse((self.root / "notebook.ipynb").exists())  # old file removed
+        # The renamed notebook is now the active one.
+        again = self.service.GetNotebook(pb2.Empty(), None)
+        self.assertEqual(again.name, "experiment_a")
+        self.assertIn("renamed", again.ipynb_json)
+
+    def test_rename_collision_gets_indexed(self):
+        self.service.GetNotebook(pb2.Empty(), None)  # active = notebook.ipynb
+        # A different file already occupies the requested name.
+        (self.root / "taken.ipynb").write_text("{}", encoding="utf-8")
+        save = self.service.SaveNotebook(
+            pb2.SaveNotebookRequest(ipynb_json=self._payload(), name="taken"), None)
+        self.assertTrue(save.ok)
+        self.assertEqual(save.name, "taken-1")
+        self.assertTrue((self.root / "taken-1.ipynb").exists())
+        self.assertTrue((self.root / "taken.ipynb").exists())  # existing file untouched
+
+    def test_rename_sanitizes_unsafe_name(self):
+        self.service.GetNotebook(pb2.Empty(), None)
+        save = self.service.SaveNotebook(
+            pb2.SaveNotebookRequest(ipynb_json=self._payload(), name="../evil/name.ipynb"), None)
+        self.assertTrue(save.ok)
+        self.assertEqual(save.name, "name")            # path stripped, .ipynb dropped
+        self.assertEqual(Path(save.path).name, "name.ipynb")
+        # Never escapes root_log_dir.
+        self.assertTrue(Path(save.path).resolve().is_relative_to(self.root.resolve()))
+
 
 class TestGenerateNotebookCode(unittest.TestCase):
     def setUp(self):

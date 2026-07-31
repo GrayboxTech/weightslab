@@ -26,6 +26,7 @@ Wire-up (in ExperimentService):
 
 import io
 import os
+import re
 import ast
 import json
 import time
@@ -396,6 +397,9 @@ class NotebookService:
         self._root_log_dir = self._resolve_root_log_dir(root_log_dir)
         self._kernel = None
         self._kernel_lock = threading.Lock()
+        # Base name (file stem, no .ipynb) of the notebook currently in use this
+        # session. None until the first Get/Save resolves it.
+        self._active_name = None
 
     # -- helpers -----------------------------------------------------------
     def _resolve_root_log_dir(self, root_log_dir) -> Path:
@@ -415,8 +419,48 @@ class NotebookService:
                 return Path(c).resolve()
         return Path("./logs").resolve()
 
-    def _notebook_path(self) -> Path:
-        return self._root_log_dir / NOTEBOOK_FILENAME
+    @staticmethod
+    def _sanitize_stem(name: str) -> str:
+        """Reduce a user-supplied notebook name to a safe file stem (no .ipynb)."""
+        stem = (name or "").strip()
+        if stem.lower().endswith(".ipynb"):
+            stem = stem[:-len(".ipynb")]
+        stem = os.path.basename(stem)                     # drop any path components
+        stem = re.sub(r"[^A-Za-z0-9._ -]", "_", stem).strip()
+        return stem or Path(NOTEBOOK_FILENAME).stem       # fall back to "notebook"
+
+    def _path_for(self, stem: str) -> Path:
+        return self._root_log_dir / f"{stem}.ipynb"
+
+    def _active_path(self) -> Path:
+        """The current notebook file: the one used this session, else the most
+        recently modified *.ipynb under root_log_dir, else the default."""
+        if self._active_name:
+            return self._path_for(self._active_name)
+        try:
+            existing = sorted(self._root_log_dir.glob("*.ipynb"),
+                              key=lambda p: p.stat().st_mtime, reverse=True)
+            if existing:
+                self._active_name = existing[0].stem
+                return existing[0]
+        except Exception:
+            pass
+        self._active_name = Path(NOTEBOOK_FILENAME).stem
+        return self._path_for(self._active_name)
+
+    def _unique_path(self, stem: str, keep: Path = None) -> Path:
+        """A non-colliding path for ``stem``.ipynb; indexes ``-1, -2, …`` when the
+        name is already taken by a *different* file. ``keep`` (the current file)
+        never counts as a collision, so renaming to the same name is a no-op."""
+        candidate = self._path_for(stem)
+        if not candidate.exists() or (keep is not None and candidate == keep):
+            return candidate
+        i = 1
+        while True:
+            candidate = self._path_for(f"{stem}-{i}")
+            if not candidate.exists() or (keep is not None and candidate == keep):
+                return candidate
+            i += 1
 
     def _get_kernel(self) -> NotebookKernel:
         with self._kernel_lock:
@@ -449,15 +493,22 @@ class NotebookService:
 
         cells = [
             md("# WeightsLab notebook\n"
-               "This notebook runs inside the live experiment process. The following "
-               "handles are pre-bound:\n\n"
-               "- `df` / `get_df()` - the ledger dataframe (live view)\n"
+               "This notebook runs inside the live experiment process. These backend "
+               "objects are pre-bound in every cell:\n\n"
+               "- `df` / `get_df()` - the ledger dataframe: a live view of every sample "
+               "with its latest computed signals and metadata\n"
                "- `model`, `cm` (checkpoints), `logger`, `hp` (hyperparameters)\n"
                "- `pd`, `np`, `plt`, `wl`\n\n"
                "Writes are only allowed under `root_log_dir`. Start a cell with `>` "
                "to ask the agent to propose code for you."),
-            code("df.head()"),
-            code("# Available checkpoints\ncm.get_all_hashes() if cm is not None else 'no checkpoint manager'"),
+            code("# Live global experiment view: every sample with its latest computed\n"
+                 "# signals and metadata. Re-run after training steps to see it update.\n"
+                 "df"),
+            code("# The public objects bound in this kernel (live backend state).\n"
+                 "print('df shape (samples x columns):', None if df is None else df.shape)\n"
+                 "print('model:', type(model).__name__ if model is not None else None)\n"
+                 "print('checkpoints:', cm.get_all_hashes() if cm is not None else 'no checkpoint manager')\n"
+                 "print('root_log_dir:', root_log_dir)"),
             code("> plot a histogram of the samples per dataset split"),
         ]
         return {
@@ -500,12 +551,12 @@ class NotebookService:
              "elapsed_s": round(time.perf_counter() - started, 3)},
         )
 
-    @safe_grpc(lambda msg: pb2.NotebookResponse(ipynb_json="", existed=False, path=""))
+    @safe_grpc(lambda msg: pb2.NotebookResponse(ipynb_json="", existed=False, path="", name=""))
     def GetNotebook(self, request, context):
-        path = self._notebook_path()
+        path = self._active_path()
         if path.exists():
             text = path.read_text(encoding="utf-8")
-            return pb2.NotebookResponse(ipynb_json=text, existed=True, path=str(path))
+            return pb2.NotebookResponse(ipynb_json=text, existed=True, path=str(path), name=path.stem)
         # Write the default template on first use (inside root_log_dir).
         default = json.dumps(self._default_notebook(), indent=1)
         try:
@@ -513,24 +564,41 @@ class NotebookService:
             path.write_text(default, encoding="utf-8")
         except Exception as exc:
             logger.warning("could not persist default notebook: %s", exc)
-        return pb2.NotebookResponse(ipynb_json=default, existed=False, path=str(path))
+        return pb2.NotebookResponse(ipynb_json=default, existed=False, path=str(path), name=path.stem)
 
-    @safe_grpc(lambda msg: pb2.SaveNotebookResponse(ok=False, path="", error=msg))
+    @safe_grpc(lambda msg: pb2.SaveNotebookResponse(ok=False, path="", error=msg, name=""))
     def SaveNotebook(self, request, context):
-        path = self._notebook_path()
         ipynb = request.ipynb_json or ""
         # Validate it is JSON before writing so we never persist a corrupt file.
         try:
             json.loads(ipynb)
         except Exception as exc:
-            return pb2.SaveNotebookResponse(ok=False, path=str(path), error=f"invalid notebook JSON: {exc}")
+            return pb2.SaveNotebookResponse(
+                ok=False, path="", error=f"invalid notebook JSON: {exc}",
+                name=(self._active_name or ""))
+
+        current = self._active_path()
+        requested = (getattr(request, "name", "") or "").strip()
+        if requested:
+            stem = self._sanitize_stem(requested)
+            target = current if stem == current.stem else self._unique_path(stem, keep=current)
+        else:
+            target = current
+
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(ipynb, encoding="utf-8")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(ipynb, encoding="utf-8")
+            # Rename semantics: when the name actually changed, drop the old file.
+            if target != current and current.exists():
+                try:
+                    current.unlink()
+                except Exception:
+                    pass
+            self._active_name = target.stem
         except Exception as exc:
-            return pb2.SaveNotebookResponse(ok=False, path=str(path), error=str(exc))
-        self._audit("notebook_save", "success", {"path": str(path), "bytes": len(ipynb)})
-        return pb2.SaveNotebookResponse(ok=True, path=str(path), error="")
+            return pb2.SaveNotebookResponse(ok=False, path=str(target), error=str(exc), name=current.stem)
+        self._audit("notebook_save", "success", {"path": str(target), "bytes": len(ipynb)})
+        return pb2.SaveNotebookResponse(ok=True, path=str(target), error="", name=target.stem)
 
     @safe_grpc(lambda msg: pb2.GenerateNotebookCodeResponse(code="", explanation="", ok=False, error=msg))
     def GenerateNotebookCode(self, request, context):
