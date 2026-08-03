@@ -12,6 +12,7 @@ from weightslab.trainer.trainer_tools import (
     _class_ids,
     _get_input_tensor_for_sample,
     _labels_from_mask_path_histogram,
+    _numeric_or_text_list,
     execute_df_operation,
     force_kill_all_python_processes,
     generate_overview,
@@ -110,6 +111,8 @@ class TestTrainerTools(unittest.TestCase):
                 self.task_type = kwargs.get("task_type", "")
                 self.sample_label = []
                 self.sample_prediction = []
+                self.sample_label_text = []
+                self.sample_prediction_text = []
 
         class _FakeSampleStats:
             def __init__(self):
@@ -143,6 +146,54 @@ class TestTrainerTools(unittest.TestCase):
             self.assertEqual(list(seg_stats.records[0].sample_label), [0, 1, 2])
             self.assertEqual(list(seg_stats.records[0].sample_prediction), [1, 2, 4])
 
+    def test_numeric_or_text_list(self):
+        self.assertEqual(_numeric_or_text_list("a generated reply"), ([], ["a generated reply"]))
+        self.assertEqual(_numeric_or_text_list(3), ([3], []))
+        self.assertEqual(_numeric_or_text_list([3]), ([3], []))
+        self.assertEqual(_numeric_or_text_list(np.array([3])), ([3], []))
+        self.assertEqual(_numeric_or_text_list(["only one string in a list"]), ([], ["only one string in a list"]))
+
+    def test_get_data_set_representation_text_label_and_prediction(self):
+        """A generative task (e.g. an LLM's reply as prediction, a reference
+        string as label) must route through the new text fields instead of
+        crashing on int(target)/int(pred)."""
+        exp = _Experiment()
+
+        class _FakeRecord:
+            def __init__(self, **kwargs):
+                self.sample_id = kwargs.get("sample_id")
+                self.sample_last_loss = kwargs.get("sample_last_loss", -1.0)
+                self.sample_discarded = kwargs.get("sample_discarded", False)
+                self.task_type = kwargs.get("task_type", "")
+                self.sample_label = []
+                self.sample_prediction = []
+                self.sample_label_text = []
+                self.sample_prediction_text = []
+
+        class _FakeSampleStats:
+            def __init__(self):
+                self.sample_count = 0
+                self.task_type = ""
+                self.records = []
+
+        text_rows = [
+            {
+                "sample_id": "30",
+                "prediction_loss": 0.1,
+                "label": "The reference/target answer.",
+                "prediction_raw": "The model's generated reply.",
+                "discarded": False,
+            },
+        ]
+
+        with patch("weightslab.trainer.trainer_tools.pb2.SampleStatistics", side_effect=_FakeSampleStats), \
+             patch("weightslab.trainer.trainer_tools.pb2.RecordMetadata", side_effect=lambda **kw: _FakeRecord(**kw)):
+            text_stats = get_data_set_representation(_SimpleDataset(text_rows), exp)
+            self.assertEqual(list(text_stats.records[0].sample_label), [])
+            self.assertEqual(list(text_stats.records[0].sample_prediction), [])
+            self.assertEqual(list(text_stats.records[0].sample_label_text), ["The reference/target answer."])
+            self.assertEqual(list(text_stats.records[0].sample_prediction_text), ["The model's generated reply."])
+
     def test_load_raw_image_from_images_and_tensor_input(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = os.path.join(tmp, "img.png")
@@ -166,6 +217,34 @@ class TestTrainerTools(unittest.TestCase):
     def test_get_input_tensor_for_sample(self):
         tensor = _get_input_tensor_for_sample(_IndexDataset(), sample_id=0, device="cpu")
         self.assertEqual(tuple(tensor.shape), (1, 3, 8, 8))
+
+    def test_process_sample_text_only_dataset_returns_empty_without_error(self):
+        """A generative/RLHF prompt dataset's items are text, not images --
+        process_sample (used by the GetSamples image-preview endpoint) must
+        return an empty/placeholder result instead of crashing on
+        torch.tensor(a_string) (confirmed empirically: raises 'new(): invalid
+        data type str')."""
+
+        class _TextDataset:
+            task_type = "generation"
+
+            def _getitem_raw(self, id):
+                return "flip a coin", id, "Certainly! Let's flip a fair coin..."
+
+        sid, transformed, raw, cls_label, mask_bytes, pred_bytes = process_sample(
+            sid=0,
+            dataset=_TextDataset(),
+            do_resize=False,
+            resize_dims=(8, 8),
+            experiment=_Experiment(),
+        )
+
+        self.assertEqual(sid, 0)
+        self.assertIsNone(transformed)
+        self.assertIsNone(raw)
+        self.assertEqual(cls_label, -1)
+        self.assertEqual(mask_bytes, b"")
+        self.assertEqual(pred_bytes, b"")
 
     def test_process_sample_classification_and_force_kill(self):
         exp = _Experiment()

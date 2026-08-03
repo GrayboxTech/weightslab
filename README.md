@@ -6,7 +6,7 @@
       <img alt="WeightsLab Banner" src="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/weightslab-banner-light.png" width="100%" />
     </picture>
   </a>
-<br>  
+<br>
 
 </div>
 <div align="center">
@@ -34,7 +34,7 @@
   <a href="https://youtu.be/pSng0aIXGCY">Demo (VLA)</a>
   ·
   <a href="https://youtu.be/WetZU_J7Tg8">Demo (LiDAR)</a>
-  
+
 </p>
 
 <br>
@@ -59,7 +59,7 @@ pip install weightslab
 weightslab start  # launch the UI
 ```
 
-**2. Start in the cloud** 
+**2. Start in the cloud**
 
 [![Start coding with GCollab](https://img.shields.io/badge/Start_coding_with_GCollab-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=white)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/Colab/wl-colab-quickstart.ipynb)
 

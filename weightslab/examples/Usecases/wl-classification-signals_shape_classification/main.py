@@ -3,14 +3,17 @@
 Parameters live in ``config.yaml`` (loaded at startup). A handful of knobs can
 also be overridden by environment variables for scripted stress runs.
 
-Per-step user code is just the watched loss. Everything else is a @wl.signal
-(defined in ``utils/signals.py``):
+Per-step user code is just the watched loss. The derived per-sample quantities
+are @wl.signal functions (defined in ``utils/signals.py``):
   entropy    from ctx.logits when the loss fires
   loss_norm  reactive, from the logged loss
   hardness   reactive, from loss + entropy
-  loss_shape reactive, classifies each sample's loss trajectory (live signal,
-             not an end-of-run function). Reads history, so it's throttled by
-             shape_every (1 = every step, full coverage; higher = cheaper).
+
+The loss-SHAPE classification is a custom ``@wl.signal_classifier`` (see
+``utils/criterions.py``): it OVERRIDES WeightsLab's built-in 6-way classifier for
+our loss signal with a binary monotonic / not_monotonic rule. The background
+auto-tagger applies it automatically, filling a categorical ``tag:loss_shape``
+column — no live signal, no end-of-run bookkeeping needed.
 
 Universal loss: the watched crit runs on the test split each epoch too, so test
 samples get a loss trajectory and a shape as well.
@@ -19,9 +22,6 @@ Env overrides (else the config.yaml value is used):
   WL_STRESS_EPOCHS       (int)  number of training epochs.
   WL_STRESS_OUT          (str)  output dir; wiped and recreated on start. Holds
                          data/, wl_logs/, metrics.jsonl and report.csv.
-  WL_SHAPE_EVERY         (int)  throttle for the sig/loss_shape signal, which
-                         reads history and is therefore costly. 1 = compute every
-                         step (full coverage); higher = every N steps (cheaper).
   WL_QUERY_CACHE_MAXSIZE (int)  backend tuning knob (read in
                          weightslab.backend.logger). Sets the LRU maxsize of the
                          per-sample query cache the ledger uses when serving
@@ -44,7 +44,7 @@ from weightslab import guard_training_context, guard_testing_context
 
 from utils.model import SmallCNN
 from utils.data import MNISTIdx
-from utils.criterions import SHAPES
+from utils.criterions import register_shape_classifier
 from utils.signals import register_signals
 
 
@@ -66,7 +66,6 @@ def load_config():
     cfg.setdefault("out", "/tmp/wl_stress")
     cfg.setdefault("batch_size", 64)
     cfg.setdefault("loss_signal_name", "loss_sample")
-    cfg.setdefault("shape_every", 1)
     cfg.setdefault("serving_grpc", False)
     cfg.setdefault("serving_cli", False)
     cfg.setdefault("ledger_flush_max_rows", 8192)
@@ -83,8 +82,6 @@ def load_config():
     # Env overrides for scripted stress runs (env wins over the yaml value).
     cfg["epochs"] = int(os.environ.get("WL_STRESS_EPOCHS", cfg["epochs"]))
     cfg["out"] = os.environ.get("WL_STRESS_OUT", cfg["out"])
-    cfg["shape_every"] = int(os.environ.get("WL_SHAPE_EVERY", cfg["shape_every"]))
-    cfg["min_step"] = int(os.environ.get("WL_MIN_STEP", cfg["min_step"]))
     cfg["query_cache_maxsize"] = int(
         os.environ.get("WL_QUERY_CACHE_MAXSIZE", cfg["query_cache_maxsize"]))
     return cfg
@@ -170,8 +167,6 @@ def main():
     LOSS = cfg["loss_signal_name"]
     OUT = cfg["out"]
     EPOCHS = cfg["epochs"]
-    SHAPE_EVERY = cfg["shape_every"]
-    SHAPE_MIN_STEP = cfg["min_step"]
     BATCH = int(cfg["data"]["train_loader"]["batch_size"])
     LR = float(cfg["optimizer"]["lr"])
     # Backend reads this from the environment when it builds the query cache.
@@ -213,13 +208,17 @@ def main():
     crit = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"),
                             flag="loss", signal_name=LOSS, per_sample=True, log=True)
 
-    # --- 4) Per-sample signals (the @wl.signal chain, see utils/signals.py) ---
-    register_signals(LOSS, SHAPE_EVERY, SHAPE_MIN_STEP)
+    # --- 4) Per-sample signals + custom shape classifier ---
+    # The reactive @wl.signal chain (entropy / loss_norm / hardness)...
+    register_signals(LOSS)
+    # ...and our binary monotonic/not_monotonic classifier, overriding the
+    # built-in 6-way default for this loss signal (see utils/criterions.py).
+    register_shape_classifier(LOSS)
 
     # --- 5) Serve + launch training ---
     wl.serve(serving_grpc=cfg["serving_grpc"], serving_cli=cfg["serving_cli"])
     wl.start_training(timeout=5)  # Let WeightsLab Initialize
-    log(f"[run] tracked train={len(train_ds)} test={len(test_ds)} | shape_every={SHAPE_EVERY}")
+    log(f"[run] tracked train={len(train_ds)} test={len(test_ds)}")
 
     # --- 6) Train / eval loop ---
     step_times, gstep, t_run = [], 0, time.perf_counter()
@@ -235,16 +234,21 @@ def main():
             f"= +{100*(wl_ms/vanilla_ms-1):.0f}% | RSS {rec['rss_gb']:.2f} GB | {rec['elapsed_s']:.0f}s")
 
     # --- 7) Report + summary ---
-    path = wl.write_dataframe(OUT + "/report.csv", format="csv", columns="signals")
+    # loss_shape_signal=LOSS runs our @wl.signal_classifier once, synchronously,
+    # so the categorical 'tag:loss_shape' column is guaranteed fresh in the dump.
+    path = wl.write_dataframe(OUT + "/report.csv", format="csv",
+                              columns=["signals", "tags"], loss_shape_signal=LOSS)
     df = pd.read_csv(path)
-    sc = [c for c in df.columns if c.endswith("sig/loss_shape")][0]
-    dist = Counter(SHAPES[int(v)] for v in df[sc].dropna() if v >= 0)
+    shape_cols = [c for c in df.columns if c.endswith("loss_shape")]
+    sc = shape_cols[0] if shape_cols else None
+    dist = Counter(df[sc].dropna()) if sc else Counter()
+    covered = int(df[sc].notna().sum()) if sc else 0
     med = float(np.median(step_times))
     metrics.close()
     log("\n[run] ===== SUMMARY =====")
     log(f"[run] vanilla {vanilla_ms:.2f} ms | WL median {med:.2f} ms/step (+{100*(med/vanilla_ms-1):.0f}%)")
-    log(f"[run] report {len(df)} rows | loss_shape covered {df[sc].notna().sum()}/{len(df)}")
-    log(f"[run] shape distribution: {dict(dist)}")
+    log(f"[run] report {len(df)} rows | loss_shape covered {covered}/{len(df)}")
+    log(f"[run] shape distribution (monotonic/not_monotonic): {dict(dist)}")
     log(f"[run] report -> {path}")
 
 

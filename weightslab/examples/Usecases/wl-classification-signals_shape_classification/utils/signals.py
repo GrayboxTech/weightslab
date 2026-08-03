@@ -5,18 +5,18 @@
 #   sig/entropy    from the logits when the watched loss fires
 #   sig/loss_norm  batch-normalized loss (loss / mean(loss))
 #   sig/hardness   loss * entropy
-#   sig/loss_shape classifies each sample's loss trajectory (live signal, not an
-#                  end-of-run function). Reads history, so it's throttled by
-#                  shape_every (1 = every step; higher = cheaper, sparser).
+#
+# The loss-SHAPE part is no longer a live signal here: it's a custom
+# ``@wl.signal_classifier`` (see utils/criterions.py) that labels each sample's
+# loss trajectory monotonic / not_monotonic and lands in a categorical
+# ``tag:loss_shape`` column via the background auto-tagger.
 import numpy as np
 import torch
 
 import weightslab as wl
 
-from utils.criterions import classify_shape
 
-
-def register_signals(loss_name, shape_every, min_step: int = 0):
+def register_signals(loss_name):
     """Define and register the per-sample signal chain on the watched loss.
 
     Defining a ``@wl.signal`` registers it globally, so this must be called
@@ -24,8 +24,6 @@ def register_signals(loss_name, shape_every, min_step: int = 0):
 
     Args:
         loss_name: name of the watched per-sample loss signal to subscribe to.
-        shape_every: compute sig/loss_shape every N steps (throttle).
-        min_step: minimum step to start computing sig/loss_shape.
     """
 
     @wl.signal(name="sig/entropy", subscribe_to=loss_name, batched=True)
@@ -40,9 +38,3 @@ def register_signals(loss_name, shape_every, min_step: int = 0):
     @wl.signal(name="sig/hardness", inputs=[loss_name, "sig/entropy"], batched=True)
     def hardness(b):
         return b.inputs[loss_name] * b.inputs["sig/entropy"]
-
-    @wl.signal(name="sig/loss_shape", inputs=[loss_name], batched=True,
-               compute_every_n_steps=shape_every, min_step=min_step)
-    def loss_shape(b):
-        hist = b.history(loss_name)   # {uid: [loss values in step order]}
-        return np.array([classify_shape(hist[s]) for s in b.sample_ids], dtype=float)

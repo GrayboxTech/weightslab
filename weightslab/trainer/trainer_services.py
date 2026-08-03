@@ -360,6 +360,10 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         logger.debug(f"\nExperimentServiceServicer.GetMetaData({request})")
         return self._exp_service.data_service.GetMetaData(request, context)
 
+    def GetSignalTrajectory(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.GetSignalTrajectory({request})")
+        return self._exp_service.data_service.GetSignalTrajectory(request, context)
+
     def GetPointCloud(self, request, context):
         logger.debug(f"\nExperimentServiceServicer.GetPointCloud({request})")
         # Server-streaming RPC: delegate the generator directly.

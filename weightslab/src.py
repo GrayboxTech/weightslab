@@ -1493,26 +1493,9 @@ def start_training(timeout: int = None) -> None:
     pause_ctrl.resume() # Ensure we're not paused if start_training is called after serve
 
 
-def _running_in_notebook() -> bool:
-    """True when running inside a Jupyter notebook kernel or Google Colab.
-
-    Distinguishes a notebook kernel (``ZMQInteractiveShell``) / Colab from a
-    plain script or a terminal IPython session, so we only nudge users who can't
-    reach a locally-launched Weights Studio without a tunnel.
-    """
-    if "google.colab" in sys.modules:
-        return True
-    try:
-        from IPython import get_ipython
-        shell = get_ipython()
-        return shell is not None and shell.__class__.__name__ == "ZMQInteractiveShell"
-    except Exception:
-        return False
-
-
-def serve(serving_cli: bool = True, serving_grpc: bool = False,
+def serve(serving_cli: bool = True, serving_grpc: bool = True,
           spawn_cli_client: bool = False, serving_bore: bool = False,
-          bore_port: int = None, **kwargs):
+          bore_port: int = None, allow_unconfigured: bool = True, **kwargs):
     """Start WeightsLab services.
 
     Args:
@@ -2238,9 +2221,23 @@ def save_signals(
 
     # Normalize to np arrays
     def to_numpy(t):
+        # Text predictions/labels (e.g. an LLM's generated reply, or a
+        # reference/target string): keep as a native str rather than
+        # wrapping in a 0-d numpy array, so it survives the
+        # DataFrameManager/H5 round-trip as a plain string and the
+        # `isinstance(x, str)` checks in trainer_tools.py/data_service.py
+        # (which build the actual RecordMetadata/DataStat the UI renders)
+        # see a real str, not an ndarray. Forcing it through the
+        # classification-label uint16 cast below would raise ValueError on
+        # non-numeric text -- see the dict-label JSON-string fallback in
+        # data_service.py for the precedent this generalizes.
+        if isinstance(t, str):
+            return t
         arr = t.detach().cpu().numpy() if isinstance(t, th.Tensor) else np.asarray(t)
         if np.issubdtype(arr.dtype, np.floating):
             return arr.astype(np.float32)
+        if np.issubdtype(arr.dtype, np.str_) or np.issubdtype(arr.dtype, np.object_):
+            return arr
         return arr.astype(np.uint16)
 
     def normalize(x):
@@ -2723,6 +2720,7 @@ def save_group_signals(
 
         if step is not None:
             updates[SampleStatsEx.LAST_SEEN.value] = step
+            updates[SampleStatsEx.NB_SEEN.value] = 0 if SampleStatsEx.NB_SEEN.value not in updates else updates[SampleStatsEx.NB_SEEN.value] + 1
 
         all_updates.append(updates)
         active_group_ids.append(gid)
@@ -3752,9 +3750,46 @@ def query_instance_history(
     return results
 
 
+def _parquet_safe_frame(df):
+    """Return *df* with object columns that hold non-scalar values (lists,
+    dicts, tuples, numpy arrays — e.g. per-instance detection ``target`` / box
+    columns) JSON-encoded as strings, so pyarrow can write them.
+
+    Arrow rejects a single column that mixes list and non-list values
+    ("cannot mix list and non-list, non-null values"); encoding the *whole*
+    offending column with ``json.dumps`` makes it a uniform string column that
+    still round-trips via ``json.loads``. Columns with no non-scalar values are
+    left untouched, so numeric / bool / plain-string columns keep their native
+    Arrow types. The input is never mutated (copy-on-write only when needed).
+    """
+    import json as _json2
+    import numpy as _np2
+
+    _NONSCALAR = (list, dict, tuple, set, _np2.ndarray)
+    out = df
+    _copied = False
+    for _col in df.columns:
+        _s = df[_col]
+        if _s.dtype != object:
+            continue
+        # Skip columns that are already uniformly scalar (the common case).
+        if not _s.map(lambda v: isinstance(v, _NONSCALAR)).any():
+            continue
+        if not _copied:
+            out = df.copy()
+            _copied = True
+        # Encode every non-null cell (not just the list ones) so the column is
+        # uniformly string-typed; keep None/NaN as real nulls.
+        out[_col] = _s.map(
+            lambda v: None if (v is None or (isinstance(v, float) and v != v))
+            else _json2.dumps(v, default=str)
+        )
+    return out
+
+
 def write_history(
     path: str | None = None,
-    format: str = "json",
+    format: str | None = None,
     type_of_history=None,
     graph_name=None,
     experiment_hash: str | None = None,
@@ -3763,7 +3798,7 @@ def write_history(
     instance_id=None,
     verbose: bool = False,
 ) -> str:
-    """Dump signal history to *path* as JSON or CSV.
+    """Dump signal history to *path* as Parquet, JSON, or CSV.
 
     Parameters
     ----------
@@ -3782,8 +3817,18 @@ def write_history(
           combination always produces the same filename; different filters
           produce different filenames.
         - The directory is created automatically if it does not exist.
-    format : {"json", "csv"}
-        Output format (default ``"json"``).
+    format : {"parquet", "json", "csv"}, optional
+        Output format. When omitted, it is inferred from *path*'s extension
+        (``.parquet`` / ``.json`` / ``.csv``), defaulting to ``"parquet"`` when
+        *path* carries no extension (a bare directory or ``None`` — the common
+        periodic-export case). Parquet is fast, compact and dtype-preserving,
+        and scales to large per-sample/instance logs far better than JSON; it
+        needs a parquet engine (``pip install pyarrow``) and falls back to JSON
+        with a warning if none is installed or a column can't be encoded, so a
+        checkpoint dump never crashes the run. ``"json"`` keeps the nested
+        per-section shape (``{"global": ..., "sample": ..., "instance": ...}``);
+        ``"parquet"`` and ``"csv"`` are flat tables with a ``type`` column
+        discriminating the sections.
     type_of_history : {None, "all", "global", "sample", "instance", "instances"}
         Which history to include. ``None`` or ``"all"`` writes every type.
         ``"global"`` writes the aggregated training-curve history.
@@ -3877,7 +3922,13 @@ def write_history(
             path = "."
         _log("write_history: no path given, using output directory %r.", path)
 
-    fmt = format.lower().strip()
+    # Resolve format: explicit arg wins; otherwise infer from the path's
+    # extension, defaulting to parquet when the path carries no format hint.
+    if format is not None:
+        fmt = format.lower().strip()
+    else:
+        _ext = _os.path.splitext(str(path))[1].lower()
+        fmt = {".parquet": "parquet", ".json": "json", ".csv": "csv"}.get(_ext, "parquet")
 
     # --- Normalize all parameters first (needed for the auto-filename hash) ---
 
@@ -4028,36 +4079,76 @@ def write_history(
         logger.debug("write_history: collected %d instance row(s) across %d "
                      "graph(s).", len(instance_rows), len(graphs_i))
 
-    if fmt == "json":
-        payload = {}
-        if write_global:
-            payload["global"] = global_rows
-        if write_sample:
-            payload["sample"] = sample_rows
-        if write_instance:
-            payload["instance"] = instance_rows
+    import pandas as _pd
 
-        # Each section is a list of row dicts sharing the same keys; route it
-        # through pandas so `orient` is genuinely honored. Default "columns"
+    # Requested sections, in stable order. JSON keeps this nested shape;
+    # parquet/csv flatten it into rows with a `type` discriminator.
+    payload = {}
+    if write_global:
+        payload["global"] = global_rows
+    if write_sample:
+        payload["sample"] = sample_rows
+    if write_instance:
+        payload["instance"] = instance_rows
+
+    _FLAT_FIELDS = [
+        "type", "graph_name", "experiment_hash", "step", "metric_value",
+        "sample_id", "annotation_id",
+    ]
+
+    def _write_json(_target):
+        # Stream the nested {section: <orient-shaped>} structure straight to
+        # disk via pandas' C writer with native `indent`. The old
+        # to_json → json.loads → json.dump round-trip rebuilt every row as
+        # Python objects just to pretty-print — the slow, memory-heavy path on
+        # large per-sample/instance logs. Default orient "columns"
         # ({column: {row_index: value}}) writes each column name once per
-        # section instead of once per row — much smaller for many rows.
-        # orient="records" reproduces the original row-list-of-dicts shape.
-        import pandas as _pd
-        json_payload = {
-            section: _json.loads(_pd.DataFrame(rows).to_json(orient=orient, default_handler=str))
-            for section, rows in payload.items()
-        }
+        # section; orient="records" gives the row-list-of-dicts shape.
+        _sections = list(payload.items())
+        with open(_target, "w", encoding="utf-8") as fh:
+            fh.write("{\n")
+            for _i, (_section, _rows) in enumerate(_sections):
+                _body = _pd.DataFrame(_rows).to_json(
+                    orient=orient, default_handler=str, indent=2)
+                fh.write(f"  {_json.dumps(_section)}: {_body}")
+                fh.write(",\n" if _i < len(_sections) - 1 else "\n")
+            fh.write("}\n")
 
-        with open(path, "w", encoding="utf-8") as fh:
-            _json.dump(json_payload, fh, indent=2)
+    if fmt == "parquet":
+        _all_rows = (
+            [{"type": "global", **r} for r in global_rows]
+            + [{"type": "sample", **r} for r in sample_rows]
+            + [{"type": "instance", **r} for r in instance_rows]
+        )
+        _flat = _pd.DataFrame(_all_rows, columns=_FLAT_FIELDS)
+        try:
+            try:
+                _flat.to_parquet(path, index=False)
+            except Exception:
+                # JSON-encode any object column that mixes list/non-list values
+                # and retry before giving up on the fast parquet path.
+                _parquet_safe_frame(_flat).to_parquet(path, index=False)
+        except Exception as _e:
+            # Never let a periodic checkpoint dump crash the run: no engine
+            # (pyarrow/fastparquet) or an unencodable column → JSON + a warning.
+            _fallback = _os.path.splitext(path)[0] + ".json"
+            if isinstance(_e, ImportError):
+                _reason = ("no parquet engine installed — run `pip install pyarrow` "
+                           "to enable the fast default")
+            else:
+                _reason = f"parquet write failed ({type(_e).__name__}: {_e})"
+            logger.warning(
+                "write_history: %s. Falling back to JSON at %s.", _reason, _fallback,
+            )
+            path = _fallback
+            _write_json(path)
+
+    elif fmt == "json":
+        _write_json(path)
 
     elif fmt == "csv":
-        _CSV_FIELDS = [
-            "type", "graph_name", "experiment_hash", "step", "metric_value",
-            "sample_id", "annotation_id",
-        ]
         with open(path, "w", newline="", encoding="utf-8") as fh:
-            writer = _csv.DictWriter(fh, fieldnames=_CSV_FIELDS, extrasaction="ignore")
+            writer = _csv.DictWriter(fh, fieldnames=_FLAT_FIELDS, extrasaction="ignore")
             writer.writeheader()
             for row in global_rows:
                 writer.writerow({"type": "global", **row})
@@ -4067,18 +4158,19 @@ def write_history(
                 writer.writerow({"type": "instance", **row})
 
     else:
-        logger.error("write_history: unsupported format %r (expected 'json' "
-                     "or 'csv').", format)
+        logger.error("write_history: unsupported format %r (expected 'parquet', "
+                     "'json' or 'csv').", format)
         raise ValueError(
-            f"write_history: unsupported format {format!r}. Use 'json' or 'csv'."
+            f"write_history: unsupported format {format!r}. Use 'parquet', 'json' or 'csv'."
         )
 
     _total = len(global_rows) + len(sample_rows) + len(instance_rows)
+    _written_fmt = _os.path.splitext(path)[1].lstrip(".") or fmt
     _log(
         "write_history: wrote %d row(s) (global=%d, sample=%d, instance=%d) "
         "as %s to %s",
         _total, len(global_rows), len(sample_rows), len(instance_rows),
-        fmt, _os.path.abspath(path),
+        _written_fmt, _os.path.abspath(path),
     )
     if _total == 0:
         logger.warning(
@@ -4105,56 +4197,225 @@ def auto_loss_shape_signal_names() -> list:
     return sorted(_AUTO_LOSS_SHAPE_SIGNALS)
 
 
-LOSS_SHAPES = ["monotonic", "plateaued", "Flat_high", "high_variance", "U_Shape", "Spiked"]
+LOSS_SHAPES = ["monotonic", "plateaued", "Flat_high", "high_variance", "U_Shape", "Spiked", "Forgotten"]
+
+# Two standard statistical conventions -- not per-label tuned magic numbers --
+# applied uniformly everywhere classify_loss_shape has to decide "is this a
+# real change, or just noise": a ~95%-confidence z-score, and the textbook
+# "cv > 1" rule of thumb for a series being more noise than signal.
+_Z_SIGNIFICANT = 2.0
+_CV_HIGH_VARIABILITY = 1.0
+_MIN_POINTS = 5
+
+
+def _noise_floor(y):
+    """Robust per-step noise estimate for *y*, independent of any trend.
+
+    Uses the discrete second difference (cancels a locally linear trend --
+    including a plain monotonic rise or fall -- leaving curvature + noise),
+    then estimates the *typical* spread from it after trimming the single
+    most extreme deviation. That trim (rather than a median/MAD) is what
+    keeps this usable at the short lengths this classifier actually runs on:
+    a lone spike contaminates ~3 consecutive second-difference entries, and
+    with only a handful of points total, those 3 can outnumber a plain
+    median's breakdown margin. Explicitly setting aside the one largest
+    deviation -- exactly the one candidate anomaly this classifier looks for
+    -- lets the rest describe the noise floor even when there are few of
+    them. Falls back to the first difference for a 2-point series.
+
+    The floor for a near-zero spread (most steps exactly flat) is scaled to
+    *y*'s own magnitude, not a bare absolute constant: an absolute floor
+    would be swamped by ordinary floating-point rounding from the smoothing
+    convolution on real-scale data, making trivial arithmetic residue
+    register as a "statistically significant" difference.
+    """
+    if y.size >= 3:
+        d, scale = np.diff(y, n=2), np.sqrt(6.0)   # Var(e[i+2]-2e[i+1]+e[i]) = 6*Var(e)
+    else:
+        d, scale = np.diff(y), np.sqrt(2.0)         # Var(e[i+1]-e[i]) = 2*Var(e)
+    abs_dev = np.abs(d - np.median(d)) if d.size else d
+    if abs_dev.size >= 2:
+        spread = float(np.mean(np.delete(abs_dev, int(np.argmax(abs_dev)))))
+    elif abs_dev.size == 1:
+        spread = float(abs_dev[0])
+    else:
+        spread = 0.0
+    rel_floor = 1e-6 * (float(np.abs(y).max()) + 1e-12)
+    return max(1.4826 * spread / scale, rel_floor)
 
 
 def trajectory_stats(values):
-    """Scale-invariant summary stats of one sample's trajectory — the reusable
-    feature layer. Returns a dict (or ``None`` with < 2 points) so you can build
-    a custom classifier on top without re-deriving the features::
+    """Scale- and noise-invariant summary stats of one sample's trajectory —
+    the reusable feature layer. Returns a dict (or ``None`` with < 2 points)
+    so you can build a custom classifier on top without re-deriving the
+    features::
 
         def my_clf(v):
             s = wl.trajectory_stats(v)
-            return None if s is None else ("fast" if s["drop"] > 0.6 else "slow")
+            return None if s is None else ("fast" if s["drop_z"] > 3 else "slow")
+
+    Every ``*_z`` value is a z-score against *this trajectory's own* noise
+    floor (see :func:`_noise_floor`) rather than a fraction of some fixed
+    constant -- the same underlying change reads as "significant" whether the
+    sample's loss lives in the single digits or the thousands, and whether
+    the curve is clean or inherently noisy. There is nothing to tune here:
+    the normalization comes from the data itself.
     """
     y = np.asarray(values, dtype=float)
     if y.size < 2:
         return None
     n = y.size
-    rng = max(float(y.max() - y.min()), 1e-8)
-    tail = y[int(0.6 * n):]
+    noise = _noise_floor(y)
+
+    w = max(1, min(n // 4, 9))
+    if w > 1:
+        pad = w // 2
+        kernel = np.ones(w) / w
+        sm = np.convolve(np.pad(y, (pad, pad), mode="edge"), kernel, mode="valid")[:n]
+    else:
+        sm = y
+
+    first, last = float(sm[0]), float(sm[-1])
+    valley_idx = int(np.argmin(sm))
+    valley = float(sm[valley_idx])
+
+    diffs = np.diff(y)
+    jump_idx = int(np.argmax(diffs))
+    pre_jump = float(sm[jump_idx])
+    after_jump = sm[jump_idx + 2:] if jump_idx + 2 < n else sm[-1:]
+
+    # How much of the time since the low point has the series actually spent
+    # settled? Walk backward from the end, growing the window while its own
+    # spread stays within noise -- the longest such suffix, as a fraction of
+    # the whole post-valley period. Doesn't care whether the climb up was one
+    # sharp jump or a slow ramp, only whether it has since stopped moving,
+    # and for how long.
+    post_valley = sm[valley_idx:]
+    lo = hi = float(post_valley[-1])
+    settled_n = 1
+    for i in range(len(post_valley) - 2, -1, -1):
+        v = float(post_valley[i])
+        new_lo, new_hi = min(lo, v), max(hi, v)
+        if (new_hi - new_lo) > _Z_SIGNIFICANT * noise:
+            break
+        lo, hi = new_lo, new_hi
+        settled_n += 1
+    settled_frac = settled_n / len(post_valley) if len(post_valley) else 0.0
+
     return {
         "n": n,
-        "first": float(y[0]), "last": float(y[-1]),
-        "drop": (float(y[0]) - float(y[-1])) / (abs(float(y[0])) + 1e-8),
-        "cv": float(y.std()) / (abs(float(y.mean())) + 1e-8),
-        "argmin_frac": float(np.argmin(y)) / n,
-        "rebound": (float(y[-1]) - float(y.min())) / rng,
-        "max_up_jump": float(np.diff(y).max()) / rng,
-        "tail_cv": float(tail.std()) / (abs(float(tail.mean())) + 1e-8),
+        "noise": noise,
+        "drop_z": (first - last) / noise,           # net change, start -> end
+        "dip_z": (first - valley) / noise,           # start -> low point
+        "rebound_z": (last - valley) / noise,        # low point -> end
+        "jump_z": float(diffs[jump_idx]) / noise,    # biggest single-step rise
+        "revert_z": abs(float(after_jump.mean()) - pre_jump) / noise,  # gap left after that jump
+        "trend_z": (float(sm.max()) - float(sm.min())) / noise,  # any discernible movement at all
+        "level_cv": noise / (abs(float(y.mean())) + 1e-8),        # noise relative to the series' own scale
+        "settled_n": settled_n,
+        "settled_frac": settled_frac,
     }
 
 
-def classify_loss_shape(values, min_points=5, drop_learned=0.4, drop_plateau=0.15,
-                        tail_flat_cv=0.1, spike_jump=0.5, noisy_cv=0.5, u_rebound=0.3):
-    """Default classifier -> one of ``LOSS_SHAPES`` (or ``None`` with <
-    *min_points*). Built on :func:`trajectory_stats` (reuse those features
-    for your own rules) with every threshold a named, tunable param. Override the
-    whole thing by passing your own ``classifier`` to :func:`write_signal_shapes`."""
+def classify_loss_shape(values):
+    """Default classifier -> one of :data:`LOSS_SHAPES` (or ``None`` with too
+    few points). Built on :func:`trajectory_stats`; every decision below is a
+    z-score against that trajectory's own noise floor, checked against the
+    same ``_Z_SIGNIFICANT`` (~95% confidence) convention everywhere -- not a
+    different hand-picked fraction per label, and nothing to tune: the
+    classifier normalizes itself to each sample's own scale and noise.
+
+    - ``Spiked`` needs a one-step jump that's statistically real (``jump_z``)
+      *and* a reversion afterwards (``revert_z`` small, i.e. indistinguishable
+      from noise) -- a jump that never comes back down isn't a spike, it's a
+      lasting change, so it falls through to the checks below instead.
+    - A real dip (``dip_z``) followed by a real rebound (``rebound_z``) is
+      ``Forgotten`` if the series has since settled (``settled_frac`` -- at
+      least half its time since the dip spent flat), else ``U_Shape`` (still
+      moving, not confirmed permanent).
+    - No statistically discernible trend at all (``trend_z``) is either
+      ``Flat_high`` or ``high_variance``, split on whether the noise itself
+      exceeds the series' own level (``level_cv`` > 1 -- the standard
+      "coefficient of variation" high-variability convention).
+    - A real net drop (``drop_z``) that has since settled is ``plateaued``;
+      still moving is ``monotonic``.
+
+    Override the whole thing by passing your own ``classifier`` to
+    :func:`write_signal_shapes`.
+    """
     s = trajectory_stats(values)
-    if s is None or s["n"] < min_points:
+    if s is None or s["n"] < _MIN_POINTS:
         return None
-    if 0.2 < s["argmin_frac"] < 0.8 and s["rebound"] > u_rebound:
-        return "U_Shape"
-    if s["drop"] > drop_learned:
-        return "monotonic"
-    if s["drop"] > drop_plateau and s["tail_cv"] < tail_flat_cv:
-        return "plateaued"
-    if s["max_up_jump"] > spike_jump:
+    settled = s["settled_n"] >= 3 and s["settled_frac"] >= 0.5
+    if s["jump_z"] > _Z_SIGNIFICANT and s["revert_z"] < _Z_SIGNIFICANT:
         return "Spiked"
-    if s["cv"] > noisy_cv:
-        return "high_variance"
+    if s["dip_z"] > _Z_SIGNIFICANT and s["rebound_z"] > _Z_SIGNIFICANT:
+        return "Forgotten" if settled else "U_Shape"
+    if s["trend_z"] <= _Z_SIGNIFICANT:
+        return "high_variance" if s["level_cv"] > _CV_HIGH_VARIABILITY else "Flat_high"
+    if s["drop_z"] > _Z_SIGNIFICANT:
+        return "plateaued" if settled else "monotonic"
     return "Flat_high"
+
+
+# User-registered signal-shape classifiers (see @signal_classifier). A classifier
+# is a callable ``trajectory(list[float]) -> label (str) | None``. Per-signal
+# entries win over the global default; the built-in classify_loss_shape is the
+# final fallback. Consulted by write_signal_shapes (and thus the background
+# auto-tagger) and enable_loss_shape_signal.
+_REGISTERED_CLASSIFIERS: dict = {}   # {signal_name: classifier}
+_GLOBAL_CLASSIFIER = None            # classifier for any signal without its own
+
+
+def signal_classifier(signal=None):
+    """Register a custom signal-shape classifier, overriding the built-in
+    :func:`classify_loss_shape`. A classifier is
+    ``trajectory(list[float]) -> label (str) | None`` (return ``None`` to leave a
+    sample untagged).
+
+    Two binding modes:
+
+    - ``@signal_classifier(signal="loss_sample")`` — classify only that signal.
+    - ``@signal_classifier`` / ``@signal_classifier()`` — become the global
+      default for every signal without its own classifier.
+
+    Resolution order is per-signal → global → built-in. The registered classifier
+    applies everywhere shapes are computed: the background auto-tagger, the
+    report-time :func:`write_signal_shapes` / :func:`write_loss_shapes`, and the
+    live :func:`enable_loss_shape_signal`. Labels are free-form strings — the
+    six-way :data:`LOSS_SHAPES` set is just the built-in's vocabulary; a custom
+    classifier can emit any labels (e.g. a binary ``monotonic``/``not_monotonic``).
+
+    Example — a binary monotonic / not_monotonic classifier for one signal::
+
+        @wl.signal_classifier(signal="loss_sample")
+        def monotonic_or_not(values):
+            s = wl.trajectory_stats(values)
+            if s is None:
+                return None
+            return "monotonic" if s["drop"] > 0.4 else "not_monotonic"
+    """
+    def _register(fn):
+        global _GLOBAL_CLASSIFIER
+        if signal is None:
+            _GLOBAL_CLASSIFIER = fn
+        else:
+            _REGISTERED_CLASSIFIERS[str(signal)] = fn
+        return fn
+    # Bare @signal_classifier (no parens): `signal` is actually the function.
+    if callable(signal):
+        fn, signal = signal, None
+        return _register(fn)
+    return _register
+
+
+def resolve_signal_classifier(signal_name):
+    """The active classifier for *signal_name*: its own registered one, else the
+    global default (if set via bare ``@signal_classifier``), else the built-in
+    :func:`classify_loss_shape`."""
+    if signal_name in _REGISTERED_CLASSIFIERS:
+        return _REGISTERED_CLASSIFIERS[signal_name]
+    return _GLOBAL_CLASSIFIER or classify_loss_shape
 
 
 def write_signal_shapes(signal_name, tag_name=None, classifier=None):
@@ -4162,10 +4423,11 @@ def write_signal_shapes(signal_name, tag_name=None, classifier=None):
     a categorical tag and return the ``{label: count}`` distribution. Works for
     ANY per-sample signal — loss, accuracy, a second loss, any metric. Reads the
     full history once (cheap end-of-report reduction). *classifier* (trajectory
-    -> label|None) defaults to the loss-shaped one (for a decreasing metric);
-    pass your own for e.g. accuracy (increasing). *tag_name* defaults to
+    -> label|None) defaults to whatever :func:`resolve_signal_classifier` returns
+    for *signal_name* — a user ``@signal_classifier``, else the built-in
+    loss-shaped one (for a decreasing metric). *tag_name* defaults to
     ``'<signal>_shape'``."""
-    clf = classifier or classify_loss_shape
+    clf = classifier or resolve_signal_classifier(signal_name)
     if tag_name is None:
         tag_name = signal_name + "_shape" if signal_name.endswith('_loss') else signal_name + "_loss_shape"
     series = {}
@@ -4235,19 +4497,21 @@ def enable_loss_shape_signal(loss_signal="loss_sample", name="sig/loss_shape",
     This is the live counterpart to :func:`write_loss_shapes` (report-time). It's
     heavier — it reads history on every fire — so throttle with *every* or prefer
     the report-time path for a definitive, full-coverage tag."""
-    clf = classifier or classify_loss_shape
+    clf = classifier or resolve_signal_classifier(loss_signal)
 
     @signal(name=name, inputs=[loss_signal], batched=True, compute_every_n_steps=every)
     def _live_shape(b):
         hist = b.history(loss_signal)
-        return np.array([(LOSS_SHAPES.index(lbl) if (lbl := clf(hist[s])) is not None else -1)
+        # int-code into LOSS_SHAPES; a custom classifier may emit labels outside
+        # that vocabulary (or None before enough history) -> -1.
+        return np.array([(LOSS_SHAPES.index(lbl) if (lbl := clf(hist[s])) in LOSS_SHAPES else -1)
                          for s in b.sample_ids], dtype=float)
     return _live_shape
 
 
 def write_dataframe(
     path: str | None = None,
-    format: str = "json",
+    format: str | None = None,
     columns=None,
     sample_id=None,
     instance_id=None,
@@ -4255,7 +4519,15 @@ def write_dataframe(
     verbose: bool = False,
     loss_shape_signal: str | None = None,
 ) -> str:
-    """Dump the WeightsLab sample dataframe to *path* as JSON or CSV.
+    """Dump the WeightsLab sample dataframe to *path* as Parquet, JSON, or CSV.
+
+    Every ``flag="loss"`` signal is already auto-classified into a
+    ``'<signal>_shape'`` tag in the background with zero setup (see
+    :func:`enable_loss_shape_autotag`'s docstring), so you normally don't need
+    *loss_shape_signal* at all. It remains as a one-off: when set (e.g.
+    ``"loss_sample"``), the classifier runs synchronously first so this
+    specific report is guaranteed fresh at the moment it's written, rather than
+    whatever the background thread last computed.
 
     Every ``flag="loss"`` signal is already auto-classified into a
     ``'<signal>_shape'`` tag in the background with zero setup (see
@@ -4279,8 +4551,16 @@ def write_dataframe(
           same filename (idempotent overwrite); different filters → different
           file.
         - The directory is created automatically if it does not exist.
-    format : {"json", "csv"}
-        Output format. Default ``"json"``.
+    format : {"parquet", "json", "csv"}, optional
+        Output format. When omitted, it is inferred from *path*'s extension
+        (``.parquet`` / ``.json`` / ``.csv``), falling back to ``"parquet"`` when
+        *path* carries no extension (a bare directory or ``None`` — the common
+        periodic-export case). Parquet is a compact, fast, dtype-preserving
+        columnar dump that scales to large frames (300k+ rows) far better than
+        JSON; it needs a parquet engine (``pip install pyarrow``) and falls back
+        to JSON with a warning if none is installed or a column can't be
+        encoded, so a checkpoint dump never crashes the run. Pass ``"json"``
+        explicitly for a human-readable dump or ``"csv"`` for flat tabular data.
     columns : str or list of str, optional
         Which columns to include (index levels ``sample_id`` / ``annotation_id``
         are always written).
@@ -4328,21 +4608,12 @@ def write_dataframe(
             sample_id=["img_001", "img_042"],
         )
     """
-    import json as _json
     import os as _os
     import hashlib as _hashlib
 
     # If reactive signals run on the worker thread, process every queued job
     # before reading, so the report includes the latest steps' derived signals.
     drain_signals()
-
-    # Default report summary: tag each sample's loss shape + log the distribution.
-    if loss_shape_signal is not None:
-        try:
-            dist = write_loss_shapes(loss_shape_signal)
-            logger.info("[WeightsLab] loss-shape summary (%s): %s", loss_shape_signal, dist)
-        except Exception as e:
-            logger.debug("loss-shape summary skipped: %s", e)
 
     logger.debug(
         "write_dataframe called: path=%r, format=%r, columns=%r, "
@@ -4374,7 +4645,13 @@ def write_dataframe(
             path = "."
         _log("write_dataframe: no path given, using output directory %r.", path)
 
-    fmt = format.lower().strip()
+    # Resolve format: explicit arg wins; otherwise infer from the path's
+    # extension, defaulting to parquet when the path carries no format hint.
+    if format is not None:
+        fmt = format.lower().strip()
+    else:
+        _ext = _os.path.splitext(str(path))[1].lower()
+        fmt = {".parquet": "parquet", ".json": "json", ".csv": "csv"}.get(_ext, "parquet")
 
     # Normalize sample_id → list[str] or None
     _sid_filter = None
@@ -4482,23 +4759,52 @@ def write_dataframe(
     # Reset index so sample_id / annotation_id appear as regular columns in output
     df_out = df_out.reset_index()
 
-    if fmt == "json":
-        _json_str = df_out.to_json(orient=orient, default_handler=str)
-        with open(path, "w", encoding="utf-8") as fh:
-            _json.dump(_json.loads(_json_str), fh, indent=2)
+    if fmt == "parquet":
+        try:
+            try:
+                df_out.to_parquet(path, index=False)
+            except Exception:
+                # pyarrow rejects object columns that mix list/non-list values
+                # (e.g. a per-instance `target` column). JSON-encode just those
+                # columns and retry so we still get the fast parquet path
+                # instead of falling all the way back to JSON.
+                _parquet_safe_frame(df_out).to_parquet(path, index=False)
+        except Exception as _e:
+            # Parquet is the fast default, but a periodic checkpoint dump must
+            # never crash a run: if there's no engine (pyarrow/fastparquet) or a
+            # column still can't be encoded, fall back to a JSON dump and warn.
+            _fallback = _os.path.splitext(path)[0] + ".json"
+            if isinstance(_e, ImportError):
+                _reason = ("no parquet engine installed — run `pip install pyarrow` "
+                           "to enable the fast default")
+            else:
+                _reason = f"parquet write failed ({type(_e).__name__}: {_e})"
+            logger.warning(
+                "write_dataframe: %s. Falling back to JSON at %s.", _reason, _fallback,
+            )
+            path = _fallback
+            df_out.to_json(path, orient=orient, indent=2, default_handler=str)
+
+    elif fmt == "json":
+        # Stream straight to the file via pandas' C writer with native `indent`.
+        # The previous to_json → json.loads → json.dump round-trip rebuilt the
+        # whole frame as Python objects just to pretty-print it — the slow,
+        # memory-heavy path on large frames (300k+ rows).
+        df_out.to_json(path, orient=orient, indent=2, default_handler=str)
 
     elif fmt == "csv":
         df_out.to_csv(path, index=False, encoding="utf-8")
 
     else:
-        logger.error("write_dataframe: unsupported format %r (expected 'json' or 'csv').", format)
+        logger.error("write_dataframe: unsupported format %r (expected 'parquet', 'json' or 'csv').", format)
         raise ValueError(
-            f"write_dataframe: unsupported format {format!r}. Use 'json' or 'csv'."
+            f"write_dataframe: unsupported format {format!r}. Use 'parquet', 'json' or 'csv'."
         )
 
+    _written_fmt = _os.path.splitext(path)[1].lstrip(".") or fmt
     logger.info(
         "write_dataframe: wrote %d row(s) × %d column(s) as %s to %s",
-        len(df_out), len(df_out.columns), fmt, _os.path.abspath(path),
+        len(df_out), len(df_out.columns), _written_fmt, _os.path.abspath(path),
     )
     if df_out.empty:
         logger.warning(

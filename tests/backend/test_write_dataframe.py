@@ -1,4 +1,10 @@
-"""Tests for wl.write_dataframe — JSON/CSV dump of the sample dataframe."""
+"""Tests for wl.write_dataframe — Parquet/JSON/CSV dump of the sample dataframe.
+
+Format defaults to inference from the path extension, falling back to parquet
+when the path has none. These tests use explicit ``.json`` / ``.csv`` paths, so
+they exercise the JSON/CSV branches deterministically regardless of whether a
+parquet engine is installed.
+"""
 import csv
 import json
 import os
@@ -163,7 +169,9 @@ class TestWriteDataframePath:
         import re
         out = _call(str(tmp_path / "outdir"), mgr)
         assert os.path.isfile(out)
-        assert re.match(r"[0-9a-f]{8}_dataframe\.json$", os.path.basename(out))
+        # No path extension → default format is parquet; without a parquet engine
+        # the write falls back to JSON, so accept either extension.
+        assert re.match(r"[0-9a-f]{8}_dataframe\.(parquet|json)$", os.path.basename(out))
 
     def test_directory_is_created_if_missing(self, mgr, tmp_path):
         out = _call(str(tmp_path / "deep" / "dir"), mgr)
@@ -199,7 +207,7 @@ class TestWriteDataframePath:
 
     def test_unsupported_format_raises(self, mgr, tmp_json):
         with pytest.raises(ValueError, match="unsupported format"):
-            _call(tmp_json.replace(".json", ".parquet"), mgr, format="parquet")
+            _call(tmp_json.replace(".json", ".xml"), mgr, format="xml")
 
 
 # ---------------------------------------------------------------------------
