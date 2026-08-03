@@ -78,11 +78,24 @@ def _resolve_configured_root_log_dir(configured):
       1. ``configured`` — an explicit value from the wrapped hyperparameters.
       2. ``$WEIGHTSLAB_ROOT_LOG_DIR`` — set by ``weightslab start [DIR]`` so an
          otherwise-unconfigured training run lands in the directory the UI
-         established (shared checkpoints/logs/notebook.ipynb).
+         established (shared checkpoints/logs/notebook.ipynb). Only used if it
+         actually points at an existing directory; if it's set but stale/typo'd,
+         a warning is logged and resolution falls through to (3) instead of
+         silently training into a directory the UI never established.
       3. A throwaway ``tempfile.mkdtemp()`` — last resort so serving never fails
          for lack of a directory.
     """
-    return configured or os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR") or tempfile.mkdtemp()
+    if configured:
+        return configured
+    env_dir = os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR")
+    if env_dir:
+        if os.path.isdir(env_dir):
+            return env_dir
+        logger.warning(
+            f"WEIGHTSLAB_ROOT_LOG_DIR is set to '{env_dir}', but that directory "
+            "does not exist. Falling back to a temporary directory instead."
+        )
+    return tempfile.mkdtemp()
 
 
 # Get global dataframe proxy (auto-updated when ledger registers real manager)
@@ -1512,7 +1525,7 @@ def start_training(timeout: int = None) -> None:
     pause_ctrl.resume() # Ensure we're not paused if start_training is called after serve
 
 
-def serve(serving_cli: bool = True, serving_grpc: bool = False,
+def serve(serving_cli: bool = True, serving_grpc: bool = True,
           spawn_cli_client: bool = False, serving_bore: bool = False,
           bore_port: int = None, allow_unconfigured: bool = True, **kwargs):
     """Start WeightsLab services.
@@ -2311,14 +2324,6 @@ def save_signals(
             return to_numpy(x)
         return None
 
-    def expand_dim(x):
-        """Add axis if 1D — skip for lists (inhomogeneous shapes)."""
-        if x is None or isinstance(x, list):
-            return x
-        if x.ndim == 1:
-            return x[:, np.newaxis]
-        return x
-
     preds_np = normalize(preds)
     preds_raw_np = normalize(preds_raw)
     target_np = normalize(targets)
@@ -2339,11 +2344,6 @@ def save_signals(
         }
     else:
         losses_data = None
-
-    # Expand dims for 1D arrays (skipped for lists)
-    target_np = expand_dim(target_np)
-    preds_np = expand_dim(preds_np)
-    preds_raw_np = expand_dim(preds_raw_np)
 
     # Enqueue to dataframe manager buffer for efficiency
     DATAFRAME_M.enqueue_batch(

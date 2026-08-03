@@ -645,6 +645,17 @@ def _resolve_experiment_dir(explicit: Optional[str]) -> Path:
     """
     if explicit:
         experiment_dir = Path(explicit).expanduser().resolve()
+        if not experiment_dir.exists():
+            # A relative path resolves against the shell's cwd; if that's not
+            # what the caller expected, this creates an empty look-alike dir
+            # instead of reusing the intended one (e.g. previous notebooks/
+            # checkpoints) -- surface it instead of silently proceeding.
+            logger.warning(
+                f"Experiment directory {experiment_dir} does not exist yet; "
+                f"creating it. If you meant to reuse an existing run, check "
+                f"that this path is right (relative paths resolve against "
+                f"the current directory: {Path.cwd()})."
+            )
     else:
         experiment_dir = (Path.cwd() / _generate_experiment_name()).resolve()
         # Retry on the rare name collision so we never reuse an existing run's dir.
@@ -773,6 +784,7 @@ def ui_start_native(args):
         certs_dir=certs_dir,
         grpc_auth_token=grpc_auth_token,
         block=True,
+        experiment_dir=str(experiment_dir),
     )
 
 
