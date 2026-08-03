@@ -182,6 +182,101 @@ class _NotebookKernelContractTests:
         self.assertTrue(done and done[-1].done.ok, f"cell errored: {''.join(tbs)}")
         self.assertTrue(any("[False, True, True]" in t for t in texts))
 
+    def test_cross_cell_def_closure_sees_later_reassigned_global(self):
+        # The scenario test_nested_function_sees_module_level_globals and
+        # test_apply_calls_nested_function_referencing_top_level_constant
+        # DON'T cover: def'ing a function in one cell, (re)binding its free
+        # variable in a LATER, separate RunNotebookCell call, then calling the
+        # function in a THIRD call. This only works if every cell truly execs
+        # against the SAME persistent namespace object (LOAD_GLOBAL resolves
+        # at call time) rather than one that snapshots/copies globals per call.
+        _run(self.service, "def foo():\n    return y")
+        _run(self.service, "y = 10")
+        chunks = _run(self.service, "foo()")
+        texts = [c.result_text for c in chunks if c.WhichOneof("payload") == "result_text"]
+        self.assertIn("10", "".join(texts))
+
+        # Rebind afterward: proves the function reads the CURRENT value of
+        # the global at call time, not a value captured when it was defined
+        # or first called.
+        _run(self.service, "y = 99")
+        chunks = _run(self.service, "foo()")
+        texts = [c.result_text for c in chunks if c.WhichOneof("payload") == "result_text"]
+        self.assertIn("99", "".join(texts))
+
+    def test_cross_cell_lambda_closure_sees_later_reassigned_global(self):
+        _run(self.service, "get_y = lambda: y")
+        _run(self.service, "y = 5")
+        chunks = _run(self.service, "get_y()")
+        texts = [c.result_text for c in chunks if c.WhichOneof("payload") == "result_text"]
+        self.assertIn("5", "".join(texts))
+
+        _run(self.service, "y = 7")
+        chunks = _run(self.service, "get_y()")
+        texts = [c.result_text for c in chunks if c.WhichOneof("payload") == "result_text"]
+        self.assertIn("7", "".join(texts))
+
+    def test_cross_cell_class_method_sees_global_defined_in_later_cell(self):
+        _run(self.service, "class Scaler:\n    def scale(self, x):\n        return x * factor")
+        _run(self.service, "factor = 2")
+        chunks = _run(self.service, "Scaler().scale(21)")
+        texts = [c.result_text for c in chunks if c.WhichOneof("payload") == "result_text"]
+        self.assertIn("42", "".join(texts))
+
+    def test_cross_cell_generator_sees_global_reassigned_before_iteration(self):
+        # Generators are lazy: the body only runs when consumed. Creating the
+        # generator in one cell, rebinding its free variable in the NEXT cell,
+        # then consuming it in a THIRD cell proves the generator frame reads
+        # the global at iteration time -- via the same live namespace -- not
+        # a value frozen when the generator object was created.
+        _run(self.service, "multiplier = 3")
+        _run(self.service, "gen = (i * multiplier for i in range(3))")
+        _run(self.service, "multiplier = 100")
+        chunks = _run(self.service, "list(gen)")
+        texts = [c.result_text for c in chunks if c.WhichOneof("payload") == "result_text"]
+        self.assertIn("[0, 100, 200]", "".join(texts))
+
+    def test_concurrent_cell_runs_are_serialized_not_interleaved(self):
+        # A real client only ever fires one RunNotebookCell at a time (the
+        # frontend queues locally -- see notebookPanel.ts's runExclusive), but
+        # the SERVER must not depend on that: both engines serialize
+        # internally (NotebookKernel via a single-worker ThreadPoolExecutor;
+        # EmbeddedKernelBridge via its own lock around execute_interactive),
+        # yet neither was proven end-to-end. Two overlapping cells each do a
+        # classic non-atomic read-sleep-write increment loop on the SAME
+        # shared global; if execution ever interleaved, the lost-update race
+        # would silently drop increments and the final count would be wrong.
+        _run(self.service, "counter = 0")
+        code = (
+            "import time\n"
+            "for _ in range(20):\n"
+            "    counter_local = counter\n"
+            "    time.sleep(0.005)\n"
+            "    counter = counter_local + 1"
+        )
+        results = {}
+
+        def _fire(key):
+            results[key] = _run(self.service, code, cell_id=key)
+
+        t1 = threading.Thread(target=_fire, args=("a",))
+        t2 = threading.Thread(target=_fire, args=("b",))
+        t1.start()
+        time.sleep(0.02)  # let t1 actually get underway before t2 overlaps it
+        t2.start()
+        t1.join(timeout=15)
+        t2.join(timeout=15)
+        self.assertFalse(t1.is_alive() or t2.is_alive(), "a concurrent cell run never completed")
+
+        for key in ("a", "b"):
+            done = [c for c in results[key] if c.WhichOneof("payload") == "done"]
+            tbs = [c.error_traceback for c in results[key] if c.WhichOneof("payload") == "error_traceback"]
+            self.assertTrue(done and done[-1].done.ok, f"cell {key} errored: {''.join(tbs)}")
+
+        chunks = _run(self.service, "counter")
+        texts = [c.result_text for c in chunks if c.WhichOneof("payload") == "result_text"]
+        self.assertIn("40", "".join(texts), "lost updates -- concurrent cells were interleaved, not serialized")
+
     def test_matplotlib_figure_is_captured_as_png(self):
         code = "plt.figure(); plt.plot([0, 1, 2], [2, 1, 0]); plt.title('t')"
         chunks = _run(self.service, code)

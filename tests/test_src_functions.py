@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 import numpy as np
 import pandas as pd
@@ -27,10 +28,20 @@ class TestResolveConfiguredRootLogDir(unittest.TestCase):
         os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = "/env/dir"
         self.assertEqual(src._resolve_configured_root_log_dir("/explicit/dir"), "/explicit/dir")
 
-    def test_env_used_when_config_absent(self):
-        os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = "/env/dir"
-        self.assertEqual(src._resolve_configured_root_log_dir(None), "/env/dir")
-        self.assertEqual(src._resolve_configured_root_log_dir(""), "/env/dir")
+    def test_env_used_when_config_absent_and_dir_exists(self):
+        with tempfile.TemporaryDirectory() as real_dir:
+            os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = real_dir
+            self.assertEqual(src._resolve_configured_root_log_dir(None), real_dir)
+            self.assertEqual(src._resolve_configured_root_log_dir(""), real_dir)
+
+    def test_env_set_to_missing_dir_warns_and_falls_back_to_tempdir(self):
+        os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = "/definitely/does/not/exist/abc123"
+        with patch("weightslab.src.tempfile.mkdtemp", return_value="/tmp/generated") as mk, \
+                self.assertLogs("weightslab.src", level="WARNING") as log_ctx:
+            result = src._resolve_configured_root_log_dir(None)
+        self.assertEqual(result, "/tmp/generated")
+        mk.assert_called_once()
+        self.assertTrue(any("does not exist" in msg for msg in log_ctx.output))
 
     def test_falls_back_to_tempdir_when_neither_set(self):
         os.environ.pop("WEIGHTSLAB_ROOT_LOG_DIR", None)
@@ -176,8 +187,12 @@ class TestSrcSaveSignals(unittest.TestCase):
         kwargs = df_manager.enqueue_batch.call_args.kwargs
 
         np.testing.assert_array_equal(kwargs["sample_ids"], np.array(['10', '11']))
-        self.assertEqual(kwargs["preds"].shape, (2, 1))
-        self.assertEqual(kwargs["targets"].shape, (2, 1))
+        # Scalar-per-sample preds/targets must stay 1-D (B,) here -- an extra
+        # trailing axis makes per-sample indexing downstream (enqueue_batch's
+        # index_batch) yield a length-1 array like [6] instead of a true
+        # scalar 6, which then round-trips through the dataframe as `[6]`.
+        self.assertEqual(kwargs["preds"].shape, (2,))
+        self.assertEqual(kwargs["targets"].shape, (2,))
         self.assertEqual(kwargs["preds_raw"].shape, (2, 2))
         self.assertIn("signals//loss", kwargs["losses"])
         self.assertEqual(kwargs["step"], 7)
