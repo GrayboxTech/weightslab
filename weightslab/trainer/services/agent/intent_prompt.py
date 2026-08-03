@@ -32,7 +32,7 @@ Choose the `kind` based on the user's VERB and INTENT:
 | **Extreme** | "Keep the best/worst", "Highest loss" | `keep` + `op="max"`/`min"` |
 | **Ordering** | "Sort by...", "Show highest first", "Rank by..." | `sort` |
 | **Grouping**| "Group by...", "Aggregate...", "Break down by..." | `group` (primary) + `sort` (secondary) |
-| **Calculation**| "What is the average X?", "Sum of Y", "Average of top 10" | `analysis` (or `keep` + `analysis` for subsets) |
+| **Calculation**| "What is the average X?", "Sum of Y", "Average of top 10", "Average X of the validation samples" | `analysis` (or `keep` + `analysis` for subsets — see rule 12) |
 | **Modification**| "Create column...", "Calculate error_sq from existing signals" | `transform` (NEW column only — see COLUMN WRITE SAFETY) |
 | **Discard / Remove** | "Discard...", "Drop...", "Remove...", "Ban...", "Denylist...", "Exclude from training" | `transform` (target=`discarded`) |
 | **Clarify** | "Sort by metrics" (if multiple exist) | `clarify` |
@@ -77,6 +77,7 @@ Choose the `kind` based on the user's VERB and INTENT:
 11. **Hyperparameter tuning (`action_name="set_hyperparam"`)**: to change a training hyperparameter, emit a `kind="action"` step with `action_name="set_hyperparam"` and `action_params={{"param": <name>, "op": <"set"|"scale">, "value": <number>}}`.
    - Relative change ("increase X by 10%", "decrease by 20%") → `op="scale"`, `value` = the multiplier (10% increase → `1.1`; 20% decrease → `0.8`). Compute the multiplier yourself.
    - See Ex45–Ex48.
+12. **Aggregation over a SUBSET (STRICT)**: a `sort` step only reorders rows — it NEVER limits how many rows exist, so `sort` + `analysis` silently aggregates over the WHOLE dataframe, not just the "highest"/"lowest"/"top N" ones. Whenever the question restricts the aggregate to a subset — "the 10 samples with the highest/lowest X", "the average X of the validation/train/test samples", "the mean of the samples where X" — you MUST emit a `keep` step FIRST (extrema `conditions` with `op="max"/"min"` and `n=<N>` for "top/bottom N"; an `origin`/value-equality condition for a split; or any other matching filter) and only THEN an `analysis` step whose `analysis_expression` computes over the now-narrowed `df` (see Ex6, Ex6b). Never substitute `sort` for `keep` when the goal is aggregation over a subset.
 
 ---
 - **Primary Goal**: `ui_manipulation` (grid changes), `data_analysis` (answers), `action` (external), `model_management` (model_info/model_action), `out_of_scope`.
@@ -170,7 +171,7 @@ User: "Group by type and sort by value"
 **Ex6: Analysis on Subset (Multi-step)**
 User: "What is the average score of the 10 samples with the lowest score?"
 {{
-  "reasoning": "Target: Subset to bottom 10 by score, then calculate average. Strategy: Split into Keep (filtering) and Analysis.",
+  "reasoning": "Target: Subset to bottom 10 by score, then calculate average. Strategy: Split into Keep (filtering) and Analysis. A 'sort' step would only reorder the rows, not limit them to 10 — 'keep' with op='min' and n=10 is required, per rule 12.",
   "primary_goal": "data_analysis",
   "steps": [
     {{
@@ -181,6 +182,23 @@ User: "What is the average score of the 10 samples with the lowest score?"
     {{
       "kind": "analysis",
       "analysis_expression": "df['score_metric'].mean()"
+    }}
+  ]
+}}
+
+**Ex6b: Analysis on a Split Subset (Multi-step)**
+User: "What is the average train loss of the validation samples?"
+{{
+  "reasoning": "Target: subset to the validation split, then average. Strategy: Split into Keep (origin filter) and Analysis, per rule 12 — an 'analysis'-only step without first narrowing `df` to the validation rows would average over the WHOLE dataframe instead.",
+  "primary_goal": "data_analysis",
+  "steps": [
+    {{
+      "kind": "keep",
+      "conditions": [{{ "column": "origin", "op": "==", "value": "val_loader" }}]
+    }},
+    {{
+      "kind": "analysis",
+      "analysis_expression": "df['train_loss'].mean()"
     }}
   ]
 }}
