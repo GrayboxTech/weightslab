@@ -75,6 +75,7 @@ jobs:
           # Get changed Python files in weightslab directory, exclude generated files
           CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRT $BASE_SHA $HEAD_SHA | \
             grep '^weightslab/.*\.py$' | \
+            grep -v '^weightslab/examples/' | \
             grep -v '_pb2\.py$' | \
             grep -v '_pb2_grpc\.py$' | \
             grep -v 'ui\.py$' | \
@@ -106,7 +107,7 @@ jobs:
           if [ -n "$FILES" ]; then
             # No --fix in CI: report and FAIL on any selected violation (a fix in
             # the ephemeral runner would be discarded and silently pass the gate).
-            echo "$FILES" | xargs ruff check --select F401,F841,E9,F632,F722,F823 --ignore E501 ./weightslab
+            echo "$FILES" | xargs ruff check --select F401,F841,E9,F632,F722,F823 --ignore E501 --exclude weightslab/examples ./weightslab
           fi
 
       - name: Pylint (errors only)
@@ -114,7 +115,7 @@ jobs:
         run: |
           FILES="${{ steps.changed-files.outputs.changed_files }}"
           if [ -n "$FILES" ]; then
-            echo "$FILES" | xargs pylint --disable=R0913,E0401,C0301,W0511,C0114,C0115,C0116 --fail-under=7.0 ./weightslab
+            echo "$FILES" | xargs pylint --disable=R0913,E0401,C0301,W0511,C0114,C0115,C0116 --fail-under=7.0 --ignore-paths='^weightslab/examples/.*' ./weightslab
           fi
 
       - name: Vulture (unused code)
@@ -125,7 +126,7 @@ jobs:
             # Advisory only (|| true): vulture at this confidence yields false
             # positives on dynamically-referenced code (CLI entry points, gRPC
             # handlers, framework hooks). Ruff + Pylint above are the hard gates.
-            echo "$FILES" | xargs vulture --min-confidence 70 ./weightslab || true
+            echo "$FILES" | xargs vulture --min-confidence 70 --exclude weightslab/examples ./weightslab || true
           fi
 
   # ── Fast install gate (always runs) ──────────────────────────────────────

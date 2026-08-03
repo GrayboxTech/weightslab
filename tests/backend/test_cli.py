@@ -131,8 +131,9 @@ class TestUiSecureEnvironment(unittest.TestCase):
 class TestUiStartNative(unittest.TestCase):
     """`weightslab start` serves the bundled SPA + gRPC-Web proxy (no Docker)."""
 
+    @patch("weightslab.utils.telemetry.ping_ui_launch")
     @patch("weightslab.ui.server.serve_ui")
-    def test_start_invokes_serve_ui_with_defaults(self, mock_serve):
+    def test_start_invokes_serve_ui_with_defaults(self, mock_serve, _mock_ping):
         with patch.dict(os.environ, {}, clear=False):
             for k in ("WEIGHTSLAB_UI_HOST", "WEIGHTSLAB_UI_PORT",
                       "GRPC_BACKEND_HOST", "GRPC_BACKEND_PORT"):
@@ -146,9 +147,10 @@ class TestUiStartNative(unittest.TestCase):
         self.assertFalse(kwargs["open_browser"])
         self.assertIsNone(kwargs["certs_dir"])  # no --certs -> unsecured
 
+    @patch("weightslab.utils.telemetry.ping_ui_launch")
     @patch("weightslab.ui.server.serve_ui")
     @patch("weightslab.cli.CertAuthManager")
-    def test_start_certs_without_valid_certs_falls_back_to_http(self, mock_mgr, mock_serve):
+    def test_start_certs_without_valid_certs_falls_back_to_http(self, mock_mgr, mock_serve, _mock_ping):
         mgr = MagicMock()
         mgr.has_valid_certs.return_value = False
         mock_mgr.from_env_or_default.return_value = mgr
@@ -157,6 +159,25 @@ class TestUiStartNative(unittest.TestCase):
         with self.assertLogs("weightslab.cli", level="WARNING"):
             ui_start_native(args)
         self.assertIsNone(mock_serve.call_args.kwargs["certs_dir"])
+
+    @patch("weightslab.utils.telemetry.ping_ui_launch")
+    @patch("weightslab.ui.server.serve_ui")
+    def test_start_fires_ui_launch_ping_not_import_ping(self, _mock_serve, mock_ping):
+        """`weightslab start` must send the `ui_start` event, distinct from `import`."""
+        from weightslab import __version__ as expected_version
+        args = argparse.Namespace(port=9125, host=None, backend_host=None,
+                                  backend_port=None, no_browser=True, certs=False)
+        ui_start_native(args)
+        mock_ping.assert_called_once_with(expected_version)
+
+    @patch("weightslab.utils.telemetry.ping_ui_launch", side_effect=RuntimeError("boom"))
+    @patch("weightslab.ui.server.serve_ui")
+    def test_start_survives_telemetry_failure(self, mock_serve, _mock_ping):
+        """A broken telemetry ping must never block the UI from starting."""
+        args = argparse.Namespace(port=9126, host=None, backend_host=None,
+                                  backend_port=None, no_browser=True, certs=False)
+        ui_start_native(args)
+        mock_serve.assert_called_once()
 
 
 class TestExampleStart(unittest.TestCase):

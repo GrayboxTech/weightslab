@@ -15,12 +15,9 @@ out: /tmp/wl_stress          # env override: WL_STRESS_OUT — wiped & recreated
 batch_size: 64
 
 # Signals
-loss_signal_name: loss_sample
-shape_every: 1               # env override: WL_SHAPE_EVERY — throttle for
-                             # sig/loss_shape (reads history, so it's costly).
-                             # 5 = every step (full coverage); higher = cheaper.
-min_step: 0                 # min step to start computing
-                             # sig/loss_shape (otherwise it will be NaN).
+loss_signal_name: loss_sample   # per-sample loss signal name. The custom
+                                # @wl.signal_classifier in utils/criterions.py is
+                                # bound to this name — keep the two in sync.
 
 # Serving
 serving_grpc: true

@@ -1,9 +1,9 @@
 """Integration check: prove WeightsLab is fully wired for this tabular example.
 
-Unlike ``test_fraud_detection.py`` (pure PyTorch), this actually drives the
-WeightsLab stack end-to-end — tracked dataloaders, watched loss/metric, the
-gRPC server, and the per-sample ledger — then asserts the sample dataframe the
-UI reads contains, for tabular mode:
+Unlike ``test_fraud_detection.py`` (pure PyTorch/pandas, offline), this drives
+the WeightsLab stack end-to-end — tracked dataloaders, watched loss/metrics,
+the gRPC server, and the per-sample ledger — then asserts the sample dataframe
+the UI reads contains, for tabular mode:
 
   * one row per sample (what you scroll/sort in the grid & List view),
   * every transaction feature as its own column (from ``get_items`` metadata),
@@ -12,6 +12,10 @@ UI reads contains, for tabular mode:
 
 and that the gRPC server is actually listening (so Weights Studio can connect
 live during the run).
+
+Uses a small synthetic CSV with the real dataset's exact schema (same as
+``test_fraud_detection.py``) rather than the real 284k-row download, so this
+check runs offline/in CI without Kaggle credentials.
 
 Run:  python verify_integration.py
 Requires weightslab installed (not a pure-unit test).
@@ -23,10 +27,12 @@ import socket
 import sys
 import tempfile
 
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torchmetrics.classification import Accuracy
+from torchmetrics.classification import Precision, Recall, F1Score, AveragePrecision
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -36,7 +42,13 @@ from weightslab.components.global_monitoring import (  # noqa: E402
     guard_testing_context,
 )
 
-from utils.data import FraudDataset, FEATURE_NAMES, NUM_FEATURES  # noqa: E402
+from utils.data import (  # noqa: E402
+    FEATURE_NAMES,
+    NUM_FEATURES,
+    compute_class_weights,
+    load_creditcard_fraud,
+)
+from utils.kaggle_data import CSV_FILENAME  # noqa: E402
 from utils.model import FraudMLP  # noqa: E402
 
 
@@ -48,9 +60,32 @@ def _free_port() -> int:
     return port
 
 
+def _make_synthetic_creditcard_csv(path, n_samples=1200, fraud_rate=0.06, seed=0):
+    rng = np.random.default_rng(seed)
+    n_fraud = max(1, int(round(n_samples * fraud_rate)))
+    n_legit = n_samples - n_fraud
+
+    def _rows(n, fraud):
+        data = {"Time": rng.uniform(0, 172792, size=n)}
+        for i in range(1, 29):
+            shift = 2.5 if fraud and i <= 4 else 0.0
+            data[f"V{i}"] = rng.normal(shift, 1.0, size=n)
+        data["Amount"] = rng.gamma(2.0, 150.0 if fraud else 60.0, size=n)
+        data["Class"] = np.full(n, int(fraud))
+        return pd.DataFrame(data)
+
+    df = pd.concat([_rows(n_legit, False), _rows(n_fraud, True)], ignore_index=True)
+    df = df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+    df.to_csv(path, index=False)
+    return path
+
+
 def main() -> int:
     device = torch.device("cpu")
     log_dir = tempfile.mkdtemp(prefix="wl_fraud_verify_")
+    data_dir = tempfile.mkdtemp(prefix="wl_fraud_verify_data_")
+    csv_path = _make_synthetic_creditcard_csv(os.path.join(data_dir, CSV_FILENAME))
+
     grpc_port = _free_port()
     # The gRPC server reads its port from GRPC_BACKEND_PORT (same knob the E2E
     # harness uses); set it before serve() so we bind to a free ephemeral port.
@@ -70,25 +105,35 @@ def main() -> int:
                              flag="model", device=device)
     optimizer = wl.watch_or_edit(optim.Adam(model.parameters(), lr=0.005), flag="optimizer")
 
-    train_ds = FraudDataset(600, seed=0)
-    test_ds = FraudDataset(200, seed=1)
+    train_ds, test_ds = load_creditcard_fraud(
+        csv_path=csv_path, cache_dir=os.path.join(data_dir, ".cache"),
+        seed=0, test_size=0.2, oversample_fraud_ratio=0.2,
+    )
 
     train_loader = wl.watch_or_edit(
-        train_ds, flag="data", loader_name="train_loader", batch_size=32, shuffle=True,
+        train_ds, flag="data", loader_name="train_loader", batch_size=64, shuffle=True,
         is_training=True, compute_hash=False, preload_labels=True, preload_metadata=True,
         enable_h5_persistence=False)
     test_loader = wl.watch_or_edit(
-        test_ds, flag="data", loader_name="test_loader", batch_size=64, shuffle=False,
+        test_ds, flag="data", loader_name="test_loader", batch_size=128, shuffle=False,
         is_training=False, compute_hash=False, preload_labels=True, preload_metadata=True,
         enable_h5_persistence=False)
 
-    cw = torch.tensor([1.0, 4.0])
-    train_crit = wl.watch_or_edit(nn.CrossEntropyLoss(weight=cw, reduction="none"),
+    class_weights = torch.tensor(compute_class_weights(train_ds.labels.numpy(), cap=20.0))
+    train_crit = wl.watch_or_edit(nn.CrossEntropyLoss(weight=class_weights, reduction="none"),
                                   flag="loss", signal_name="train-loss-CE", log=True)
-    test_crit = wl.watch_or_edit(nn.CrossEntropyLoss(weight=cw, reduction="none"),
+    test_crit = wl.watch_or_edit(nn.CrossEntropyLoss(weight=class_weights, reduction="none"),
                                  flag="loss", signal_name="test-loss-CE", log=True)
-    metric = wl.watch_or_edit(Accuracy(task="multiclass", num_classes=2),
-                              flag="metric", signal_name="metric-ACC", log=True)
+    metrics = {
+        "precision": wl.watch_or_edit(Precision(task="binary"), flag="metric",
+                                       signal_name="metric-Precision", log=True),
+        "recall": wl.watch_or_edit(Recall(task="binary"), flag="metric",
+                                    signal_name="metric-Recall", log=True),
+        "f1": wl.watch_or_edit(F1Score(task="binary"), flag="metric",
+                                signal_name="metric-F1", log=True),
+        "ap": wl.watch_or_edit(AveragePrecision(task="binary"), flag="metric",
+                                signal_name="metric-AveragePrecision", log=True),
+    }
 
     wl.serve(serving_grpc=True, grpc_port=grpc_port)
     wl.start_training()
@@ -109,8 +154,12 @@ def main() -> int:
         with guard_testing_context:
             out = model(inputs)
             preds = out.argmax(dim=1, keepdim=True)
+            probs = torch.softmax(out, dim=1)[:, 1]
             test_crit(out, labels, batch_ids=ids, preds=preds)
-            metric.update(out, labels)
+            metrics["precision"].update(preds.view(-1), labels)
+            metrics["recall"].update(preds.view(-1), labels)
+            metrics["f1"].update(preds.view(-1), labels)
+            metrics["ap"].update(probs, labels)
 
     wl.drain_signals()
 
@@ -124,15 +173,16 @@ def main() -> int:
 
     cols = set(c.strip().strip('"') for c in header)
     n_rows = len(rows)
+    expected_rows = len(train_ds) + len(test_ds)
 
     print("\n=== Ledger dataframe ===")
-    print(f"rows: {n_rows}")
+    print(f"rows: {n_rows} (expected ~{expected_rows})")
     print(f"columns ({len(cols)}): {sorted(cols)}")
 
     # ---- assertions ----
     problems = []
-    if n_rows < 700:  # 600 train + 200 test - some may be batched off; expect most
-        problems.append(f"expected ~800 sample rows, got {n_rows}")
+    if n_rows < expected_rows * 0.9:
+        problems.append(f"expected ~{expected_rows} sample rows, got {n_rows}")
 
     missing_features = [f for f in FEATURE_NAMES if f not in cols]
     if missing_features:

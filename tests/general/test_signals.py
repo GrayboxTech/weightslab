@@ -641,6 +641,43 @@ class TestSignals(unittest.TestCase):
 
             self.assertTrue(mock_df.enqueue_batch.called)
 
+    @patch("weightslab.src.get_dataframe")
+    @patch("weightslab.src._gm")
+    def test_save_signals_with_string_predictions(self, mock_gm, mock_get_dataframe):
+        """Test save_signals with TEXT predictions/labels (e.g. a generative
+        model's reply and its reference/target text). Must not crash (the
+        pre-fix behavior raised ValueError from the classification-label
+        uint16 cast on non-numeric strings) and must forward native Python
+        str values, unwrapped, so downstream RecordMetadata/DataStat
+        construction sees a real str rather than a 0-d numpy array."""
+        mock_df = MagicMock()
+        mock_get_dataframe.return_value = mock_df
+
+        mock_model = MagicMock()
+        mock_model.current_step = 1
+        mock_gm.return_value = mock_model
+
+        with patch("weightslab.src.DATAFRAME_M", mock_df):
+            batch_ids = torch.tensor([1, 2])
+            signals = {"loss": torch.tensor(0.5)}
+            preds = ["Certainly! Here is the answer to your question.", "I don't know."]
+            targets = ["The expected reference answer.", "Another reference answer."]
+
+            wl.save_signals(
+                signals=signals,
+                batch_ids=batch_ids,
+                preds=preds,
+                targets=targets,
+                log=True
+            )
+
+            self.assertTrue(mock_df.enqueue_batch.called)
+            _, kwargs = mock_df.enqueue_batch.call_args
+            self.assertEqual(kwargs["preds"], preds)
+            self.assertEqual(kwargs["targets"], targets)
+            for value in kwargs["preds"] + kwargs["targets"]:
+                self.assertIsInstance(value, str)
+
     # =========================================================================
     # Signal Composition and Combination Tests
     # =========================================================================

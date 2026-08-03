@@ -795,6 +795,39 @@ class TestReducePerSample(unittest.TestCase):
         never_below = sorted(s for s, v in mins.items() if v >= 0.5)
         self.assertEqual(never_below, ["0", "2"])
 
+    def test_list_per_sample_returns_ordered_history(self):
+        # reduce="list" returns each sample's FULL time series (ordered by step)
+        # instead of a scalar — the axis needed for "history as a list per sample".
+        lg = self._seed()
+        hist = lg.reduce_per_sample("train_loss", "list", exp_hash="h1")
+        self.assertEqual([round(x, 5) for x in hist["0"]], [0.9, 0.6, 0.55])
+        self.assertEqual([round(x, 5) for x in hist["1"]], [0.4, 0.3, 0.2])
+        self.assertEqual([round(x, 5) for x in hist["2"]], [0.7, 0.5, 0.5])
+        # "values" is an alias for "list".
+        self.assertEqual(
+            lg.reduce_per_sample("train_loss", "values", exp_hash="h1").keys(),
+            hist.keys(),
+        )
+
+    def test_list_max_points_subsamples_evenly(self):
+        # A long history is capped to max_points, evenly spaced, endpoints kept.
+        lg = _lg()
+        lg.graph_names.add("m")
+        for step in range(1000):
+            lg._stage_sample_row("m", "h1", "0", step, float(step))
+        full = lg.reduce_per_sample("m", "list", exp_hash="h1")["0"]
+        self.assertEqual(len(full), 1000)  # no cap by default
+
+        capped = lg.reduce_per_sample("m", "list", exp_hash="h1", max_points=100)["0"]
+        self.assertLessEqual(len(capped), 100)
+        self.assertEqual(capped[0], 0.0)       # first kept
+        self.assertEqual(capped[-1], 999.0)    # last kept
+        self.assertEqual(capped, sorted(capped))  # order preserved
+
+        # A short history (<= max_points) is returned unchanged.
+        short = lg.reduce_per_sample("m", "list", exp_hash="h1", sample_ids=["0"], max_points=100)
+        self.assertEqual(len(capped), len(short["0"]))
+
     def test_sample_ids_filter(self):
         lg = self._seed()
         subset = lg.reduce_per_sample("train_loss", "min", sample_ids=["1"], exp_hash="h1")
