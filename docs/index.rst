@@ -86,6 +86,12 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       Drive UI actions (sort, dump, load), data analysis, tagging/discarding, and model freeze/reset with natural language.
 
+   .. grid-item-card:: Experiment Reports
+      :link: experiment_reports
+      :link-type: doc
+
+      Ask the agent for a branded HTML report: signal health plots, dataset stats, and a written analysis.
+
    .. grid-item-card:: gRPC Communication
       :link: grpc/index
       :link-type: doc
@@ -134,6 +140,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    hyperparameters
    logger
    checkpointing
+   experiment_reports
    .. weights_studio
 
 

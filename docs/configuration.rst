@@ -1085,7 +1085,8 @@ case) to disable.
        shared in-process kernel against the live experiment (``df``, model,
        checkpoints); cells starting with ``>`` ask the agent to propose code. The
        notebook document is persisted as ``notebook.ipynb`` under the experiment
-       ``root_log_dir``. Dev-server fallback: ``VITE_ENABLE_NOTEBOOK``.
+       ``root_log_dir``. Dev-server fallback: ``VITE_ENABLE_NOTEBOOK``. See
+       :ref:`embedded-notebook` for how it works, with examples.
 
 .. note::
 
