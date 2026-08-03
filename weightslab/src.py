@@ -1493,7 +1493,7 @@ def start_training(timeout: int = None) -> None:
     pause_ctrl.resume() # Ensure we're not paused if start_training is called after serve
 
 
-def serve(serving_cli: bool = True, serving_grpc: bool = False,
+def serve(serving_cli: bool = True, serving_grpc: bool = True,
           spawn_cli_client: bool = False, serving_bore: bool = False,
           bore_port: int = None, allow_unconfigured: bool = True, **kwargs):
     """Start WeightsLab services.
@@ -4520,6 +4520,14 @@ def write_dataframe(
     loss_shape_signal: str | None = None,
 ) -> str:
     """Dump the WeightsLab sample dataframe to *path* as Parquet, JSON, or CSV.
+
+    Every ``flag="loss"`` signal is already auto-classified into a
+    ``'<signal>_shape'`` tag in the background with zero setup (see
+    :func:`enable_loss_shape_autotag`'s docstring), so you normally don't need
+    *loss_shape_signal* at all. It remains as a one-off: when set (e.g.
+    ``"loss_sample"``), the classifier runs synchronously first so this
+    specific report is guaranteed fresh at the moment it's written, rather than
+    whatever the background thread last computed.
 
     Every ``flag="loss"`` signal is already auto-classified into a
     ``'<signal>_shape'`` tag in the background with zero setup (see

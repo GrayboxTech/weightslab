@@ -19,9 +19,7 @@ import torch.nn as nn
 
 from .data import (
     CATEGORICAL_CARDINALITIES,
-    NUM_CATEGORICAL,
     NUM_NUMERIC,
-    IMG_SIDE,
     unpack,
 )
 

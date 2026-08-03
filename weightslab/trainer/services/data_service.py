@@ -120,6 +120,7 @@ def peek_is_tabular_sample(dataset, sample_id) -> bool:
         return False
 
 
+<<<<<<< HEAD
 def looks_like_file_path_label(label) -> bool:
     """True when a string label looks like a file path (e.g. a segmentation
     mask path such as "mask.png") rather than free text (e.g. an LLM's
@@ -150,6 +151,8 @@ def looks_like_file_path_label(label) -> bool:
     return 1 <= len(ext) <= 6 and ext.isalnum() and any(c.isalpha() for c in ext)
 
 
+=======
+>>>>>>> origin/main
 def normalize_metadata_copy_source_name(source_name: str, experiment_hash: str = None) -> str:
     """Normalize a source metadata name for deterministic copied-column naming."""
     name = str(source_name or "").strip()
