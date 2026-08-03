@@ -329,11 +329,7 @@ class CheckpointManager:
                 except Exception as e:
                     logger.warning(f"Failed to merge on-disk logger history from sibling root {candidate}: {e}")
 
-            if not merged and hasattr(lg, 'load_snapshot'):
-                try:
-                    payload = self._load_logger_snapshot_payload(loggers_dir=sibling_loggers_dir)
-                    for lname, lpayload in payload.get('loggers', {}).items() if payload else ():
-                        # Merge into the already-registered logger for that name
+                    for lname, lpayload in (payload.get('loggers', {}).items() if payload else ()):
                         # when there is one, otherwise the current default logger.
                         target_lg = ledgers.get_logger(lname) if lname in ledgers.list_loggers() else lg
                         if hasattr(target_lg, 'load_snapshot'):
