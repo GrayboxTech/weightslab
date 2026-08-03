@@ -184,7 +184,6 @@ def ping_ui_launch(version: str) -> None:
         "Set WL_NO_TELEMETRY=1 to disable."
     )
     _fire("ui_start", version)
-<<<<<<< HEAD
 
 
 def ping_tunnel_launch(version: str) -> None:
@@ -200,5 +199,3 @@ def ping_tunnel_launch(version: str) -> None:
         "Set WL_NO_TELEMETRY=1 to disable."
     )
     _fire("tunnel_start", version)
-=======
->>>>>>> origin/main

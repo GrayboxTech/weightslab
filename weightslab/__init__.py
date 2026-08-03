@@ -228,11 +228,8 @@ __all__ = [
     "enable_loss_shape_autotag",
     "disable_loss_shape_autotag",
     "auto_loss_shape_signal_names",
-<<<<<<< HEAD
     "signal_classifier",
     "resolve_signal_classifier",
-=======
->>>>>>> origin/main
     "LOSS_SHAPES",
 
     "pointcloud_thumbnail",
