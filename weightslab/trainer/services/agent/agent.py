@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 # Ensure intent_prompt is accessible
 from .intent_prompt import INTENT_PROMPT
 from .notebook_prompt import NOTEBOOK_CODE_PROMPT
+from .report_prompt import REPORT_ANALYSIS_PROMPT
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.trainer.trainer_tools import get_layer_representations
 
@@ -2003,4 +2004,57 @@ class DataManipulationAgent:
         raise RuntimeError(
             f"Code generation failed: {last_error}" if last_error
             else "Code generation failed: no provider produced a response."
+        )
+
+    # ------------------------------------------------------------------
+    # Experiment report narrative
+    # ------------------------------------------------------------------
+
+    def generate_report_narrative(self, stats_summary: str) -> str:
+        """Write the prose "Analysis" section for an experiment report from
+        already-computed statistics (see weightslab/reporting.py's
+        ``collect_report_context``). Grounded, not generative: the model only
+        sees ``stats_summary`` (signal shapes + dataframe stats), never raw
+        history, so it can comment on the numbers but not invent new ones.
+
+        Mirrors ``generate_code``'s provider-fallback shape, but returns plain
+        text (no code-fence extraction) and does not touch ``self.history`` --
+        this is a side-channel report artifact, not a step in the
+        NL-to-data-operation conversation.
+        """
+        if not self.is_available():
+            raise RuntimeError(
+                "Agent not configured. Initialize a provider with /init (or run a "
+                "local Ollama server) before generating a report."
+            )
+
+        system_prompt = REPORT_ANALYSIS_PROMPT.format(
+            stats_summary=(stats_summary or "(no data)").strip()
+        )
+        escaped_sys = system_prompt.replace("{", "{{").replace("}", "}}")
+        chat_prompt = ChatPromptTemplate.from_messages(
+            [("system", escaped_sys), ("human", "Write the analysis section.")]
+        )
+
+        order = [self.preferred_provider]
+        if self.fallback_to_local and self.preferred_provider != "ollama":
+            order.append("ollama")
+
+        last_error = None
+        for provider in order:
+            chain = getattr(self, f"chain_{provider}", None)
+            if chain is None:
+                continue
+            try:
+                response = (chat_prompt | chain).invoke({})
+                text = getattr(response, "content", None)
+                return text.strip() if text else str(response).strip()
+            except Exception as exc:
+                last_error = exc
+                _LOGGER.warning("[report narrative] provider %s failed: %s", provider, exc)
+                continue
+
+        raise RuntimeError(
+            f"Report narrative generation failed: {last_error}" if last_error
+            else "Report narrative generation failed: no provider produced a response."
         )
