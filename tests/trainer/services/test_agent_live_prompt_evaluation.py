@@ -421,6 +421,15 @@ class TestAgentRstDocumentedPrompts(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.base_df = _build_fixture_dataframe()
+        # Clear any model/dataloader/etc. left registered in the global
+        # ledger by other test files run earlier in the same process.
+        # watch_or_edit(..., flag="model") with no explicit name= silently
+        # REUSES whatever is already registered instead of wrapping our own
+        # _TwoConvNet, which would make every hardcoded layer id/neuron-count
+        # assumption below (and in each model-* test) refer to some other
+        # test's stale model instead of the fresh one built here.
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
         # Wrap a small 2-conv model so the model-* prompts target a real
         # architecture. Best-effort: if wrapping fails in this environment the
         # model tests self-skip rather than erroring the whole class.
@@ -437,6 +446,12 @@ class TestAgentRstDocumentedPrompts(unittest.TestCase):
         # state afterwards (the whole class shares one wrapped model — the
         # global ledger only holds one — so each mutating test restores it).
         cls.model_service = ModelService(exp_ctx) if exp_ctx is not None else None
+
+    @classmethod
+    def tearDownClass(cls):
+        # Don't leak our _TwoConvNet into whatever test file runs next.
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
 
     def _fresh_df(self):
         return self.base_df.copy()

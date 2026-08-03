@@ -206,8 +206,6 @@ yet), re-resolves the endpoint per connection (so a changing tunnel IP is picked
 up), and runs until ``Ctrl+C``. See the classification Colab notebook
 (``examples/Notebooks/PyTorch/wl-classification.ipynb``) for the end-to-end
 setup.
-<<<<<<< HEAD
-=======
 
 weightslab tunnel
 ~~~~~~~~~~~~~~~~~~
@@ -286,7 +284,6 @@ yet), re-resolves the endpoint per connection (so a changing tunnel IP is picked
 up), and runs until ``Ctrl+C``. See the classification Colab notebook
 (``examples/Notebooks/PyTorch/ws-classification.ipynb``) for the end-to-end
 setup.
->>>>>>> origin/main
 
 .. _cli-console:
 
