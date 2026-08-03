@@ -87,8 +87,8 @@ wl.serve(serving_grpc=True, serving_cli=False)
 > weightslab start example --det      # detection
 > weightslab start example --clus     # clustering
 > ```
->
-Explore our [sandbox](https://sandbox.graybx.com/). For a detailed installation guide and advanced configuration: [Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
+> Explore our [sandbox](https://sandbox.graybx.com/).
+For a detailed installation guide and advanced configuration: [Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
 
 <br>
 
