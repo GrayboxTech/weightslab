@@ -90,7 +90,7 @@ dependencies = [
   "ipykernel>=6.29,<7",
   "jupyter_client>=8.6,<9",
   "notebook>=7.6.1",
-  "ipywidgets>=8.1.8"
+  "ipywidgets>=8.1.8",
 
   # Reporting
   "matplotlib>=3.7,<4",
