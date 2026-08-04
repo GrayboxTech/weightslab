@@ -30,7 +30,8 @@ from weightslab.backend.model_interface import ModelInterface
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
-from weightslab.utils.tools import detach_to_cpu, _running_in_notebook
+from weightslab.utils.tools import detach_to_cpu, _running_in_notebook, _running_in_colab, _embedded_kernel_disabled
+from weightslab.trainer.services import notebook_service as _notebook_service
 from weightslab.backend.logger import LoggerQueue
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
@@ -68,6 +69,35 @@ from tqdm import tqdm
 
 # Get global logger
 logger = logging.getLogger(__name__)
+
+
+def _resolve_configured_root_log_dir(configured):
+    """Resolve the experiment ``root_log_dir`` for a serving config.
+
+    Resolution order:
+      1. ``configured`` — an explicit value from the wrapped hyperparameters.
+      2. ``$WEIGHTSLAB_ROOT_LOG_DIR`` — set by ``weightslab start [DIR]`` so an
+         otherwise-unconfigured training run lands in the directory the UI
+         established (shared checkpoints/logs/notebook.ipynb). Only used if it
+         actually points at an existing directory; if it's set but stale/typo'd,
+         a warning is logged and resolution falls through to (3) instead of
+         silently training into a directory the UI never established.
+      3. A throwaway ``tempfile.mkdtemp()`` — last resort so serving never fails
+         for lack of a directory.
+    """
+    if configured:
+        return configured
+    env_dir = os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR")
+    if env_dir:
+        if os.path.isdir(env_dir):
+            return env_dir
+        logger.warning(
+            f"WEIGHTSLAB_ROOT_LOG_DIR is set to '{env_dir}', but that directory "
+            "does not exist. Falling back to a temporary directory instead."
+        )
+    return tempfile.mkdtemp()
+
+
 # Get global dataframe proxy (auto-updated when ledger registers real manager)
 DATAFRAME_M = None
 # Global registry for custom signals
@@ -1349,8 +1379,10 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         if fl in ('hp', 'hyperparams', 'params', 'hyperparameters', 'parameters', 'config'):
             # If obj is a string, treat as a file path and start watcher
             try:
-                # Initialize CheckpointManager if we have a root dir (fallback to default root)
-                obj['root_log_dir'] = obj.get('root_log_dir') or tempfile.mkdtemp()
+                # Initialize CheckpointManager if we have a root dir (see
+                # _resolve_configured_root_log_dir for the resolution order).
+                obj['root_log_dir'] = _resolve_configured_root_log_dir(
+                    obj.get('root_log_dir'))
                 try:
                     # Check if a checkpoint manager is already registered in ledger
                     try:
@@ -1503,6 +1535,13 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
         serving_grpc: Start the gRPC server. In a notebook/Colab, if this is on
             but ``serving_bore`` is off, a warning suggests ``serving_bore=True``
             (the UI runs on your own machine and needs a tunnel to reach here).
+            Also embeds a real Jupyter kernel (sharing this process's live
+            objects) for the studio notebook panel and any external Jupyter
+            client to attach to, unless this process is already itself a
+            notebook/Colab kernel, `ipykernel`/`jupyter_client` aren't
+            installed (``pip install weightslab[notebook-kernel]``), or
+            ``WEIGHTSLAB_DISABLE_EMBEDDED_KERNEL=1`` is set. Only one kernel is
+            ever embedded per process — a second ``serve()`` call reuses it.
         spawn_cli_client: When ``serving_cli`` is True, also open the interactive
             REPL in a new console window (the default, backward-compatible
             behavior). Set to ``False`` to start the CLI server *headless* — it
@@ -1568,18 +1607,42 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
             )
         logger.warning(base_msg)
 
+    # Embed a real Jupyter kernel (shares this process's live objects) so the
+    # studio notebook panel — and any external Jupyter client — can attach to
+    # it, unless we're already inside a notebook/Colab kernel ourselves (mode
+    # C) or the user opted out via WEIGHTSLAB_DISABLE_EMBEDDED_KERNEL.
+    embed_kernel_decision = None
+    if serving_grpc:
+        embed_kernel_decision = not _running_in_notebook() and not _embedded_kernel_disabled()
+        _notebook_service.configure_embedded_kernel(embed_kernel_decision)
+
     if serving_grpc:
         grpc_serve(**kwargs)
 
-    # In a notebook/Colab the backend has no local Weights Studio to talk to
-    # (the UI runs on the user's own machine). Nudge them to open a tunnel.
-    if serving_grpc and not serving_bore and _running_in_notebook():
+    if embed_kernel_decision:
+        connection_file = _notebook_service.get_embedded_kernel_connection_file(wait_timeout=15.0)
+        if connection_file is not None:
+            print("=" * 60)
+            print(" Embedded Jupyter kernel ready (shares live process memory):")
+            print(f"     jupyter console --existing {connection_file}")
+            print(" The studio notebook panel already uses this same kernel.")
+            print("=" * 60)
+        else:
+            logger.warning(
+                "Embedded notebook kernel did not come up in time (or "
+                "ipykernel/jupyter_client are not installed) — the studio "
+                "notebook panel will use the built-in executor instead."
+            )
+
+    # On a REMOTE host (Colab) the local Weights Studio cannot reach this backend
+    # directly, so nudge for a tunnel. A LOCAL notebook serving as the backend
+    # (mode C) is reachable at localhost, so it needs no tunnel and no warning.
+    if serving_grpc and not serving_bore and _running_in_colab():
         logger.warning(
-            "Running in a notebook/Colab with serving_grpc=True but "
-            "serving_bore=False. Weights Studio runs on your OWN machine and "
-            "cannot reach this backend directly. Pass serving_bore=True to open "
-            "a tunnel and sync with the UI: wl.serve(serving_grpc=True, "
-            "serving_bore=True)."
+            "Running in Colab with serving_grpc=True but serving_bore=False. "
+            "Weights Studio runs on your OWN machine and cannot reach this "
+            "backend directly. Pass serving_bore=True to open a tunnel and sync "
+            "with the UI: wl.serve(serving_grpc=True, serving_bore=True)."
         )
 
     bore_endpoint = None
@@ -2261,14 +2324,6 @@ def save_signals(
             return to_numpy(x)
         return None
 
-    def expand_dim(x):
-        """Add axis if 1D — skip for lists (inhomogeneous shapes)."""
-        if x is None or isinstance(x, list):
-            return x
-        if x.ndim == 1:
-            return x[:, np.newaxis]
-        return x
-
     preds_np = normalize(preds)
     preds_raw_np = normalize(preds_raw)
     target_np = normalize(targets)
@@ -2289,11 +2344,6 @@ def save_signals(
         }
     else:
         losses_data = None
-
-    # Expand dims for 1D arrays (skipped for lists)
-    target_np = expand_dim(target_np)
-    preds_np = expand_dim(preds_np)
-    preds_raw_np = expand_dim(preds_raw_np)
 
     # Enqueue to dataframe manager buffer for efficiency
     DATAFRAME_M.enqueue_batch(

@@ -2814,6 +2814,69 @@ class DataService:
             text = text[:max_len] + "\n... (truncated; ask for a specific key, e.g. 'show the root log dir')"
         return f"Configuration ({hp_name}):\n{text}"
 
+    def _agent_generate_experiment_report(self, signals=None) -> str:
+        """Agent action (READ-ONLY): build an HTML experiment report -- signal
+        trajectory plots + health classification + dataset stats + a written
+        analysis -- saved under the experiment's ``reports/`` directory.
+
+        Two passes, one data fetch: ``reporting.collect_report_context``
+        deterministically gathers signal history + dataframe stats + renders
+        plots; that (plot-free) summary is then handed to the agent's own LLM
+        for the analysis paragraph (grounded in those exact numbers, never raw
+        history -- see report_prompt.py), and finally rendered once to disk.
+        A failed/unavailable LLM degrades to a report with no narrative rather
+        than no report at all.
+        """
+        from weightslab.backend import ledgers
+        from weightslab import reporting
+
+        cm = self._resolve_checkpoint_manager()
+        root_log_dir = getattr(cm, "root_log_dir", None) or self._root_log_dir
+        if not root_log_dir:
+            return "Action: no experiment directory available; cannot generate a report."
+
+        try:
+            logger_q = ledgers.get_logger()
+        except Exception:
+            logger_q = None
+        if logger_q is None or not hasattr(logger_q, "get_graph_names"):
+            return "Action: no experiment logger available; cannot generate a report."
+
+        try:
+            df = self._df_manager.get_combined_df() if self._df_manager is not None else None
+        except Exception:
+            df = None
+
+        try:
+            context = reporting.collect_report_context(root_log_dir, logger_q, df, signals=signals)
+        except Exception as e:
+            return f"Action: failed to gather report data: {e}"
+
+        stats_summary = json.dumps({
+            "signals": [
+                {k: v for k, v in entry.items() if k != "plot_b64"}
+                for entry in context.get("signals", [])
+            ],
+            "loss_shape_tags": context.get("loss_shape_tags", []),
+            "dataframe": context.get("dataframe", {}),
+        }, indent=2, default=str)
+
+        narrative = None
+        try:
+            narrative = self._agent.generate_report_narrative(stats_summary)
+        except Exception as e:
+            logger.warning(f"[Agent] report narrative generation failed: {e}")
+
+        try:
+            output_path = reporting.default_report_path(root_log_dir)
+            path = reporting.render_report(context, output_path, narrative=narrative)
+        except Exception as e:
+            return f"Action: failed to render report: {e}"
+
+        n_signals = len(context.get("signals", []))
+        suffix = "" if narrative else " (no written analysis -- agent LLM unavailable)"
+        return f"Action: generated experiment report ({n_signals} signal(s)) at {path}{suffix}"
+
     @staticmethod
     def _mask_from_coerced_query(df, expr: str):
         """Best-effort boolean mask for `expr` against `df`, tolerating two
@@ -2923,6 +2986,12 @@ class DataService:
                 return self._agent_show_config(
                     param=params.get("param") or params.get("name") or params.get("key_path")
                 )
+
+            # READ-ONLY: build an HTML experiment report (signal plots + health
+            # classification + dataset stats + a written analysis).
+            elif action_name in ("generate_experiment_report", "experiment_report",
+                                 "create_report", "generate_report", "report"):
+                return self._agent_generate_experiment_report(signals=params.get("signals"))
 
             return f"Action triggered: {action_name} (Not implemented)"
 

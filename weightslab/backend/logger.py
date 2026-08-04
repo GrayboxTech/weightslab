@@ -1248,6 +1248,58 @@ class LoggerQueue:
             }
         return {str(sid): float(v) for (sid, v) in rows if v is not None}
 
+    def top_k_samples_by_reduce(
+        self,
+        graph_name: str,
+        reduce: str = "max",
+        k: int = 5,
+        sample_ids=None,
+        exp_hash: str | None = None,
+        descending: bool = True,
+    ) -> list:
+        """Top-``k`` samples by a reduction of their per-sample HISTORY,
+        ranked entirely inside DuckDB (``GROUP BY sample_id ... ORDER BY
+        ... LIMIT k``) — unlike ``reduce_per_sample`` (which returns EVERY
+        sample's reduced value as a Python dict), this never materializes
+        more than ``k`` rows in Python. Built for reporting/summary use over
+        a dataset with millions of samples, where pulling a per-sample dict
+        (let alone full history) would be a real memory/latency cost, and
+        handing it to an LLM would be a real token cost.
+
+        Args:
+            reduce: ``min``/``max``/``mean`` (peak/trough/average over the
+                sample's whole history), or ``spread`` (``max - min``, a
+                simple instability proxy — how far a sample's loss has swung).
+            descending: ``True`` for "worst k" on an ascending-is-better
+                metric (e.g. highest peak loss); ``False`` for the other end.
+
+        Returns:
+            ``[{"sample_id": str, "value": float}, ...]``, length <= ``k``,
+            ordered by ``value``; empty if the metric is unknown or has no
+            recorded history.
+        """
+        agg = {
+            "min": "min(value)", "max": "max(value)",
+            "mean": "avg(value)", "avg": "avg(value)",
+            "spread": "max(value) - min(value)",
+        }.get(str(reduce).lower())
+        if agg is None:
+            raise ValueError(f"Unsupported reduce '{reduce}'. Use min/max/mean/spread.")
+
+        with self._lock:
+            self._flush_stage()
+            params = [graph_name]
+            sql = f"SELECT sample_id, {agg} AS reduced_value FROM per_sample WHERE metric_name = ?"
+            sql += self._hash_filter(exp_hash, params)
+            if sample_ids is not None:
+                sql += " AND sample_id IN (SELECT UNNEST(?))"
+                params.append([str(s) for s in sample_ids])
+            sql += f" GROUP BY sample_id ORDER BY reduced_value {'DESC' if descending else 'ASC'} LIMIT ?"
+            params.append(int(k))
+            rows = self._conn.execute(sql, params).fetchall()
+
+        return [{"sample_id": str(sid), "value": float(v)} for (sid, v) in rows if v is not None]
+
     @staticmethod
     def _subsample_series(values: list, max_points: int | None) -> list:
         """Downsample *values* to at most *max_points* evenly-spaced entries,

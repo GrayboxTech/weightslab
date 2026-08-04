@@ -182,10 +182,16 @@ commands:
                            shells find them.
                              --force-certs   regenerate even if certs exist
 
-  start                    Start the Weights Studio UI natively — no Docker.
+  start [DIR]              Start the Weights Studio UI natively — no Docker.
                            Serves the bundled SPA and proxies gRPC-Web to a
                            running backend, all from one Python process.
                            UNSECURED (HTTP) by default.
+                           DIR is the experiment directory (created if missing)
+                           used as root_log_dir — where this run's checkpoints,
+                           logs and notebook.ipynb live. Omit DIR to create a
+                           fresh randomly-named dir under the current folder.
+                           (UI-only: run training separately with a main.py that
+                           points its root_log_dir at the same directory.)
                              --port PORT           UI HTTP port (default 50051)
                              --config FILE         experiment config file used to read ui_port
                              --backend-port PORT   backend gRPC port (default 50051)
@@ -226,6 +232,8 @@ examples:
   weightslab se                       # one-time secure setup (then export WEIGHTSLAB_CERTS_DIR)
   weightslab se --force-certs         # regenerate the certs
   weightslab start                    # launch the UI (unsecured HTTP, default) at :50051
+                                      # (creates a fresh ./wl-<name> experiment dir)
+  weightslab start ./exp/mnist_opt/   # use (or create) this experiment directory
   weightslab start --certs            # launch the UI over HTTPS (needs `weightslab se` first)
   weightslab start --port 9000        # launch the UI on a custom port
   weightslab start --backend-port 50052   # proxy to a backend on a custom gRPC port
@@ -607,6 +615,79 @@ def cli_connect(args):
     sys.exit(exit_code)
 
 
+# Friendly two-word experiment names (adjective-noun), e.g. "wl-brisk-otter".
+# Readable and low-collision — nicer than a raw UUID for a directory the user
+# will `cd` into and share.
+_EXP_ADJECTIVES = (
+    "brisk", "calm", "clever", "bold", "bright", "keen", "lucid", "nimble",
+    "quiet", "swift", "warm", "zesty", "amber", "cobalt", "coral", "jade",
+)
+_EXP_NOUNS = (
+    "otter", "falcon", "maple", "cedar", "comet", "delta", "ember", "harbor",
+    "lark", "meadow", "pixel", "quartz", "ridge", "tide", "vertex", "willow",
+)
+
+
+def _generate_experiment_name() -> str:
+    """Return a fresh adjective-noun experiment directory name (no timestamp so
+    it stays short and human-friendly; collisions are retried by the caller)."""
+    import random
+    return f"wl-{random.choice(_EXP_ADJECTIVES)}-{random.choice(_EXP_NOUNS)}"
+
+
+def _resolve_experiment_dir(explicit: Optional[str]) -> Path:
+    """Resolve (and create) the experiment directory for ``weightslab start``.
+
+    ``explicit`` — a path given on the command line (``weightslab start ./exp/x``);
+    created if missing. When omitted, a fresh randomly-named directory is created
+    under the current working directory (``./wl-<adjective>-<noun>``). Returned as
+    an absolute path so the backend, UI and notebook agree on one location.
+    """
+    if explicit:
+        experiment_dir = Path(explicit).expanduser().resolve()
+        if not experiment_dir.exists():
+            # A relative path resolves against the shell's cwd; if that's not
+            # what the caller expected, this creates an empty look-alike dir
+            # instead of reusing the intended one (e.g. previous notebooks/
+            # checkpoints) -- surface it instead of silently proceeding.
+            logger.warning(
+                f"Experiment directory {experiment_dir} does not exist yet; "
+                f"creating it. If you meant to reuse an existing run, check "
+                f"that this path is right (relative paths resolve against "
+                f"the current directory: {Path.cwd()})."
+            )
+    else:
+        experiment_dir = (Path.cwd() / _generate_experiment_name()).resolve()
+        # Retry on the rare name collision so we never reuse an existing run's dir.
+        while experiment_dir.exists():
+            experiment_dir = (Path.cwd() / _generate_experiment_name()).resolve()
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    return experiment_dir
+
+
+def _print_experiment_guidance(experiment_dir: Path) -> None:
+    """Tell the user which directory this run uses and how to point training at it.
+
+    ``weightslab start`` is UI-only — it does not run training. The experiment
+    directory only fills up once a training backend uses it as its
+    ``root_log_dir``; this prints the one line that wires the two together.
+    """
+    d = str(experiment_dir)
+    logger.info("=" * 60)
+    logger.info(f" Experiment directory: {d}")
+    logger.info(" (this run's checkpoints, logs and notebook.ipynb live here)")
+    logger.info(" Point your training backend at it so the UI, data and notebook")
+    logger.info(" all share this experiment — set it in your config:")
+    logger.info("     root_log_dir: " + d)
+    logger.info(" or export it in the terminal that launches your training:")
+    if _is_windows():
+        logger.info(f'     $env:WEIGHTSLAB_ROOT_LOG_DIR = "{d}"   (current PowerShell)')
+        logger.info(f'     setx WEIGHTSLAB_ROOT_LOG_DIR "{d}"     (new terminals)')
+    else:
+        logger.info(f'     export WEIGHTSLAB_ROOT_LOG_DIR="{d}"')
+    logger.info("=" * 60)
+
+
 def ui_start_native(args):
     """`weightslab start`: launch the Weights Studio UI natively (no Docker).
 
@@ -629,6 +710,16 @@ def ui_start_native(args):
         ping_ui_launch(_version)
     except Exception as exc:
         logger.debug(f"Telemetry ping failed: {exc}")
+
+    # Resolve (and create) the experiment directory for this run. `start` is
+    # UI-only, so we export WEIGHTSLAB_ROOT_LOG_DIR for this process (picked up by
+    # a backend launched from the same environment and by the notebook kernel's
+    # root_log_dir fallback) and persist it for discovery, then tell the user how
+    # to point their training backend at it.
+    experiment_dir = _resolve_experiment_dir(getattr(args, "experiment_dir", None))
+    os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = str(experiment_dir)
+    os.environ["WL_LAST_EXPERIMENT_DIR"] = str(experiment_dir)
+    _print_experiment_guidance(experiment_dir)
 
     ui_host = getattr(args, "host", None) or os.getenv("WEIGHTSLAB_UI_HOST", "0.0.0.0")
     preferred_ui_port, ui_port_source = _resolve_ui_port(args)
@@ -693,6 +784,7 @@ def ui_start_native(args):
         certs_dir=certs_dir,
         grpc_auth_token=grpc_auth_token,
         block=True,
+        experiment_dir=str(experiment_dir),
     )
 
 
@@ -788,18 +880,22 @@ def _build_parser() -> argparse.ArgumentParser:
         '--remote-port', type=int, default=None,
         help="Remote port, if not included in ENDPOINT")
 
-    # weightslab start [--port N ...]        -> native UI server
-    # weightslab start example [--cls|--seg|--clus|--gen]  -> bundled example
+    # weightslab start [DIR] [--port N ...]  -> native UI server for an experiment dir
+    # weightslab start example [--cls|...]   -> bundled example (rewritten in main()
+    #                                           to the `example` alias below, because a
+    #                                           positional DIR cannot coexist with a
+    #                                           nested `example` subcommand in argparse)
     start_parser = sub.add_parser(
         "start",
-        help="Start the Weights Studio UI natively (no Docker); "
-             "or `start example` to run a bundled example")
+        help="Start the Weights Studio UI natively (no Docker) for an experiment "
+             "directory; or `start example` to run a bundled example")
+    start_parser.add_argument(
+        "experiment_dir", nargs="?", default=None,
+        help="Experiment directory to use as the root_log_dir (created if missing). "
+             "Omit to create a fresh, randomly-named directory under the current "
+             "folder. Holds this run's checkpoints, logs and notebook.ipynb.")
     # Flags on the bare `start` command launch the native UI server.
     _add_ui_server_flags(start_parser)
-    start_sub = start_parser.add_subparsers(dest="start_target")
-    example_parser = start_sub.add_parser(
-        "example", help="Start a bundled PyTorch example (default: classification)")
-    _add_example_kind_flags(example_parser)
 
     # Tolerate the swapped order: `weightslab example start [flags]` (and bare
     # `weightslab example`) behave exactly like `weightslab start example`. Hidden
@@ -816,8 +912,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main():
+    argv = sys.argv[1:]
+    # `weightslab start example ...` routes to the bundled-example flow. The
+    # `start` command takes an optional experiment-dir positional, which cannot
+    # coexist with a nested `example` subcommand in argparse, so rewrite it to
+    # the equivalent top-level alias `weightslab example start ...`.
+    if argv[:2] == ["start", "example"]:
+        argv = ["example", "start"] + argv[2:]
+
     parser = _build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.command == "help" or args.command is None:
         parser.print_help()
@@ -829,11 +933,9 @@ def main():
     elif args.command == "se":
         ui_secure_environment(args)
     elif args.command == "start":
-        if getattr(args, "start_target", None) == "example":
-            example_start(args)
-        else:
-            # Bare `weightslab start` -> launch the native UI.
-            ui_start_native(args)
+        # Bare `weightslab start [DIR]` -> launch the native UI ( `start example`
+        # was rewritten to the `example` command above).
+        ui_start_native(args)
     elif args.command == "example":
         # Alias for `start example` — tolerate the swapped subcommand order.
         example_start(args)

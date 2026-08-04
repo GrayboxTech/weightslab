@@ -28,6 +28,8 @@ from pydantic import BaseModel, Field
 
 # Ensure intent_prompt is accessible
 from .intent_prompt import INTENT_PROMPT
+from .notebook_prompt import NOTEBOOK_CODE_PROMPT
+from .report_prompt import REPORT_ANALYSIS_PROMPT
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.trainer.trainer_tools import get_layer_representations
 
@@ -1886,3 +1888,173 @@ class DataManipulationAgent:
 
         _LOGGER.info(f"[Agent] Query total wall time: {time.perf_counter() - _query_t0:.2f}s (no provider succeeded)")
         return [{"function": "out_of_scope", "params": {"reason": error_msg}}]
+
+    # ------------------------------------------------------------------
+    # Notebook code generation
+    # ------------------------------------------------------------------
+
+    def _compact_schema_for_prompt(self) -> str:
+        """Return a "- `name` (dtype)" listing of the live dataframe, with
+        index levels reported SEPARATELY from real columns.
+
+        `sample_id`/`origin` are index levels on the notebook's `df` (set via
+        `df.set_index([...], drop=True)` in DataService), never plain columns
+        -- but `_setup_schema()` merges index-level names into the same
+        `all_columns`/`metadata` structures it uses for its own stats-context
+        purposes, so without this split the two are indistinguishable in the
+        prompt and the LLM reliably emits `df["sample_id"]`/`df["origin"]`,
+        which raises KeyError. `index_columns` is already computed by
+        `_setup_schema()` for exactly this distinction; this method was simply
+        not using it.
+
+        Reuses the cached schema built for query() so notebook code-gen does not
+        pay a second full stats pass.
+        """
+        try:
+            self._setup_schema()
+            schema = self.df_schema or {}
+            meta = schema.get("metadata", {})
+            index_names = set(schema.get("index_columns", []))
+
+            column_lines = [f"- `{col}` ({info.get('dtype', '?')})"
+                             for col, info in meta.items() if col not in index_names]
+            index_lines = [f"- `{col}` ({info.get('dtype', '?')})"
+                            for col, info in meta.items() if col in index_names]
+
+            if not column_lines and not index_lines:
+                return "(no dataframe columns available yet)"
+
+            parts = ["Columns:\n" + "\n".join(column_lines) if column_lines
+                     else "Columns: (none)"]
+            if index_lines:
+                parts.append(
+                    "Index levels (NOT columns -- use df.index.get_level_values"
+                    "('name') or df.reset_index() first, never df['name']):\n"
+                    + "\n".join(index_lines)
+                )
+            return "\n\n".join(parts)
+        except Exception as exc:
+            _LOGGER.debug("notebook schema build failed: %s", exc)
+            return "(dataframe schema unavailable)"
+
+    @staticmethod
+    def _extract_code_and_explanation(text: str):
+        """Split an LLM reply into (code, explanation).
+
+        Prefers a fenced ```python block; falls back to the first generic fence,
+        then to treating the whole reply as code when no fence is present.
+        """
+        if text is None:
+            return "", ""
+        fence = re.search(r"```(?:python|py)?\s*\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
+        if fence:
+            code = fence.group(1).strip()
+            explanation = (text[:fence.start()] + text[fence.end():]).strip()
+            return code, explanation
+        return text.strip(), ""
+
+    def generate_code(self, prompt: str, context_code: str = ""):
+        """Propose Python for a notebook cell from a natural-language ``prompt``.
+
+        This does NOT execute anything and does NOT touch the intent pipeline; it
+        only asks the active LLM provider for runnable code. Returns a
+        ``(code, explanation)`` tuple. Raises RuntimeError when no provider is
+        configured so the service can report a clean error.
+        """
+        if not self.is_available():
+            raise RuntimeError(
+                "Agent not configured. Initialize a provider with /init (or run a "
+                "local Ollama server) before using \">\" notebook cells."
+            )
+
+        system_prompt = NOTEBOOK_CODE_PROMPT.format(
+            schema=self._compact_schema_for_prompt(),
+            context_code=(context_code or "(none)").strip(),
+        )
+        # Escape braces the same way _query_langchain does so ChatPromptTemplate
+        # does not treat stray { } in the schema/context as template variables.
+        escaped_sys = system_prompt.replace("{", "{{").replace("}", "}}")
+        chat_prompt = ChatPromptTemplate.from_messages(
+            [("system", escaped_sys), ("human", "{instruction}")]
+        )
+
+        order = [self.preferred_provider]
+        if self.fallback_to_local and self.preferred_provider != "ollama":
+            order.append("ollama")
+
+        last_error = None
+        for provider in order:
+            chain = getattr(self, f"chain_{provider}", None)
+            if chain is None:
+                continue
+            try:
+                response = (chat_prompt | chain).invoke({"instruction": prompt})
+                text = getattr(response, "content", None)
+                if text is None:
+                    text = str(response)
+                code, explanation = self._extract_code_and_explanation(text)
+                self.history.append(f"User (notebook): {prompt}")
+                self.history.append("Action: proposed notebook code")
+                return code, explanation
+            except Exception as exc:
+                last_error = exc
+                _LOGGER.warning("[notebook code-gen] provider %s failed: %s", provider, exc)
+                continue
+
+        raise RuntimeError(
+            f"Code generation failed: {last_error}" if last_error
+            else "Code generation failed: no provider produced a response."
+        )
+
+    # ------------------------------------------------------------------
+    # Experiment report narrative
+    # ------------------------------------------------------------------
+
+    def generate_report_narrative(self, stats_summary: str) -> str:
+        """Write the prose "Analysis" section for an experiment report from
+        already-computed statistics (see weightslab/reporting.py's
+        ``collect_report_context``). Grounded, not generative: the model only
+        sees ``stats_summary`` (signal shapes + dataframe stats), never raw
+        history, so it can comment on the numbers but not invent new ones.
+
+        Mirrors ``generate_code``'s provider-fallback shape, but returns plain
+        text (no code-fence extraction) and does not touch ``self.history`` --
+        this is a side-channel report artifact, not a step in the
+        NL-to-data-operation conversation.
+        """
+        if not self.is_available():
+            raise RuntimeError(
+                "Agent not configured. Initialize a provider with /init (or run a "
+                "local Ollama server) before generating a report."
+            )
+
+        system_prompt = REPORT_ANALYSIS_PROMPT.format(
+            stats_summary=(stats_summary or "(no data)").strip()
+        )
+        escaped_sys = system_prompt.replace("{", "{{").replace("}", "}}")
+        chat_prompt = ChatPromptTemplate.from_messages(
+            [("system", escaped_sys), ("human", "Write the analysis section.")]
+        )
+
+        order = [self.preferred_provider]
+        if self.fallback_to_local and self.preferred_provider != "ollama":
+            order.append("ollama")
+
+        last_error = None
+        for provider in order:
+            chain = getattr(self, f"chain_{provider}", None)
+            if chain is None:
+                continue
+            try:
+                response = (chat_prompt | chain).invoke({})
+                text = getattr(response, "content", None)
+                return text.strip() if text else str(response).strip()
+            except Exception as exc:
+                last_error = exc
+                _LOGGER.warning("[report narrative] provider %s failed: %s", provider, exc)
+                continue
+
+        raise RuntimeError(
+            f"Report narrative generation failed: {last_error}" if last_error
+            else "Report narrative generation failed: no provider produced a response."
+        )

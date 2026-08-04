@@ -1,4 +1,5 @@
 import io
+import os
 import sys
 import xxhash
 import types
@@ -38,6 +39,25 @@ def _running_in_notebook() -> bool:
         return shell is not None and shell.__class__.__name__ == "ZMQInteractiveShell"
     except Exception:
         return False
+
+
+def _running_in_colab() -> bool:
+    """True only inside Google Colab (a *remote* host).
+
+    Narrower than :func:`_running_in_notebook`: a local Jupyter kernel serving as
+    the backend (mode C) is reachable from a local Weights Studio at ``localhost``
+    and needs no tunnel, so only Colab warrants the "open a bore tunnel" nudge.
+    """
+    return "google.colab" in sys.modules
+
+
+def _embedded_kernel_disabled() -> bool:
+    """True when WEIGHTSLAB_DISABLE_EMBEDDED_KERNEL opts out of the real
+    embedded Jupyter kernel that ``wl.serve()`` starts alongside the gRPC
+    backend for the studio notebook panel."""
+    return os.environ.get(
+        "WEIGHTSLAB_DISABLE_EMBEDDED_KERNEL", "0"
+    ).strip().lower() in ("1", "true", "yes", "on")
 
 
 def safe_reset_index(df: "pd.DataFrame") -> "pd.DataFrame":
