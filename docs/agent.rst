@@ -609,6 +609,11 @@ configured LLM provider for the written analysis).
      - Reports on exactly those two signals instead of the automatic
        selection.
 
+The same report is available without going through the chat: the CLI
+console's ``report`` command and ``wl.ai_report_generation()`` in Python both
+run the identical path (and still use this agent for the written analysis) —
+see :doc:`experiment_reports`.
+
 Querying signal history (behavior over training)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

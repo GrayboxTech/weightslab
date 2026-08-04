@@ -5,14 +5,21 @@ LLM/agent coupling of its own, it only turns already-fetched data (a live
 ``LoggerQueue`` and the sample dataframe) into a rendered report. The
 narrative/conclusion text is written by the agent from ``collect_report_context``'s
 output and handed back in via ``narrative=`` when rendering.
+
+``generate_report`` ties the collect → narrate → render sequence together and
+is the single code path behind every way a user can ask for a report (the
+Studio button / chat action, ``wl.ai_report_generation``, and the CLI console's
+``report`` command) — the LLM stays injected as a ``narrative_fn`` callable, so
+this module still knows nothing about agents.
 """
 
 import base64
 import html
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import pandas as pd
 
@@ -635,3 +642,71 @@ def render_report(context: dict, output_path, narrative: Optional[str] = None) -
 def default_report_path(root_log_dir) -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return Path(root_log_dir) / "reports" / f"experiment_report_{stamp}.html"
+
+
+def summarize_context_for_llm(context: dict) -> str:
+    """The JSON summary of ``context`` that gets handed to an LLM for the
+    narrative: everything except the base64 plot images (bytes an LLM can do
+    nothing with, and by far the bulk of the context).
+
+    Bounded by construction — see ``collect_report_context``: per-signal
+    aggregates + O(top_k) outliers + a label→count histogram, never per-sample
+    rows — so the prompt is the same size for a hundred samples or ten million.
+    """
+    return json.dumps({
+        "signals": [
+            {k: v for k, v in entry.items() if k != "plot_b64"}
+            for entry in context.get("signals", [])
+        ],
+        "loss_shape_tags": context.get("loss_shape_tags", []),
+        "dataframe": context.get("dataframe", {}),
+    }, indent=2, default=str)
+
+
+def generate_report(
+    root_log_dir,
+    logger_q,
+    df: Optional[pd.DataFrame] = None,
+    signals: Optional[list] = None,
+    output_path=None,
+    narrative_fn: Optional[Callable[[str], str]] = None,
+) -> dict:
+    """Collect → narrate → render, in one call. The single implementation
+    behind every user-facing entry point (the Studio report button and the
+    agent's ``generate_experiment_report`` action, ``wl.ai_report_generation``,
+    and the CLI console's ``report`` command), so they cannot drift apart.
+
+    ``narrative_fn`` is called with ``summarize_context_for_llm(context)`` and
+    must return the Analysis prose — in practice
+    ``DataManipulationAgent.generate_report_narrative``. It is kept as an
+    injected callable so this module stays LLM-agnostic. Pass ``None`` to skip
+    the analysis entirely; a ``narrative_fn`` that *raises* (no provider
+    configured, request timed out, ...) degrades the same way — a report with
+    no written analysis rather than no report at all.
+
+    Returns ``{"path", "n_signals", "narrative", "narrative_error"}``. Failures
+    to gather data or write the file are NOT swallowed: they raise, because
+    there is no report to hand back.
+    """
+    context = collect_report_context(root_log_dir, logger_q, df, signals=signals)
+
+    narrative = None
+    narrative_error = None
+    if narrative_fn is not None:
+        try:
+            narrative = narrative_fn(summarize_context_for_llm(context))
+        except Exception as exc:
+            narrative_error = str(exc)
+            logger.warning("experiment report: narrative generation failed: %s", exc)
+
+    path = render_report(
+        context,
+        output_path if output_path is not None else default_report_path(root_log_dir),
+        narrative=narrative,
+    )
+    return {
+        "path": path,
+        "n_signals": len(context.get("signals") or []),
+        "narrative": narrative,
+        "narrative_error": narrative_error,
+    }

@@ -2819,12 +2819,13 @@ class DataService:
         trajectory plots + health classification + dataset stats + a written
         analysis -- saved under the experiment's ``reports/`` directory.
 
-        Two passes, one data fetch: ``reporting.collect_report_context``
-        deterministically gathers signal history + dataframe stats + renders
-        plots; that (plot-free) summary is then handed to the agent's own LLM
-        for the analysis paragraph (grounded in those exact numbers, never raw
-        history -- see report_prompt.py), and finally rendered once to disk.
-        A failed/unavailable LLM degrades to a report with no narrative rather
+        Thin wrapper over ``reporting.generate_report`` (the shared
+        collect -> narrate -> render path, also used by
+        ``wl.ai_report_generation`` and the CLI console's ``report`` command):
+        this resolves the live experiment's directory, logger and dataframe,
+        and injects the agent's own LLM as the narrative writer -- grounded in
+        the collected numbers, never raw history, see report_prompt.py. A
+        failed/unavailable LLM degrades to a report with no narrative rather
         than no report at all.
         """
         from weightslab.backend import ledgers
@@ -2848,34 +2849,16 @@ class DataService:
             df = None
 
         try:
-            context = reporting.collect_report_context(root_log_dir, logger_q, df, signals=signals)
+            result = reporting.generate_report(
+                root_log_dir, logger_q, df, signals=signals,
+                narrative_fn=self._agent.generate_report_narrative,
+            )
         except Exception as e:
-            return f"Action: failed to gather report data: {e}"
+            return f"Action: failed to generate report: {e}"
 
-        stats_summary = json.dumps({
-            "signals": [
-                {k: v for k, v in entry.items() if k != "plot_b64"}
-                for entry in context.get("signals", [])
-            ],
-            "loss_shape_tags": context.get("loss_shape_tags", []),
-            "dataframe": context.get("dataframe", {}),
-        }, indent=2, default=str)
-
-        narrative = None
-        try:
-            narrative = self._agent.generate_report_narrative(stats_summary)
-        except Exception as e:
-            logger.warning(f"[Agent] report narrative generation failed: {e}")
-
-        try:
-            output_path = reporting.default_report_path(root_log_dir)
-            path = reporting.render_report(context, output_path, narrative=narrative)
-        except Exception as e:
-            return f"Action: failed to render report: {e}"
-
-        n_signals = len(context.get("signals", []))
-        suffix = "" if narrative else " (no written analysis -- agent LLM unavailable)"
-        return f"Action: generated experiment report ({n_signals} signal(s)) at {path}{suffix}"
+        suffix = "" if result["narrative"] else " (no written analysis -- agent LLM unavailable)"
+        return (f"Action: generated experiment report ({result['n_signals']} signal(s)) "
+                f"at {result['path']}{suffix}")
 
     @staticmethod
     def _mask_from_coerced_query(df, expr: str):

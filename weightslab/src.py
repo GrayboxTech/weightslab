@@ -4866,6 +4866,157 @@ def write_dataframe(
     return path
 
 
+def _live_data_service():
+    """The DataService of the experiment running in THIS process, if any.
+
+    ``DataService.__init__`` publishes itself to ``weightslab.backend.cli``
+    (that is also how the CLI console reaches the agent), which makes it the
+    one process-wide handle to the live service — and therefore to the live
+    agent — without importing the gRPC service layer from here."""
+    try:
+        import weightslab.backend.cli as _cli_backend
+        return _cli_backend._get_cli_data_service()
+    except Exception:
+        return None
+
+
+def ai_report_generation(
+    signals: list | None = None,
+    output_path: str | None = None,
+    root_log_dir: str | None = None,
+    use_agent: bool = True,
+) -> str:
+    """Generate the experiment health report and return the path written.
+
+    Same artifact, same code path as the Weights Studio report button and the
+    agent's ``generate_experiment_report`` action (and the CLI console's
+    ``report`` command): signal trajectory plots, a health label per signal,
+    per-sample outliers, loss-shape tag counts, dataset stats, and a written
+    analysis produced by the agent's LLM from those exact numbers. Call it
+    from your training script or a notebook whenever you want a snapshot —
+    typically at the end of a run, or periodically from a callback.
+
+    The report is written to ``<root_log_dir>/reports/experiment_report_<stamp>.html``
+    unless *output_path* says otherwise.
+
+    Parameters
+    ----------
+    signals : list of str, optional
+        Report on these signals only. Default (``None``): every registered
+        signal with at least 2 logged points, "loss" ones first — see
+        :func:`weightslab.reporting.select_important_signals`.
+    output_path : str, optional
+        Write the HTML here instead of the default timestamped path.
+    root_log_dir : str, optional
+        Experiment directory to report on. Defaults to the active checkpoint
+        manager's ``root_log_dir``.
+    use_agent : bool, default True
+        Write the Analysis section with the agent's LLM. ``False`` skips the
+        LLM call entirely (no provider needed, no tokens spent) and produces
+        the same report minus the prose. With ``True`` but no agent available
+        (none configured, or no experiment being served in this process), the
+        report is still written — just without the analysis, never an error.
+
+    Raises
+    ------
+    RuntimeError
+        If there is no experiment directory or no logger to report on — there
+        is no report to return in that case.
+
+    Example::
+
+        import weightslab as wl
+
+        wl.ai_report_generation()                          # everything, with analysis
+        wl.ai_report_generation(signals=["train_loss"])    # one signal
+        wl.ai_report_generation(use_agent=False)           # no LLM call
+    """
+    return _ai_report_generation_result(
+        signals=signals, output_path=output_path,
+        root_log_dir=root_log_dir, use_agent=use_agent,
+    )["path"]
+
+
+def _ai_report_generation_result(
+    signals: list | None = None,
+    output_path: str | None = None,
+    root_log_dir: str | None = None,
+    use_agent: bool = True,
+) -> dict:
+    """:func:`ai_report_generation`'s implementation, keeping the full
+    ``reporting.generate_report`` result dict (path + signal count + narrative
+    state) instead of just the path. The public function returns the path
+    because that is all a training script wants; the CLI console's ``report``
+    command uses this one to also tell the user how many signals went in and
+    whether the written analysis made it."""
+    from weightslab import reporting
+
+    # Reactive signals may still be queued on the worker thread; process them
+    # so the report reflects the latest steps (same as write_dataframe).
+    drain_signals()
+
+    service = _live_data_service()
+
+    if root_log_dir is None:
+        root_log_dir = getattr(service, "_root_log_dir", None)
+    if root_log_dir is None:
+        try:
+            _cm = get_checkpoint_manager()
+            # An unresolved ledger Proxy raises on attribute access — getattr's
+            # default covers "no checkpoint manager registered" either way.
+            root_log_dir = getattr(_cm, "root_log_dir", None)
+        except Exception:
+            root_log_dir = None
+    if not root_log_dir:
+        raise RuntimeError(
+            "ai_report_generation: no experiment directory available. Start an "
+            "experiment (wl.watch_or_edit / wl.serve) or pass root_log_dir=..."
+        )
+
+    logger_q = get_logger()
+    if logger_q is None or not hasattr(logger_q, "get_graph_names"):
+        raise RuntimeError(
+            "ai_report_generation: no experiment logger available; nothing to report on."
+        )
+
+    try:
+        _dm = get_dataframe()
+        df = _dm.get_combined_df() if _dm is not None else None
+    except Exception as _e:
+        logger.debug("ai_report_generation: no sample dataframe available (%s).", _e)
+        df = None
+
+    # The narrative comes from the live agent — the same LLM call the Studio
+    # button makes. Without a served experiment there is no agent to ask, so
+    # the report degrades to "no written analysis" instead of failing.
+    narrative_fn = None
+    if use_agent:
+        agent = getattr(service, "_agent", None)
+        if agent is not None:
+            narrative_fn = agent.generate_report_narrative
+        else:
+            logger.info(
+                "ai_report_generation: no live agent in this process; writing the "
+                "report without a written analysis."
+            )
+
+    result = reporting.generate_report(
+        root_log_dir, logger_q, df, signals=signals,
+        output_path=output_path, narrative_fn=narrative_fn,
+    )
+    if result["narrative_error"]:
+        logger.warning(
+            "ai_report_generation: analysis section skipped — the agent LLM "
+            "failed (%s). The report itself was still written.",
+            result["narrative_error"],
+        )
+    logger.info(
+        "ai_report_generation: wrote report on %d signal(s) to %s",
+        result["n_signals"], result["path"],
+    )
+    return result
+
+
 # ##############################################################################################################
 # MAIN EXAMPLES USAGE (can be called from training script to manually set)
 # ##############################################################################################################

@@ -15,10 +15,38 @@ branded with the WeightsLab logo.
 Generating a report
 --------------------
 
-This is an :doc:`agent <agent>` action — there is no separate CLI command or
-Python function to call. Two equivalent ways to trigger it:
+Four ways to ask for one — all four run the **same** code path
+(``weightslab.reporting.generate_report``: collect → narrate → render), so
+they produce the same artifact:
 
-- **Chat / CLI**: ask for it in the chat bar (or via ``agent query`` on the CLI
+- **Python** — :func:`ai_report_generation` (see :doc:`user_functions`), for a
+  snapshot from your training script or a notebook:
+
+  .. code-block:: python
+
+     import weightslab as wl
+
+     path = wl.ai_report_generation()                        # every signal, with analysis
+     wl.ai_report_generation(signals=["train_loss"])         # specific signals
+     wl.ai_report_generation(use_agent=False)                # skip the LLM call
+     wl.ai_report_generation(output_path="reports/run.html") # choose the file
+
+  It returns the path written.
+
+- **CLI console** — the ``report`` command (see :ref:`cli-console`), from a
+  terminal attached to a running experiment with ``weightslab cli``:
+
+  .. code-block:: text
+
+     report
+     report train_loss val_loss
+     report --output /tmp/run_42.html
+     report --no-agent
+
+  The reply gives the path, the number of signals included, and whether the
+  written analysis made it in.
+
+- **Chat** — ask for it in the chat bar (or via ``agent query`` on the CLI
   console; see :doc:`agent` for how to initialize a provider first):
 
   .. code-block:: text
@@ -40,15 +68,15 @@ Python function to call. Two equivalent ways to trigger it:
   a dropdown of every report already on disk, newest first, click one to
   open it in a new browser tab.
 
-Either path runs the exact same backend action; the button just sends the
-same request the chat bar would, with a canned prompt. A colored status pill
-tracks progress: amber while checking/generating, orange if the agent isn't
-configured (the report still generates, just without a written analysis),
-green on success, red on failure.
+The button just sends the same request the chat bar would, with a canned
+prompt. A colored status pill tracks progress: amber while
+checking/generating, orange if the agent isn't configured (the report still
+generates, just without a written analysis), green on success, red on
+failure.
 
-The reply names the file written under ``<root_log_dir>/reports/`` (a
-timestamped ``experiment_report_<YYYYMMDD_HHMMSS>.html``) — open it in any
-browser.
+Every path writes to ``<root_log_dir>/reports/`` (a timestamped
+``experiment_report_<YYYYMMDD_HHMMSS>.html``) unless an explicit output path
+is given — open it in any browser.
 
 What's in the report
 ----------------------
@@ -140,16 +168,23 @@ dataset stats sections are unaffected — but signal cards show a text summary
 The written analysis needs a configured agent LLM provider (see
 :doc:`agent`'s *Initializing the agent* section). If no provider is
 available, the report is still generated with a note that no analysis was
-written, rather than failing outright.
+written, rather than failing outright. The same applies when
+``wl.ai_report_generation`` is called from a script that isn't serving an
+experiment: there is no live agent to ask, so the report comes out without
+the Analysis section instead of erroring.
 
 How it works (under the hood)
 --------------------------------
 
-1. The agent action reads the experiment logger's aggregated per-step history
-   for each selected signal (``LoggerQueue.get_current_signaL_history``) and
-   the live sample dataframe, and renders both to plots/stats via
-   ``weightslab.reporting`` — a plain data-in-plots-and-stats-out module with
-   no LLM involvement of its own.
+``weightslab.reporting.generate_report`` is the one implementation behind all
+four entry points above; the LLM reaches it as an injected ``narrative_fn``
+callable, so ``weightslab/reporting.py`` itself stays a plain
+data-in-plots-and-stats-out module with no agent coupling.
+
+1. ``collect_report_context`` reads the experiment logger's aggregated
+   per-step history for each selected signal
+   (``LoggerQueue.get_current_signaL_history``) and the live sample
+   dataframe, and renders both to plots/stats.
 2. That (plot-free) summary — signal names, health labels, value ranges,
    dataset stats — is handed to the agent's LLM in a single, focused call
    (``DataManipulationAgent.generate_report_narrative``) asking specifically

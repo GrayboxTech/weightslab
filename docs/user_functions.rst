@@ -29,6 +29,7 @@ Public API surface
 - ``wl.run_pending_evaluation``  *(optional, for training-loop integration)*
 - ``wl.trigger_pending_evaluation_async``  *(optional, for the background gRPC/CLI worker)*
 - ``wl.pointcloud_thumbnail`` / ``wl.pointcloud_boxes``  *(decorators — LiDAR / point-cloud tasks)*
+- ``wl.ai_report_generation``  *(agent-written HTML experiment report)*
 - ``wl.clear_all``
 - ``wl.seed_everything``
 - ``wl.set_log_directory``
@@ -1378,6 +1379,61 @@ Dump the ``loss_shape`` categorical tag and signals for sample-level rows only
         columns=["signals", "tag:loss_shape"],
         instance_id=0,
     )
+
+ai_report_generation
+--------------------
+
+**Signature**
+
+.. code-block:: python
+
+   wl.ai_report_generation(
+       signals=None,          # list[str] | None — default: every signal with >= 2 points
+       output_path=None,      # str | None — default: <root_log_dir>/reports/experiment_report_<stamp>.html
+       root_log_dir=None,     # str | None — default: the active checkpoint manager's dir
+       use_agent=True,        # write the Analysis section with the agent's LLM
+   ) -> str                   # the path written
+
+Generates the self-contained HTML experiment report — signal trajectory
+plots, a health label per signal, per-sample outliers, loss-shape tag counts,
+dataset stats, and a written analysis — and returns the file path. This is
+the same artifact, produced by the same code path, as the Weights Studio
+report button, the agent action ("generate a report" in the chat bar), and
+the CLI console's ``report`` command. See :doc:`experiment_reports` for what
+each section contains and how it stays bounded on huge datasets.
+
+The written analysis comes from the agent's LLM (see :doc:`agent` for
+provider setup). If no provider is configured — or no experiment is being
+served in this process, so there is no agent to ask — the report is still
+written, just without the Analysis prose. Pass ``use_agent=False`` to skip
+the LLM call deliberately (no provider needed, no tokens spent).
+
+Raises ``RuntimeError`` when there is no experiment directory or no logger to
+report on, since there is no report to return in that case.
+
+**Examples**
+
+Everything, with the written analysis::
+
+    import weightslab as wl
+
+    path = wl.ai_report_generation()
+    print(f"report written to {path}")
+
+Specific signals only, to a chosen file, without calling the LLM::
+
+    wl.ai_report_generation(
+        signals=["train_loss", "val_loss"],
+        output_path="reports/epoch_10.html",
+        use_agent=False,
+    )
+
+A snapshot at the end of a run (or periodically, from your own callback)::
+
+    for epoch in range(epochs):
+        train_one_epoch(...)
+        if epoch % 10 == 0:
+            wl.ai_report_generation()
 
 Point-cloud customization (LiDAR)
 ----------------------------------

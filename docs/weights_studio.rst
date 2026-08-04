@@ -526,6 +526,7 @@ Full reference: :doc:`user_commands`. Quick summary:
 - Evaluation: ``evaluate``, ``eval_status``, ``cancel_eval``.
 - Audit mode: ``audit [on|off]``.
 - AI agent: ``agent`` / ``query`` / ``ask`` — see :doc:`agent`.
+- Experiment report: ``report`` — see :doc:`experiment_reports`.
 - Session control: ``exit`` / ``quit``, ``clear`` / ``cls``.
 
 Troubleshooting

@@ -8,6 +8,9 @@ Covers:
 - summarize_loss_shape_tags (bounded by label count + examples, not sample count)
 - find_signal_outliers (delegates to LoggerQueue.top_k_samples_by_reduce)
 - collect_report_context / render_report end-to-end
+- summarize_context_for_llm (plot-free, bounded LLM payload)
+- generate_report (the shared collect -> narrate -> render path behind the
+  Studio button, wl.ai_report_generation and the CLI `report` command)
 """
 
 import base64
@@ -260,6 +263,107 @@ class TestReportEndToEnd(unittest.TestCase):
             path = reporting.render_report(ctx, reporting.default_report_path(tmp))
             html = open(path, encoding="utf-8").read()
             self.assertIn("No narrative was generated", html)
+
+
+# ---------------------------------------------------------------------------
+# summarize_context_for_llm / generate_report
+# ---------------------------------------------------------------------------
+
+class TestSummarizeContextForLLM(unittest.TestCase):
+
+    def test_drops_plots_and_keeps_the_bounded_sections(self):
+        context = {
+            "signals": [{"name": "train_loss", "label": "monotonic",
+                         "plot_b64": "AAAA" * 1000, "last_value": 0.2}],
+            "loss_shape_tags": [{"tag": "train_loss_shape", "counts": {"monotonic": 5}}],
+            "dataframe": {"total_samples": 5},
+            "root_log_dir": "/somewhere",
+        }
+        payload = reporting.summarize_context_for_llm(context)
+        self.assertNotIn("plot_b64", payload)
+        self.assertNotIn("AAAA", payload)
+        self.assertIn("train_loss", payload)
+        self.assertIn("train_loss_shape", payload)
+        self.assertIn("total_samples", payload)
+
+
+class TestGenerateReport(unittest.TestCase):
+
+    def _seeded_logger(self):
+        lg = _lg()
+        _seed_signal(lg, "train_loss", [1.0, 0.8, 0.6, 0.4])
+        return lg
+
+    def test_narrative_fn_receives_the_summary_and_lands_in_the_html(self):
+        lg = self._seeded_logger()
+        seen = {}
+
+        def narrator(summary):
+            seen["summary"] = summary
+            return "Loss is going down nicely."
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = reporting.generate_report(tmp, lg, None, narrative_fn=narrator)
+
+            self.assertIn("train_loss", seen["summary"])
+            self.assertNotIn("plot_b64", seen["summary"])
+            self.assertEqual(result["n_signals"], 1)
+            self.assertEqual(result["narrative"], "Loss is going down nicely.")
+            self.assertIsNone(result["narrative_error"])
+            html = open(result["path"], encoding="utf-8").read()
+            self.assertIn("Loss is going down nicely.", html)
+
+    def test_failing_narrative_fn_still_writes_a_report(self):
+        lg = self._seeded_logger()
+
+        def narrator(_summary):
+            raise RuntimeError("no provider configured")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = reporting.generate_report(tmp, lg, None, narrative_fn=narrator)
+
+            self.assertTrue(os.path.isfile(result["path"]))
+            self.assertIsNone(result["narrative"])
+            self.assertIn("no provider configured", result["narrative_error"])
+            html = open(result["path"], encoding="utf-8").read()
+            self.assertIn("No narrative was generated", html)
+
+    def test_without_narrative_fn_no_llm_is_consulted(self):
+        lg = self._seeded_logger()
+        with tempfile.TemporaryDirectory() as tmp:
+            result = reporting.generate_report(tmp, lg, None)
+            self.assertIsNone(result["narrative"])
+            self.assertIsNone(result["narrative_error"])
+            self.assertTrue(os.path.isfile(result["path"]))
+
+    def test_default_path_is_under_reports_dir_and_output_path_overrides_it(self):
+        lg = self._seeded_logger()
+        with tempfile.TemporaryDirectory() as tmp:
+            default = reporting.generate_report(tmp, lg, None)["path"]
+            self.assertEqual(os.path.basename(os.path.dirname(default)), "reports")
+
+            chosen = os.path.join(tmp, "custom", "my_report.html")
+            written = reporting.generate_report(tmp, lg, None, output_path=chosen)["path"]
+            self.assertEqual(os.path.abspath(written), os.path.abspath(chosen))
+            self.assertTrue(os.path.isfile(chosen))
+
+    def test_signals_filter_is_forwarded(self):
+        lg = self._seeded_logger()
+        _seed_signal(lg, "val_accuracy", [0.1, 0.5, 0.9])
+        with tempfile.TemporaryDirectory() as tmp:
+            result = reporting.generate_report(tmp, lg, None, signals=["train_loss"])
+            self.assertEqual(result["n_signals"], 1)
+            html = open(result["path"], encoding="utf-8").read()
+            self.assertNotIn("val_accuracy", html)
+
+    def test_unreadable_output_path_raises_rather_than_reporting_success(self):
+        lg = self._seeded_logger()
+        with tempfile.TemporaryDirectory() as tmp:
+            # A directory where the file should go -> write_text fails.
+            clash = os.path.join(tmp, "clash.html")
+            os.makedirs(clash)
+            with self.assertRaises(Exception):
+                reporting.generate_report(tmp, lg, None, output_path=clash)
 
 
 if __name__ == "__main__":
