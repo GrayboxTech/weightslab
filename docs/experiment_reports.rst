@@ -154,13 +154,11 @@ handful of oversized plots dominating the page.
 Requirements
 --------------
 
-Plotting needs matplotlib, an optional extra so a minimal install never pulls
-it in unasked:
+Plotting uses matplotlib (installed as a core dependency of WeightsLab). If you are working in an environment where it isn't present, install it with:
 
 .. code-block:: bash
 
-   pip install weightslab[reporting]
-
+   pip install matplotlib
 Without it, the report still renders — the health classification and
 dataset stats sections are unaffected — but signal cards show a text summary
 (first/last/min/max value) instead of a plot.
