@@ -15,6 +15,7 @@ import io
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import pandas as pd
 
@@ -33,7 +34,19 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 def _lg() -> LoggerQueue:
-    lg = LoggerQueue(register=False)
+    """A standalone logger whose history starts empty.
+
+    ``LoggerQueue.__init__`` binds to the process-global checkpoint manager's
+    on-disk DuckDB when one is registered (resume semantics, see
+    ``LoggerQueue.set_db_path``), and ``_restore_runtime_state_from_db`` then
+    replays that file's graph names. In a full-suite run an earlier test module
+    leaves such a manager registered in the global ledger, so without this
+    patch every logger built here would inherit that experiment's signals and
+    the "which signals get reported" assertions would see foreign names.
+    """
+    with mock.patch("weightslab.backend.logger.get_checkpoint_manager",
+                    return_value=None):
+        lg = LoggerQueue(register=False)
     lg.chkpt_manager = None
     return lg
 
