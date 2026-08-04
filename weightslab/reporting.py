@@ -10,12 +10,10 @@ output and handed back in via ``narrative=`` when rendering.
 import base64
 import html
 import logging
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import pandas as pd
 
 from weightslab.data.sample_stats import SampleStatsEx
