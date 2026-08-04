@@ -4579,6 +4579,14 @@ def write_dataframe(
     specific report is guaranteed fresh at the moment it's written, rather than
     whatever the background thread last computed.
 
+    Every ``flag="loss"`` signal is already auto-classified into a
+    ``'<signal>_shape'`` tag in the background with zero setup (see
+    :func:`enable_loss_shape_autotag`'s docstring), so you normally don't need
+    *loss_shape_signal* at all. It remains as a one-off: when set (e.g.
+    ``"loss_sample"``), the classifier runs synchronously first so this
+    specific report is guaranteed fresh at the moment it's written, rather than
+    whatever the background thread last computed.
+
     Parameters
     ----------
     path : str, optional

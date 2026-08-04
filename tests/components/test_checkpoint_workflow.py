@@ -1326,6 +1326,14 @@ class CheckpointSystemTests(unittest.TestCase):
         else:
             self.assertIsInstance(signals, list, "Signal history should be list or nested dict")
 
+    @classmethod
+    def tearDownClass(cls):
+        """Clear the global ledger so this class's model/dataloader/logger
+        registrations don't leak into later test files: register_in_ledger()/
+        watch_or_edit() silently reuse whatever is already registered under
+        the default name when no explicit name= is given."""
+        ledgers.clear_all()
+
 
 class CheckpointStepAwareBehaviorTests(unittest.TestCase):
     def test_model_hash_depends_on_init_step(self):

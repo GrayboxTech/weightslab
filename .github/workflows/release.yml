@@ -72,33 +72,34 @@ jobs:
             echo "::warning::Tag '${GITHUB_REF_NAME}' has no 'dev' in its name and its commit is not on main — skipping release entirely."
           fi
 
-  # # ── Shared: run tests before any publish (main or dev pre-release) ────────
-  # test:
-  #   name: Run Tests Before Release
-  #   needs: detect-target
-  #   runs-on: ubuntu-latest
-  #   if: ${{ needs.detect-target.outputs.should_run == 'true' }}
-  #   steps:
-  #     - uses: actions/checkout@v4
+  # ── Shared: run tests before any publish (main or dev pre-release) ────────
+  test:
+    name: Run Tests Before Release
+    needs: detect-target
+    runs-on: ubuntu-latest
+    if: ${{ needs.detect-target.outputs.should_run == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
 
-  #     - uses: actions/setup-python@v6
-  #       with:
-  #         python-version: '3.11'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
 
-  #     - name: Install dependencies
-  #       run: |
-  #         python -m pip install --upgrade pip
-  #         # Install the test extra so pytest, graphviz, torchmetrics,
-  #         # pytorch-lightning and tensorboard are available (several test modules
-  #         # import pytest / use pytest fixtures and cannot run under bare unittest).
-  #         python -m pip install .[utest] --extra-index-url https://download.pytorch.org/whl/cpu
-  #         python -m pip install pytest-timeout
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install the test extra so pytest, graphviz, torchmetrics,
+          # pytorch-lightning and tensorboard are available (several test modules
+          # import pytest / use pytest fixtures and cannot run under bare unittest).
+          python -m pip install .[utest] --extra-index-url https://download.pytorch.org/whl/cpu
+          python -m pip install pytest-timeout
 
-  #     - name: Run tests
-  #       run: |
-  #         export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-  #         python -m pip install pytorch_lightning
-  #         python -m unittest discover -s ./tests -p "test_*.py" -t . -v
+      - name: Run tests
+        run: |
+          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+          python -m pip install pytorch_lightning
+          python -m unittest discover -s ./tests -p "test_*.py" -t . -v
+
 
   # ═══════════════════════════════════════════════════════════════════════════
   # DEV RELEASE — tag on dev branch, not yet merged to main
@@ -236,47 +237,54 @@ jobs:
       - name: Create isolated virtual environment
         run: python -m venv .venv-ci
 
-      - name: Install from TestPyPI (wait until indexed)
+      # Wrapped in a retry: TestPyPI can take a while to index a fresh upload,
+      # and the install itself is a real network call to a public registry —
+      # both transient enough to warrant retrying the whole install+verify
+      # unit (up to 3 attempts total) rather than failing the job outright.
+      - name: Install from TestPyPI (wait until indexed) + verify import
+        uses: nick-fields/retry@v3
         env:
           WL_VERSION: ${{ needs.build-and-publish-dev-release.outputs.published_version }}
-        run: |
-          . .venv-ci/bin/activate
-          python -m pip install --upgrade pip
-          if [ -z "${WL_VERSION}" ]; then
-            echo "Missing published_version from upstream job"; exit 1
-          fi
-
-          for attempt in $(seq 1 60); do
-            echo "Checking TestPyPI for weightslab==${WL_VERSION} (attempt ${attempt}/60)"
-            if python -m pip download \
-                --index-url https://test.pypi.org/simple/ \
-                --no-deps \
-                "weightslab==${WL_VERSION}" \
-                -d /tmp/wl-probe >/dev/null 2>&1; then
-              echo "Found weightslab==${WL_VERSION}"
-              break
+        with:
+          timeout_minutes: 15
+          max_attempts: 3
+          retry_on: any
+          shell: bash
+          command: |
+            . .venv-ci/bin/activate
+            python -m pip install --upgrade pip
+            if [ -z "${WL_VERSION}" ]; then
+              echo "Missing published_version from upstream job"; exit 1
             fi
-            if [ "${attempt}" -eq 60 ]; then
-              echo "Timed out waiting for weightslab==${WL_VERSION} on TestPyPI"; exit 1
-            fi
-            sleep 7
-          done
 
-          python -m pip install \
-            --index-url https://test.pypi.org/simple/ \
-            --extra-index-url https://pypi.org/simple/ \
-            --extra-index-url https://download.pytorch.org/whl/cpu \
-            "weightslab==${WL_VERSION}" --no-cache-dir --retries 10 --timeout 60
-          echo "weightslab==${WL_VERSION} installed on Python ${{ matrix.python-version }}"
+            for attempt in $(seq 1 60); do
+              echo "Checking TestPyPI for weightslab==${WL_VERSION} (attempt ${attempt}/60)"
+              if python -m pip download \
+                  --index-url https://test.pypi.org/simple/ \
+                  --no-deps \
+                  "weightslab==${WL_VERSION}" \
+                  -d /tmp/wl-probe >/dev/null 2>&1; then
+                echo "Found weightslab==${WL_VERSION}"
+                break
+              fi
+              if [ "${attempt}" -eq 60 ]; then
+                echo "Timed out waiting for weightslab==${WL_VERSION} on TestPyPI"; exit 1
+              fi
+              sleep 7
+            done
 
-      - name: Verify package import
-        run: |
-          . .venv-ci/bin/activate
-          python -c "
-          import weightslab, importlib.metadata as m
-          print('weightslab import OK on Python ${{ matrix.python-version }}')
-          print('installed version:', m.version('weightslab'))
-          "
+            python -m pip install \
+              --index-url https://test.pypi.org/simple/ \
+              --extra-index-url https://pypi.org/simple/ \
+              --extra-index-url https://download.pytorch.org/whl/cpu \
+              "weightslab==${WL_VERSION}" --no-cache-dir --retries 10 --timeout 60
+            echo "weightslab==${WL_VERSION} installed on Python ${{ matrix.python-version }}"
+
+            python -c "
+            import weightslab, importlib.metadata as m
+            print('weightslab import OK on Python ${{ matrix.python-version }}')
+            print('installed version:', m.version('weightslab'))
+            "
 
   # Only for a dev pre-release tag (off main, name contains 'dev').
   create-dev-release:
@@ -619,46 +627,53 @@ jobs:
       - name: Create isolated virtual environment
         run: python -m venv .venv-ci
 
-      - name: Install from PyPI (wait until indexed)
+      # Wrapped in a retry: PyPI can take a while to index a fresh upload, and
+      # the install itself is a real network call to a public registry — both
+      # transient enough to warrant retrying the whole install+verify unit (up
+      # to 3 attempts total) rather than failing the job outright.
+      - name: Install from PyPI (wait until indexed) + verify import
+        uses: nick-fields/retry@v3
         env:
           WL_VERSION: ${{ needs.build-and-publish-main.outputs.published_version }}
-        run: |
-          . .venv-ci/bin/activate
-          python -m pip install --upgrade pip
-          if [ -z "${WL_VERSION}" ]; then
-            echo "Missing published_version from upstream job"; exit 1
-          fi
-
-          for attempt in $(seq 1 60); do
-            echo "Checking PyPI for weightslab==${WL_VERSION} (attempt ${attempt}/60)"
-            if python -m pip download \
-                --index-url https://pypi.org/simple/ \
-                --no-deps \
-                "weightslab==${WL_VERSION}" \
-                -d /tmp/wl-probe >/dev/null 2>&1; then
-              echo "Found weightslab==${WL_VERSION}"
-              break
+        with:
+          timeout_minutes: 15
+          max_attempts: 3
+          retry_on: any
+          shell: bash
+          command: |
+            . .venv-ci/bin/activate
+            python -m pip install --upgrade pip
+            if [ -z "${WL_VERSION}" ]; then
+              echo "Missing published_version from upstream job"; exit 1
             fi
-            if [ "${attempt}" -eq 60 ]; then
-              echo "Timed out waiting for weightslab==${WL_VERSION} on PyPI"; exit 1
-            fi
-            sleep 7
-          done
 
-          python -m pip install \
-            --index-url https://pypi.org/simple/ \
-            --extra-index-url https://download.pytorch.org/whl/cpu \
-            "weightslab==${WL_VERSION}" --no-cache-dir --retries 10 --timeout 60
-          echo "weightslab==${WL_VERSION} installed on Python ${{ matrix.python-version }}"
+            for attempt in $(seq 1 60); do
+              echo "Checking PyPI for weightslab==${WL_VERSION} (attempt ${attempt}/60)"
+              if python -m pip download \
+                  --index-url https://pypi.org/simple/ \
+                  --no-deps \
+                  "weightslab==${WL_VERSION}" \
+                  -d /tmp/wl-probe >/dev/null 2>&1; then
+                echo "Found weightslab==${WL_VERSION}"
+                break
+              fi
+              if [ "${attempt}" -eq 60 ]; then
+                echo "Timed out waiting for weightslab==${WL_VERSION} on PyPI"; exit 1
+              fi
+              sleep 7
+            done
 
-      - name: Verify package import
-        run: |
-          . .venv-ci/bin/activate
-          python -c "
-          import weightslab, importlib.metadata as m
-          print('weightslab import OK on Python ${{ matrix.python-version }}')
-          print('installed version:', m.version('weightslab'))
-          "
+            python -m pip install \
+              --index-url https://pypi.org/simple/ \
+              --extra-index-url https://download.pytorch.org/whl/cpu \
+              "weightslab==${WL_VERSION}" --no-cache-dir --retries 10 --timeout 60
+            echo "weightslab==${WL_VERSION} installed on Python ${{ matrix.python-version }}"
+
+            python -c "
+            import weightslab, importlib.metadata as m
+            print('weightslab import OK on Python ${{ matrix.python-version }}')
+            print('installed version:', m.version('weightslab'))
+            "
 
   create-main-release:
     name: Create GitHub Release
