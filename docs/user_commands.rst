@@ -230,7 +230,7 @@ HTTP/2 frames must pass through untouched. Two consequences:
   zero-signup option is `bore <https://github.com/ekzhang/bore>`_ with its free
   public relay: ``bore local 50051 --to bore.pub`` (prints ``bore.pub:<port>``).
   ``ngrok tcp 50051`` also works but now requires a credit card on the free tier.
-- The backend must run **plaintext** — the default ``weightslab ui launch``
+- The backend must run **plaintext** — the default ``weightslab start``
   (no ``--certs``) — so no TLS terminates mid-path.
 
 **Arguments**
@@ -267,7 +267,7 @@ HTTP/2 frames must pass through untouched. Two consequences:
    #    !bore local 50051 --to bore.pub
 
    # 2) On your machine, in two terminals:
-   weightslab ui launch                           # plaintext HTTP (default)
+   weightslab start                           # plaintext HTTP (default)
    weightslab tunnel bore.pub:12345               # the host:port bore printed
 
    # 3) Open http://localhost:5173 — Studio streams live from Colab.
