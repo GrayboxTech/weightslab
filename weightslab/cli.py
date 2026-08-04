@@ -723,6 +723,8 @@ def ui_start_native(args):
 
     ui_host = getattr(args, "host", None) or os.getenv("WEIGHTSLAB_UI_HOST", "0.0.0.0")
     preferred_ui_port, ui_port_source = _resolve_ui_port(args)
+    if ui_port_source == "default":
+        preferred_ui_port = 8080
     ui_port = preferred_ui_port
     backend_host = (getattr(args, "backend_host", None)
                     or os.getenv("GRPC_BACKEND_HOST", "localhost"))
