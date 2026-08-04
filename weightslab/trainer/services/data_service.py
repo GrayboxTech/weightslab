@@ -63,12 +63,24 @@ _DEFAULT_POINT_CLOUD_CHUNK_BYTES = 1 << 20 # 1 MiB
 # Cap for signal_history(..., 'list'): a raw per-sample history is subsampled
 # (evenly, endpoints kept) to at most this many points so a long training run
 # doesn't produce unwieldy per-cell lists. Override with WL_SIGNAL_HISTORY_MAX_POINTS.
-SIGNAL_HISTORY_MAX_POINTS = int(os.environ.get("WL_SIGNAL_HISTORY_MAX_POINTS", "100"))
+#
+# Parsed defensively so a bad env var can't crash module import.
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0 else default
+
+SIGNAL_HISTORY_MAX_POINTS = _env_int("WL_SIGNAL_HISTORY_MAX_POINTS", 100)
 
 # Cap for the on-demand GetSignalTrajectory plot (right-click a signal -> plot):
 # each sample's trajectory is downsampled (evenly, endpoints kept) to at most this
 # many points before it goes on the wire. Override with WL_SIGNAL_TRAJ_MAX_POINTS.
-SIGNAL_TRAJ_MAX_POINTS = int(os.environ.get("WL_SIGNAL_TRAJ_MAX_POINTS", "100"))
+SIGNAL_TRAJ_MAX_POINTS = _env_int("WL_SIGNAL_TRAJ_MAX_POINTS", 100)
 
 # A trajectory needs at least this many recorded points to be worth plotting;
 # samples with fewer are omitted from GetSignalTrajectory entirely.

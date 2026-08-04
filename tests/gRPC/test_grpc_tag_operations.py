@@ -233,6 +233,14 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
         except:
             pass
 
+        # Clear the global ledger so this class's model/dataloader/optimizer
+        # registrations don't leak into later test files: watch_or_edit()
+        # silently reuses whatever is already registered under the default
+        # name when no explicit name= is given, so a stale model here would
+        # otherwise get picked up by unrelated tests run later in the suite.
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
+
         # Clean up temp directory
         if os.path.exists(cls.temp_dir):
             shutil.rmtree(cls.temp_dir)
