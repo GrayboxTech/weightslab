@@ -533,14 +533,17 @@ class EmbeddedKernelBridge:
         _DONE = object()
 
         def _work():
-            self._busy = True
             try:
                 with self._lock:
-                    reply = self._client.execute_interactive(
-                        code, allow_stdin=False, timeout=None,
-                        output_hook=lambda msg: _append_iopub_output(
-                            lambda kind, payload: q.put((kind, payload)), msg),
-                    )
+                    self._busy = True
+                    try:
+                        reply = self._client.execute_interactive(
+                            code, allow_stdin=False, timeout=None,
+                            output_hook=lambda msg: _append_iopub_output(
+                                lambda kind, payload: q.put((kind, payload)), msg),
+                        )
+                    finally:
+                        self._busy = False
                 content = reply.get("content", {})
                 final = {
                     "ok": content.get("status") == "ok",
@@ -548,8 +551,6 @@ class EmbeddedKernelBridge:
                 }
             except Exception as exc:
                 final = {"ok": False, "exec_count": 0, "error": str(exc)}
-            finally:
-                self._busy = False
             q.put((_DONE, final))
 
         threading.Thread(target=_work, daemon=True, name="WL-Notebook-Cell-Run").start()
