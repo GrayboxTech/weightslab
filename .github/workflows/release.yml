@@ -108,8 +108,8 @@ jobs:
 
   build-and-publish-dev-release:
     name: Build & Publish Dev Release (TestPyPI)
-    # needs: [detect-target,test]
-    needs: [detect-target]
+    needs: [detect-target,test]
+    # needs: [detect-target]
     runs-on: ubuntu-latest
     if: ${{ needs.detect-target.outputs.should_run == 'true' }}
     permissions:
