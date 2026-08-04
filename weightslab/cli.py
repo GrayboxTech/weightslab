@@ -192,7 +192,7 @@ commands:
                            fresh randomly-named dir under the current folder.
                            (UI-only: run training separately with a main.py that
                            points its root_log_dir at the same directory.)
-                             --port PORT           UI HTTP port (default 50051)
+                              --port PORT           UI HTTP port (default 8080)
                              --config FILE         experiment config file used to read ui_port
                              --backend-port PORT   backend gRPC port (default 50051)
                              --backend-host HOST   backend gRPC host (default localhost)
