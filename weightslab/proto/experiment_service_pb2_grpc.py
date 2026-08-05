@@ -5,7 +5,7 @@ import warnings
 
 from weightslab.proto import experiment_service_pb2 as weightslab_dot_proto_dot_experiment__service__pb2
 
-GRPC_GENERATED_VERSION = '1.68.1'
+GRPC_GENERATED_VERSION = '1.76.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in weightslab/proto/experiment_service_pb2_grpc.py depends on'
+        + ' but the generated code in weightslab/proto/experiment_service_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -128,6 +128,31 @@ class ExperimentServiceStub(object):
                 '/ExperimentService/ResetAgent',
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ResetAgentResponse.FromString,
+                _registered_method=True)
+        self.RunNotebookCell = channel.unary_stream(
+                '/ExperimentService/RunNotebookCell',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.RunNotebookCellRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.NotebookCellChunk.FromString,
+                _registered_method=True)
+        self.InterruptNotebookCell = channel.unary_unary(
+                '/ExperimentService/InterruptNotebookCell',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.InterruptNotebookCellRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.InterruptNotebookCellResponse.FromString,
+                _registered_method=True)
+        self.GetNotebook = channel.unary_unary(
+                '/ExperimentService/GetNotebook',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.NotebookResponse.FromString,
+                _registered_method=True)
+        self.SaveNotebook = channel.unary_unary(
+                '/ExperimentService/SaveNotebook',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.SaveNotebookRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.SaveNotebookResponse.FromString,
+                _registered_method=True)
+        self.GenerateNotebookCode = channel.unary_unary(
+                '/ExperimentService/GenerateNotebookCode',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GenerateNotebookCodeRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GenerateNotebookCodeResponse.FromString,
                 _registered_method=True)
         self.RestoreCheckpoint = channel.unary_unary(
                 '/ExperimentService/RestoreCheckpoint',
@@ -281,6 +306,44 @@ class ExperimentServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def RunNotebookCell(self, request, context):
+        """Notebook (shared in-process Python kernel for the studio UI). Cell output is
+        server-streamed in chunks (stdout / stderr / result / image), mirroring
+        GetPointCloud, so long-running cells report incrementally.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def InterruptNotebookCell(self, request, context):
+        """Interrupt whichever cell is currently executing (best-effort; raises
+        KeyboardInterrupt in the executing thread at its next bytecode boundary).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetNotebook(self, request, context):
+        """Load the persisted notebook from root_log_dir (writes a default on first use).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SaveNotebook(self, request, context):
+        """Persist the notebook JSON back under root_log_dir.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GenerateNotebookCode(self, request, context):
+        """Ask the agent to propose Python code for a notebook cell ("> ..." cells).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def RestoreCheckpoint(self, request, context):
         """Checkpoint restore
         """
@@ -404,6 +467,31 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     servicer.ResetAgent,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ResetAgentResponse.SerializeToString,
+            ),
+            'RunNotebookCell': grpc.unary_stream_rpc_method_handler(
+                    servicer.RunNotebookCell,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.RunNotebookCellRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.NotebookCellChunk.SerializeToString,
+            ),
+            'InterruptNotebookCell': grpc.unary_unary_rpc_method_handler(
+                    servicer.InterruptNotebookCell,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.InterruptNotebookCellRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.InterruptNotebookCellResponse.SerializeToString,
+            ),
+            'GetNotebook': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetNotebook,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.NotebookResponse.SerializeToString,
+            ),
+            'SaveNotebook': grpc.unary_unary_rpc_method_handler(
+                    servicer.SaveNotebook,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.SaveNotebookRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.SaveNotebookResponse.SerializeToString,
+            ),
+            'GenerateNotebookCode': grpc.unary_unary_rpc_method_handler(
+                    servicer.GenerateNotebookCode,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GenerateNotebookCodeRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GenerateNotebookCodeResponse.SerializeToString,
             ),
             'RestoreCheckpoint': grpc.unary_unary_rpc_method_handler(
                     servicer.RestoreCheckpoint,
@@ -939,6 +1027,141 @@ class ExperimentService(object):
             '/ExperimentService/ResetAgent',
             weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
             weightslab_dot_proto_dot_experiment__service__pb2.ResetAgentResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RunNotebookCell(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/ExperimentService/RunNotebookCell',
+            weightslab_dot_proto_dot_experiment__service__pb2.RunNotebookCellRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.NotebookCellChunk.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def InterruptNotebookCell(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/InterruptNotebookCell',
+            weightslab_dot_proto_dot_experiment__service__pb2.InterruptNotebookCellRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.InterruptNotebookCellResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetNotebook(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetNotebook',
+            weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.NotebookResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SaveNotebook(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/SaveNotebook',
+            weightslab_dot_proto_dot_experiment__service__pb2.SaveNotebookRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.SaveNotebookResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GenerateNotebookCode(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GenerateNotebookCode',
+            weightslab_dot_proto_dot_experiment__service__pb2.GenerateNotebookCodeRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.GenerateNotebookCodeResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -155,6 +155,11 @@ def _handle_command(cmd: str) -> Any:
                         'agent model <MODEL> | agent models | agent reset | agent query <prompt>'
                     ),
                     'query / ask': 'Shortcut for agent query. Syntax: query <prompt> or ask <prompt>',
+                    'report': (
+                        'Generate the experiment HTML report (signal plots, health labels, '
+                        'dataset stats + an agent-written analysis) under <root_log_dir>/reports/. '
+                        'Syntax: report [signal ...] [--signals a,b] [--output PATH] [--no-agent]'
+                    ),
                     'evaluate / eval': (
                         'Pause training and trigger an evaluation pass. '
                         'Syntax: evaluate [split_name] [--steps N] [--tags tag1,tag2]. '
@@ -196,6 +201,12 @@ def _handle_command(cmd: str) -> Any:
                     'discard by sample_id': 'discard sample_001 sample_002',
                     'restore by sample_id': 'undiscard sample_001',
                     'tag by sample_id': 'add_tag sample_001 difficult sample_002 sample_003',
+                },
+                'report_examples': {
+                    'report on every signal': 'report',
+                    'report on specific signals': 'report train_loss val_loss',
+                    'skip the LLM analysis': 'report --no-agent',
+                    'write to a chosen file': 'report --output /tmp/run.html',
                 },
                 'agent_examples': {
                     'check agent': 'agent status',
@@ -818,6 +829,57 @@ def _handle_command(cmd: str) -> Any:
                 return {'ok': True, 'message': 'Agent plan generated.', 'operations': operations}
 
             return {'ok': False, 'error': 'unknown_agent_command'}
+
+        # ------------------------------------------------------------------
+        # report — generate the experiment HTML report (same as the Studio
+        # button / the agent's generate_experiment_report action)
+        # ------------------------------------------------------------------
+        if verb in ('report', 'reports'):
+            # Syntax: report [signal ...] [--signals a,b] [--output PATH] [--no-agent]
+            signals: list = []
+            output_path = None
+            use_agent = True
+
+            i = 1
+            while i < len(parts):
+                token = parts[i]
+                if token == '--no-agent':
+                    use_agent = False
+                elif token in ('--signals', '--signal') and i + 1 < len(parts):
+                    signals += [s for s in parts[i + 1].split(',') if s]
+                    i += 1
+                elif token in ('--output', '-o') and i + 1 < len(parts):
+                    output_path = parts[i + 1]
+                    i += 1
+                elif token.startswith('--'):
+                    return {'ok': False, 'error': (
+                        'usage: report [signal ...] [--signals a,b] '
+                        '[--output PATH] [--no-agent]')}
+                else:
+                    signals.append(token)
+                i += 1
+
+            try:
+                from weightslab.src import _ai_report_generation_result
+
+                result = _ai_report_generation_result(
+                    signals=signals or None, output_path=output_path,
+                    use_agent=use_agent,
+                )
+            except Exception as e:
+                return {'ok': False, 'error': str(e)}
+
+            has_analysis = bool(result.get('narrative'))
+            message = (f"Report written to {result['path']} "
+                       f"({result['n_signals']} signal(s)"
+                       f"{'' if has_analysis else ', no written analysis'}).")
+            return {
+                'ok': True,
+                'path': result['path'],
+                'signals': result['n_signals'],
+                'analysis': has_analysis,
+                'message': message,
+            }
 
         # Hyperparameters: list / show details and set
         if verb in ('hp', 'hyperparams'):

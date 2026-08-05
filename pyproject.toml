@@ -85,6 +85,15 @@ dependencies = [
   "langchain-core>=0.3,<2",
   "langchain-ollama>=0.2,<2",
   "langchain-openai>=0.2,<2",
+
+  # Jupyter
+  "ipykernel>=6.29,<7",
+  "jupyter_client>=8.6,<9",
+  "notebook>=7.6.1",
+  "ipywidgets>=8.1.8",
+
+  # Reporting
+  "matplotlib>=3.7,<4",
 ]
 
 [project.optional-dependencies]
@@ -141,6 +150,8 @@ weightslab = [
   "examples/**/*",
   # Pre-built Weights Studio SPA served by `weightslab start`.
   "ui/static/**/*",
+  # Logo used to brand generated experiment reports (weightslab/reporting.py).
+  "assets/**/*",
 ]
 
 [tool.setuptools.exclude-package-data]

@@ -428,6 +428,71 @@ class TestIngestPerSample(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 7b. top_k_samples_by_reduce (weightslab/reporting.py's bounded outlier
+#     lookup -- ranking happens in DuckDB, only the top k rows ever leave it)
+# ---------------------------------------------------------------------------
+
+class TestTopKSamplesByReduce(unittest.TestCase):
+
+    def _seed(self, lg):
+        # s0: peaks at 5.0 (one bad spike), otherwise flat low -- widest swing.
+        # s1: steady mid-range values -- no extremes.
+        # s2: peaks at 3.0 -- second-highest peak, smaller swing than s0.
+        lg.ingest_per_sample("loss", "h1", [
+            ("s0", 0, 0.1), ("s0", 1, 5.0), ("s0", 2, 0.1),
+            ("s1", 0, 1.0), ("s1", 1, 1.1), ("s1", 2, 0.9),
+            ("s2", 0, 0.2), ("s2", 1, 3.0), ("s2", 2, 0.2),
+        ])
+
+    def test_max_reduce_ranks_highest_peak_first(self):
+        lg = _lg()
+        self._seed(lg)
+        top = lg.top_k_samples_by_reduce("loss", reduce="max", k=2)
+        self.assertEqual([r["sample_id"] for r in top], ["s0", "s2"])
+        self.assertAlmostEqual(top[0]["value"], 5.0, places=4)
+
+    def test_spread_reduce_ranks_widest_swing_first(self):
+        lg = _lg()
+        self._seed(lg)
+        top = lg.top_k_samples_by_reduce("loss", reduce="spread", k=1)
+        self.assertEqual(top[0]["sample_id"], "s0")
+        self.assertAlmostEqual(top[0]["value"], 4.9, places=4)
+
+    def test_min_reduce_ascending_gets_lowest_first(self):
+        lg = _lg()
+        self._seed(lg)
+        top = lg.top_k_samples_by_reduce("loss", reduce="min", k=1, descending=False)
+        # s0's min (0.1) ties s2's min (0.2)? No -- 0.1 < 0.2, s0 wins.
+        self.assertEqual(top[0]["sample_id"], "s0")
+
+    def test_k_bounds_the_result_regardless_of_sample_count(self):
+        lg = _lg()
+        self._seed(lg)
+        top = lg.top_k_samples_by_reduce("loss", reduce="max", k=1)
+        self.assertEqual(len(top), 1)
+
+    def test_unknown_metric_returns_empty(self):
+        lg = _lg()
+        self._seed(lg)
+        self.assertEqual(lg.top_k_samples_by_reduce("nonexistent", reduce="max", k=5), [])
+
+    def test_invalid_reduce_raises(self):
+        lg = _lg()
+        self._seed(lg)
+        with self.assertRaises(ValueError):
+            lg.top_k_samples_by_reduce("loss", reduce="bogus", k=5)
+
+    def test_exp_hash_filter_applied(self):
+        lg = _lg()
+        self._seed(lg)
+        lg.ingest_per_sample("loss", "h2", [("s9", 0, 99.0)])
+        top_h1 = lg.top_k_samples_by_reduce("loss", reduce="max", k=5, exp_hash="h1")
+        self.assertNotIn("s9", [r["sample_id"] for r in top_h1])
+        top_h2 = lg.top_k_samples_by_reduce("loss", reduce="max", k=5, exp_hash="h2")
+        self.assertEqual([r["sample_id"] for r in top_h2], ["s9"])
+
+
+# ---------------------------------------------------------------------------
 # 8. get_current_signaL_history
 # ---------------------------------------------------------------------------
 

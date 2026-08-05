@@ -15,6 +15,23 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
        </div>
    </div>
 
+.. tip:: New on this branch
+
+   - **AI agent experiment reports** — ask the agent (chat bar, CLI, or the
+     new report button in Weights Studio) to *"generate an experiment
+     report"* for a branded, self-contained HTML summary: per-signal health
+     plots, bounded per-sample outliers, dataset stats, and a written
+     analysis grounded in those numbers — safe even on a dataset with
+     millions of samples. See :doc:`experiment_reports`.
+   - **Studio notebook, upgraded** — the in-app notebook panel is now
+     renameable, has a proper Code/Markdown picker (instead of a blind
+     toggle), a "Clear output" button next to Copy, and "Run all" now always
+     renders every Markdown cell instead of occasionally flipping an
+     already-rendered one back to edit mode.
+   - **Local Jupyter Notebook picker** — ``weightslab start``'s landing page
+     can now list and reopen existing local notebooks, not just create a new
+     one each time.
+
 .. grid:: 1 1 2 2
    :gutter: 2
 
@@ -86,6 +103,12 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       Drive UI actions (sort, dump, load), data analysis, tagging/discarding, and model freeze/reset with natural language.
 
+   .. grid-item-card:: Experiment Reports
+      :link: experiment_reports
+      :link-type: doc
+
+      Ask the agent for a branded HTML report: signal health plots, dataset stats, and a written analysis.
+
    .. grid-item-card:: gRPC Communication
       :link: grpc/index
       :link-type: doc
@@ -134,6 +157,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    hyperparameters
    logger
    checkpointing
+   experiment_reports
    .. weights_studio
 
 

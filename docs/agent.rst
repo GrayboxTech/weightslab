@@ -57,6 +57,11 @@ The agent recognizes four broad families of request:
        whose loss was ever above 5", "Keep samples whose average training loss
        stayed under 0.2" — queries over each sample's signal history *over
        training*, not just its latest value.
+   * - **Experiment reports**
+     - "How is this experiment going? Generate a report.", "Create a report
+       on training progress" — a branded HTML report with signal health
+       plots, dataset stats, and a written analysis. See
+       :doc:`experiment_reports`.
 
 Compound, multi-step requests work too. A prompt such as *"Tag as 'Disabled'
 samples with training loss greater than 0.3 and loss_shape classified as
@@ -582,6 +587,32 @@ never writes.
      - Reports a single value (``root_log_dir``) from the config.
    * - "What is the batch size?"
      - Reports the resolved value (e.g. ``data.train_loader.batch_size``).
+
+Generating an experiment report
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Read-only, like the configuration lookups above — it never modifies the
+experiment, only writes a new report file. See :doc:`experiment_reports` for
+what the report contains and its requirements (matplotlib for plots, a
+configured LLM provider for the written analysis).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 60 40
+
+   * - Prompt
+     - What happens
+   * - "How is this experiment going? Generate a report."
+     - Builds an HTML report covering the automatically-selected most
+       important signals, saved under ``<root_log_dir>/reports/``.
+   * - "Generate an experiment report on train_loss and val_loss"
+     - Reports on exactly those two signals instead of the automatic
+       selection.
+
+The same report is available without going through the chat: the CLI
+console's ``report`` command and ``wl.ai_report_generation()`` in Python both
+run the identical path (and still use this agent for the written analysis) —
+see :doc:`experiment_reports`.
 
 Querying signal history (behavior over training)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

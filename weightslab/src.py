@@ -30,7 +30,8 @@ from weightslab.backend.model_interface import ModelInterface
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
-from weightslab.utils.tools import detach_to_cpu, _running_in_notebook
+from weightslab.utils.tools import detach_to_cpu, _running_in_notebook, _running_in_colab, _embedded_kernel_disabled
+from weightslab.trainer.services import notebook_service as _notebook_service
 from weightslab.backend.logger import LoggerQueue
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
@@ -68,6 +69,35 @@ from tqdm import tqdm
 
 # Get global logger
 logger = logging.getLogger(__name__)
+
+
+def _resolve_configured_root_log_dir(configured):
+    """Resolve the experiment ``root_log_dir`` for a serving config.
+
+    Resolution order:
+      1. ``configured`` — an explicit value from the wrapped hyperparameters.
+      2. ``$WEIGHTSLAB_ROOT_LOG_DIR`` — set by ``weightslab start [DIR]`` so an
+         otherwise-unconfigured training run lands in the directory the UI
+         established (shared checkpoints/logs/notebook.ipynb). Only used if it
+         actually points at an existing directory; if it's set but stale/typo'd,
+         a warning is logged and resolution falls through to (3) instead of
+         silently training into a directory the UI never established.
+      3. A throwaway ``tempfile.mkdtemp()`` — last resort so serving never fails
+         for lack of a directory.
+    """
+    if configured:
+        return configured
+    env_dir = os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR")
+    if env_dir:
+        if os.path.isdir(env_dir):
+            return env_dir
+        logger.warning(
+            f"WEIGHTSLAB_ROOT_LOG_DIR is set to '{env_dir}', but that directory "
+            "does not exist. Falling back to a temporary directory instead."
+        )
+    return tempfile.mkdtemp()
+
+
 # Get global dataframe proxy (auto-updated when ledger registers real manager)
 DATAFRAME_M = None
 # Global registry for custom signals
@@ -1349,8 +1379,10 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         if fl in ('hp', 'hyperparams', 'params', 'hyperparameters', 'parameters', 'config'):
             # If obj is a string, treat as a file path and start watcher
             try:
-                # Initialize CheckpointManager if we have a root dir (fallback to default root)
-                obj['root_log_dir'] = obj.get('root_log_dir') or tempfile.mkdtemp()
+                # Initialize CheckpointManager if we have a root dir (see
+                # _resolve_configured_root_log_dir for the resolution order).
+                obj['root_log_dir'] = _resolve_configured_root_log_dir(
+                    obj.get('root_log_dir'))
                 try:
                     # Check if a checkpoint manager is already registered in ledger
                     try:
@@ -1503,6 +1535,13 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
         serving_grpc: Start the gRPC server. In a notebook/Colab, if this is on
             but ``serving_bore`` is off, a warning suggests ``serving_bore=True``
             (the UI runs on your own machine and needs a tunnel to reach here).
+            Also embeds a real Jupyter kernel (sharing this process's live
+            objects) for the studio notebook panel and any external Jupyter
+            client to attach to, unless this process is already itself a
+            notebook/Colab kernel, `ipykernel`/`jupyter_client` aren't
+            installed (``pip install weightslab[notebook-kernel]``), or
+            ``WEIGHTSLAB_DISABLE_EMBEDDED_KERNEL=1`` is set. Only one kernel is
+            ever embedded per process — a second ``serve()`` call reuses it.
         spawn_cli_client: When ``serving_cli`` is True, also open the interactive
             REPL in a new console window (the default, backward-compatible
             behavior). Set to ``False`` to start the CLI server *headless* — it
@@ -1568,18 +1607,42 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
             )
         logger.warning(base_msg)
 
+    # Embed a real Jupyter kernel (shares this process's live objects) so the
+    # studio notebook panel — and any external Jupyter client — can attach to
+    # it, unless we're already inside a notebook/Colab kernel ourselves (mode
+    # C) or the user opted out via WEIGHTSLAB_DISABLE_EMBEDDED_KERNEL.
+    embed_kernel_decision = None
+    if serving_grpc:
+        embed_kernel_decision = not _running_in_notebook() and not _embedded_kernel_disabled()
+        _notebook_service.configure_embedded_kernel(embed_kernel_decision)
+
     if serving_grpc:
         grpc_serve(**kwargs)
 
-    # In a notebook/Colab the backend has no local Weights Studio to talk to
-    # (the UI runs on the user's own machine). Nudge them to open a tunnel.
-    if serving_grpc and not serving_bore and _running_in_notebook():
+    if embed_kernel_decision:
+        connection_file = _notebook_service.get_embedded_kernel_connection_file(wait_timeout=15.0)
+        if connection_file is not None:
+            print("=" * 60)
+            print(" Embedded Jupyter kernel ready (shares live process memory):")
+            print(f"     jupyter console --existing {connection_file}")
+            print(" The studio notebook panel already uses this same kernel.")
+            print("=" * 60)
+        else:
+            logger.warning(
+                "Embedded notebook kernel did not come up in time (or "
+                "ipykernel/jupyter_client are not installed) — the studio "
+                "notebook panel will use the built-in executor instead."
+            )
+
+    # On a REMOTE host (Colab) the local Weights Studio cannot reach this backend
+    # directly, so nudge for a tunnel. A LOCAL notebook serving as the backend
+    # (mode C) is reachable at localhost, so it needs no tunnel and no warning.
+    if serving_grpc and not serving_bore and _running_in_colab():
         logger.warning(
-            "Running in a notebook/Colab with serving_grpc=True but "
-            "serving_bore=False. Weights Studio runs on your OWN machine and "
-            "cannot reach this backend directly. Pass serving_bore=True to open "
-            "a tunnel and sync with the UI: wl.serve(serving_grpc=True, "
-            "serving_bore=True)."
+            "Running in Colab with serving_grpc=True but serving_bore=False. "
+            "Weights Studio runs on your OWN machine and cannot reach this "
+            "backend directly. Pass serving_bore=True to open a tunnel and sync "
+            "with the UI: wl.serve(serving_grpc=True, serving_bore=True)."
         )
 
     bore_endpoint = None
@@ -2261,14 +2324,6 @@ def save_signals(
             return to_numpy(x)
         return None
 
-    def expand_dim(x):
-        """Add axis if 1D — skip for lists (inhomogeneous shapes)."""
-        if x is None or isinstance(x, list):
-            return x
-        if x.ndim == 1:
-            return x[:, np.newaxis]
-        return x
-
     preds_np = normalize(preds)
     preds_raw_np = normalize(preds_raw)
     target_np = normalize(targets)
@@ -2289,11 +2344,6 @@ def save_signals(
         }
     else:
         losses_data = None
-
-    # Expand dims for 1D arrays (skipped for lists)
-    target_np = expand_dim(target_np)
-    preds_np = expand_dim(preds_np)
-    preds_raw_np = expand_dim(preds_raw_np)
 
     # Enqueue to dataframe manager buffer for efficiency
     DATAFRAME_M.enqueue_batch(
@@ -4814,6 +4864,157 @@ def write_dataframe(
         )
 
     return path
+
+
+def _live_data_service():
+    """The DataService of the experiment running in THIS process, if any.
+
+    ``DataService.__init__`` publishes itself to ``weightslab.backend.cli``
+    (that is also how the CLI console reaches the agent), which makes it the
+    one process-wide handle to the live service — and therefore to the live
+    agent — without importing the gRPC service layer from here."""
+    try:
+        import weightslab.backend.cli as _cli_backend
+        return _cli_backend._get_cli_data_service()
+    except Exception:
+        return None
+
+
+def ai_report_generation(
+    signals: list | None = None,
+    output_path: str | None = None,
+    root_log_dir: str | None = None,
+    use_agent: bool = True,
+) -> str:
+    """Generate the experiment health report and return the path written.
+
+    Same artifact, same code path as the Weights Studio report button and the
+    agent's ``generate_experiment_report`` action (and the CLI console's
+    ``report`` command): signal trajectory plots, a health label per signal,
+    per-sample outliers, loss-shape tag counts, dataset stats, and a written
+    analysis produced by the agent's LLM from those exact numbers. Call it
+    from your training script or a notebook whenever you want a snapshot —
+    typically at the end of a run, or periodically from a callback.
+
+    The report is written to ``<root_log_dir>/reports/experiment_report_<stamp>.html``
+    unless *output_path* says otherwise.
+
+    Parameters
+    ----------
+    signals : list of str, optional
+        Report on these signals only. Default (``None``): every registered
+        signal with at least 2 logged points, "loss" ones first — see
+        :func:`weightslab.reporting.select_important_signals`.
+    output_path : str, optional
+        Write the HTML here instead of the default timestamped path.
+    root_log_dir : str, optional
+        Experiment directory to report on. Defaults to the active checkpoint
+        manager's ``root_log_dir``.
+    use_agent : bool, default True
+        Write the Analysis section with the agent's LLM. ``False`` skips the
+        LLM call entirely (no provider needed, no tokens spent) and produces
+        the same report minus the prose. With ``True`` but no agent available
+        (none configured, or no experiment being served in this process), the
+        report is still written — just without the analysis, never an error.
+
+    Raises
+    ------
+    RuntimeError
+        If there is no experiment directory or no logger to report on — there
+        is no report to return in that case.
+
+    Example::
+
+        import weightslab as wl
+
+        wl.ai_report_generation()                          # everything, with analysis
+        wl.ai_report_generation(signals=["train_loss"])    # one signal
+        wl.ai_report_generation(use_agent=False)           # no LLM call
+    """
+    return _ai_report_generation_result(
+        signals=signals, output_path=output_path,
+        root_log_dir=root_log_dir, use_agent=use_agent,
+    )["path"]
+
+
+def _ai_report_generation_result(
+    signals: list | None = None,
+    output_path: str | None = None,
+    root_log_dir: str | None = None,
+    use_agent: bool = True,
+) -> dict:
+    """:func:`ai_report_generation`'s implementation, keeping the full
+    ``reporting.generate_report`` result dict (path + signal count + narrative
+    state) instead of just the path. The public function returns the path
+    because that is all a training script wants; the CLI console's ``report``
+    command uses this one to also tell the user how many signals went in and
+    whether the written analysis made it."""
+    from weightslab import reporting
+
+    # Reactive signals may still be queued on the worker thread; process them
+    # so the report reflects the latest steps (same as write_dataframe).
+    drain_signals()
+
+    service = _live_data_service()
+
+    if root_log_dir is None:
+        root_log_dir = getattr(service, "_root_log_dir", None)
+    if root_log_dir is None:
+        try:
+            _cm = get_checkpoint_manager()
+            # An unresolved ledger Proxy raises on attribute access — getattr's
+            # default covers "no checkpoint manager registered" either way.
+            root_log_dir = getattr(_cm, "root_log_dir", None)
+        except Exception:
+            root_log_dir = None
+    if not root_log_dir:
+        raise RuntimeError(
+            "ai_report_generation: no experiment directory available. Start an "
+            "experiment (wl.watch_or_edit / wl.serve) or pass root_log_dir=..."
+        )
+
+    logger_q = get_logger()
+    if logger_q is None or not hasattr(logger_q, "get_graph_names"):
+        raise RuntimeError(
+            "ai_report_generation: no experiment logger available; nothing to report on."
+        )
+
+    try:
+        _dm = get_dataframe()
+        df = _dm.get_combined_df() if _dm is not None else None
+    except Exception as _e:
+        logger.debug("ai_report_generation: no sample dataframe available (%s).", _e)
+        df = None
+
+    # The narrative comes from the live agent — the same LLM call the Studio
+    # button makes. Without a served experiment there is no agent to ask, so
+    # the report degrades to "no written analysis" instead of failing.
+    narrative_fn = None
+    if use_agent:
+        agent = getattr(service, "_agent", None)
+        if agent is not None:
+            narrative_fn = agent.generate_report_narrative
+        else:
+            logger.info(
+                "ai_report_generation: no live agent in this process; writing the "
+                "report without a written analysis."
+            )
+
+    result = reporting.generate_report(
+        root_log_dir, logger_q, df, signals=signals,
+        output_path=output_path, narrative_fn=narrative_fn,
+    )
+    if result["narrative_error"]:
+        logger.warning(
+            "ai_report_generation: analysis section skipped — the agent LLM "
+            "failed (%s). The report itself was still written.",
+            result["narrative_error"],
+        )
+    logger.info(
+        "ai_report_generation: wrote report on %d signal(s) to %s",
+        result["n_signals"], result["path"],
+    )
+    return result
 
 
 # ##############################################################################################################

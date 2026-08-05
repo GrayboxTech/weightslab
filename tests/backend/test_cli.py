@@ -9,7 +9,9 @@ import argparse
 import contextlib
 import io
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -22,6 +24,7 @@ from weightslab.cli import (
     _get_example_dir,
     _install_example_requirements,
     _make_executable,
+    _resolve_experiment_dir,
     example_start,
     main,
     ui_secure_environment,
@@ -131,6 +134,27 @@ class TestUiSecureEnvironment(unittest.TestCase):
 class TestUiStartNative(unittest.TestCase):
     """`weightslab start` serves the bundled SPA + gRPC-Web proxy (no Docker)."""
 
+    def setUp(self):
+        # `weightslab start` with no DIR creates a fresh randomly-named experiment
+        # directory under the CWD. Run each test from a throwaway CWD so that dir
+        # never lands in the repo, and restore the environment afterwards.
+        self._cwd = os.getcwd()
+        self._tmp = tempfile.mkdtemp()
+        os.chdir(self._tmp)
+        self._env_snapshot = {
+            k: os.environ.get(k)
+            for k in ("WEIGHTSLAB_ROOT_LOG_DIR", "WL_LAST_EXPERIMENT_DIR")
+        }
+
+    def tearDown(self):
+        os.chdir(self._cwd)
+        for k, v in self._env_snapshot.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
     @patch("weightslab.utils.telemetry.ping_ui_launch")
     @patch("weightslab.ui.server.serve_ui")
     def test_start_invokes_serve_ui_with_defaults(self, mock_serve, _mock_ping):
@@ -177,6 +201,66 @@ class TestUiStartNative(unittest.TestCase):
         args = argparse.Namespace(port=9126, host=None, backend_host=None,
                                   backend_port=None, no_browser=True, certs=False)
         ui_start_native(args)
+        mock_serve.assert_called_once()
+
+
+class TestExperimentDir(unittest.TestCase):
+    """`weightslab start [DIR]` establishes the experiment directory (root_log_dir)."""
+
+    def setUp(self):
+        self._cwd = os.getcwd()
+        self._tmp = tempfile.mkdtemp()
+        os.chdir(self._tmp)
+        self._env_snapshot = {
+            k: os.environ.get(k)
+            for k in ("WEIGHTSLAB_ROOT_LOG_DIR", "WL_LAST_EXPERIMENT_DIR")
+        }
+
+    def tearDown(self):
+        os.chdir(self._cwd)
+        for k, v in self._env_snapshot.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_resolve_explicit_dir_is_created_and_absolute(self):
+        resolved = _resolve_experiment_dir("./exp/mnist_opt")
+        self.assertTrue(resolved.is_dir())
+        self.assertTrue(resolved.is_absolute())
+        self.assertEqual(resolved.name, "mnist_opt")
+        # Lands under the current working directory.
+        self.assertEqual(resolved, (Path(self._tmp) / "exp" / "mnist_opt").resolve())
+
+    def test_resolve_no_arg_creates_fresh_random_dir(self):
+        first = _resolve_experiment_dir(None)
+        second = _resolve_experiment_dir(None)
+        for d in (first, second):
+            self.assertTrue(d.is_dir())
+            self.assertTrue(d.name.startswith("wl-"))
+            self.assertEqual(d.parent, Path(self._tmp).resolve())
+        # Two bare `start` invocations never collide on the same directory.
+        self.assertNotEqual(first, second)
+
+    @patch("weightslab.utils.telemetry.ping_ui_launch")
+    @patch("weightslab.ui.server.serve_ui")
+    def test_start_exports_root_log_dir_env(self, _mock_serve, _mock_ping):
+        args = argparse.Namespace(experiment_dir="./exp/run1", port=9200, host=None,
+                                  backend_host=None, backend_port=None,
+                                  no_browser=True, certs=False)
+        ui_start_native(args)
+        expected = str((Path(self._tmp) / "exp" / "run1").resolve())
+        self.assertEqual(os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR"), expected)
+        self.assertEqual(os.environ.get("WL_LAST_EXPERIMENT_DIR"), expected)
+
+    @patch("weightslab.utils.telemetry.ping_ui_launch")
+    @patch("weightslab.ui.server.serve_ui")
+    def test_start_dir_positional_parsed_by_main(self, mock_serve, _mock_ping):
+        with patch("sys.argv", ["weightslab", "start", "./exp/via_main"]):
+            main()
+        expected = str((Path(self._tmp) / "exp" / "via_main").resolve())
+        self.assertEqual(os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR"), expected)
         mock_serve.assert_called_once()
 
 

@@ -230,7 +230,7 @@ HTTP/2 frames must pass through untouched. Two consequences:
   zero-signup option is `bore <https://github.com/ekzhang/bore>`_ with its free
   public relay: ``bore local 50051 --to bore.pub`` (prints ``bore.pub:<port>``).
   ``ngrok tcp 50051`` also works but now requires a credit card on the free tier.
-- The backend must run **plaintext** — the default ``weightslab ui launch``
+- The backend must run **plaintext** — the default ``weightslab start``
   (no ``--certs``) — so no TLS terminates mid-path.
 
 **Arguments**
@@ -267,7 +267,7 @@ HTTP/2 frames must pass through untouched. Two consequences:
    #    !bore local 50051 --to bore.pub
 
    # 2) On your machine, in two terminals:
-   weightslab ui launch                           # plaintext HTTP (default)
+   weightslab start                           # plaintext HTTP (default)
    weightslab tunnel bore.pub:12345               # the host:port bore printed
 
    # 3) Open http://localhost:5173 — Studio streams live from Colab.
@@ -491,6 +491,36 @@ sub-verb reference, examples, and setup: see :doc:`agent`.
    agent models
    agent model google/gemini-flash-latest
    ask tag train samples with loss > 1.2 as goldset
+
+Experiment report
+^^^^^^^^^^^^^^^^^^
+
+**Syntax**: ``report [signal ...] [--signals a,b] [--output PATH] [--no-agent]``
+(alias: ``reports``)
+
+Generates the HTML experiment report — signal trajectory plots, a health
+label per signal, per-sample outliers, loss-shape tag counts, dataset stats,
+and an analysis written by the agent's LLM — under
+``<root_log_dir>/reports/``, and replies with the path, how many signals went
+in, and whether the analysis was included. Same artifact and same code path
+as the Weights Studio report button and :func:`ai_report_generation`; see
+:doc:`experiment_reports`.
+
+With no arguments it covers every signal with at least 2 logged points. Name
+signals positionally (or with ``--signals``) to restrict it, ``--output`` to
+choose the file, and ``--no-agent`` to skip the LLM call entirely. If no LLM
+provider is configured the report is still written, just without the
+analysis (``"analysis": false`` in the reply).
+
+**Examples**
+
+.. code-block:: text
+
+   report
+   report train_loss val_loss
+   report --signals train_loss,val_loss
+   report --output /tmp/run_42.html
+   report --no-agent
 
 Session control
 ^^^^^^^^^^^^^^^^
