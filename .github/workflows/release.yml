@@ -177,8 +177,38 @@ jobs:
       - name: Install build tools
         run: python -m pip install --upgrade pip build twine
 
+      # This job always publishes to TestPyPI ONLY (never real PyPI -- that's
+      # build-and-publish-main, below, which is untouched by this and always
+      # builds the tag's own clean version). So the version published HERE is
+      # always commit-decorated, regardless of whether the pushed tag name
+      # itself contains "-devN" -- a dev-branch pre-release tag and a real
+      # main-branch release tag both go through this same TestPyPI pre-check,
+      # and an exact tag match otherwise carries no commit-specific info of
+      # its own (every push of the same tag name would resolve to the exact
+      # same version, colliding on a re-run/retag).
+      #
+      # TestPyPI/PyPI reject a literal "+sha" local version (see local_scheme
+      # = "no-local-version" in pyproject.toml), and PEP 440's devN segment
+      # must be a plain integer -- so the short hex commit sha is encoded as
+      # a decimal integer inside devN instead, mirroring ci.yml's
+      # build-and-publish-dev job (which solves the exact same constraint for
+      # its own, non-tag-based, publish-on-push-to-main version).
+      - name: Compute decorated TestPyPI version
+        id: compute_version
+        run: |
+          BASE_VERSION="$(echo "${GITHUB_REF_NAME#v}" | sed -E 's/[-\.]?dev[0-9]*$//')"
+          SHORT_SHA_HEX="$(git rev-parse --short=8 HEAD)"
+          SHA_DEC="$((16#${SHORT_SHA_HEX}))"
+          PUBLISH_VERSION="${BASE_VERSION}.dev${SHA_DEC}"
+          echo "publish_version=${PUBLISH_VERSION}" >> $GITHUB_OUTPUT
+          echo "Tag ${GITHUB_REF_NAME} @ ${SHORT_SHA_HEX} -> TestPyPI version ${PUBLISH_VERSION}"
+
       - name: Build distributions
-        run: python -m build
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION_FOR_WEIGHTSLAB: ${{ steps.compute_version.outputs.publish_version }}
+        run: |
+          echo "Building with version ${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_WEIGHTSLAB}"
+          python -m build
 
       - name: Capture version from wheel
         id: version
@@ -188,6 +218,9 @@ jobs:
           VERSION="$(basename "${WHEEL}" | sed -E 's/^weightslab-([^-]+)-.*/\1/')"
           echo "published_version=${VERSION}" >> $GITHUB_OUTPUT
           echo "Dev release version: ${VERSION}"
+          if [ "${VERSION}" != "${{ steps.compute_version.outputs.publish_version }}" ]; then
+            echo "::warning::Built wheel version (${VERSION}) does not match the intended decorated version (${{ steps.compute_version.outputs.publish_version }})."
+          fi
 
       - name: Check distributions
         run: python -m twine check dist/*
