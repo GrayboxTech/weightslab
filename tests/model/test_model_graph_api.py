@@ -87,6 +87,31 @@ class TestModelGraphApi(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "strictly between 0 and 1"):
             model.perturb_neurons(0, [0], ratio=1.0)
 
+    def test_freeze_and_unfreeze_reject_untracked_weight(self):
+        raw_model = nn.Sequential(
+            nn.Linear(4, 3),
+            nn.ReLU(),
+            nn.Linear(3, 2),
+        )
+        raw_model[0].weight.requires_grad_(False)
+        model = ModelInterface(
+            raw_model,
+            dummy_input=torch.randn(1, 4),
+            compute_dependencies=True,
+            register=False,
+            skip_previous_auto_load=True,
+        )
+        model._architecture_change_hook_fns = []
+
+        for operation in (model.freeze_neurons, model.unfreeze_neurons):
+            with self.subTest(operation=operation.__name__):
+                with self.assertRaisesRegex(
+                    ValueError, "trainable, per-neuron tracked weight"
+                ):
+                    operation(0, [0])
+
+        self.assertEqual(model.get_layer_info(0)["operation_counts"]["FREEZE"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

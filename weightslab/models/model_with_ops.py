@@ -326,10 +326,18 @@ class NetworkWithOps(nn.Module):
             layer_id, neuron_indices, allow_empty=True
         )
         layer = self.get_layer_by_id(layer_id)
-        if not hasattr(layer, "weight") or layer.weight is None:
+        weight = getattr(layer, "weight", None)
+        if weight is None:
             raise ValueError(
                 f"Layer {layer_id} has no learnable weights to freeze. "
                 "Select a learnable layer from get_model_graph()."
+            )
+        lr_overrides = getattr(layer, "neuron_2_lr", {})
+        if not weight.requires_grad or "weight" not in lr_overrides:
+            raise ValueError(
+                f"Layer {layer_id} does not have a trainable, per-neuron "
+                "tracked weight. Freeze or unfreeze it through PyTorch before "
+                "wrapping the model."
             )
         neuron_count = self._neuron_count(layer, "out_neurons") or 0
         selected = (
@@ -337,7 +345,7 @@ class NetworkWithOps(nn.Module):
             if indices
             else set(range(neuron_count))
         )
-        weight_lrs = getattr(layer, "neuron_2_lr", {}).get("weight", {})
+        weight_lrs = lr_overrides["weight"]
         currently_frozen = {
             index for index in selected if float(weight_lrs.get(index, 1.0)) == 0.0
         }
