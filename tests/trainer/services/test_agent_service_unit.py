@@ -24,9 +24,11 @@ class TestAgentServiceUnit(unittest.TestCase):
         self.assertTrue(response.available)
         self.assertIn('Ready to help you.', response.message)
 
-    def test_initialize_agent_delegates_to_agent_with_openrouter(self):
+    def test_initialize_agent_rejects_openrouter_now_that_it_is_removed(self):
+        """PROVIDER_OPENROUTER (0) is kept in the .proto only for wire
+        compatibility with older frontends -- requesting it must be rejected
+        cleanly rather than reaching the (now opencode-only) agent."""
         agent = MagicMock()
-        agent.initialize_with_cloud_key.return_value = (True, 'ok')
         service, _ = self._make_service(agent=agent)
 
         response = service.InitializeAgent(
@@ -38,13 +40,9 @@ class TestAgentServiceUnit(unittest.TestCase):
             None,
         )
 
-        agent.initialize_with_cloud_key.assert_called_once_with(
-            'sk-or-test',
-            'openrouter',
-            '~google/gemini-flash-latest',
-        )
-        self.assertTrue(response.success)
-        self.assertEqual(response.message, 'ok')
+        agent.initialize_with_cloud_key.assert_not_called()
+        self.assertFalse(response.success)
+        self.assertIn('Only OpenCode', response.message)
 
     def test_initialize_agent_rejects_unsupported_provider(self):
         agent = MagicMock()
@@ -61,7 +59,7 @@ class TestAgentServiceUnit(unittest.TestCase):
 
         agent.initialize_with_cloud_key.assert_not_called()
         self.assertFalse(response.success)
-        self.assertIn('Only OpenRouter', response.message)
+        self.assertIn('Only OpenCode', response.message)
 
     def test_change_get_and_reset_agent_delegate_to_agent(self):
         agent = MagicMock()
@@ -98,6 +96,56 @@ class TestAgentServiceUnit(unittest.TestCase):
         self.assertFalse(reset_response.success)
         self.assertEqual(list(list_response.models), [])
         self.assertIn('not running', init_response.message)
+
+    def test_initialize_agent_accepts_opencode_provider(self):
+        agent = MagicMock()
+        agent.initialize_with_cloud_key.return_value = (True, 'Agent initialized successfully via OpenCode. Ready to help you.')
+        service, _ = self._make_service(agent=agent)
+
+        response = service.InitializeAgent(
+            pb2.InitializeAgentRequest(
+                api_key='',  # ignored for opencode -- credential lives in OpenCode's own config
+                provider=pb2.PROVIDER_OPENCODE,
+                model='openrouter/anthropic/claude-opus-4.6',
+            ),
+            None,
+        )
+
+        agent.initialize_with_cloud_key.assert_called_once_with(
+            '', 'opencode', 'openrouter/anthropic/claude-opus-4.6',
+        )
+        self.assertTrue(response.success)
+
+    def test_clear_agent_history_delegates_to_agent(self):
+        agent = MagicMock()
+        agent.clear_history.return_value = (True, 'Cleared 4 history entries.')
+        service, _ = self._make_service(agent=agent)
+
+        response = service.ClearAgentHistory(pb2.Empty(), None)
+
+        agent.clear_history.assert_called_once_with()
+        self.assertTrue(response.success)
+        self.assertEqual(response.message, 'Cleared 4 history entries.')
+
+    def test_compact_agent_history_delegates_to_agent(self):
+        agent = MagicMock()
+        agent.compact_history.return_value = (True, 'Compacted 4 entries into one summary.')
+        service, _ = self._make_service(agent=agent)
+
+        response = service.CompactAgentHistory(pb2.Empty(), None)
+
+        agent.compact_history.assert_called_once_with()
+        self.assertTrue(response.success)
+
+    def test_clear_and_compact_history_fail_cleanly_when_agent_backend_missing(self):
+        service, _ = self._make_service(agent=None)
+
+        clear_response = service.ClearAgentHistory(pb2.Empty(), None)
+        compact_response = service.CompactAgentHistory(pb2.Empty(), None)
+
+        self.assertFalse(clear_response.success)
+        self.assertFalse(compact_response.success)
+        self.assertIn('not running', clear_response.message)
 
 
 if __name__ == '__main__':

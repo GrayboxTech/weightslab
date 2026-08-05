@@ -40,6 +40,13 @@ service ExperimentService {
   rpc ChangeAgentModel (ChangeAgentModelRequest) returns (ChangeAgentModelResponse);
   rpc GetAgentModels (GetAgentModelsRequest) returns (GetAgentModelsResponse);
   rpc ResetAgent (Empty) returns (ResetAgentResponse);
+  // Wipe the agent's conversation history (self.history) without touching the
+  // provider connection -- distinct from ResetAgent, which drops the connection.
+  rpc ClearAgentHistory (Empty) returns (ClearAgentHistoryResponse);
+  // Summarize the agent's conversation history via the active model, replacing
+  // it with the summary. Distinct from OpenCode's own session compaction (which
+  // this does not touch) -- this is the SDK agent's own self.history.
+  rpc CompactAgentHistory (Empty) returns (CompactAgentHistoryResponse);
 
   // Notebook (shared in-process Python kernel for the studio UI). Cell output is
   // server-streamed in chunks (stdout / stderr / result / image), mirroring
@@ -576,6 +583,12 @@ message AgentHealthResponse {
 // --- Agent Onboarding ---
 enum AgentProviderType {
   PROVIDER_OPENROUTER = 0;
+  // A local OpenCode server (opencode.ai) backs the LLM calls instead of a
+  // direct OpenRouter connection. No api_key is used for this provider -- the
+  // credential lives in OpenCode's own config, entered once via `opencode auth
+  // login` or the Weights Studio landing page's login modal. `model` carries
+  // OpenCode's "providerID/modelID" string (e.g. "openrouter/anthropic/claude-opus-4.6").
+  PROVIDER_OPENCODE = 1;
 }
 
 message InitializeAgentRequest {
@@ -607,6 +620,16 @@ message GetAgentModelsResponse {
 }
 
 message ResetAgentResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ClearAgentHistoryResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message CompactAgentHistoryResponse {
   bool success = 1;
   string message = 2;
 }

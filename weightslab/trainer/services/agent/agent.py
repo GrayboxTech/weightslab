@@ -7,22 +7,12 @@ import yaml
 import logging
 import threading
 import pandas as pd
-from urllib.parse import urlparse, urlunparse
 
 from abc import ABC, abstractmethod
 from typing import Optional, List, Union, Literal, Callable, Dict, Any
 from dotenv import load_dotenv
 from pathlib import Path
 
-try:
-    from langchain_ollama import ChatOllama
-except ImportError:
-    ChatOllama = None
-
-try:
-    from langchain_openai import ChatOpenAI
-except ImportError:
-    ChatOpenAI = None
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
@@ -30,6 +20,7 @@ from pydantic import BaseModel, Field
 from .intent_prompt import INTENT_PROMPT
 from .notebook_prompt import NOTEBOOK_CODE_PROMPT
 from .report_prompt import REPORT_ANALYSIS_PROMPT
+from .opencode_chat import OpenCodeChat
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.trainer.trainer_tools import get_layer_representations
 
@@ -397,7 +388,6 @@ class DataManipulationAgent:
         self._build_column_index()
         self._load_config()
         self._setup_providers()
-        self._verify_startup_providers()
         self.history = []
 
         # --- HANDLER REGISTRY ---
@@ -722,41 +712,16 @@ class DataManipulationAgent:
         return "\n".join(lines)
 
     def _load_config(self):
-        self.preferred_provider = os.environ.get("PREFERRED_PROVIDER", "openrouter") # Default to OpenRouter if API key is provided, otherwise fallback to local Ollama. This can be overridden by config file or env variable.
-
-        # Cloud provider settings with sensible defaults. OpenRouter is the default cloud provider if API key is provided.
-        # Default to a fast flash-class model: the intent-planning task is
-        # simple JSON generation, and a 70B model added ~15-30s of latency for
-        # no accuracy benefit (see plan Phase B.1). Override with OPENROUTER_MODEL
-        # (or agent_config.yaml) to use a larger model.
-        self.openrouter_model = os.environ.get("OPENROUTER_MODEL", "~google/gemini-flash-latest")
-        self.openrouter_base_url = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-        self.openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", None)
-        self.openrouter_request_timeout = float(os.environ.get("OPENROUTER_REQUEST_TIMEOUT", "15.0"))
-        # Cap the completion length. OpenRouter pre-authorizes
-        # `max_tokens * completion_price` against the key's remaining budget
-        # BEFORE generating; with no cap the client requests the model's full
-        # output window (tens of thousands of tokens), which 402s on a
-        # credit/weekly-limited key even though the actual intent-planning
-        # response is only a few hundred tokens. Keep this modest.
-        self.openrouter_max_tokens = int(os.environ.get("OPENROUTER_MAX_TOKENS", "2048"))
-        # Bias OpenRouter's upstream provider selection ("throughput"/"latency"/
-        # "price"); empty string lets OpenRouter choose freely (see Phase B.2).
-        self.openrouter_provider_sort = os.environ.get("OPENROUTER_PROVIDER_SORT", "throughput")
-        # Ask the model for a schema-validated Intent object directly instead of
-        # free-form JSON + regex repair. More reliable, but only works on models
-        # whose OpenRouter route supports structured/JSON-schema output (e.g.
-        # Gemini, GPT-4o). Default OFF so an unsupported model can't break; flip
-        # on with OPENROUTER_STRUCTURED_OUTPUT=1 or the config key.
-        self.openrouter_structured_output = os.environ.get(
-            "OPENROUTER_STRUCTURED_OUTPUT", ""
-        ).strip().lower() in ("1", "true", "yes", "on")
-
-        # Local fallback if no cloud (OpenRouter) is available or if the user prefers it. Ollama is the default local provider.
-        self.fallback_to_local = True # Default to allowing fallback to local Ollama if OpenRouter fails
-        self.ollama_host = "localhost"
-        self.ollama_port = "11435"
-        self.ollama_model = "llama3.2:3b"
+        # OpenCode is the only supported agent backend: a local OpenCode
+        # server (opencode.ai) backs every LLM call. No API key here -- the
+        # credential lives in OpenCode's own config, entered once via
+        # `opencode auth login` or the Weights Studio landing page's login
+        # modal. OPENCODE_URL is the SAME shared root env var the frontend
+        # reads (forwarded to window.WS_OPENCODE_URL by weightslab/ui/server.py's
+        # _UI_ENV_GLOBALS) -- set it once and both sides point at one server.
+        self.preferred_provider = "opencode"
+        self.opencode_url = os.environ.get("OPENCODE_URL", "http://127.0.0.1:4096")
+        self.opencode_model = os.environ.get("OPENCODE_MODEL", "")
 
         repo_root = Path(__file__).resolve().parents[4] # weightslab/ root
         inner_pkg = Path(__file__).resolve().parents[3]
@@ -783,23 +748,9 @@ class DataManipulationAgent:
                 if not cfg or "agent" not in cfg: continue
                 a_cfg = cfg["agent"]
 
-                # Agents settings
-                self.preferred_provider = a_cfg.get("provider", self.preferred_provider).lower()
-                self.fallback_to_local = a_cfg.get("fallback_to_local", self.fallback_to_local)
-
-                # OPENROUTER
-                self.openrouter_model = a_cfg.get("openrouter_model", self.openrouter_model)
-                self.openrouter_base_url = a_cfg.get("openrouter_base_url", self.openrouter_base_url)
-                self.openrouter_api_key = a_cfg.get("openrouter_api_key", self.openrouter_api_key)
-                self.openrouter_request_timeout = float(a_cfg.get("openrouter_request_timeout", self.openrouter_request_timeout))
-                self.openrouter_max_tokens = int(a_cfg.get("openrouter_max_tokens", self.openrouter_max_tokens))
-                self.openrouter_provider_sort = a_cfg.get("openrouter_provider_sort", self.openrouter_provider_sort)
-                self.openrouter_structured_output = bool(a_cfg.get("openrouter_structured_output", self.openrouter_structured_output))
-
-                # OLLAMA
-                self.ollama_host = a_cfg.get("ollama_host", self.ollama_host)
-                self.ollama_port = a_cfg.get("ollama_port", self.ollama_port)
-                self.ollama_model = a_cfg.get("ollama_model", self.ollama_model)
+                # OPENCODE
+                self.opencode_url = a_cfg.get("opencode_url", self.opencode_url)
+                self.opencode_model = a_cfg.get("opencode_model", self.opencode_model)
 
                 _LOGGER.info(f"Applied agent configuration from {path}")
                 _LOGGER.debug(f"Agent Config: {cfg}")
@@ -813,228 +764,67 @@ class DataManipulationAgent:
             "\n# #######################################" + "\n" +
             "# #######################################" + "\n" +
             f"Agent initialized from configuration {path}: " + "\n" +
-            f"\tFinal Agent Configuration: Preferred Provider={self.preferred_provider}, " + "\n" +
-            f"\tFallback to Local={self.fallback_to_local}, " + "\n" +
-            f"\tOpenRouter Model={self.openrouter_model} with:" + "\n" +
-            f"\t\tAPI Key={f'{self.openrouter_api_key[:4]}****{self.openrouter_api_key[-4:]}' if self.openrouter_api_key else 'None'}" + "\n" +
-            f"\t\tBase URL={self.openrouter_base_url}, " + "\n" +
-            f"\tOllama Model={self.ollama_model}" + "\n" +
+            f"\tOpenCode URL={self.opencode_url}, Model={self.opencode_model or '(server default)'}" + "\n" +
             "# #######################################" + "\n" +
             "# #######################################" + "\n" + ""
         )
 
-    @staticmethod
-    def _effective_http_port(parsed_url, explicit_port: Optional[str]) -> int:
-        if explicit_port and explicit_port.isdigit():
-            return int(explicit_port)
-        if parsed_url.port is not None:
-            return parsed_url.port
-        return 443 if parsed_url.scheme == "https" else 80
-
-    @staticmethod
-    def _normalize_openrouter_base_url(raw_url: str, explicit_port: Optional[str]) -> str:
-        url = (raw_url or "https://openrouter.ai/api/v1").strip()
-        parsed = urlparse(url)
-        if not parsed.scheme:
-            parsed = urlparse(f"https://{url}")
-
-        host = parsed.hostname or "openrouter.ai"
-        port = DataManipulationAgent._effective_http_port(parsed, explicit_port)
-        netloc = host if ((parsed.scheme == "https" and port == 443) or (parsed.scheme == "http" and port == 80)) else f"{host}:{port}"
-        path = parsed.path if parsed.path else "/api/v1"
-
-        return urlunparse((parsed.scheme, netloc, path, "", "", ""))
-
     def _setup_providers(self):
-        self.chain_ollama = None
-        self.chain_openrouter = None
+        self.chain_opencode = None
         initialized = False
 
-        # Determine which providers to initialize
-        active_providers = {self.preferred_provider}
-        if self.fallback_to_local:
-            active_providers.add("ollama")
-
-        # OPEN ROUTER
-        if "openrouter" in active_providers and self.openrouter_api_key:
-            _LOGGER.info(f"Setting up OpenRouter with model {self.openrouter_model}")
-            try:
-                if ChatOpenAI is None:
-                    _LOGGER.warning("langchain_openai is not installed, skipping OpenRouter provider")
-                else:
-                    explicit_openrouter_port = os.environ.get("OPENROUTER_PORT", "").strip()
-                    openrouter_base_url = self._normalize_openrouter_base_url(self.openrouter_base_url, explicit_openrouter_port)
-                    parsed = urlparse(openrouter_base_url)
-                    effective_port = self._effective_http_port(parsed, explicit_openrouter_port)
-
-                    # Bias OpenRouter's upstream routing so it doesn't pick a
-                    # slow/cold provider for the model — a major source of the
-                    # query tail latency (see plan Phase B.2). Configurable via
-                    # `openrouter_provider_sort` ("throughput"/"latency"/"price");
-                    # set to "" to let OpenRouter choose freely.
-                    extra_body = None
-                    sort = getattr(self, "openrouter_provider_sort", "throughput")
-                    if sort:
-                        extra_body = {"provider": {"sort": sort}}
-
-                    llm = ChatOpenAI(
-                        model=self.openrouter_model, temperature=0,
-                        api_key=self.openrouter_api_key,
-                        base_url=openrouter_base_url,
-                        streaming=False, max_retries=1, request_timeout=self.openrouter_request_timeout,
-                        max_tokens=self.openrouter_max_tokens,
-                        extra_body=extra_body,
-                    )
-                    self.chain_openrouter = llm
-                    initialized = True
-                    _LOGGER.info(
-                        f"[Agent] OpenRouter enabled: {self.openrouter_model} via {parsed.hostname}:{effective_port} "
-                        f"(provider sort={sort or 'default'})"
-                    )
-            except Exception as e: _LOGGER.error(f"OpenRouter error: {e}")
-
-        # LOCAL
-        if "ollama" in active_providers:
-            try:
-                if ChatOllama is None:
-                    _LOGGER.warning("langchain_ollama is not installed, skipping Ollama provider")
-                else:
-                    _LOGGER.info(f"Setting up Ollama with model {self.ollama_model}")
-                    host = self.ollama_host.split(':')[0]
-                    port = self.ollama_port
-                    llm = ChatOllama(base_url=f"http://{host}:{port}", model=self.ollama_model, temperature=0, timeout=15)
-                    self.chain_ollama = llm
-                    initialized = True
-                    _LOGGER.info(f"[Agent] Ollama enabled: {self.ollama_model}")
-            except Exception as e: _LOGGER.error(f"Ollama error: {e}")
+        try:
+            self.chain_opencode = OpenCodeChat(self.opencode_url, self.opencode_model).as_runnable()
+            initialized = True
+            _LOGGER.info(
+                f"[Agent] OpenCode enabled: {self.opencode_url} "
+                f"(model={self.opencode_model or 'server default'})"
+            )
+        except Exception as e:
+            _LOGGER.error(f"OpenCode error: {e}")
 
         return initialized
 
-    def _verify_startup_providers(self) -> None:
-        """
-        A provider configured at construction time (agent_config.yaml / env
-        vars, e.g. OPENROUTER_API_KEY) never goes through the connectivity
-        check the `/init` UI flow runs (see `initialize_with_cloud_key`) --
-        `_setup_providers()` only builds a client object from whatever key
-        string it was given, it never confirms the key is actually accepted.
-        `is_available()` treats "a client object exists" as "ready", so a
-        bad startup key would otherwise report available=True indefinitely
-        (CheckAgentHealth says "ready to help you") until the first real
-        query 401s. Probe once here instead, so that mismatch can't happen.
-
-        Only runs for the OpenRouter chain built in `__init__`: Ollama's
-        `is_available()` already does a live reachability check every call,
-        and `initialize_with_cloud_key`/`change_model` already run their own
-        explicit post-`_setup_providers()` check.
-        """
-        if self.chain_openrouter is None:
-            return
-        ok, message = self._check_chat_provider("openrouter")
-        if not ok:
-            _LOGGER.warning(f"[Agent] Startup OpenRouter connectivity check failed, disabling it: {message}")
-            self.chain_openrouter = None
-
-    def _check_chat_provider(self, provider: str) -> "tuple[bool, str]":
-        """Run a minimal chat request to verify the provider is actually usable."""
-        chain = getattr(self, f"chain_{provider}", None)
-        if chain is None:
-            return False, f"{provider} client was not initialized."
-
-        try:
-            # Keep the probe's reservation tiny. OpenRouter pre-authorizes
-            # `max_tokens * price` before generating, so a large (or unset)
-            # cap makes the health check 402 on a budget-limited key even
-            # though the model is perfectly usable for real (short) requests.
-            probe = chain
-            if provider == "openrouter" and hasattr(chain, "bind"):
-                try:
-                    probe = chain.bind(max_tokens=16)
-                except Exception:
-                    probe = chain
-            response = probe.invoke("Reply with OK.")
-        except Exception as e:
-            _LOGGER.warning(f"[{provider}] connectivity check failed: {e}")
-            return False, f"{provider} connectivity check failed: {e}"
-
-        text = response.content if hasattr(response, "content") else str(response)
-        if not str(text).strip():
-            return False, f"{provider} connectivity check returned an empty response."
-
-        return True, f"{provider} connectivity check succeeded."
-
-    def is_ollama_available(self) -> bool:
-        return self.chain_ollama is not None
-
     def is_available(self) -> bool:
-        """
-        Return True if any LLM provider is actually ready to serve requests.
-
-        OpenRouter is considered ready as soon as its chain is set up.
-
-        Ollama requires an active HTTP connection check because the ChatOllama
-        constructor succeeds even when the daemon is not running.
-        """
-        if self.chain_openrouter is not None:
-            return True
-        if self.chain_ollama is not None:
-            return self._is_ollama_reachable()
-        return False
-
-    def _is_ollama_reachable(self) -> bool:
-        """Ping the Ollama HTTP endpoint to verify the daemon is actually running."""
-        try:
-            import urllib.request as _ur
-            host = self.ollama_host.split(':')[0]
-            url = f"http://{host}:{self.ollama_port}/api/version"
-            with _ur.urlopen(_ur.Request(url), timeout=2) as resp:
-                return resp.status == 200
-        except Exception:
-            return False
+        """Return True if the OpenCode provider is ready to serve requests."""
+        return self.chain_opencode is not None
 
     def initialize_with_cloud_key(self, api_key: str, provider: str, model: Optional[str] = None) -> "tuple[bool, str]":
         """
-        Initialize (or reinitialize) the OpenRouter cloud provider.
+        Initialize (or reinitialize) the OpenCode provider.
 
         Args:
-            api_key: The API key obtained from the provider's website.
-            provider: Must be ``"openrouter"``.
-            model: OpenRouter model identifier chosen by the user.
+            api_key: Unused -- OpenCode's credential lives in the OpenCode
+                server's own config (``opencode auth login`` or the Weights
+                Studio landing page's login modal), never in this agent.
+            provider: Must be ``"opencode"`` -- the only supported backend.
+            model: OpenCode's ``"providerID/modelID"`` model identifier.
 
         Returns:
             ``(True, success_message)`` or ``(False, error_message)``.
         """
-        if not api_key or not api_key.strip():
-            return False, "API key cannot be empty."
-
-        if provider.lower() != "openrouter":
-            return False, "Only OpenRouter cloud onboarding is supported."
+        provider = (provider or "").lower()
+        if provider != "opencode":
+            return False, "Only OpenCode is supported as the agent backend."
 
         if model is not None and not model.strip():
             return False, "Model cannot be empty."
 
-        self.openrouter_api_key = api_key.strip()
-        self.openrouter_base_url = "https://openrouter.ai/api/v1"
-        self.openrouter_model = model.strip() if model and model.strip() else self.openrouter_model
-        self.preferred_provider = "openrouter"
+        self.opencode_model = model.strip() if model and model.strip() else self.opencode_model
+        self.preferred_provider = "opencode"
 
         success = self._setup_providers()
+        if self.chain_opencode is None or not success:
+            return False, "Could not reach the OpenCode server. Please verify OPENCODE_URL and that it is running."
 
-        if self.chain_openrouter is None or not success:
-            return False, "Provider client initialization failed. Please verify your API key, base URL, and model."
-
-        chat_ok, chat_message = self._check_chat_provider("openrouter")
-        if not chat_ok:
-            self.chain_openrouter = None
-            return False, chat_message
-
-        return True, "Agent initialized successfully. Ready to help you."
+        return True, "Agent initialized successfully via OpenCode. Ready to help you."
 
     def change_model(self, model: str) -> "tuple[bool, str]":
         """
-        Switch the active OpenRouter model without re-entering the API key.
+        Switch the active OpenCode model, without re-entering credentials.
 
         Args:
-            model: OpenRouter model identifier (e.g. ``"openai/gpt-4o"``).
+            model: OpenCode's ``"providerID/modelID"`` model identifier.
 
         Returns:
             ``(True, success_message)`` or ``(False, error_message)``.
@@ -1042,25 +832,17 @@ class DataManipulationAgent:
         if not model or not model.strip():
             return False, "Model cannot be empty."
 
-        if not getattr(self, "openrouter_api_key", None):
-            return False, "No API key configured. Please initialize the agent first (/init)."
-
-        self.openrouter_model = model.strip()
+        self.opencode_model = model.strip()
         success = self._setup_providers()
-
-        if self.chain_openrouter is None or not success:
-            return False, "Provider reinitialization failed. Please verify the model name."
-
-        chat_ok, chat_message = self._check_chat_provider("openrouter")
-        if not chat_ok:
-            self.chain_openrouter = None
-            return False, chat_message
-
-        return True, f"Model switched to {self.openrouter_model}. Ready to help you."
+        if self.chain_opencode is None or not success:
+            return False, "Could not reach the OpenCode server. Please verify OPENCODE_URL and that it is running."
+        return True, f"Model switched to {self.opencode_model}. Ready to help you."
 
     def get_available_models(self) -> "tuple[bool, list[str], str]":
         """
-        Fetch the list of models available via the configured OpenRouter API key.
+        Fetch every provider/model OpenCode is authenticated for, flattened
+        into "providerID/modelID" strings (same convention used throughout
+        the frontend).
 
         Returns:
             ``(True, model_ids, "")`` on success, or ``(False, [], error_message)``.
@@ -1068,30 +850,76 @@ class DataManipulationAgent:
         import urllib.request as _ur
         import json as _json
 
-        api_key = getattr(self, "openrouter_api_key", None)
-        if not api_key:
-            return False, [], "No API key configured. Please initialize the agent first (/init)."
-
         try:
-            url = "https://openrouter.ai/api/v1/models"
-            req = _ur.Request(url, headers={"Authorization": f"Bearer {api_key}"})
-            with _ur.urlopen(req, timeout=10) as resp:
+            url = f"{self.opencode_url.rstrip('/')}/config/providers"
+            with _ur.urlopen(_ur.Request(url), timeout=10) as resp:
                 data = _json.loads(resp.read().decode())
-            models = sorted(entry["id"] for entry in data.get("data", []) if "id" in entry)
-            return True, models, ""
+            models = []
+            for provider in data.get("providers", []):
+                provider_id = provider.get("id")
+                if not provider_id:
+                    continue
+                provider_models = provider.get("models", {})
+                model_ids = provider_models.keys() if isinstance(provider_models, dict) else \
+                    (m.get("id") for m in provider_models if isinstance(m, dict))
+                for model_id in model_ids:
+                    if model_id:
+                        models.append(f"{provider_id}/{model_id}")
+            return True, sorted(models), ""
         except Exception as exc:
-            _LOGGER.warning("get_available_models error: %s", exc)
-            return False, [], f"Could not fetch models: {exc}"
+            _LOGGER.warning("get_available_models (opencode) error: %s", exc)
+            return False, [], f"Could not reach the OpenCode server: {exc}"
 
     def reset_connection(self) -> "tuple[bool, str]":
-        """Clear the active cloud connection and revert the agent to the uninitialized state."""
-        self.chain_ollama = None
-        self.chain_openrouter = None
-        self.openrouter_api_key = None
-        self.openrouter_model = os.environ.get("OPENROUTER_MODEL", "~google/gemini-flash-latest")
-        self.preferred_provider = "openrouter"
+        """Clear the active OpenCode connection and revert the agent to the
+        uninitialized state."""
+        self.chain_opencode = None
+        self.opencode_model = os.environ.get("OPENCODE_MODEL", "")
+        self.preferred_provider = "opencode"
 
         return True, "Agent connection reset. Type /init to set up again."
+
+    def clear_history(self) -> "tuple[bool, str]":
+        """Wipe the conversation history (self.history) without touching the
+        provider connection -- distinct from reset_connection, which drops the
+        connection but leaves history untouched. Only affects this SDK agent's
+        own history; OpenCode-backed sessions (the landing page, /loop jobs)
+        manage their own, separate context and are untouched by this."""
+        count = len(self.history)
+        self.history = []
+        return True, f"Cleared {count} history entries."
+
+    def compact_history(self) -> "tuple[bool, str]":
+        """Summarize self.history via OpenCode, replacing it with a single
+        entry -- a real compaction (LLM summary), not a harder truncation of
+        the existing self.history[-5:] read-time cap."""
+        if not self.history:
+            return True, "History is already empty; nothing to compact."
+
+        if not self.chain_opencode:
+            return False, "Could not compact history -- no provider available."
+
+        transcript = "\n".join(self.history)
+        summarize_prompt = ChatPromptTemplate.from_messages([
+            ("system", "Summarize the following agent conversation log into a short, "
+                       "dense paragraph that preserves the concrete actions taken and "
+                       "any user preferences stated. Output only the summary text, no "
+                       "preamble."),
+            ("human", "{transcript}"),
+        ])
+
+        try:
+            response = (summarize_prompt | self.chain_opencode).invoke({"transcript": transcript})
+            summary = response.content if hasattr(response, "content") else str(response)
+            summary = summary.strip()
+            if summary:
+                before = len(self.history)
+                self.history = [f"Summary of {before} prior entries: {summary}"]
+                return True, f"Compacted {before} entries into one summary."
+        except Exception as e:
+            _LOGGER.error(f"OpenCode failed to compact history: {e}")
+
+        return False, "Could not compact history -- no provider available."
 
     def _build_column_index(self):
         """Builds normalized token indexes and lightweight synonyms for column resolution."""
@@ -1702,24 +1530,12 @@ class DataManipulationAgent:
 
             prompt = ChatPromptTemplate.from_messages([("system", escaped_sys), ("human", "{instruction}")])
 
-            # Optionally bind schema-validated structured output (Intent) so the
-            # model returns a parsed object directly, skipping the free-form JSON
-            # + regex-repair path in _parse_intent_from_response. Gated because
-            # not every OpenRouter route supports it (see _load_config).
-            runnable_chain = chain
-            if name == "openrouter" and getattr(self, "openrouter_structured_output", False):
-                try:
-                    runnable_chain = chain.with_structured_output(Intent)
-                except Exception as e:
-                    _LOGGER.warning(f"[{name}] structured output unavailable, falling back to free-form JSON: {e}")
-                    runnable_chain = chain
-
             # Time the pure LLM round-trip (see plan Phase A). This is the
             # dominant cost of a query; ~chars/4 is a rough token estimate.
             prompt_chars = len(escaped_sys) + len(instruction)
-            model_name = getattr(self, f"{name}_model", None) or getattr(self, "openrouter_model", name)
+            model_name = getattr(self, f"{name}_model", None) or name
             _t0 = time.perf_counter()
-            response = (prompt | runnable_chain).invoke({"instruction": instruction})
+            response = (prompt | chain).invoke({"instruction": instruction})
             _llm_elapsed = time.perf_counter() - _t0
 
             _LOGGER.info(
@@ -1774,7 +1590,7 @@ class DataManipulationAgent:
         )
 
     def _try_query_provider(self, provider: str, instruction: str, system_prompt: str) -> Optional[List[dict]]:
-            # 1. Dynamically find the chain (chain_openrouter, chain_ollama)
+            # 1. Dynamically find the chain (chain_opencode)
             chain = getattr(self, f"chain_{provider}", None)
 
             # 2. If it exists, use the standard LangChain method
@@ -1852,8 +1668,6 @@ class DataManipulationAgent:
         )
 
         order = [self.preferred_provider]
-        if self.fallback_to_local and self.preferred_provider != "ollama":
-            order.append("ollama")
 
         for provider in order:
             if abort_event and abort_event.is_set(): return []
@@ -1872,19 +1686,18 @@ class DataManipulationAgent:
         # If we get here, all providers failed
         error_msg = "Internal Agent Error: Failed to generate a plan."
         if self._is_auth_error(self._last_query_error):
-            # The provider rejected our credentials — the agent isn't
-            # connected. Invalidate the cached client so is_available()/
-            # CheckAgentHealth immediately stop reporting "available" for a
-            # connection that just proved broken, instead of leaving the
-            # health check permanently stale until the process restarts.
-            self.chain_openrouter = None
+            # OpenCode rejected the request -- the agent isn't connected.
+            # Invalidate the cached client so is_available()/CheckAgentHealth
+            # immediately stop reporting "available" for a connection that
+            # just proved broken, instead of leaving the health check
+            # permanently stale until the process restarts.
+            self.chain_opencode = None
             error_msg = (
-                "Agent not connected: the LLM provider rejected the request "
-                "(401 Unauthorized). Check your API key and re-initialize the "
-                "agent with /init."
+                "Agent not connected: OpenCode rejected the request "
+                "(401 Unauthorized). Re-initialize the agent with /init."
             )
-        elif not self.is_ollama_available() and not os.environ.get("OPENROUTER_API_KEY"):
-            error_msg = "No LLM providers configured. Please check your API keys or local Ollama setup. Initialize the agent with /init."
+        elif not self.is_available():
+            error_msg = "No LLM provider configured. Please check your OpenCode server (OPENCODE_URL) and initialize the agent with /init."
 
         _LOGGER.info(f"[Agent] Query total wall time: {time.perf_counter() - _query_t0:.2f}s (no provider succeeded)")
         return [{"function": "out_of_scope", "params": {"reason": error_msg}}]
@@ -1957,14 +1770,14 @@ class DataManipulationAgent:
         """Propose Python for a notebook cell from a natural-language ``prompt``.
 
         This does NOT execute anything and does NOT touch the intent pipeline; it
-        only asks the active LLM provider for runnable code. Returns a
-        ``(code, explanation)`` tuple. Raises RuntimeError when no provider is
-        configured so the service can report a clean error.
+        only asks OpenCode for runnable code. Returns a ``(code, explanation)``
+        tuple. Raises RuntimeError when no provider is configured so the
+        service can report a clean error.
         """
         if not self.is_available():
             raise RuntimeError(
-                "Agent not configured. Initialize a provider with /init (or run a "
-                "local Ollama server) before using \">\" notebook cells."
+                "Agent not configured. Initialize OpenCode with /init before "
+                "using \">\" notebook cells."
             )
 
         system_prompt = NOTEBOOK_CODE_PROMPT.format(
@@ -1978,33 +1791,17 @@ class DataManipulationAgent:
             [("system", escaped_sys), ("human", "{instruction}")]
         )
 
-        order = [self.preferred_provider]
-        if self.fallback_to_local and self.preferred_provider != "ollama":
-            order.append("ollama")
-
-        last_error = None
-        for provider in order:
-            chain = getattr(self, f"chain_{provider}", None)
-            if chain is None:
-                continue
-            try:
-                response = (chat_prompt | chain).invoke({"instruction": prompt})
-                text = getattr(response, "content", None)
-                if text is None:
-                    text = str(response)
-                code, explanation = self._extract_code_and_explanation(text)
-                self.history.append(f"User (notebook): {prompt}")
-                self.history.append("Action: proposed notebook code")
-                return code, explanation
-            except Exception as exc:
-                last_error = exc
-                _LOGGER.warning("[notebook code-gen] provider %s failed: %s", provider, exc)
-                continue
-
-        raise RuntimeError(
-            f"Code generation failed: {last_error}" if last_error
-            else "Code generation failed: no provider produced a response."
-        )
+        try:
+            response = (chat_prompt | self.chain_opencode).invoke({"instruction": prompt})
+            text = getattr(response, "content", None)
+            if text is None:
+                text = str(response)
+            code, explanation = self._extract_code_and_explanation(text)
+            self.history.append(f"User (notebook): {prompt}")
+            self.history.append("Action: proposed notebook code")
+            return code, explanation
+        except Exception as exc:
+            raise RuntimeError(f"Code generation failed: {exc}")
 
     # ------------------------------------------------------------------
     # Experiment report narrative
@@ -2017,15 +1814,15 @@ class DataManipulationAgent:
         sees ``stats_summary`` (signal shapes + dataframe stats), never raw
         history, so it can comment on the numbers but not invent new ones.
 
-        Mirrors ``generate_code``'s provider-fallback shape, but returns plain
-        text (no code-fence extraction) and does not touch ``self.history`` --
-        this is a side-channel report artifact, not a step in the
-        NL-to-data-operation conversation.
+        Mirrors ``generate_code``, but returns plain text (no code-fence
+        extraction) and does not touch ``self.history`` -- this is a
+        side-channel report artifact, not a step in the NL-to-data-operation
+        conversation.
         """
         if not self.is_available():
             raise RuntimeError(
-                "Agent not configured. Initialize a provider with /init (or run a "
-                "local Ollama server) before generating a report."
+                "Agent not configured. Initialize OpenCode with /init before "
+                "generating a report."
             )
 
         system_prompt = REPORT_ANALYSIS_PROMPT.format(
@@ -2036,25 +1833,9 @@ class DataManipulationAgent:
             [("system", escaped_sys), ("human", "Write the analysis section.")]
         )
 
-        order = [self.preferred_provider]
-        if self.fallback_to_local and self.preferred_provider != "ollama":
-            order.append("ollama")
-
-        last_error = None
-        for provider in order:
-            chain = getattr(self, f"chain_{provider}", None)
-            if chain is None:
-                continue
-            try:
-                response = (chat_prompt | chain).invoke({})
-                text = getattr(response, "content", None)
-                return text.strip() if text else str(response).strip()
-            except Exception as exc:
-                last_error = exc
-                _LOGGER.warning("[report narrative] provider %s failed: %s", provider, exc)
-                continue
-
-        raise RuntimeError(
-            f"Report narrative generation failed: {last_error}" if last_error
-            else "Report narrative generation failed: no provider produced a response."
-        )
+        try:
+            response = (chat_prompt | self.chain_opencode).invoke({})
+            text = getattr(response, "content", None)
+            return text.strip() if text else str(response).strip()
+        except Exception as exc:
+            raise RuntimeError(f"Report narrative generation failed: {exc}")

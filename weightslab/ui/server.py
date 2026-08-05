@@ -36,6 +36,7 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -343,6 +344,556 @@ atexit.register(_jupyter_session.shutdown)
 
 
 # --------------------------------------------------------------------------- #
+# OpenCode agent server (backs the landing-page agent chat)
+# --------------------------------------------------------------------------- #
+
+# Generous: a cold `npx` run downloads the package before the server binds.
+_OPENCODE_START_TIMEOUT = 45.0
+
+
+def _free_port() -> int:
+    """Reserve an unused loopback port by binding and releasing it.
+
+    We pick the port ourselves rather than parsing it out of the child's stdout:
+    that gives us a URL to health-poll immediately, and avoids depending on the
+    exact wording of a startup log line we do not control.
+    """
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _resolve_opencode_argv() -> Optional[list]:
+    """Locate a way to run OpenCode, preferring an already-installed binary.
+
+    Falls back to ``npx --yes``, which fetches the package into the npx cache on
+    first use. That is deliberately *not* ``npm install -g``: a global install may
+    need elevated permissions and mutates the user's toolchain behind their back,
+    while the npx path needs neither and is equally automatic.
+    """
+    exe = shutil.which("opencode")
+    if exe:
+        return [exe]
+    npx = shutil.which("npx")
+    if npx:
+        return [npx, "--yes", "opencode-ai@latest"]
+    return None
+
+
+def _opencode_healthy(base_url: str, timeout: float = 1.5) -> bool:
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(base_url + "/global/health", timeout=timeout) as resp:
+            return 200 <= int(resp.status) < 300
+    except Exception:
+        return False
+
+
+def _cors_origin_variants(origin: Optional[str]) -> list:
+    """Expand one origin into the set a browser might actually send.
+
+    ``localhost`` and ``127.0.0.1`` are *different* origins to the CORS check, and
+    getting that wrong produces the single most confusing failure in this whole
+    feature: every request is blocked, and from the page it is indistinguishable
+    from the server being down. So allow both spellings of whichever we were given.
+    """
+    origins: list = []
+
+    def add(value: str) -> None:
+        if value and value not in origins:
+            origins.append(value)
+
+    if origin:
+        add(origin)
+        if "localhost" in origin:
+            add(origin.replace("localhost", "127.0.0.1"))
+        elif "127.0.0.1" in origin:
+            add(origin.replace("127.0.0.1", "localhost"))
+    return origins
+
+
+class _OpencodeSession:
+    """Tracks the single OpenCode server process this UI server has launched.
+
+    The browser cannot start a process, so the landing-page agent asks us to do it
+    (``POST /agent-server/start``). The child is rooted at the experiment
+    directory, which becomes the agent's workspace, and is torn down with this
+    UI server so it never outlives the session that spawned it.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._process: Optional[subprocess.Popen] = None
+        self._port: Optional[int] = None
+        self._workspace: Optional[str] = None
+        self._error: Optional[str] = None
+        self._log: list = []
+        # Set when OPENCODE_URL points at an already-running server we adopted
+        # instead of spawning our own -- see ensure(). Mutually exclusive with
+        # self._process; only one of the two is ever active at a time.
+        self._external_url: Optional[str] = None
+
+    def _running_locked(self) -> bool:
+        if self._external_url is not None:
+            return True
+        return self._process is not None and self._process.poll() is None
+
+    def _url_locked(self) -> Optional[str]:
+        if self._external_url is not None:
+            return self._external_url
+        return f"http://127.0.0.1:{self._port}" if self._port else None
+
+    def _drain_output(self, process: "subprocess.Popen[str]") -> None:
+        # Must be drained for the life of the process or the pipe buffer fills and
+        # blocks the child. We keep only a short tail, purely so a failed start can
+        # report why instead of a bare timeout.
+        try:
+            for line in process.stdout:  # type: ignore[union-attr]
+                self._log.append(line.rstrip())
+                del self._log[:-15]
+        except Exception:  # pragma: no cover - best-effort log draining
+            pass
+
+    def ensure(self, workspace_dir: str, origin: Optional[str]) -> dict:
+        """Start the agent server if it is not already running, and wait until it
+        answers a health check. Idempotent: a second call while alive is a no-op.
+
+        If OPENCODE_URL is set and healthy, adopt it directly instead of
+        spawning a child -- this is what makes the shared root config in
+        agent.py's _load_config actually converge: point both the SDK agent
+        and this UI server at one already-running server via one env var,
+        rather than each independently spawning its own."""
+        with self._lock:
+            if self._running_locked():
+                return {"ok": True, "url": self._url_locked(), "reused": True,
+                        "workspace": self._workspace}
+
+        external_url = os.environ.get("OPENCODE_URL", "").strip()
+        if external_url and _opencode_healthy(external_url):
+            with self._lock:
+                self._external_url = external_url
+                self._workspace = workspace_dir
+                self._error = None
+            return {"ok": True, "url": external_url, "reused": False, "workspace": workspace_dir}
+
+        with self._lock:
+            argv = _resolve_opencode_argv()
+            if argv is None:
+                self._error = (
+                    "Could not find `opencode` or `npx`. Install Node.js 20+ "
+                    "(which provides npx), or `npm i -g opencode-ai`."
+                )
+                return {"ok": False, "error": self._error}
+
+            port = _free_port()
+            cmd = argv + ["serve", "--hostname", "127.0.0.1", "--port", str(port)]
+            for value in _cors_origin_variants(origin):
+                cmd += ["--cors", value]
+
+            self._log = []
+            self._error = None
+            try:
+                process = subprocess.Popen(
+                    cmd,
+                    cwd=workspace_dir,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    # Process-group leader so shutdown() can kill the whole tree --
+                    # npx spawns the real binary as a child, so killing only this
+                    # PID would orphan the server.
+                    start_new_session=True,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                self._error = str(exc)
+                return {"ok": False, "error": self._error}
+
+            self._process = process
+            self._port = port
+            self._workspace = workspace_dir
+            threading.Thread(target=self._drain_output, args=(process,), daemon=True).start()
+
+        # Health-poll outside the lock so status() stays responsive while a cold
+        # npx download runs.
+        base_url = f"http://127.0.0.1:{port}"
+        deadline = time.monotonic() + _OPENCODE_START_TIMEOUT
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            if _opencode_healthy(base_url):
+                return {"ok": True, "url": base_url, "reused": False,
+                        "workspace": workspace_dir}
+            time.sleep(0.4)
+
+        tail = " / ".join(self._log[-4:]) or "no output"
+        self._error = (
+            f"The agent server did not come up within {int(_OPENCODE_START_TIMEOUT)}s. "
+            f"Last output: {tail}"
+        )
+        _kill_process_tree(process)
+        with self._lock:
+            self._port = None
+        return {"ok": False, "error": self._error}
+
+    def status(self) -> dict:
+        with self._lock:
+            process = self._process
+            url = self._url_locked()
+            workspace = self._workspace
+            error = self._error
+            external = self._external_url is not None
+        if external:
+            return {"state": "running", "url": url, "workspace": workspace}
+        if process is None:
+            return {"state": "none", "error": error}
+        if process.poll() is None:
+            return {"state": "running", "url": url, "workspace": workspace}
+        return {"state": "killed", "workspace": workspace, "error": error}
+
+    def shutdown(self) -> None:
+        with self._lock:
+            process = self._process
+            # An externally-provided OPENCODE_URL server is not ours to kill --
+            # just drop the reference so a later ensure() re-evaluates it fresh.
+            self._external_url = None
+        if process is None or process.poll() is not None:
+            return
+        _kill_process_tree(process)
+
+
+_opencode_session = _OpencodeSession()
+atexit.register(_opencode_session.shutdown)
+
+
+# --------------------------------------------------------------------------- #
+# /loop -- recurring OpenCode-backed monitoring jobs
+# --------------------------------------------------------------------------- #
+
+# Minimum interval a loop can be scheduled at -- guards against a typo'd
+# "/loop 30s ..." hammering the model every few seconds.
+_LOOP_MIN_INTERVAL_SECONDS = 60.0
+
+# Loops run against the live training process with a broad toolset (bash,
+# file edits, pause/discard/restart) -- an unbounded number of them is an
+# unbounded number of concurrent interventions. Shared across both chat
+# surfaces since _loop_registry is a single process-wide instance.
+_LOOP_MAX_CONCURRENT = 3
+
+# Every mutating capability this job needs already exists as a local CLI verb
+# (weightslab.cli:main, backed by weightslab/backend/cli.py's localhost TCP
+# command server to the live training process) -- no new bridge/tool is built
+# for this. The loop's OpenCode session gets the SAME full toolset the landing
+# page chat runs with (bash/read/write/edit/patch, no restriction), so it can
+# invoke these directly.
+_LOOP_SYSTEM_PREAMBLE = (
+    "You are a recurring monitoring agent for a live WeightsLab training run, "
+    "checking in periodically. Your workspace is the experiment directory; you "
+    "have bash, read, write, edit, and patch tools rooted there.\n\n"
+    "A local `weightslab` CLI is already available via bash for controlling "
+    "the live training run, not just editing files:\n"
+    "  - `weightslab pause` / `weightslab resume` -- freeze/resume weight "
+    "updates (a safe pause; skips the optimizer step, does not kill the process)\n"
+    "  - `weightslab discard <sample_id>` -- discard one sample by id\n"
+    "  - `weightslab agent query \"<natural language>\"` -- ask the data-"
+    "manipulation agent to do something in plain English, e.g. "
+    "`weightslab agent query \"discard samples where loss > 5\"` or "
+    "`weightslab agent query \"tag mislabeled samples with tag:review\"` -- "
+    "this goes through the normal LLM-driven intent pipeline, not just exact ids\n"
+    "  - `weightslab status` -- a snapshot of hyperparameters/model/training state\n\n"
+    "You may also read and edit training code directly (e.g. fix a broken "
+    "signal function) and, if training has crashed or stalled, attempt to "
+    "restart it via bash -- this is best-effort: look for the process "
+    "(`ps`/`pgrep`), stop it if still running, and re-launch the training "
+    "command if you can determine what it was from shell history, a run "
+    "script, or logs in this directory. There is no dedicated restart "
+    "command, so use your judgement and explain what you did.\n\n"
+    "Your monitoring task for this check-in:\n{prompt}"
+)
+
+
+def _opencode_json_request(base_url: str, path: str, method: str = "GET", body: Optional[dict] = None, timeout: float = 30.0):
+    import urllib.request
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"Content-Type": "application/json"} if body is not None else {}
+    req = urllib.request.Request(f"{base_url.rstrip('/')}{path}", data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _opencode_send_and_collect(base_url: str, session_id: str, text: str, timeout: float = 600.0) -> str:
+    """Open the SSE event stream, THEN send the message, THEN read the stream
+    until this session goes idle -- same stream-first ordering and event
+    parsing as weights_studio/src/landing/agent/opencodeClient.ts and
+    weightslab/trainer/services/agent/opencode_chat.py's _collect_reply.
+    Duplicated in miniature here (rather than importing opencode_chat.py)
+    because this module is deliberately stdlib-only -- see its own docstring --
+    and this loop wants the opposite tool policy (full toolset, no
+    restriction) from that module's SDK-agent use case anyway.
+
+    A loop check-in can legitimately run long (the agent may read logs, edit
+    files, run training-control commands) -- default timeout is 10 minutes,
+    generous relative to the loop's own interval (minimum 1 minute), and a
+    slow check-in simply delays that job's next tick rather than blocking
+    anything else (each job's timer callback runs independently)."""
+    import urllib.error
+    import urllib.request
+
+    stream_req = urllib.request.Request(f"{base_url.rstrip('/')}/event", headers={"Accept": "text/event-stream"})
+    stream = urllib.request.urlopen(stream_req, timeout=timeout)
+
+    send_errors: list = []
+
+    def _send() -> None:
+        try:
+            _opencode_json_request(
+                base_url, f"/session/{session_id}/message", method="POST",
+                body={"parts": [{"type": "text", "text": text}]}, timeout=timeout,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced via send_errors
+            send_errors.append(exc)
+
+    sender = threading.Thread(target=_send, daemon=True)
+    text_parts: dict = {}
+    assistant_message_ids: set = set()
+
+    try:
+        sender.start()
+        data_lines: list = []
+        deadline = time.monotonic() + timeout
+        for raw_line in stream:
+            if time.monotonic() > deadline:
+                break
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+            if line == "":
+                if data_lines:
+                    payload = "\n".join(data_lines)
+                    data_lines = []
+                    try:
+                        event = json.loads(payload)
+                    except (ValueError, TypeError):
+                        continue
+                    event_type = event.get("type")
+                    props = event.get("properties") or {}
+                    if event_type == "message.updated":
+                        msg = props.get("info") or props.get("message") or props
+                        msg_session = str(msg.get("sessionID") or "")
+                        if (not msg_session or msg_session == session_id) and \
+                                str(msg.get("role") or "") == "assistant" and msg.get("id"):
+                            assistant_message_ids.add(str(msg["id"]))
+                    elif event_type == "message.part.updated":
+                        part = props.get("part") or props
+                        part_session = str(part.get("sessionID") or "")
+                        message_id = str(part.get("messageID") or "")
+                        if (not part_session or part_session == session_id) and \
+                                message_id in assistant_message_ids and part.get("type") == "text" \
+                                and isinstance(part.get("text"), str):
+                            text_parts[str(part.get("id") or message_id)] = part["text"]
+                    elif event_type in ("session.idle", "session.error") and \
+                            str(props.get("sessionID") or "") == session_id:
+                        break
+                continue
+            if line.startswith(":"):
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip(" "))
+    except (urllib.error.URLError, TimeoutError, OSError):
+        pass  # degrade to whatever text was collected so far
+    finally:
+        stream.close()
+
+    sender.join(timeout=1.0)
+    if send_errors and not text_parts:
+        raise send_errors[0]
+
+    return "".join(text_parts[key] for key in text_parts)
+
+
+class _LoopJob:
+    def __init__(self, job_id: str, prompt: str, interval_seconds: float, workspace: str) -> None:
+        self.id = job_id
+        self.prompt = prompt
+        self.interval_seconds = interval_seconds
+        self.workspace = workspace
+        self.session_id: Optional[str] = None
+        self.base_url: Optional[str] = None
+        self.next_run_at: Optional[float] = None
+        self.last_result: Optional[str] = None
+        self.last_error: Optional[str] = None
+        self.timer: Optional[threading.Timer] = None
+        self.stopped = False
+
+
+class _LoopRegistry:
+    """Recurring OpenCode-backed monitoring jobs, e.g. `/loop 30m <prompt>`.
+
+    Lives here (this UI server process) rather than in the browser tab or the
+    training backend: the browser can't run a persistent timer that survives
+    a page reload, and the training backend doesn't need to be touched at all
+    since every intervention the loop needs is already reachable through the
+    local `weightslab` CLI over bash (see _LOOP_SYSTEM_PREAMBLE). A job
+    survives a page reload/tab close (tied to this process, not the tab) but
+    not a full `weightslab start` restart -- no persistence beyond that,
+    matching every other piece of state in this server (Jupyter/OpenCode
+    sessions).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._jobs: dict = {}
+        self._next_id = 1
+
+    def start(self, prompt: str, interval_seconds: float, workspace_dir: str, origin: Optional[str]) -> dict:
+        prompt = (prompt or "").strip()
+        if not prompt:
+            return {"ok": False, "error": "A monitoring prompt is required."}
+        if interval_seconds < _LOOP_MIN_INTERVAL_SECONDS:
+            return {"ok": False, "error": f"Minimum loop interval is {int(_LOOP_MIN_INTERVAL_SECONDS)}s."}
+
+        with self._lock:
+            if len(self._jobs) >= _LOOP_MAX_CONCURRENT:
+                return {
+                    "ok": False,
+                    "error": f"{_LOOP_MAX_CONCURRENT} loops already running -- "
+                             f"stop one first (\"/loop stop <id>\").",
+                }
+
+        ensured = _opencode_session.ensure(workspace_dir, origin)
+        if not ensured.get("ok"):
+            return {"ok": False, "error": ensured.get("error") or "Could not start the agent server."}
+        base_url = ensured["url"]
+
+        with self._lock:
+            if len(self._jobs) >= _LOOP_MAX_CONCURRENT:
+                return {
+                    "ok": False,
+                    "error": f"{_LOOP_MAX_CONCURRENT} loops already running -- "
+                             f"stop one first (\"/loop stop <id>\").",
+                }
+            job_id = str(self._next_id)
+            self._next_id += 1
+            job = _LoopJob(job_id, prompt, interval_seconds, workspace_dir)
+            job.base_url = base_url
+            self._jobs[job_id] = job
+
+        threading.Thread(target=self._fire, args=(job_id, base_url), daemon=True).start()
+        return {"ok": True, "id": job_id, "intervalSeconds": interval_seconds}
+
+    def _fire(self, job_id: str, base_url: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None or job.stopped:
+            return  # stopped before this tick ran
+
+        try:
+            if job.session_id is None:
+                created = _opencode_json_request(
+                    base_url, "/session", method="POST",
+                    body={"title": f"weightslab-loop-{job_id}"},
+                )
+                job.session_id = created["id"]
+                text = _LOOP_SYSTEM_PREAMBLE.format(prompt=job.prompt)
+            else:
+                text = job.prompt
+            result = _opencode_send_and_collect(base_url, job.session_id, text)
+            with self._lock:
+                if job_id in self._jobs:
+                    job.last_result = result
+                    job.last_error = None
+        except Exception as exc:
+            with self._lock:
+                if job_id in self._jobs:
+                    job.last_error = str(exc)
+
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.stopped:
+                return  # stopped while this tick was running
+            job.next_run_at = time.time() + job.interval_seconds
+            timer = threading.Timer(job.interval_seconds, self._fire, args=(job_id, base_url))
+            timer.daemon = True
+            job.timer = timer
+            timer.start()
+
+    def stop(self, job_id: str) -> dict:
+        with self._lock:
+            job = self._jobs.pop(job_id, None)
+            if job is not None:
+                job.stopped = True
+        if job is None:
+            return {"ok": False, "error": f"No loop job {job_id}."}
+        if job.timer is not None:
+            job.timer.cancel()
+        return {"ok": True}
+
+    def update(self, job_id: str, prompt: Optional[str] = None, interval_seconds: Optional[float] = None) -> dict:
+        """Change a running job's prompt and/or interval in place. An interval
+        change reschedules from now rather than waiting out the old timer, so
+        the change is felt immediately instead of on the tick after next."""
+        if prompt is not None and not prompt.strip():
+            return {"ok": False, "error": "The monitoring prompt cannot be empty."}
+        if interval_seconds is not None and interval_seconds < _LOOP_MIN_INTERVAL_SECONDS:
+            return {"ok": False, "error": f"Minimum loop interval is {int(_LOOP_MIN_INTERVAL_SECONDS)}s."}
+
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return {"ok": False, "error": f"No loop job {job_id}."}
+
+            if prompt is not None:
+                job.prompt = prompt.strip()
+
+            reschedule = interval_seconds is not None and interval_seconds != job.interval_seconds
+            if interval_seconds is not None:
+                job.interval_seconds = interval_seconds
+
+            if reschedule and job.timer is not None:
+                job.timer.cancel()
+                job.next_run_at = time.time() + job.interval_seconds
+                timer = threading.Timer(job.interval_seconds, self._fire, args=(job_id, job.base_url))
+                timer.daemon = True
+                job.timer = timer
+                timer.start()
+
+            return {
+                "ok": True,
+                "id": job.id,
+                "prompt": job.prompt,
+                "intervalSeconds": job.interval_seconds,
+                "nextRunAt": job.next_run_at,
+            }
+
+    def list(self) -> list:
+        with self._lock:
+            jobs = list(self._jobs.values())
+        return [
+            {
+                "id": j.id,
+                "prompt": j.prompt,
+                "intervalSeconds": j.interval_seconds,
+                "nextRunAt": j.next_run_at,
+                "lastResult": j.last_result,
+                "lastError": j.last_error,
+            }
+            for j in jobs
+        ]
+
+    def shutdown(self) -> None:
+        with self._lock:
+            jobs = list(self._jobs.values())
+            self._jobs.clear()
+        for job in jobs:
+            job.stopped = True
+            if job.timer is not None:
+                job.timer.cancel()
+
+
+_loop_registry = _LoopRegistry()
+atexit.register(_loop_registry.shutdown)
+
+
+# --------------------------------------------------------------------------- #
 # Request handler
 # --------------------------------------------------------------------------- #
 
@@ -391,6 +942,12 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         if path == "/local-notebook/status":
             self._send_json(HTTPStatus.OK, _jupyter_session.status())
             return
+        if path == "/agent-server/status":
+            self._send_json(HTTPStatus.OK, _opencode_session.status())
+            return
+        if path == "/agent-server/loop/list":
+            self._send_json(HTTPStatus.OK, {"loops": _loop_registry.list()})
+            return
         if path == "/local-notebook/list":
             self._list_local_notebooks()
             return
@@ -409,6 +966,16 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/local-notebook":
             self._start_local_notebook()
+        elif path == "/agent-server/start":
+            self._start_agent_server()
+        elif path == "/agent-server/loop/start":
+            self._start_loop()
+        elif path.startswith("/agent-server/loop/") and path.endswith("/stop"):
+            loop_id = path[len("/agent-server/loop/"):-len("/stop")]
+            self._stop_loop(loop_id)
+        elif path.startswith("/agent-server/loop/") and path.endswith("/update"):
+            loop_id = path[len("/agent-server/loop/"):-len("/update")]
+            self._update_loop(loop_id)
         elif path.startswith(self.api_prefix + "/") or path == self.api_prefix:
             self._proxy_grpc_web(path)
         else:
@@ -523,6 +1090,96 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
                         "path": os.path.join(notebooks_dir, filename),
                     })
         self._send_json(HTTPStatus.OK, {"notebooks": entries})
+
+    def _start_agent_server(self):
+        """Start (or reuse) the OpenCode server backing the landing-page agent.
+
+        Same shape and same reasoning as ``_start_local_notebook`` below: spawning
+        a process is an OS-level action, so the browser asks us to do it. Rooted at
+        the experiment directory, which becomes the agent's workspace. Loopback-only,
+        like every other local-machine action in this server -- this one starts a
+        process with filesystem access, so it must never be reachable off-host.
+        """
+        if self.client_address[0] not in _LOOPBACK_ADDRESSES:
+            self._send_json(HTTPStatus.FORBIDDEN,
+                            {"ok": False, "error": "Only reachable from localhost."})
+            return
+
+        workspace = self.experiment_dir or os.getcwd()
+        os.makedirs(workspace, exist_ok=True)
+
+        # Prefer the browser's own Origin header: it is the exact string the CORS
+        # check will compare against. Fall back to reconstructing it from Host.
+        origin = self.headers.get("Origin")
+        if not origin:
+            host = self.headers.get("Host") or "localhost"
+            scheme = "https" if isinstance(getattr(self, "connection", None), ssl.SSLSocket) else "http"
+            origin = f"{scheme}://{host}"
+
+        result = _opencode_session.ensure(workspace, origin)
+        status = HTTPStatus.OK if result.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR
+        self._send_json(status, result)
+
+    def _start_loop(self):
+        """Start a recurring OpenCode-backed monitoring job (the `/loop`
+        command in the connected-experiment agent bar). Loopback-only, same
+        reasoning as _start_agent_server -- this also starts/reuses that same
+        process."""
+        if self.client_address[0] not in _LOOPBACK_ADDRESSES:
+            self._send_json(HTTPStatus.FORBIDDEN,
+                             {"ok": False, "error": "Only reachable from localhost."})
+            return
+
+        body = self._read_json_body()
+        prompt = str(body.get("prompt") or "")
+        try:
+            interval_minutes = float(body.get("intervalMinutes") or 0)
+        except (TypeError, ValueError):
+            interval_minutes = 0
+
+        workspace = self.experiment_dir or os.getcwd()
+        os.makedirs(workspace, exist_ok=True)
+
+        origin = self.headers.get("Origin")
+        if not origin:
+            host = self.headers.get("Host") or "localhost"
+            scheme = "https" if isinstance(getattr(self, "connection", None), ssl.SSLSocket) else "http"
+            origin = f"{scheme}://{host}"
+
+        result = _loop_registry.start(prompt, interval_minutes * 60.0, workspace, origin)
+        status = HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST
+        self._send_json(status, result)
+
+    def _stop_loop(self, loop_id: str):
+        if self.client_address[0] not in _LOOPBACK_ADDRESSES:
+            self._send_json(HTTPStatus.FORBIDDEN,
+                             {"ok": False, "error": "Only reachable from localhost."})
+            return
+        result = _loop_registry.stop(loop_id)
+        status = HTTPStatus.OK if result.get("ok") else HTTPStatus.NOT_FOUND
+        self._send_json(status, result)
+
+    def _update_loop(self, loop_id: str):
+        """Change a running loop's prompt and/or interval (the panel's Edit
+        action) without stopping and restarting the job."""
+        if self.client_address[0] not in _LOOPBACK_ADDRESSES:
+            self._send_json(HTTPStatus.FORBIDDEN,
+                             {"ok": False, "error": "Only reachable from localhost."})
+            return
+
+        body = self._read_json_body()
+        prompt = body.get("prompt")
+        interval_seconds = None
+        if body.get("intervalMinutes") is not None:
+            try:
+                interval_seconds = float(body["intervalMinutes"]) * 60.0
+            except (TypeError, ValueError):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "intervalMinutes must be a number."})
+                return
+
+        result = _loop_registry.update(loop_id, prompt=prompt, interval_seconds=interval_seconds)
+        status = HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST
+        self._send_json(status, result)
 
     def _start_local_notebook(self):
         # Copying a file and spawning a process are OS-level actions the
@@ -779,6 +1436,11 @@ _UI_ENV_GLOBALS = [
      ("ENABLE_HYPERPARAMETERS_OPTIMIZATION", "WS_ENABLE_HYPERPARAMETERS_OPTIMIZATION",
       "VITE_ENABLE_HYPERPARAMETERS_OPTIMIZATION")),
     ("WS_ENABLE_AGENT", ("ENABLE_AGENT", "WS_ENABLE_AGENT", "VITE_ENABLE_AGENT")),
+    # Shared with the SDK agent's own OPENCODE_URL config (agent.py's
+    # _load_config) -- setting OPENCODE_URL once configures both sides, and
+    # is also what _OpencodeSession.ensure() prefers over spawning its own
+    # server (see below).
+    ("WS_OPENCODE_URL", ("OPENCODE_URL", "WS_OPENCODE_URL", "VITE_OPENCODE_URL")),
 ]
 
 

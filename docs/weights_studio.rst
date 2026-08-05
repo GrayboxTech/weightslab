@@ -195,45 +195,41 @@ Agent Usage in Weights Studio
 ------------------------------
 
 Weights Studio includes an agent bar and an expandable agent history window.
-The agent can run with either:
+The agent is backed entirely by a local OpenCode server (`opencode.ai
+<https://opencode.ai>`_) — see :doc:`agent` for the full setup story and the
+distinction between this chat-bar agent and the separate ``/loop``/landing-page
+OpenCode agent.
 
-- a local Ollama provider configured on the backend
-- a cloud OpenRouter provider configured at startup or initialized from the UI
+OpenCode workflow
+~~~~~~~~~~~~~~~~~~
 
-Local Ollama workflow
-~~~~~~~~~~~~~~~~~~~~~
+WeightsLab starts (or reuses) a local ``opencode serve`` process for you, so
+there's normally nothing to configure before the agent is available. If the
+backend isn't connected to it yet, Weights Studio shows the agent as
+unconfigured and the input placeholder instructs the user to type ``/init``.
 
-If the backend is configured with ``provider: ollama`` and the Ollama server is
-running, the agent is available immediately after backend startup.
+Typical setup:
 
-Typical local setup:
-
-1. Start Ollama.
+1. Authenticate OpenCode once, if you haven't already: ``opencode auth
+   login`` (or the landing page's login modal) — OpenRouter, Anthropic, a
+   local Ollama endpoint, anything OpenCode supports.
 2. Start WeightsLab (``wl.serve(serving_grpc=True)``).
 3. Start Weights Studio (``weightslab start``).
-4. Ask questions in the agent bar.
-
-Cloud OpenRouter workflow
-~~~~~~~~~~~~~~~~~~~~~~~~~
-
-If the backend is not initialized with a cloud key yet, Weights Studio shows
-the agent as unconfigured and the input placeholder instructs the user to type
-``/init``.
+4. Ask questions in the agent bar, or type ``/init`` first to pick a specific
+   model.
 
 ``/init`` flow:
 
 1. Type ``/init`` in the agent input.
-2. Choose manual API key entry or the OpenRouter OAuth flow.
+2. Weights Studio connects to the OpenCode server.
 3. Select a model from the available model list.
 4. Confirm to initialize the runtime connection.
-
-The default cloud model is ``~google/gemini-flash-latest``.
 
 Available agent commands
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-- ``/init`` — initialize OpenRouter from the UI
-- ``/model`` — open the model chooser to switch the active OpenRouter model
+- ``/init`` — connect to the OpenCode server from the UI
+- ``/model`` — open the model chooser to switch the active OpenCode model
 - ``/reset`` — clear the current agent runtime connection and status
 
 History behavior

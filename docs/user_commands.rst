@@ -487,9 +487,9 @@ sub-verb reference, examples, and setup: see :doc:`agent`.
 .. code-block:: text
 
    agent status
-   agent init --api-key sk-or-... --model openai/gpt-4o-mini --timeout 20
+   agent init --model openrouter/anthropic/claude-opus-4.6
    agent models
-   agent model google/gemini-flash-latest
+   agent model openrouter/openai/gpt-5
    ask tag train samples with loss > 1.2 as goldset
 
 Experiment report

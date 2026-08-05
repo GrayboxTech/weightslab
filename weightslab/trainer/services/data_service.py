@@ -904,7 +904,7 @@ class DataService:
 
     def _is_agent_available(self) -> bool:
         """
-        Check if the agent (Ollama) is available for natural language queries.
+        Check if the agent (OpenCode) is available for natural language queries.
 
         Returns:
             bool: True if agent is available, False otherwise

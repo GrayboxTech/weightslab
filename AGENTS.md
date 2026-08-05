@@ -222,10 +222,11 @@ gates and separates phases.
 
 **Large weights/images fail to transfer.** Raise `GRPC_MAX_MESSAGE_BYTES`.
 
-**The agent bar says it's unconfigured.** The LLM agent needs a provider: a
-local **Ollama** server (`provider: ollama`, available immediately) or **cloud
-OpenRouter** initialized from the UI via `/init` (then `/model` to switch,
-`/reset` to clear). See `weightslab/docs/weights_studio.rst`.
+**The agent bar says it's unconfigured.** The LLM agent is backed entirely by
+a local **OpenCode** server (`OPENCODE_URL`, default `http://127.0.0.1:4096`)
+— WeightsLab starts one for you on first use. Initialize from the UI via
+`/init` (then `/model` to switch, `/reset` to clear). See
+`weightslab/docs/agent.rst` and `weightslab/docs/weights_studio.rst`.
 
 ---
 
