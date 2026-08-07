@@ -120,3 +120,51 @@ reported as:
 4. **ledger contents verified** — signal columns present, measured-row count
 
 (4) is not optional: a previous "10× win" was writes silently failing.
+
+---
+
+# E. Triage — which call sites need a full reconstruction
+
+`_slowUpdateInternals()` rebuilds the whole view: `copy → collapse → reset_index
+→ set_index → reindex`. It has 18 call sites, and almost none of them need
+that. Most just want **fresh values for rows the trainer touched**, which is
+`O(change)`.
+
+`_fastUpdateInternals()` applies only dirty rows, via a maintained
+`sample_id → position` map (`_rebuild_view_pos_map`), and returns `False` —
+falling back to the full rebuild — whenever it cannot safely apply:
+
+- no view yet, or no position map (first build)
+- a dirty `sample_id` absent from the map (new rows ⇒ structural change)
+- backlog > `max_dirty` (a rebuild is genuinely cheaper)
+
+So the worst case is today's behaviour, never wrong data.
+
+| site | routing | why |
+|---|---|---|
+| `_bg_view_refresh` | **fast** | exists purely to refresh values after a stale read — the textbook differential case, and the one that holds `_lock` against the trainer |
+| `_process_get_data_samples` | **fast** | grid fetch needs current values, not a new frame |
+| `_compute_custom_signals` | **fast** | writes new signal *values*; schema unchanged |
+| `GetDataSplits` | **fast** | read-only summary |
+| `EditDataSample` ×5 | **fast** | per-sample value edits |
+| `EditDataSample` ×3 (`df.modify`, `df.drop_column`) | **full** | changes the schema — differential cannot add/remove columns |
+| `ApplyDataQuery` `@reset`/`@clear` | **full** | clears `_is_filtered` to restore the full universe; a differential updates values but cannot restore *dropped rows* |
+| `ApplyDataQuery` filter + agent paths | **full** (deferred) | a forced rebuild preserves `_is_filtered` (`:3691`), so swapping in a differential changes which rows the user sees. Rare, user-initiated, low perf value, high blast radius — not worth the risk until the filter semantics are pinned down |
+| `_compute_natural_sort_stats` | **full** | gated off (`compute_natural_sort=False`); latent |
+| `_manual_save_data_state` | **full** | explicit user save; correctness over speed |
+
+**Kill-switch:** `WL_FAST_VIEW=0` disables the differential and the position-map
+build, reproducing prior behaviour exactly. This is what makes a like-for-like
+A/B possible from a single tree.
+
+## Why the no-client benchmark cannot show this
+
+A 41-step run with no UI client attached records **0 rebuild events** — nothing
+calls `_slowUpdateInternals` at all, so the fast path has nothing to improve and
+correctly measures as no change. The rebuild cost only materialises when a
+client is attached, which is the case that measured **3.7× slower** with p50
+grid latency of 5.2 s.
+
+The A/B is therefore run under load: baseline → under-load → recovery phases
+within one training process (`t_imgload.py`), so each arm is normalised against
+its own idle throughput.
