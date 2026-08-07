@@ -148,6 +148,14 @@ then with TensorBoard removed and replaced by WeightsLab.
    +  wl.keep_serving()
 
 
+3) Notebook Code with Google Colab
+----------------------------------
+
+Open this notebook:
+
+- `WeightsLab Colab quickstart notebook <https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/Colab/wl-colab-quickstart.ipynb>`_
+
+
 Use Weightslab Studio (UI)
 --------------------------
 
