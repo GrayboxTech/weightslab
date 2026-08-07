@@ -128,15 +128,6 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
    quickstart
 
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Usage
-   :hidden:
-
-   usage/good_practice
-
-
 .. toctree::
    :maxdepth: 3
    :caption: Examples
@@ -144,6 +135,12 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
    examples/index
 
+.. toctree::
+   :maxdepth: 2
+   :caption: Usage
+   :hidden:
+
+   usage/good_practice
 
 .. toctree::
    :maxdepth: 2
