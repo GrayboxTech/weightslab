@@ -195,3 +195,29 @@ class AgentService:
         logger.debug("CompactAgentHistory")
         success, message = agent.compact_history()
         return pb2.CompactAgentHistoryResponse(success=success, message=message)
+
+    @safe_grpc(lambda msg: pb2.GetAgentContextUsageResponse(success=False, message=msg))
+    def GetAgentContextUsage(self, request, context):
+        """Context-window usage breakdown for the active model (backs the
+        /context command) -- see DataManipulationAgent.get_context_usage."""
+        agent = self._agent
+        if agent is None:
+            return pb2.GetAgentContextUsageResponse(
+                success=False,
+                message="Agent backend is not running.",
+            )
+
+        logger.debug("GetAgentContextUsage")
+        ok, usage, message = agent.get_context_usage()
+        return pb2.GetAgentContextUsageResponse(
+            success=ok,
+            message=message,
+            model=usage.get("model") or "",
+            context_window=usage.get("context_window") or 0,
+            input_tokens=usage.get("input_tokens") or 0,
+            output_tokens=usage.get("output_tokens") or 0,
+            reasoning_tokens=usage.get("reasoning_tokens") or 0,
+            cache_read_tokens=usage.get("cache_read_tokens") or 0,
+            cache_write_tokens=usage.get("cache_write_tokens") or 0,
+        )
+        return pb2.CompactAgentHistoryResponse(success=success, message=message)

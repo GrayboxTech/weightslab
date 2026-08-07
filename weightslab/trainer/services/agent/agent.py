@@ -771,10 +771,15 @@ class DataManipulationAgent:
 
     def _setup_providers(self):
         self.chain_opencode = None
+        self._opencode_chat = None
         initialized = False
 
         try:
-            self.chain_opencode = OpenCodeChat(self.opencode_url, self.opencode_model).as_runnable()
+            # Kept alongside the runnable (not just `self.chain_opencode`) so
+            # get_context_usage() can read `.last_usage` off it after a call --
+            # `as_runnable()` only hands back a RunnableLambda wrapping it.
+            self._opencode_chat = OpenCodeChat(self.opencode_url, self.opencode_model)
+            self.chain_opencode = self._opencode_chat.as_runnable()
             initialized = True
             _LOGGER.info(
                 f"[Agent] OpenCode enabled: {self.opencode_url} "
@@ -870,10 +875,77 @@ class DataManipulationAgent:
             _LOGGER.warning("get_available_models (opencode) error: %s", exc)
             return False, [], f"Could not reach the OpenCode server: {exc}"
 
+    def _fetch_context_window(self, model: str) -> int:
+        """Look up the active model's context-window size (tokens) from
+        OpenCode's /config/providers -- same endpoint/shape as
+        get_available_models, but this time reading each model's own `limit`
+        metadata (models.dev schema: {context, output}) instead of just its
+        id. Returns 0 (unknown) on any lookup failure or missing field --
+        callers must degrade gracefully rather than treat 0 as an error."""
+        if not model or "/" not in model:
+            return 0
+        provider_id, model_id = model.split("/", 1)
+
+        import urllib.request as _ur
+        import json as _json
+
+        try:
+            url = f"{self.opencode_url.rstrip('/')}/config/providers"
+            with _ur.urlopen(_ur.Request(url), timeout=10) as resp:
+                data = _json.loads(resp.read().decode())
+            for provider in data.get("providers", []):
+                if provider.get("id") != provider_id:
+                    continue
+                provider_models = provider.get("models", {})
+                info = provider_models.get(model_id) if isinstance(provider_models, dict) else next(
+                    (m for m in provider_models if isinstance(m, dict) and m.get("id") == model_id), None,
+                )
+                context = (info or {}).get("limit", {}).get("context")
+                return int(context) if isinstance(context, (int, float)) else 0
+        except Exception as exc:
+            _LOGGER.warning("_fetch_context_window (opencode) error: %s", exc)
+        return 0
+
+    def get_context_usage(self) -> "tuple[bool, dict, str]":
+        """
+        Context-window usage for the active model, for the /context command.
+
+        A fresh OpenCode session is created per agent call (opencode_chat.py),
+        so there is no persistent session to total across turns -- this
+        reports the LAST completed call's token usage (self._opencode_chat.
+        last_usage), which is exactly the size of the context the NEXT call
+        will resend (the full history is baked into the prompt text every
+        time, see agent.py's own history= placeholder usage).
+
+        Returns:
+            ``(True, usage_dict, message)``. ``message`` is empty on a normal
+            result, or a human-readable note ("no turns yet", etc.) when
+            ``usage_dict`` is present but incomplete. ``(False, {}, error)``
+            only when the agent isn't configured at all.
+        """
+        if self.preferred_provider != "opencode" or self._opencode_chat is None:
+            return False, {}, "Agent not configured. Type /init to set up the agent."
+
+        window = self._fetch_context_window(self.opencode_model) if self.opencode_model else 0
+        usage = self._opencode_chat.last_usage
+        base = {"model": self.opencode_model, "context_window": window}
+        if usage is None:
+            return True, base, "No agent turns yet in this session."
+
+        return True, {
+            **base,
+            "input_tokens": usage.get("input", 0),
+            "output_tokens": usage.get("output", 0),
+            "reasoning_tokens": usage.get("reasoning", 0),
+            "cache_read_tokens": usage.get("cache_read", 0),
+            "cache_write_tokens": usage.get("cache_write", 0),
+        }, ""
+
     def reset_connection(self) -> "tuple[bool, str]":
         """Clear the active OpenCode connection and revert the agent to the
         uninitialized state."""
         self.chain_opencode = None
+        self._opencode_chat = None
         self.opencode_model = os.environ.get("OPENCODE_MODEL", "")
         self.preferred_provider = "opencode"
 
@@ -1692,6 +1764,7 @@ class DataManipulationAgent:
             # just proved broken, instead of leaving the health check
             # permanently stale until the process restarts.
             self.chain_opencode = None
+            self._opencode_chat = None
             error_msg = (
                 "Agent not connected: OpenCode rejected the request "
                 "(401 Unauthorized). Re-initialize the agent with /init."

@@ -40,6 +40,7 @@ import time
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Iterable, Optional, Tuple
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
@@ -464,6 +465,7 @@ class _OpencodeSession:
         agent.py's _load_config actually converge: point both the SDK agent
         and this UI server at one already-running server via one env var,
         rather than each independently spawning its own."""
+        _ensure_workspace_agents_md(workspace_dir)
         with self._lock:
             if self._running_locked():
                 return {"ok": True, "url": self._url_locked(), "reused": True,
@@ -565,6 +567,83 @@ class _OpencodeSession:
 
 _opencode_session = _OpencodeSession()
 atexit.register(_opencode_session.shutdown)
+
+
+# --------------------------------------------------------------------------- #
+# /agent-server/docs -- integration docs for preset prompts
+# --------------------------------------------------------------------------- #
+
+# AGENTS.md lives inside the package itself (weightslab/weightslab/AGENTS.md,
+# so parents[1] from here), which is what actually ships in a `pip install`
+# (see pyproject.toml's package-data) -- parents[2], the repo root, is kept
+# as a fallback only for anything not (yet) moved into the package. Missing
+# entirely is not an error; the preset prompt still works without it, just
+# without that extra grounding.
+def _repo_doc_path(filename: str) -> Optional[Path]:
+    here = Path(__file__).resolve()
+    for candidate in (here.parents[1] / filename, here.parents[2] / filename):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _read_repo_doc(filename: str) -> Optional[str]:
+    path = _repo_doc_path(filename)
+    if path is None:
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+# Best-effort: drop AGENTS.md directly into a freshly-used OpenCode workspace
+# so the agent can just `read AGENTS.md` itself -- it has file tools rooted
+# right there -- rather than depending entirely on the landing chat happening
+# to attach it via /agent-server/docs (which the experiment-bar-driven
+# `/loop` agent never calls at all). Never overwrites an existing AGENTS.md
+# already in the workspace: that may be the user's OWN project instructions,
+# not ours to replace.
+def _ensure_workspace_agents_md(workspace_dir: str) -> None:
+    target = Path(workspace_dir) / "AGENTS.md"
+    if target.exists():
+        return
+    source = _repo_doc_path("AGENTS.md")
+    if source is None:
+        return
+    try:
+        shutil.copyfile(source, target)
+    except OSError:
+        pass
+
+
+# The MNIST preset's counterpart to _read_repo_doc: a complete, working
+# reference implementation is more actionable grounding than an excerpt alone
+# (confirmed live: the excerpt in AGENTS.md wasn't enough on its own to stop a
+# model from re-deriving the API from the installed package instead of using
+# it directly). Scoped to just the one usecase the requesting preset actually
+# matches -- attaching all of them to every request would trade the "a few
+# minutes to generate" goal away for thoroughness nobody asked for here.
+_KNOWN_EXAMPLE_USECASES = {
+    "wl-ads-recommendation", "wl-classification", "wl-clustering",
+    "wl-detection", "wl-fraud-detection", "wl-generation", "wl-segmentation",
+}
+
+
+def _read_example_main(usecase: str) -> Optional[str]:
+    """Best-effort main.py for one of weightslab's own PyTorch usecase
+    examples. `usecase` is client-supplied (a query param) -- checked against
+    a fixed allowlist first, never trusted as a path component directly."""
+    if usecase not in _KNOWN_EXAMPLE_USECASES:
+        return None
+    here = Path(__file__).resolve()
+    candidate = here.parents[1] / "examples" / "PyTorch" / usecase / "main.py"
+    if candidate.is_file():
+        try:
+            return candidate.read_text(encoding="utf-8")
+        except OSError:
+            return None
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -710,6 +789,16 @@ def _opencode_send_and_collect(base_url: str, session_id: str, text: str, timeou
     return "".join(text_parts[key] for key in text_parts)
 
 
+def _opencode_get_messages(base_url: str, session_id: str) -> list:
+    """A loop's chat tab reads its own scrollback from here -- same shape
+    weights_studio's opencodeClient.ts's getSessionMessages() already
+    consumes (each item `{info, parts}`), a trivial GET via the JSON helper
+    above rather than a new primitive: both scheduled ticks and manual
+    messages land as ordinary turns in this same session, so its own message
+    list already is the merged transcript, nothing to reconcile here."""
+    return _opencode_json_request(base_url, f"/session/{session_id}/message", method="GET")
+
+
 class _LoopJob:
     def __init__(self, job_id: str, prompt: str, interval_seconds: float, workspace: str) -> None:
         self.id = job_id
@@ -723,6 +812,19 @@ class _LoopJob:
         self.last_error: Optional[str] = None
         self.timer: Optional[threading.Timer] = None
         self.stopped = False
+        # Serializes every send against this job's session -- OpenCode's
+        # /event stream is one GLOBAL feed filtered client-side by sessionID
+        # (see _opencode_send_and_collect), so two unlocked concurrent sends
+        # on the same session would cross-contaminate each other's collected
+        # text. Held by both the scheduled tick (_fire) and a manual message
+        # from the loop's chat tab (send_message) -- never both at once.
+        self.lock = threading.Lock()
+        # True once the monitoring preamble (role + available CLI verbs) has
+        # been sent as this session's first message -- after that, both the
+        # scheduled tick and manual messages send plain text. Separate from
+        # session_id being set: the session itself is now created eagerly in
+        # start(), before any message (scheduled or manual) has gone out.
+        self.preamble_sent = False
 
 
 class _LoopRegistry:
@@ -764,8 +866,32 @@ class _LoopRegistry:
             return {"ok": False, "error": ensured.get("error") or "Could not start the agent server."}
         base_url = ensured["url"]
 
+        # Created eagerly now -- not lazily on the first tick, as before --
+        # so a loop's chat tab has a session to show/send into immediately,
+        # before its first check-in has even run. Done here, between the two
+        # admission checks rather than inside either, same reasoning as
+        # ensure() just above: a network round-trip has no business running
+        # while holding the lock that also serializes list()/stop()/update().
+        try:
+            created = _opencode_json_request(
+                base_url, "/session", method="POST",
+                body={"title": f"weightslab-loop-{int(time.time())}"},
+            )
+            session_id = created["id"]
+        except Exception as exc:
+            return {"ok": False, "error": f"Could not start a chat session for this loop: {exc}"}
+
         with self._lock:
             if len(self._jobs) >= _LOOP_MAX_CONCURRENT:
+                # Lost the race between the two checks -- the session just
+                # created above will never be used. Best-effort delete rather
+                # than leak it (this registry already tolerates a leaked
+                # session on stop(), below; unlike that one, this is a
+                # certain, immediate leak, so it's worth the extra call).
+                try:
+                    _opencode_json_request(base_url, f"/session/{session_id}", method="DELETE")
+                except Exception:
+                    pass
                 return {
                     "ok": False,
                     "error": f"{_LOOP_MAX_CONCURRENT} loops already running -- "
@@ -775,10 +901,64 @@ class _LoopRegistry:
             self._next_id += 1
             job = _LoopJob(job_id, prompt, interval_seconds, workspace_dir)
             job.base_url = base_url
+            job.session_id = session_id
             self._jobs[job_id] = job
 
         threading.Thread(target=self._fire, args=(job_id, base_url), daemon=True).start()
         return {"ok": True, "id": job_id, "intervalSeconds": interval_seconds}
+
+    def _send_locked(self, job: "_LoopJob", base_url: str, text: str) -> None:
+        """Send `text` to `job`'s session under its lock, prepending the
+        monitoring preamble exactly once (whichever caller -- a scheduled
+        tick or a manual message -- happens to send first). Shared by _fire
+        and send_message so both go through the same serialization and
+        last_result/last_error bookkeeping.
+
+        Raises if the lock is already held (a send is already in flight) --
+        callers decide what "busy" means for them (skip a tick vs. tell the
+        user to wait) rather than this method blocking or guessing."""
+        if not job.lock.acquire(blocking=False):
+            raise RuntimeError("A check-in for this loop is already in progress.")
+        try:
+            send_preamble = not job.preamble_sent
+            full_text = _LOOP_SYSTEM_PREAMBLE.format(prompt=text) if send_preamble else text
+            result = _opencode_send_and_collect(base_url, job.session_id, full_text)
+            with self._lock:
+                if job.id in self._jobs:
+                    job.last_result = result
+                    job.last_error = None
+                    if send_preamble:
+                        job.preamble_sent = True
+        finally:
+            job.lock.release()
+
+    def send_message(self, job_id: str, text: str) -> dict:
+        """A manual, ad hoc message into a loop's own session -- typed by the
+        user in that loop's chat tab, interleaved with its scheduled
+        check-ins rather than a separate conversation."""
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "Message cannot be empty."}
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            return {"ok": False, "error": f"No loop job {job_id}."}
+        try:
+            self._send_locked(job, job.base_url, text)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "result": job.last_result}
+
+    def get_messages(self, job_id: str) -> dict:
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            return {"ok": False, "error": f"No loop job {job_id}."}
+        try:
+            messages = _opencode_get_messages(job.base_url, job.session_id)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "messages": messages}
 
     def _fire(self, job_id: str, base_url: str) -> None:
         with self._lock:
@@ -787,21 +967,13 @@ class _LoopRegistry:
             return  # stopped before this tick ran
 
         try:
-            if job.session_id is None:
-                created = _opencode_json_request(
-                    base_url, "/session", method="POST",
-                    body={"title": f"weightslab-loop-{job_id}"},
-                )
-                job.session_id = created["id"]
-                text = _LOOP_SYSTEM_PREAMBLE.format(prompt=job.prompt)
-            else:
-                text = job.prompt
-            result = _opencode_send_and_collect(base_url, job.session_id, text)
-            with self._lock:
-                if job_id in self._jobs:
-                    job.last_result = result
-                    job.last_error = None
+            self._send_locked(job, base_url, job.prompt)
         except Exception as exc:
+            # Includes the "already in progress" case from _send_locked --
+            # a manual message was mid-flight, so this tick is simply
+            # skipped (preamble_sent, if still False, stays False) rather
+            # than blocking the timer thread; the reschedule below still
+            # runs, so the next interval tries again.
             with self._lock:
                 if job_id in self._jobs:
                     job.last_error = str(exc)
@@ -948,6 +1120,13 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         if path == "/agent-server/loop/list":
             self._send_json(HTTPStatus.OK, {"loops": _loop_registry.list()})
             return
+        if path.startswith("/agent-server/loop/") and path.endswith("/messages"):
+            loop_id = path[len("/agent-server/loop/"):-len("/messages")]
+            self._get_loop_messages(loop_id)
+            return
+        if path == "/agent-server/docs":
+            self._get_agent_docs()
+            return
         if path == "/local-notebook/list":
             self._list_local_notebooks()
             return
@@ -976,6 +1155,9 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         elif path.startswith("/agent-server/loop/") and path.endswith("/update"):
             loop_id = path[len("/agent-server/loop/"):-len("/update")]
             self._update_loop(loop_id)
+        elif path.startswith("/agent-server/loop/") and path.endswith("/message"):
+            loop_id = path[len("/agent-server/loop/"):-len("/message")]
+            self._send_loop_message(loop_id)
         elif path.startswith(self.api_prefix + "/") or path == self.api_prefix:
             self._proxy_grpc_web(path)
         else:
@@ -1180,6 +1362,59 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         result = _loop_registry.update(loop_id, prompt=prompt, interval_seconds=interval_seconds)
         status = HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST
         self._send_json(status, result)
+
+    def _get_loop_messages(self, loop_id: str):
+        """Backs a loop's chat tab: its scrollback is just this job's own
+        OpenCode session history -- scheduled ticks and manual messages
+        (_send_loop_message below) both land as ordinary turns in the same
+        session, so nothing needs merging here, only fetching."""
+        if self.client_address[0] not in _LOOPBACK_ADDRESSES:
+            self._send_json(HTTPStatus.FORBIDDEN,
+                             {"ok": False, "error": "Only reachable from localhost."})
+            return
+        result = _loop_registry.get_messages(loop_id)
+        status = HTTPStatus.OK if result.get("ok") else HTTPStatus.NOT_FOUND
+        self._send_json(status, result)
+
+    def _send_loop_message(self, loop_id: str):
+        """A user-typed message into a loop's chat tab, interleaved with its
+        scheduled check-ins on the same session. Request/response, matching
+        the existing blocking-call UX of the backend SDK agent's query bar --
+        not the Frontend Agent tab's SSE streaming."""
+        if self.client_address[0] not in _LOOPBACK_ADDRESSES:
+            self._send_json(HTTPStatus.FORBIDDEN,
+                             {"ok": False, "error": "Only reachable from localhost."})
+            return
+        body = self._read_json_body()
+        text = str(body.get("text") or "")
+        result = _loop_registry.send_message(loop_id, text)
+        status = HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST
+        self._send_json(status, result)
+
+    def _get_agent_docs(self):
+        """AGENTS.md content for the landing chat's preset prompts to attach,
+        so the agent has a grounded, accurate weightslab integration pattern
+        instead of guessing. Best-effort and never errors -- if a file
+        genuinely is not present (e.g. a `pip install` without a repo
+        checkout), it is just omitted from the response.
+
+        ?example=<usecase> (repeatable) additionally attaches each named
+        PyTorch usecase's complete main.py (see _KNOWN_EXAMPLE_USECASES) --
+        whichever ones the requesting preset asks for. Unknown/unlisted
+        usecases are silently skipped rather than erroring, same as a missing
+        AGENTS.md."""
+        files = []
+        agents_md = _read_repo_doc("AGENTS.md")
+        if agents_md:
+            files.append({"name": "AGENTS.md", "content": agents_md})
+
+        query = parse_qs(urlsplit(self.path).query)
+        for usecase in query.get("example") or []:
+            example_main = _read_example_main(usecase)
+            if example_main:
+                files.append({"name": f"examples/PyTorch/{usecase}/main.py", "content": example_main})
+
+        self._send_json(HTTPStatus.OK, {"files": files})
 
     def _start_local_notebook(self):
         # Copying a file and spawning a process are OS-level actions the

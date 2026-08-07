@@ -86,7 +86,10 @@ class _FakeOpenCodeHandler(BaseHTTPRequestHandler):
         while not self.server.recorded_messages and time.monotonic() < deadline:
             time.sleep(0.01)
 
-        emit({"type": "message.updated", "properties": {"info": {"id": "msg_1", "role": "assistant", "sessionID": session_id}}})
+        info = {"id": "msg_1", "role": "assistant", "sessionID": session_id}
+        if self.server.reply_tokens is not None:
+            info["tokens"] = self.server.reply_tokens
+        emit({"type": "message.updated", "properties": {"info": info}})
         for delta in self.server.reply_deltas:
             emit({"type": "message.part.updated", "properties": {"part": {
                 "id": f"prt_{delta[:4]}", "type": "text", "text": delta, "messageID": "msg_1", "sessionID": session_id,
@@ -103,19 +106,21 @@ class _FakeOpenCodeHandler(BaseHTTPRequestHandler):
 class _FakeOpenCodeServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, *args, reply_deltas, emit_error=False, **kwargs):
+    def __init__(self, *args, reply_deltas, emit_error=False, reply_tokens=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.session_id = "ses_test1"
         self.reply_deltas = reply_deltas
         self.emit_error = emit_error
+        self.reply_tokens = reply_tokens
         self.recorded_messages = []
         self.recorded_session_titles = []
 
 
 class _ServerTestCase(unittest.TestCase):
-    def _start_server(self, reply_deltas, emit_error=False):
+    def _start_server(self, reply_deltas, emit_error=False, reply_tokens=None):
         self.httpd = _FakeOpenCodeServer(
-            ("127.0.0.1", 0), _FakeOpenCodeHandler, reply_deltas=reply_deltas, emit_error=emit_error,
+            ("127.0.0.1", 0), _FakeOpenCodeHandler,
+            reply_deltas=reply_deltas, emit_error=emit_error, reply_tokens=reply_tokens,
         )
         self.port = self.httpd.server_address[1]
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
@@ -194,6 +199,29 @@ class TestOpenCodeChatCall(_ServerTestCase):
         with self.assertRaises(OpenCodeError):
             chat._call("hello")
 
+    def test_populates_last_usage_from_the_assistant_messages_tokens(self):
+        self._start_server(
+            reply_deltas=["ok"],
+            reply_tokens={"input": 120, "output": 30, "reasoning": 5, "cache": {"read": 80, "write": 10}},
+        )
+        chat = OpenCodeChat(f"http://127.0.0.1:{self.port}", model=None, timeout=10)
+
+        self.assertIsNone(chat.last_usage)
+        chat._call("hello")
+
+        self.assertEqual(
+            chat.last_usage,
+            {"input": 120, "output": 30, "reasoning": 5, "cache_read": 80, "cache_write": 10},
+        )
+
+    def test_last_usage_is_none_when_the_reply_carries_no_tokens_field(self):
+        self._start_server(reply_deltas=["ok"])  # reply_tokens defaults to None
+        chat = OpenCodeChat(f"http://127.0.0.1:{self.port}", model=None, timeout=10)
+
+        chat._call("hello")
+
+        self.assertIsNone(chat.last_usage)
+
 
 class TestModelRefParsing(unittest.TestCase):
     def test_splits_on_first_slash_only(self):
@@ -244,6 +272,28 @@ class TestHandleEvent(unittest.TestCase):
             json.dumps({"type": "session.idle", "properties": {"sessionID": "s1"}}), "s1", set(), {},
         )
         self.assertEqual(outcome, "idle")
+
+    def test_populates_the_usage_dict_when_the_assistant_message_carries_tokens(self):
+        usage = {}
+        payload = json.dumps({
+            "type": "message.updated",
+            "properties": {"info": {
+                "id": "msg_1", "role": "assistant", "sessionID": "s1",
+                "tokens": {"input": 10, "output": 2, "reasoning": 0, "cache": {"read": 5, "write": 1}},
+            }},
+        })
+        outcome = OpenCodeChat._handle_event(payload, "s1", set(), {}, usage)
+        self.assertIsNone(outcome)
+        self.assertEqual(usage, {"input": 10, "output": 2, "reasoning": 0, "cache_read": 5, "cache_write": 1})
+
+    def test_usage_param_is_optional_and_ignored_when_omitted(self):
+        # Existing call sites that predate the usage tracking must keep working.
+        payload = json.dumps({
+            "type": "message.updated",
+            "properties": {"info": {"id": "msg_1", "role": "assistant", "sessionID": "s1", "tokens": {"input": 1}}},
+        })
+        outcome = OpenCodeChat._handle_event(payload, "s1", set(), {})
+        self.assertIsNone(outcome)
 
 
 if __name__ == "__main__":

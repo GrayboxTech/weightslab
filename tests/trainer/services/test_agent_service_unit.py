@@ -147,6 +147,39 @@ class TestAgentServiceUnit(unittest.TestCase):
         self.assertFalse(compact_response.success)
         self.assertIn('not running', clear_response.message)
 
+    def test_get_agent_context_usage_delegates_to_agent(self):
+        agent = MagicMock()
+        agent.get_context_usage.return_value = (True, {
+            'model': 'openrouter/anthropic/claude-opus-4.6',
+            'context_window': 200000,
+            'input_tokens': 100,
+            'output_tokens': 20,
+            'reasoning_tokens': 5,
+            'cache_read_tokens': 60,
+            'cache_write_tokens': 10,
+        }, '')
+        service, _ = self._make_service(agent=agent)
+
+        response = service.GetAgentContextUsage(pb2.Empty(), None)
+
+        agent.get_context_usage.assert_called_once_with()
+        self.assertTrue(response.success)
+        self.assertEqual(response.model, 'openrouter/anthropic/claude-opus-4.6')
+        self.assertEqual(response.context_window, 200000)
+        self.assertEqual(response.input_tokens, 100)
+        self.assertEqual(response.output_tokens, 20)
+        self.assertEqual(response.reasoning_tokens, 5)
+        self.assertEqual(response.cache_read_tokens, 60)
+        self.assertEqual(response.cache_write_tokens, 10)
+
+    def test_get_agent_context_usage_fails_cleanly_when_agent_backend_missing(self):
+        service, _ = self._make_service(agent=None)
+
+        response = service.GetAgentContextUsage(pb2.Empty(), None)
+
+        self.assertFalse(response.success)
+        self.assertIn('not running', response.message)
+
 
 if __name__ == '__main__':
     unittest.main()

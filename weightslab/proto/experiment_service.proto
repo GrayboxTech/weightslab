@@ -47,6 +47,13 @@ service ExperimentService {
   // it with the summary. Distinct from OpenCode's own session compaction (which
   // this does not touch) -- this is the SDK agent's own self.history.
   rpc CompactAgentHistory (Empty) returns (CompactAgentHistoryResponse);
+  // Context-window usage breakdown for the active model. A fresh OpenCode
+  // session is created per agent call (see opencode_chat.py), so there is no
+  // persistent session to total across turns -- this reports the LAST
+  // completed call's token usage, which is exactly the size of the context
+  // the NEXT call will resend (the full history is baked into the prompt
+  // text every time).
+  rpc GetAgentContextUsage (Empty) returns (GetAgentContextUsageResponse);
 
   // Notebook (shared in-process Python kernel for the studio UI). Cell output is
   // server-streamed in chunks (stdout / stderr / result / image), mirroring
@@ -632,6 +639,18 @@ message ClearAgentHistoryResponse {
 message CompactAgentHistoryResponse {
   bool success = 1;
   string message = 2;
+}
+
+message GetAgentContextUsageResponse {
+  bool success = 1;
+  string message = 2;
+  string model = 3;              // "providerID/modelID" currently active, "" if unknown.
+  int64 context_window = 4;      // Model's context-window size in tokens, 0 if unknown.
+  int64 input_tokens = 5;        // Last completed call's input tokens (system+tools+history+message).
+  int64 output_tokens = 6;
+  int64 reasoning_tokens = 7;
+  int64 cache_read_tokens = 8;   // Portion of input_tokens served from a cached prefix.
+  int64 cache_write_tokens = 9;  // Portion of input_tokens newly written to the cache.
 }
 
 // --- Checkpoint Restore ---

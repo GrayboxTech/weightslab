@@ -139,6 +139,11 @@ class ExperimentServiceStub(object):
                 request_serializer=experiment__service__pb2.Empty.SerializeToString,
                 response_deserializer=experiment__service__pb2.CompactAgentHistoryResponse.FromString,
                 _registered_method=True)
+        self.GetAgentContextUsage = channel.unary_unary(
+                '/ExperimentService/GetAgentContextUsage',
+                request_serializer=experiment__service__pb2.Empty.SerializeToString,
+                response_deserializer=experiment__service__pb2.GetAgentContextUsageResponse.FromString,
+                _registered_method=True)
         self.RunNotebookCell = channel.unary_stream(
                 '/ExperimentService/RunNotebookCell',
                 request_serializer=experiment__service__pb2.RunNotebookCellRequest.SerializeToString,
@@ -333,6 +338,18 @@ class ExperimentServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetAgentContextUsage(self, request, context):
+        """Context-window usage breakdown for the active model. A fresh OpenCode
+        session is created per agent call (see opencode_chat.py), so there is no
+        persistent session to total across turns -- this reports the LAST
+        completed call's token usage, which is exactly the size of the context
+        the NEXT call will resend (the full history is baked into the prompt
+        text every time).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def RunNotebookCell(self, request, context):
         """Notebook (shared in-process Python kernel for the studio UI). Cell output is
         server-streamed in chunks (stdout / stderr / result / image), mirroring
@@ -504,6 +521,11 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     servicer.CompactAgentHistory,
                     request_deserializer=experiment__service__pb2.Empty.FromString,
                     response_serializer=experiment__service__pb2.CompactAgentHistoryResponse.SerializeToString,
+            ),
+            'GetAgentContextUsage': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetAgentContextUsage,
+                    request_deserializer=experiment__service__pb2.Empty.FromString,
+                    response_serializer=experiment__service__pb2.GetAgentContextUsageResponse.SerializeToString,
             ),
             'RunNotebookCell': grpc.unary_stream_rpc_method_handler(
                     servicer.RunNotebookCell,
@@ -1118,6 +1140,33 @@ class ExperimentService(object):
             '/ExperimentService/CompactAgentHistory',
             experiment__service__pb2.Empty.SerializeToString,
             experiment__service__pb2.CompactAgentHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetAgentContextUsage(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetAgentContextUsage',
+            experiment__service__pb2.Empty.SerializeToString,
+            experiment__service__pb2.GetAgentContextUsageResponse.FromString,
             options,
             channel_credentials,
             insecure,

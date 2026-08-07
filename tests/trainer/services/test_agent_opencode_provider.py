@@ -11,6 +11,7 @@ covered by test_opencode_chat.py against a real fake server.
 """
 
 import importlib
+import json
 import sys
 import types
 import unittest
@@ -204,6 +205,94 @@ class TestGetAvailableModelsOpenCode(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(models, [])
         self.assertIn("OpenCode", message)
+
+
+class TestGetContextUsage(unittest.TestCase):
+    """DataManipulationAgent.get_context_usage() -- backs the /context
+    command. Combines OpenCodeChat.last_usage (mocked directly here; its own
+    population from real SSE events is covered by test_opencode_chat.py) with
+    a context-window lookup via /config/providers (mocked urllib, same
+    _FakeResp pattern as TestGetAvailableModelsOpenCode above)."""
+
+    class _FakeResp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps(self._payload).encode()
+
+    def test_not_configured_when_opencode_chat_is_none(self):
+        _, agent = _make_agent()
+        agent._opencode_chat = None
+
+        ok, usage, message = agent.get_context_usage()
+
+        self.assertFalse(ok)
+        self.assertEqual(usage, {})
+        self.assertIn("/init", message)
+
+    def test_reports_no_turns_yet_when_last_usage_is_none(self):
+        _, agent = _make_agent()
+        agent.opencode_model = ""
+        agent._opencode_chat = MagicMock(last_usage=None)
+
+        ok, usage, message = agent.get_context_usage()
+
+        self.assertTrue(ok)
+        self.assertEqual(usage["context_window"], 0)
+        self.assertIn("No agent turns yet", message)
+
+    def test_combines_last_usage_with_the_models_context_window(self):
+        _, agent = _make_agent()
+        agent.opencode_url = "http://127.0.0.1:4096"
+        agent.opencode_model = "openrouter/anthropic/claude-opus-4.6"
+        agent._opencode_chat = MagicMock(last_usage={
+            "input": 100, "output": 20, "reasoning": 5, "cache_read": 60, "cache_write": 10,
+        })
+
+        payload = {
+            "providers": [
+                {"id": "openrouter", "models": {
+                    "anthropic/claude-opus-4.6": {"limit": {"context": 200000, "output": 8192}},
+                }},
+            ],
+        }
+        with mock.patch("urllib.request.urlopen", return_value=self._FakeResp(payload)):
+            ok, usage, message = agent.get_context_usage()
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "")
+        self.assertEqual(usage, {
+            "model": "openrouter/anthropic/claude-opus-4.6",
+            "context_window": 200000,
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "reasoning_tokens": 5,
+            "cache_read_tokens": 60,
+            "cache_write_tokens": 10,
+        })
+
+    def test_context_window_defaults_to_zero_when_the_server_is_unreachable(self):
+        """A failed /config/providers lookup must not sink the whole command --
+        usage numbers are still worth showing without a window/percentage."""
+        _, agent = _make_agent()
+        agent.opencode_model = "openrouter/anthropic/claude-opus-4.6"
+        agent._opencode_chat = MagicMock(last_usage={
+            "input": 10, "output": 2, "reasoning": 0, "cache_read": 0, "cache_write": 0,
+        })
+
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("refused")):
+            ok, usage, message = agent.get_context_usage()
+
+        self.assertTrue(ok)
+        self.assertEqual(usage["context_window"], 0)
+        self.assertEqual(usage["input_tokens"], 10)
 
 
 class TestResetConnection(unittest.TestCase):

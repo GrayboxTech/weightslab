@@ -61,6 +61,13 @@ class OpenCodeChat:
         self.base_url = (base_url or "http://127.0.0.1:4096").rstrip("/")
         self.model = model
         self.timeout = timeout
+        # Token usage from the LAST completed `_call`, or None before any call
+        # has finished -- {"input", "output", "reasoning", "cache_read",
+        # "cache_write"}. Populated by `_collect_reply`; read by
+        # `DataManipulationAgent.get_context_usage()` for the /context command.
+        # There is no persistent OpenCode session to total across calls (see
+        # module docstring), so this is deliberately per-call, not cumulative.
+        self.last_usage: Optional[dict] = None
 
     # -- wire helpers --------------------------------------------------- #
 
@@ -108,7 +115,13 @@ class OpenCodeChat:
             raise OpenCodeError(f"OpenCode rejected the prompt: {exc}") from exc
 
     @staticmethod
-    def _handle_event(payload: str, session_id: str, assistant_message_ids: set, text_parts: dict) -> Optional[str]:
+    def _handle_event(
+        payload: str,
+        session_id: str,
+        assistant_message_ids: set,
+        text_parts: dict,
+        usage: Optional[dict] = None,
+    ) -> Optional[str]:
         """Returns None while the turn is still in progress, or a string
         ("idle"/"error") once this session's turn has finished. Field names
         are read defensively -- OpenCode's event shapes are not part of its
@@ -128,6 +141,20 @@ class OpenCodeChat:
                 return None
             if str(msg.get("role") or "") == "assistant" and msg.get("id"):
                 assistant_message_ids.add(str(msg["id"]))
+                # AssistantMessage.tokens (GET /doc): {input, output,
+                # reasoning, cache: {read, write}} -- may be absent on early
+                # deltas of the same message id, so this overwrites `usage`
+                # in place rather than accumulating, same "latest wins"
+                # convention weights_studio's TS client uses for its own
+                # per-message token map.
+                tokens = msg.get("tokens")
+                if usage is not None and isinstance(tokens, dict):
+                    cache = tokens.get("cache") or {}
+                    usage["input"] = tokens.get("input") or 0
+                    usage["output"] = tokens.get("output") or 0
+                    usage["reasoning"] = tokens.get("reasoning") or 0
+                    usage["cache_read"] = cache.get("read") or 0
+                    usage["cache_write"] = cache.get("write") or 0
             return None
 
         if event_type == "message.part.updated":
@@ -159,6 +186,7 @@ class OpenCodeChat:
         session" and "start reading" is lost (see module docstring)."""
         text_parts: dict = {}
         assistant_message_ids: set = set()
+        usage: dict = {}
 
         try:
             stream = self._request("/event", headers={"Accept": "text/event-stream"})
@@ -188,7 +216,7 @@ class OpenCodeChat:
                     if data_lines:
                         payload = "\n".join(data_lines)
                         data_lines = []
-                        outcome = self._handle_event(payload, session_id, assistant_message_ids, text_parts)
+                        outcome = self._handle_event(payload, session_id, assistant_message_ids, text_parts, usage)
                         if outcome is not None:
                             break
                     continue
@@ -208,6 +236,10 @@ class OpenCodeChat:
         if send_errors:
             raise send_errors[0]
 
+        # Set even on a dropped/errored stream (whatever was captured before
+        # that point) -- a partial usage read is still more useful than none,
+        # matching how a partial text reply is still returned above.
+        self.last_usage = usage or None
         return "".join(text_parts[key] for key in text_parts)
 
     # -- public surface --------------------------------------------------- #
