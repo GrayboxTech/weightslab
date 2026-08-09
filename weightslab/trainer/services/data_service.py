@@ -437,6 +437,11 @@ def rewrite_boolean_keywords_to_bitwise(code: str) -> str:
         return code
 
 
+def _fast_view_enabled() -> bool:
+    """Differential view refresh. On by default; set WL_FAST_VIEW=0 to opt out."""
+    return os.environ.get("WL_FAST_VIEW", "1") not in ("0", "false", "False")
+
+
 class DataService:
 
     """
@@ -508,6 +513,7 @@ class DataService:
 
         # In-memory dataframe view of all datasets combined (streamed to UI)
         self._all_datasets_df = self._pull_into_all_data_view_df()
+        self._rebuild_view_pos_map()
         self._load_existing_tags()
         self._agent = DataManipulationAgent(self)
         try:
@@ -933,6 +939,7 @@ class DataService:
     def _initialize_data_service(self):
         """Recreate the in-memory dataframe view from the shared H5 store."""
         self._all_datasets_df = self._pull_into_all_data_view_df()
+        self._rebuild_view_pos_map()
         self._load_existing_tags()
 
     def _resolve_root_log_dir(self) -> Path:
@@ -1378,8 +1385,9 @@ class DataService:
             except Exception as e:
                 logger.error(f"[DataService] Failed to compute signals for loader '{loader_name}': {e}")
 
-        # Force view update
-        self._slowUpdateInternals(force=True)
+        # Refresh signal values; differential unless the schema actually changed.
+        if not self._fastUpdateInternals():
+            self._slowUpdateInternals(force=True)
 
     def _process_sample_row(self, args):
         """Process a single dataframe row to create a DataRecord."""
@@ -3710,11 +3718,111 @@ class DataService:
         real rebuild+swap via force=True OFF the request path, then releases the guard so
         a later stale read can trigger another. Never raises into a request."""
         try:
-            self._slowUpdateInternals(force=True)
+            if not self._fastUpdateInternals():
+                self._slowUpdateInternals(force=True)
         except Exception:
             logger.exception("[ViewRefresh] background view refresh failed")
         finally:
             self._refresh_in_flight.release()
+
+    # Columns the trainer mutates. Structural columns (origin, edit_prompt,
+    # task_type, ...) never change after registration, so a differential sync
+    # only has to carry these.
+    _FAST_SYNC_PREFIXES = ("signals", "last_seen", "discarded", "prediction", "target")
+
+    def _fast_sync_columns(self, view):
+        return [c for c in view.columns
+                if str(c).startswith(self._FAST_SYNC_PREFIXES)]
+
+    def _compute_view_pos_map(self, view):
+        """sample_id -> positional row index for *view*. Pure: builds and returns
+        the map so callers can do it OFF-lock (it is O(rows): ~5s at 4M)."""
+        if not _fast_view_enabled():
+            return {}
+        try:
+            if view is None or view.empty:
+                return {}
+            SID = SampleStatsEx.SAMPLE_ID.value
+            keys = (view.index.get_level_values(SID)
+                    if isinstance(view.index, pd.MultiIndex) and SID in (view.index.names or [])
+                    else view.index)
+            return {str(k): i for i, k in enumerate(keys)}
+        except Exception:
+            return {}
+
+    def _rebuild_view_pos_map(self):
+        """sample_id -> positional row index, rebuilt with the view so the
+        differential path does O(1) lookups instead of label alignment."""
+        if not _fast_view_enabled():
+            self._view_pos_map = {}
+            return                  # opt-out: skip the map build entirely
+        try:
+            view = self._all_datasets_df
+            if view is None or view.empty:
+                self._view_pos_map = {}
+                return
+            SID = SampleStatsEx.SAMPLE_ID.value
+            keys = (view.index.get_level_values(SID)
+                    if isinstance(view.index, pd.MultiIndex) and SID in (view.index.names or [])
+                    else view.index)
+            self._view_pos_map = {str(k): i for i, k in enumerate(keys)}
+        except Exception:
+            self._view_pos_map = {}
+
+    def _fastUpdateInternals(self, max_dirty: int = 250_000) -> bool:
+        """O(change) view refresh. True if applied, False -> caller must rebuild.
+
+        Falls back when there is no view yet, when a dirty row is absent from
+        the view (new rows => structural change), or when the backlog is large
+        enough that a rebuild is cheaper.
+        """
+        if not _fast_view_enabled():
+            return False            # opt-out: behave exactly as before
+        view = self._all_datasets_df
+        dfm = self._df_manager
+        if view is None or getattr(view, "empty", True) or dfm is None:
+            return False
+        pos_map = getattr(self, "_view_pos_map", None)
+        if not pos_map:
+            return False
+
+        dirty = dfm.take_view_dirty(limit=max_dirty)
+        if dirty is None:
+            return False            # backlog too large; rebuild is cheaper
+        if not dirty:
+            return True             # nothing changed since last sync
+
+        sids = [str(s) for s in dirty]
+        positions, keep = [], []
+        for s in sids:
+            p = pos_map.get(s)
+            if p is None:
+                return False        # unknown row => structural change
+            positions.append(p); keep.append(s)
+
+        cols = self._fast_sync_columns(view)
+        if not cols:
+            return True
+        sub = dfm.get_source_rows(keep, columns=[c for c in cols if c in view.columns])
+        if sub is None or sub.empty:
+            return True
+        if isinstance(sub.index, pd.MultiIndex):
+            sub = sub.droplevel(-1)
+        sub = sub[~sub.index.duplicated(keep="last")]
+
+        order = {str(k): i for i, k in enumerate(sub.index)}
+        rows, vals_idx = [], []
+        for s, p in zip(keep, positions):
+            j = order.get(s)
+            if j is not None:
+                rows.append(p); vals_idx.append(j)
+        if not rows:
+            return True
+        rows = np.asarray(rows); vals_idx = np.asarray(vals_idx)
+        for c in sub.columns:
+            ci = view.columns.get_loc(c)
+            view.iloc[rows, ci] = sub[c].to_numpy()[vals_idx]
+        return True
 
     def _slowUpdateInternals(self, force: bool = False, reset_view: bool = False) -> None:
         """Update the internal dataframe view with the latest data from the manager.
@@ -3885,6 +3993,7 @@ class DataService:
 
             # Atomic swap to make the new view available to readers
             self._all_datasets_df = updated_df
+            self._rebuild_view_pos_map()
             self._last_internals_update_time = current_time
 
         finally:
@@ -4391,7 +4500,8 @@ class DataService:
                 )
 
             # Trigger update if needed (it has its own internal locking)
-            self._slowUpdateInternals()
+            if not self._fastUpdateInternals():
+                self._slowUpdateInternals()
 
             # Atomic snapshot of the current authoritative dataframe
             current_df = self._all_datasets_df
@@ -4702,37 +4812,43 @@ class DataService:
                 operations = self._parse_direct_query(request.query)
 
                 # Apply operations with lock
-                with self._watched_lock("_lock[ApplyDataQuery/ops]"):
-                    # Skip the forced full-view rebuild for SORT-ONLY operations. Sorting just
-                    # re-orders the existing snapshot, so a fresh collapse+combine (hundreds of
-                    # ms on large views, and — being lock-held — contends with the training
-                    # thread for multi-second stalls) is unnecessary. Filters/edits still refresh
-                    # so they operate on the latest data. The view is frozen on direct queries
-                    # anyway (_is_filtered=True), so it wasn't auto-refreshing mid-sort regardless.
-                    _SORT_FUNCS = {"df.sort_values", "df.sort_index", "df.sort_view_slice"}
-                    is_sort_only = bool(operations) and all(
-                        op.get("function") in _SORT_FUNCS for op in operations)
-                    if not is_sort_only:
-                        self._slowUpdateInternals(force=True) # Refresh internals before applying non-sort operations
+                _SORT_FUNCS = {"df.sort_values", "df.sort_index", "df.sort_view_slice"}
+                is_sort_only = bool(operations) and all(
+                    op.get("function") in _SORT_FUNCS for op in operations)
 
-                    # Work on a copy to allow concurrent readers to see a consistent state
-                    df = self._all_datasets_df # Remove copy because memory waste and slowdown
-                    messages = []
-
+                def _run_ops(target):
+                    out = []
                     for op in operations:
-                        func = op.get("function")
-                        params = op.get("params", {}) or {}
-                        msg = self._apply_agent_operation(df, func, params)
-                        messages.append(msg)
+                        out.append(self._apply_agent_operation(
+                            target, op.get("function"), op.get("params", {}) or {}))
+                    return " | ".join(out) if out else "No operation performed"
 
-                    final_message = " | ".join(messages) if messages else "No operation performed"
-
-                    # Atomic swap
-                    self._all_datasets_df = df
-
-                    # Direct queries are manipulations -> Freeze the view
-                    if operations:
-                         self._is_filtered = True
+                if is_sort_only:
+                    # Sorting 4M rows costs ~10s; under _lock that stalls the trainer
+                    # for the whole duration (measured 11716ms). Sort a shallow copy
+                    # off-lock, then hold the lock only for the reference swap.
+                    base = self._all_datasets_df
+                    df = base.copy(deep=False) if base is not None else base
+                    final_message = _run_ops(df)
+                    # Row ORDER changed, so sample_id -> position is stale; without a
+                    # rebuild the differential refresh writes signals to wrong rows.
+                    # Build it OFF-lock -- doing it inside the swap held the lock for
+                    # 5320ms at 4M rows.
+                    new_pos_map = self._compute_view_pos_map(df)
+                    with self._watched_lock("_lock[ApplyDataQuery/swap]"):
+                        self._all_datasets_df = df
+                        self._view_pos_map = new_pos_map
+                        if operations:
+                            self._is_filtered = True
+                else:
+                    with self._watched_lock("_lock[ApplyDataQuery/ops]"):
+                        self._slowUpdateInternals(force=True)
+                        df = self._all_datasets_df
+                        final_message = _run_ops(df)
+                        self._all_datasets_df = df
+                        self._rebuild_view_pos_map()
+                        if operations:
+                            self._is_filtered = True
 
                 return self._build_success_response(
                     df=df,
@@ -5456,7 +5572,8 @@ class DataService:
 
             with self._watched_lock("_lock[EditDataSample/__copy_metadata__]"):
                 try:
-                    self._slowUpdateInternals()
+                    if not self._fastUpdateInternals():
+                        self._slowUpdateInternals()
                     if self._all_datasets_df is None or self._all_datasets_df.empty:
                         return pb2.DataEditsResponse(
                             success=False,
@@ -5527,7 +5644,8 @@ class DataService:
 
             with self._watched_lock("_lock[EditDataSample/delete-col]"):
                 try:
-                    self._slowUpdateInternals()
+                    if not self._fastUpdateInternals():
+                        self._slowUpdateInternals()
                     if self._all_datasets_df is None or self._all_datasets_df.empty:
                         return pb2.DataEditsResponse(
                             success=False,
@@ -5565,7 +5683,8 @@ class DataService:
                     # Kick a background view-refresh (non-blocking) — the in-memory view
                     # is already consistent after the drop above, so blocking inline rebuild
                     # is unnecessary and causes the gRPC response to stall for 5-10 s.
-                    self._slowUpdateInternals()
+                    if not self._fastUpdateInternals():
+                        self._slowUpdateInternals()
 
                     return pb2.DataEditsResponse(
                         success=True,
@@ -5588,7 +5707,8 @@ class DataService:
 
             with self._watched_lock("_lock[EditDataSample/__discard_by_tag__]"):
                 try:
-                    self._slowUpdateInternals()
+                    if not self._fastUpdateInternals():
+                        self._slowUpdateInternals()
                     if self._all_datasets_df is None or self._all_datasets_df.empty:
                         return pb2.DataEditsResponse(
                             success=False,
@@ -5597,7 +5717,8 @@ class DataService:
 
                     tag_col = f"{SampleStatsEx.TAG.value}:{tag_name}"
                     if tag_col not in self._all_datasets_df.columns:
-                        self._slowUpdateInternals()
+                        if not self._fastUpdateInternals():
+                            self._slowUpdateInternals()
                     df = safe_reset_index(self._all_datasets_df)
                     if tag_col not in df.columns:
                         return pb2.DataEditsResponse(
@@ -5805,7 +5926,8 @@ class DataService:
             # IMPORTANT: keep lock ordering consistent (_update_lock -> _lock).
             # Calling _slowUpdateInternals() while holding _lock can deadlock
             # with concurrent readers/writers under high UI refresh pressure.
-            self._slowUpdateInternals()
+            if not self._fastUpdateInternals():
+                self._slowUpdateInternals()
 
             if context is not None and not context.is_active():
                 return pb2.DataSplitsResponse(success=False, split_names=[])
