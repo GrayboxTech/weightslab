@@ -8,117 +8,51 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    <div class="wl-hero">
      <img src="_static/logo-light.png" alt="Weightslab logo" class="wl-hero-logo wl-only-light" />
      <img src="_static/logo-dark.png" alt="Weightslab logo" class="wl-hero-logo wl-only-dark" />
-     <p class="wl-hero-subtitle">Inspect, edit, and optimize model training with a unified workflow.</p>
+     <p class="wl-hero-subtitle">Inspect, edit, and optimize model training with one workflow.</p>
        <div class="wl-hero-cta-group">
-          <a class="wl-hero-cta" href="quickstart.html">Install & Get Started</a>
-          <a class="wl-hero-cta wl-hero-cta-secondary" href="user_functions.html">API Reference</a>
+          <a class="wl-hero-cta" href="quickstart.html">Quickstart</a>
+          <a class="wl-hero-cta wl-hero-cta-secondary" href="examples/index.html">Examples</a>
        </div>
    </div>
 
-.. tip:: New on this branch
-
-   - **AI agent experiment reports** — ask the agent (chat bar, CLI, or the
-     new report button in Weights Studio) to *"generate an experiment
-     report"* for a branded, self-contained HTML summary: per-signal health
-     plots, bounded per-sample outliers, dataset stats, and a written
-     analysis grounded in those numbers — safe even on a dataset with
-     millions of samples. See :doc:`experiment_reports`.
-   - **Studio notebook, upgraded** — the in-app notebook panel is now
-     renameable, has a proper Code/Markdown picker (instead of a blind
-     toggle), a "Clear output" button next to Copy, and "Run all" now always
-     renders every Markdown cell instead of occasionally flipping an
-     already-rendered one back to edit mode.
-   - **Local Jupyter Notebook picker** — ``weightslab start``'s landing page
-     can now list and reopen existing local notebooks, not just create a new
-     one each time.
-
-.. grid:: 1 1 2 2
+.. grid:: 1 1 2 3
    :gutter: 2
 
    .. grid-item-card:: Quickstart
       :link: quickstart
       :link-type: doc
 
-      Install, build, and run Weightslab documentation locally in minutes.
+      Install and run WeightsLab in minutes.
 
-   .. grid-item-card:: Four-Way Approach
+   .. grid-item-card:: Core Concepts
       :link: four_way_approach
       :link-type: doc
 
-      Understand how model, data, hyperparameters, and logger workflows connect.
-
-   .. grid-item-card:: Model + Data Control
-      :link: model_interaction
-      :link-type: doc
-
-      Learn how to wrap training components and iterate on difficult samples.
-
-   .. grid-item-card:: User Functions
-      :link: user_functions
-      :link-type: doc
-
-      Reference all public SDK functions with usage-oriented explanations.
-
-   .. grid-item-card:: User Commands
-      :link: user_commands
-      :link-type: doc
-
-      The ``weightslab`` CLI and its interactive console — every command,
-      flag, and default.
+      Understand the 4-level workflow and each part independently.
 
    .. grid-item-card:: Examples
       :link: examples/index
       :link-type: doc
 
-      Classification, detection, segmentation, clustering, anomaly detection,
-      LiDAR, and Lightning — all with WeightsLab wired in.
+      End-to-end runnable integrations.
 
-   .. grid-item-card:: PyTorch Lightning
-      :link: pytorch_lightning
+   .. grid-item-card:: External Integrations
+      :link: external_integrations
       :link-type: doc
 
-      Integrate Weightslab with Lightning.
-
-   .. grid-item-card:: UltraLytics
-      :link: ultralytics
-      :link-type: doc
-
-      Integrate Weightslab with Ultralytics.
-
-   .. grid-item-card:: Weights Studio
-      :link: weights_studio
-      :link-type: doc
-
-      Deploy and operate the UI: architecture, ports, TLS, and actions.
+      Colab, local notebooks, and in-training notebook workflows.
 
    .. grid-item-card:: Configuration
       :link: configuration
       :link-type: doc
 
-      All environment variables for WeightsLab and Weights Studio with defaults and explanations.
+      Environment variables and runtime toggles.
 
-   .. grid-item-card:: AI Agent
-      :link: agent
+   .. grid-item-card:: Reference
+      :link: user_functions
       :link-type: doc
 
-      Drive UI actions (sort, dump, load), data analysis, tagging/discarding, and model freeze/reset with natural language.
-
-   .. grid-item-card:: Experiment Reports
-      :link: experiment_reports
-      :link-type: doc
-
-      Ask the agent for a branded HTML report: signal health plots, dataset stats, and a written analysis.
-
-   .. grid-item-card:: gRPC Communication
-      :link: grpc/index
-      :link-type: doc
-
-      All RPC handlers, parameters, and behavior. Comprehensive audit logging for user interactions.
-
-.. admonition:: Weightslab in one sentence
-   :class: note
-
-   Wrap your training script once, then monitor, tag/discard, adjust, and improve continuously.
+      Complete SDK, CLI, and gRPC documentation.
 
 
 .. toctree::
@@ -143,31 +77,28 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    :hidden:
 
    examples/index
+   pytorch_lightning
+   ultralytics
 
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 3
    :caption: Core Concepts
    :hidden:
 
    four_way_approach
-   model_interaction
-   data_exploration
    agent
-   hyperparameters
-   logger
    checkpointing
    experiment_reports
-   .. weights_studio
+   weights_studio
 
 
 .. toctree::
    :maxdepth: 2
-   :caption: External Library Integration
+   :caption: External Integrations
    :hidden:
 
-   pytorch_lightning
-   ultralytics
+   external_integrations
 
 
 .. toctree::

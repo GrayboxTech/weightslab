@@ -1,251 +1,139 @@
 Logger and Signals
 ==================
 
-Weightslab logger behavior is similar in spirit to TensorBoard: it tracks scalar evolution and per-sample context.
+Logger and signals track scalar evolution and per-sample/per-instance histories.
+This is the dedicated place for signal APIs.
 
-What gets logged
-----------------
+Signal wrapper parameters
+-------------------------
 
-- Scalar signals (losses, metrics)
-- Per-sample signal vectors
-- Optional predictions/targets for deeper analysis
+For ``wl.watch_or_edit(..., flag="loss"|"metric"|"signal", ...)``:
 
-Start services
---------------
+.. list-table::
+   :header-rows: 1
 
-.. code-block:: python
+   * - Parameter
+     - Default
+     - Behavior
+   * - ``signal_name`` / ``name``
+     - inferred
+     - Signal key stored as ``signals//<name>``.
+   * - ``log``
+     - ``True``
+     - Adds step-level curve to logger/UI.
+   * - ``per_sample``
+     - ``False``
+     - One value per sample id.
+   * - ``per_instance``
+     - ``False``
+     - One value per ``(sample_id, annotation_id)``.
+   * - ``subscribe_to``
+     - ``None``
+     - Dynamic signal trigger from another signal.
+   * - ``compute_every_n_steps``
+     - ``1``
+     - Dynamic signal throttling.
+   * - ``include_history``
+     - ``False``
+     - Provides full subscribed history to signal callback context.
 
-   import weightslab as wl
+Core SDK signal calls
+---------------------
 
-   wl.serve(serving_cli=True, serving_grpc=True)
+- ``wl.watch_or_edit(loss_or_metric, flag="loss"|"metric")``
+- ``wl.save_signals(...)``
+- ``wl.save_instance_signals(...)``
+- ``wl.save_group_signals(...)``
+- ``wl.compute_signals(dataset_or_loader, ...)``
 
-Wrap losses and metrics as signals
------------------------------------
-
-The simplest way to produce signals is to wrap a loss or metric with
-``wl.watch_or_edit``. It hooks the object's ``forward`` (losses) or ``compute``
-(``torchmetrics``) method, so **every call computes, logs, and persists**
-per-sample values automatically — no manual ``save_signals`` needed.
+Example (wrapped losses + manual signal write):
 
 .. code-block:: python
 
    import torch.nn as nn
    import weightslab as wl
 
-   # reduction="none" -> one value per sample; log=True also plots the curve
    train_loss = wl.watch_or_edit(
        nn.CrossEntropyLoss(reduction="none"),
-       flag="loss", signal_name="train_loss/CE", per_sample=True, log=True,
+       flag="loss",
+       signal_name="train/loss",
+       per_sample=True,
+       log=True,
    )
-
-   for inputs, ids, targets, _ in train_loader:
-       with wl.guard_training_context:
-           preds = model(inputs)
-           loss = train_loss(preds, targets, batch_ids=ids).mean()
-           loss.backward()
-
-Pass ``batch_ids=`` so each value maps to its sample. Use ``per_instance=True``
-for per-annotation values (detection / segmentation). The signal name comes from
-``signal_name`` (or ``name``) and is stored as a ``signals//<name>`` column; set
-``log=False`` to persist per-sample values without a dashboard curve. See
-:doc:`user_functions` for the full wrapper reference.
-
-Loss-shape classification
---------------------------
-
-A single scalar hides how a sample got there. The *shape* of a per-sample
-loss trajectory over training — steadily dropping, stuck, forgotten, noisy —
-tells you whether the model is learning that sample, struggling with it, or
-whether it's a candidate mislabel. By default Weightslab classifies every
-sample's trajectory into one of seven built-in shapes (the vocabulary of the
-built-in :func:`classify_loss_shape`; you can replace it with your own labels —
-see :ref:`custom-signal-classifier`):
-
-==============  ====================================================================
-Label           Meaning
-==============  ====================================================================
-monotonic       Loss steadily decreasing — the model is learning the sample.
-plateaued       Decreased then leveled off still-high — stuck / hard sample.
-Flat_high       Never moved, stayed high — likely a mislabel or unlearnable.
-high_variance   Noisy oscillation — model uncertain, often an ambiguous label.
-U_Shape         Dipped, then is recovering/still moving — not settled yet.
-Forgotten       Dipped, then permanently regressed to a new, worse, flat level.
-Spiked          One-step jump that reverts — transient, not a lasting change.
-==============  ====================================================================
-
-``U_Shape`` and ``Forgotten`` are the same event (loss improved, then got worse
-again) split on whether it has *settled*: still moving/oscillating is
-``U_Shape``, flat at the new worse level is ``Forgotten`` (catastrophic
-interference from later data). ``Spiked`` requires the jump to actually come
-back down — a jump that sticks is a ``Forgotten``/``monotonic`` regime change,
-not a spike.
-
-Automatic — zero setup
-~~~~~~~~~~~~~~~~~~~~~~~
-
-Any signal wrapped with ``flag="loss"`` (as above) is classified
-automatically; there is nothing to call. The logger runs a background thread
-(off the training thread; interval via ``WL_LOGGER_FLUSH_INTERVAL_SECONDS``,
-default 2s) that discovers every ``flag="loss"`` signal and, once a sample has
-enough history to classify (5+ points), tags it with a ``<signal>_shape``
-categorical tag — e.g. ``train_loss/CE`` gets a ``train_loss/CE_shape`` tag:
-
-.. code-block:: python
-
-   train_loss = wl.watch_or_edit(
+   val_loss = wl.watch_or_edit(
        nn.CrossEntropyLoss(reduction="none"),
-       flag="loss", signal_name="train_loss/CE", log=True,
-   )
-   # Nothing else needed — train_loss/CE_shape starts appearing on samples
-   # as they accumulate enough history, refreshed every background tick.
-
-``flag="metric"`` signals are **not** auto-classified: the default classifier
-assumes a decreasing trajectory (a loss), which would misclassify an
-increasing metric like accuracy.
-
-The classifier the auto-tagger uses is **overridable**: register your own with
-``@wl.signal_classifier`` (see :ref:`custom-signal-classifier`) and the
-background thread applies it — same zero-setup tagging, your labels.
-
-.. _custom-signal-classifier:
-
-Custom classifier — ``@wl.signal_classifier``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-To replace the built-in shape classifier with your own, register a callable with
-the :func:`signal_classifier` decorator. A classifier takes a sample's ordered
-value trajectory (``list[float]``) and returns a label string, or ``None`` to
-leave the sample untagged. Labels are **free-form** — the seven-way
-:data:`LOSS_SHAPES` set is only the *built-in's* vocabulary; your classifier may
-emit any labels, e.g. a binary ``monotonic`` / ``not_monotonic``:
-
-.. code-block:: python
-
-   @wl.signal_classifier(signal="loss_sample")
-   def monotonic_or_not(values):
-       s = wl.trajectory_stats(values)
-       if s is None or s["n"] < 5:
-           return None
-       return "monotonic" if s["drop_z"] > 2 else "not_monotonic"
-
-Two binding modes:
-
-- ``@wl.signal_classifier(signal="loss_sample")`` — classify **only** that one
-  signal (per-signal).
-- ``@wl.signal_classifier`` or ``@wl.signal_classifier()`` — become the
-  **global default** for every signal that has no per-signal classifier of its
-  own.
-
-**Resolution order** for any signal name: per-signal registered → global
-registered → built-in :func:`classify_loss_shape`. Use
-:func:`resolve_signal_classifier` to introspect which classifier is active for a
-name.
-
-A registered classifier is consulted **everywhere shapes are computed** — the
-background auto-tagger, :func:`write_signal_shapes` / :func:`write_loss_shapes`
-(and ``write_dataframe(loss_shape_signal=...)``), and the live
-:func:`enable_loss_shape_signal`. The built-in seven-way
-:func:`classify_loss_shape` is unchanged and remains the default when no custom
-classifier is registered.
-
-Overriding or opting out
-~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Use :func:`enable_loss_shape_autotag` / :func:`disable_loss_shape_autotag`
-only to customize or opt out — not to turn classification on:
-
-.. code-block:: python
-
-   # Different tag name / classifier for one signal (e.g. it isn't a loss).
-   wl.enable_loss_shape_autotag("train_loss/CE", tag_name="curve_shape")
-
-   # Opt in a signal that wasn't registered via flag="loss" (e.g. logged
-   # manually through wl.save_signals under a custom name).
-   wl.enable_loss_shape_autotag("custom_metric")
-
-   # Opt out one signal, or every signal.
-   wl.disable_loss_shape_autotag("train_loss/CE")
-   wl.disable_loss_shape_autotag()
-
-:func:`auto_loss_shape_signal_names` lists every signal currently tracked.
-
-One-off / report-time classification
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-To force a synchronous, guaranteed-fresh classification right before a
-specific report, pass ``loss_shape_signal`` to :func:`write_dataframe`, or
-call the underlying reusable engine directly — it works for **any**
-per-sample signal, not just a loss (pass your own ``classifier`` for an
-increasing metric such as accuracy):
-
-.. code-block:: python
-
-   wl.write_dataframe("report.csv", format="csv", loss_shape_signal="train_loss/CE")
-
-   wl.write_signal_shapes("train_loss/CE", tag_name="train_loss/CE_shape")
-   wl.write_loss_shapes("train_loss/CE")  # convenience wrapper (tag: loss_shape)
-
-Building a custom classifier
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-:func:`trajectory_stats` computes scale-invariant features (net drop,
-coefficient of variation, argmin fraction, rebound, max jump, tail flatness)
-from a sample's ordered value history. Reuse them in your own rule. The
-supported way to install a custom rule is ``@wl.signal_classifier`` (above),
-which the auto-tagger and every shape-writing helper honour:
-
-.. code-block:: python
-
-   @wl.signal_classifier(signal="train_loss/CE")
-   def my_classifier(values):
-       s = wl.trajectory_stats(values)
-       return None if s is None else ("fast" if s["drop_z"] > 3 else "slow")
-
-You can still pass a one-off ``classifier`` callable (``list[float] -> str |
-None``) to a single call when you don't want to register it globally:
-
-.. code-block:: python
-
-   wl.enable_loss_shape_autotag("train_loss/CE", classifier=my_classifier)
-
-For a live, per-step reactive variant (heavier — reads history on every fire)
-via :func:`enable_loss_shape_signal`, or a fully hand-rolled
-``@wl.signal(subscribe_to=...)`` walkthrough, see
-:doc:`examples/usecases/loss_shape_classification`.
-
-Custom signals
---------------
-
-Use the signal decorator for static or dynamic signals.
-
-.. code-block:: python
-
-   import numpy as np
-   import weightslab as wl
-
-   @wl.signal(name="weighted_train_loss", subscribe_to="train_loss/CE", compute_every_n_steps=10)
-   def weighted_train_loss(ctx):
-       if ctx.subscribed_value is None:
-           return 0.0
-       return 0.5 * float(ctx.subscribed_value)
-
-Use in training loop
---------------------
-
-.. code-block:: python
-
-   wl.save_signals(
-       signals={"train_loss/CE": loss},
-       batch_ids=batch_ids,
-       preds_raw=logits,
-       targets=targets,
-       step=step,
+       flag="loss",
+       signal_name="val/loss",
+       per_sample=True,
        log=True,
    )
 
-Notes
------
+   with wl.guard_training_context:
+       loss_per_sample = train_loss(train_logits, train_targets, batch_ids=train_ids)
 
-- Static signals can be batch-computed with ``wl.compute_signals(dataset_or_loader)``.
-- Dynamic signals are triggered from subscribed metrics/signals.
-- Call ``wl.keep_serving()`` at script end if you need services to remain available.
+   with wl.guard_testing_context:
+       _ = val_loss(val_logits, val_targets, batch_ids=val_ids)
+
+   wl.save_signals(
+       signals={"train/confidence": conf_per_sample},
+       batch_ids=train_ids,
+       preds_raw=train_logits,
+       preds=train_preds_processed,
+       targets=train_targets,
+       log=True,
+   )
+
+.. _custom-signal-classifier:
+
+Signal-shape classification
+---------------------------
+
+Per-sample trajectories can be classified into categorical tags (for example
+monotonic / plateaued / forgotten) and used by Studio, agent flows, and reports.
+See :doc:`user_functions` for classifier customization APIs.
+
+Standalone logger-only integration (UI + CLI ready)
+---------------------------------------------------
+
+.. code-block:: python
+
+   import weightslab as wl
+   import torch.nn as nn
+
+   train_loss = wl.watch_or_edit(
+       nn.CrossEntropyLoss(reduction="none"),
+       flag="loss",
+       signal_name="train/loss",
+       per_sample=True,
+       log=True,
+   )
+
+   # Start both integration surfaces
+   wl.serve(serving_grpc=True, serving_cli=True)
+   wl.start_training(timeout=3)
+   wl.keep_serving()
+
+CLI and UI surfaces
+-------------------
+
+CLI:
+
+- ``status``
+- ``evaluate`` / ``eval_status``
+- ``report``
+
+UI:
+
+- live signal plots
+- sample ranking by signal values
+- report button and signal diagnostics
+
+Related automated tests (verified)
+----------------------------------
+
+Signal and logger coverage:
+
+- ``tests/general/test_signals.py`` (save/compute signal flows)
+- ``tests/general/test_signals_wrapping.py`` (wrapping behavior across tasks)
+- ``tests/backend/test_logger_core.py`` (logger histories, queueing, markers)
+- ``tests/model/test_logger.py`` (model-linked logger behaviors)

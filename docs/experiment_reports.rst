@@ -15,6 +15,25 @@ branded with the WeightsLab logo.
 Generating a report
 --------------------
 
+Quick examples
+~~~~~~~~~~~~~~
+
+.. code-block:: python
+
+   import weightslab as wl
+
+   wl.ai_report_generation()                              # all available signals
+   wl.ai_report_generation(signals=["train_loss"])        # selected signals
+   wl.ai_report_generation(use_agent=False)               # no LLM narrative
+   wl.ai_report_generation(output_path="reports/run.html")
+
+.. code-block:: text
+
+   report
+   report train_loss val_loss
+   report --signals train_loss,val_loss --no-agent
+   How is this experiment going? Generate a report.
+
 Four ways to ask for one — all four run the **same** code path
 (``weightslab.reporting.generate_report``: collect → narrate → render), so
 they produce the same artifact:
@@ -159,12 +178,13 @@ Plotting uses matplotlib (installed as a core dependency of WeightsLab). If you 
 .. code-block:: bash
 
    pip install matplotlib
+
 Without it, the report still renders — the health classification and
 dataset stats sections are unaffected — but signal cards show a text summary
 (first/last/min/max value) instead of a plot.
 
 The written analysis needs a configured agent LLM provider (see
-:doc:`agent`'s *Initializing the agent* section). If no provider is
+:doc:`agent`). If no provider is
 available, the report is still generated with a note that no analysis was
 written, rather than failing outright. The same applies when
 ``wl.ai_report_generation`` is called from a script that isn't serving an

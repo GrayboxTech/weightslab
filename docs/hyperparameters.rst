@@ -1,53 +1,136 @@
-Hyperparameter Management
-=========================
+Config Management
+=================
 
-Hyperparameter management allows runtime-driven control of experiment settings.
+Config management controls live hyperparameters, experiment identity, and runtime
+paths during training.
 
-Supported patterns
-------------------
+Hyperparameter wrapper parameters
+---------------------------------
 
-- Register a Python dictionary.
-- Register a YAML file path and let Weightslab watch for updates.
+``wl.watch_or_edit(..., flag="hyperparameters", ...)`` key parameters:
 
-Minimal examples
-----------------
+.. list-table::
+   :header-rows: 1
+
+   * - Parameter
+     - Default
+     - Behavior
+   * - ``defaults``
+     - ``None``
+     - Initial values written to YAML on first registration.
+   * - ``poll_interval``
+     - ``1.0``
+     - Reload period (seconds) for file-based config updates.
+   * - ``checkpoint_manager``
+     - ``None``
+     - Checkpoint load/save behavior override for config state.
+   * - ``name``
+     - inferred
+     - Logical config name (useful with multiple registered config sets).
+
+Registration patterns
+---------------------
+
+Dict-based:
 
 .. code-block:: python
 
    import weightslab as wl
 
-   # Dict-based registration
-   wl.watch_or_edit(
+   hp = wl.watch_or_edit(
        {
-           "experiment_name": "seg_exp",
-           "training_steps_to_do": 1000,
+           "experiment_name": "exp_a",
+           "root_log_dir": "./logs/exp_a",
            "optimizer": {"lr": 1e-3},
+           "data": {"train_loader": {"batch_size": 16}},
        },
        flag="hyperparameters",
-       name="seg_exp",
+       name="exp_a",
    )
+
+YAML-based with polling:
 
 .. code-block:: python
 
-   # File-based registration and polling
-   wl.watch_or_edit(
+   hp = wl.watch_or_edit(
        "./config.yaml",
        flag="hyperparameters",
        defaults={"optimizer": {"lr": 1e-3}},
        poll_interval=1.0,
    )
 
-Typical controlled values
+Runtime SDK operations
+----------------------
+
+.. code-block:: python
+
+   # Read
+   lr = hp["optimizer"]["lr"]
+
+   # Write (in-place)
+   hp["optimizer"]["lr"] = 5e-4
+   hp["data"]["train_loader"]["batch_size"] = 32
+
+``root_log_dir`` behavior
 -------------------------
 
-- Learning rate and optimizer settings
-- Batch size and dataloader settings
-- Logging paths and experiment metadata
-- Service toggles (CLI/gRPC)
+``root_log_dir`` determines where experiment artifacts are stored:
 
-Tips
-----
+- checkpoints and version states
+- logger history
+- generated reports
+- notebook artifacts
 
-- Set ``root_log_dir`` early to keep all artifacts under one experiment folder.
-- Keep defaults in code and environment-specific overrides in YAML.
-- Version-control your baseline YAML templates.
+Example:
+
+.. code-block:: yaml
+
+   experiment_name: classifier_v1
+   root_log_dir: ./logs/classifier_v1
+
+Standalone config-only integration (UI + CLI ready)
+---------------------------------------------------
+
+.. code-block:: python
+
+   import weightslab as wl
+
+   hp = wl.watch_or_edit(
+       "./config.yaml",
+       flag="hyperparameters",
+       defaults={
+           "experiment_name": "cfg_only_demo",
+           "root_log_dir": "./logs/cfg_only_demo",
+           "optimizer": {"lr": 1e-3},
+           "data": {"train_loader": {"batch_size": 16}},
+       },
+       poll_interval=1.0,
+   )
+
+   # Start both integration surfaces
+   wl.serve(serving_grpc=True, serving_cli=True)
+   wl.start_training(timeout=3)
+   wl.keep_serving()
+
+CLI and UI surfaces
+-------------------
+
+CLI:
+
+- ``hp`` / ``hp <name>``
+- ``set_hp [hp_name] <key.path> <value>``
+- ``status`` for current registered configuration
+
+UI:
+
+- Hyperparameters panel runtime edits
+- Agent-driven config changes (for example "set batch size to 32")
+
+Related automated tests (verified)
+----------------------------------
+
+Config registration/update coverage:
+
+- ``tests/general/test_hyperparams.py`` (register/get/set behavior)
+- ``tests/general/test_cli.py`` (CLI hyperparameter commands including ``set_hp``)
+- ``tests/test_src_functions.py`` (root log-dir and source-level behavior)
