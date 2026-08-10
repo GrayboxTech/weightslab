@@ -67,7 +67,7 @@ then with TensorBoard removed and replaced by WeightsLab.
    class CNN(nn.Module):
        def __init__(self):
            super().__init__()
-   +      self.input_shape = (1, 28, 28)  # Weightslab necessary input shape for MNIST
+   +          self.input_shape = (1, 28, 28)  # Weightslab necessary input shape for MNIST
            self.net = nn.Sequential(
                nn.Conv2d(1, 32, 3, padding=1),
                nn.ReLU(),
@@ -132,16 +132,16 @@ then with TensorBoard removed and replaced by WeightsLab.
    while 1:
    +      with wl.guard_training_context:
    -      inputs, labels = next(iter(train_loader))
-   +          inputs, uids, labels, metadata = next(iter(train_loader))
+   +             inputs, uids, labels, metadata = next(iter(train_loader))
               inputs, labels = inputs.to(device), labels.to(device)
               optimizer.zero_grad()
               logits = model(inputs)
-   -      loss_per_sample = loss(logits, labels)
-   +          loss_per_sample = loss(logits, labels, batch_ids=uids, preds=logits)
+   -          loss_per_sample = loss(logits, labels)
+   +             loss_per_sample = loss(logits, labels, batch_ids=uids, preds=logits)
               loss_per_sample.mean().backward()
               optimizer.step()
       if step % 20 == 0:
-          print(f"Loss: {loss_per_sample.mean().item():.4f}")
+         print(f"Loss: {loss_per_sample.mean().item():.4f}")
       step += 1
 
    -  writer.close()
@@ -151,9 +151,9 @@ then with TensorBoard removed and replaced by WeightsLab.
 3) Notebook Code with Google Colab
 ----------------------------------
 
-Open this notebook:
+Start by opening this notebook:
 
-- `WeightsLab Colab quickstart notebook <https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/Colab/wl-colab-quickstart.ipynb>`_
+- `WeightsLab Colab Quickstart <https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/Colab/wl-colab-quickstart.ipynb>`_
 
 
 Use Weightslab Studio (UI)

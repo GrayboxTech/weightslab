@@ -41,29 +41,35 @@ Minimal integration order
    import weightslab as wl
    import torch.nn as nn
    import torch.optim as optim
-
+   
+   # ...
    # 1) Register shared hyperparameters
    hp = wl.watch_or_edit(parameters, flag="hyperparameters", defaults=parameters)
 
+   # ...
    # 2) Register tracked loaders
    train_loader = wl.watch_or_edit(train_dataset, flag="data", loader_name="train_loader", is_training=True)
    val_loader = wl.watch_or_edit(val_dataset, flag="data", loader_name="val_loader")
 
+   # ...
    # 3) Register model stack
    model = wl.watch_or_edit(my_model, flag="model", device="cuda")
    optimizer = wl.watch_or_edit(optim.Adam(model.parameters(), lr=hp["optimizer"]["lr"]), flag="optimizer")
    train_loss = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"), flag="loss", signal_name="train/loss", per_sample=True, log=True)
 
+   # ...
    # 4) Start WeightsLab services
    wl.serve(serving_grpc=True, serving_cli=True)
    wl.start_training(timeout=3)
 
+   # ...
    # 5) Route train/eval steps explicitly
    with wl.guard_training_context:
        pass
    with wl.guard_testing_context:
        pass
 
+   # ...
    # 6) Keep services alive for post-run UI/CLI analysis
    wl.keep_serving()
 
