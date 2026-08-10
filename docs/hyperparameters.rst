@@ -17,16 +17,15 @@ Hyperparameter wrapper parameters
      - Behavior
    * - ``defaults``
      - ``None``
-     - Initial values written to YAML on first registration.
+     - Values registered before the YAML is first read. They seed the in-memory
+       config only — the watcher reads the file, it never writes it, so write the
+       YAML yourself if you want it editable from the start.
    * - ``poll_interval``
      - ``1.0``
      - Reload period (seconds) for file-based config updates.
    * - ``checkpoint_manager``
      - ``None``
      - Checkpoint load/save behavior override for config state.
-   * - ``name``
-     - inferred
-     - Logical config name (useful with multiple registered config sets).
 
 Registration patterns
 ---------------------
@@ -45,7 +44,6 @@ Dict-based:
            "data": {"train_loader": {"batch_size": 16}},
        },
        flag="hyperparameters",
-       name="exp_a",
    )
 
 YAML-based with polling:
@@ -58,6 +56,10 @@ YAML-based with polling:
        defaults={"optimizer": {"lr": 1e-3}},
        poll_interval=1.0,
    )
+
+``watch_or_edit`` rebinds the caller's variable to the returned proxy, so pass the
+path as a fresh string (``str(config_path)``) when you still need the path
+afterwards.
 
 Runtime SDK operations
 ----------------------
@@ -91,26 +93,37 @@ Example:
 Standalone config-only integration (UI + CLI ready)
 ---------------------------------------------------
 
-.. code-block:: python
+A complete, runnable script with **nothing but the configuration** registered: no
+model, no data, no signals. Its loop only reads the config each step and prints
+what changed, so you can watch a value propagate from any of the three places it
+can be edited — the YAML file, ``set_hp`` in the CLI, or the studio panel.
 
-   import weightslab as wl
+**Bundled example:** ``weightslab/examples/PyTorch/wl-standalone-config/main.py``
 
-   hp = wl.watch_or_edit(
-       "./config.yaml",
-       flag="hyperparameters",
-       defaults={
-           "experiment_name": "cfg_only_demo",
-           "root_log_dir": "./logs/cfg_only_demo",
-           "optimizer": {"lr": 1e-3},
-           "data": {"train_loader": {"batch_size": 16}},
-       },
-       poll_interval=1.0,
-   )
+.. code-block:: bash
 
-   # Start both integration surfaces
-   wl.serve(serving_grpc=True, serving_cli=True)
-   wl.start_training(timeout=3)
-   wl.keep_serving()
+   weightslab start example --config    # writes config.yaml on first run
+   weightslab cli                       # attach a terminal, in another shell
+   weightslab start                     # open Weights Studio, in a third shell
+
+.. literalinclude:: ../weightslab/examples/PyTorch/wl-standalone-config/main.py
+   :language: python
+   :pyobject: main
+
+Then, from the attached CLI:
+
+.. code-block:: text
+
+   hp                                     # -> ['main']
+   hp main                                # the whole config
+   set_hp optimizer.lr 0.0005             # the loop prints the change
+   set_hp data.train_loader.batch_size 64
+
+.. note::
+
+   The file watcher is one-way: it loads the YAML when its mtime changes, and
+   ``set_hp`` / studio edits change the live config without writing the file back.
+   Saving the YAML after an in-memory edit therefore reinstates the file's values.
 
 CLI and UI surfaces
 -------------------
@@ -131,6 +144,8 @@ Related automated tests (verified)
 
 Config registration/update coverage:
 
+- ``tests/general/test_four_way_standalone.py::TestConfigLevelCli`` (the standalone
+  above, including YAML-path registration and ``set_hp`` through the CLI socket)
 - ``tests/general/test_hyperparams.py`` (register/get/set behavior)
 - ``tests/general/test_cli.py`` (CLI hyperparameter commands including ``set_hp``)
 - ``tests/test_src_functions.py`` (root log-dir and source-level behavior)

@@ -36,6 +36,10 @@ Key ``wl.watch_or_edit(model, flag="model", ...)`` parameters:
    * - ``forced_model_wrapping``
      - ``False``
      - Forces a fresh wrapper even when a checkpoint already contains one.
+   * - ``log_model_signals``
+     - ``True``
+     - Logs ``model/grad_norm`` and ``model/parameters`` once per training step, so
+       the model level produces experiment history on its own (see below).
 
 For full API signatures, see :doc:`user_functions`.
 
@@ -130,40 +134,74 @@ Operation behavior:
 Standalone model-only integration (UI + CLI ready)
 --------------------------------------------------
 
-.. code-block:: python
+A complete, runnable MNIST script that wraps **only** the model and its
+optimizer. Data loading is plain ``torch.utils.data``, the loss is a plain
+``nn.CrossEntropyLoss``, and no hyperparameters are registered — the model level
+alone drives the CLI and the studio.
 
-   import weightslab as wl
-   import torch
-   import torch.optim as optim
+**Bundled example:** ``weightslab/examples/PyTorch/wl-standalone-model/main.py``
 
-   model = wl.watch_or_edit(
-       my_model,
-       flag="model",
-       device="cuda" if torch.cuda.is_available() else "cpu",
-       dummy_input=example_batch,
-       compute_dependencies=True,
-       use_onnx=False,
-   )
-   optimizer = wl.watch_or_edit(optim.Adam(model.parameters(), lr=1e-3), flag="optimizer")
+.. code-block:: bash
 
-   # Start both integration surfaces
-   wl.serve(serving_grpc=True, serving_cli=True)
-   wl.start_training(timeout=3)
+   weightslab start example --model    # run it (MNIST downloads on first run)
+   weightslab cli                      # attach a terminal, in another shell
+   weightslab start                    # open Weights Studio, in a third shell
 
-   # Minimal train/eval routing
-   with wl.guard_training_context:
-       preds = model(train_inputs)
-   with wl.guard_testing_context:
-       preds_eval = model(val_inputs)
+.. literalinclude:: ../weightslab/examples/PyTorch/wl-standalone-model/main.py
+   :language: python
+   :pyobject: main
 
-   wl.keep_serving()
+The excerpt is the example's ``main()``; the file also contains the ``SmallCNN``
+definition, the plain loader builder and the ``apply_architecture_op`` helper it
+calls.
+
+Signals the model level logs by itself
+--------------------------------------
+
+Every ``wl.guard_training_context`` step, the wrapped model logs its own signals
+into the experiment history:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Signal
+     - Meaning
+   * - ``model/grad_norm``
+     - Global L2 norm of the gradients that were just computed.
+   * - ``model/parameters``
+     - Trainable parameter count — it steps whenever an architecture operation
+       resizes a layer.
+
+Those are what make a model-only run non-empty in the studio, in
+``report``, and in ``wl.write_history()``: nothing else writes to the logger until
+a loss or metric is wrapped, which is the :doc:`logger` level. Pass
+``log_model_signals=False`` to skip the per-step work.
+
+Two details make the level self-sufficient:
+
+- ``WEIGHTSLAB_ROOT_LOG_DIR`` gives the run an experiment directory without the
+  config level. It is the same variable ``weightslab start [DIR]`` exports, so a
+  model-only run lands where the UI looks.
+- ``wl.serve()`` warns (rather than fails) about the missing serving config, and
+  ``wl.start_training()`` can leave the paused state because only the levels you
+  actually registered are waited on.
+
+.. note::
+
+   ``FREEZE`` and ``RESET`` keep layer shapes, so the loop above trains straight
+   through them — that is why ``--op freeze`` is the example's default. ``ADD``
+   and ``PRUNE`` do resize the layer (the printed parameter count proves it), but
+   the autograd graph of an already-running loop still refers to the pre-op
+   tensors, so the backward passes right after them are dropped by the guard.
+   Apply shape-changing operations from Weights Studio / the agent, or restart the
+   loop afterwards.
 
 CLI and UI surfaces
 -------------------
 
 CLI:
 
-- ``status``, ``list_models``, ``plot_model``
+- ``status``, ``list_models``, ``list_optimizers``, ``plot_model``
 - ``pause`` / ``resume``
 - ``agent query freeze layer ...`` / ``reset layer ...`` / ``unfreeze ...``
 
@@ -178,6 +216,8 @@ Related automated tests (verified)
 
 Model wrapping, graph/dependency analysis, and operations are covered by:
 
+- ``tests/general/test_four_way_standalone.py::TestModelLevelCli`` (the standalone
+  above, driven through real CLI commands)
 - ``tests/model/test_dependency_patterns.py`` (TorchFX and ONNX dependency paths)
 - ``tests/model/test_model_with_ops.py`` (ADD/PRUNE/FREEZE/RESET behavior)
 - ``tests/model/test_model_with_ops_unit.py`` (model ops utility behavior)

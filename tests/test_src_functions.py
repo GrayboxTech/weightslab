@@ -126,10 +126,13 @@ class TestSrcTagAndDiscardFunctions(unittest.TestCase):
         )
 
         with patch("weightslab.backend.ledgers.get_dataframe", return_value=df_manager):
-            out = src.get_samples_by_tag("difficult", origin="train", limit=100)
+            out = src.get_samples_by_tag("difficult", origin="train_loader", limit=100)
 
         self.assertEqual(out, [5, 7])
-        df_manager.get_df_view.assert_called_once_with("train", limit=100)
+        # `origin` filters the rows of the 'origin' column (the loader name); it is
+        # not the column to select.
+        df_manager.get_df_view.assert_called_once_with(
+            column=SampleStatsEx.ORIGIN.value, value="train_loader", limit=100)
 
     def test_get_samples_by_tag_missing_tag_column_returns_empty(self):
         df_manager = MagicMock()
@@ -150,10 +153,37 @@ class TestSrcTagAndDiscardFunctions(unittest.TestCase):
         )
 
         with patch("weightslab.backend.ledgers.get_dataframe", return_value=df_manager):
-            out = src.get_discarded_samples(origin="eval", limit=10)
+            out = src.get_discarded_samples(origin="val_loader", limit=10)
 
         self.assertEqual(out, [100, 102])
-        df_manager.get_df_view.assert_called_once_with("eval", limit=10)
+        df_manager.get_df_view.assert_called_once_with(
+            column=SampleStatsEx.ORIGIN.value, value="val_loader", limit=10)
+
+    def test_get_discarded_samples_without_origin_reads_every_split(self):
+        df_manager = MagicMock()
+        df_manager.get_df_view.return_value = pd.DataFrame(
+            {SampleStatsEx.DISCARDED.value: [True, False]}, index=[1, 2])
+
+        with patch("weightslab.backend.ledgers.get_dataframe", return_value=df_manager):
+            out = src.get_discarded_samples()
+
+        self.assertEqual(out, [1])
+        # No origin and no limit: whole frame, and -1 (not None) so the manager's
+        # `limit > 0` check cannot raise.
+        df_manager.get_df_view.assert_called_once_with(limit=-1)
+
+    def test_get_samples_by_tag_returns_sample_ids_from_a_multiindex(self):
+        df_manager = MagicMock()
+        index = pd.MultiIndex.from_tuples(
+            [(5, 0), (5, 1), (6, 0)], names=["sample_id", "annotation_id"])
+        df_manager.get_df_view.return_value = pd.DataFrame(
+            {"tag:difficult": [True, True, False]}, index=index)
+
+        with patch("weightslab.backend.ledgers.get_dataframe", return_value=df_manager):
+            out = src.get_samples_by_tag("difficult")
+
+        # Sample ids, de-duplicated — not (sample_id, annotation_id) tuples.
+        self.assertEqual(out, [5])
 
 
 class TestSrcSaveSignals(unittest.TestCase):

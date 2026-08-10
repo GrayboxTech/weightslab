@@ -33,6 +33,58 @@ Level map
      - Persist and analyze per-step/per-sample trajectories
      - :doc:`logger`
 
+Standalone examples, one per level
+----------------------------------
+
+Each level ships as a self-contained, runnable MNIST script that registers *only*
+that level. Run any of them with no arguments, then attach the CLI
+(``weightslab cli``) or open the studio (``weightslab start``) from another shell.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Level
+     - Run it
+     - Bundled example
+     - What it proves
+   * - Model interaction
+     - ``weightslab start example --model``
+     - ``weightslab/examples/PyTorch/wl-standalone-model/main.py``
+     - Trains MNIST with only the model + optimizer wrapped; logs
+       ``model/grad_norm`` / ``model/parameters``; applies a runtime architecture
+       operation
+   * - Data exploration
+     - ``weightslab start example --data``
+     - ``weightslab/examples/PyTorch/wl-standalone-data/main.py``
+     - Tags, discards, queries and exports MNIST samples with no model at all
+   * - Config management
+     - ``weightslab start example --config``
+     - ``weightslab/examples/PyTorch/wl-standalone-config/main.py``
+     - A live ``config.yaml`` edited from the file, ``set_hp``, or the studio panel
+   * - Logger and signals
+     - ``weightslab start example --logger``
+     - ``weightslab/examples/PyTorch/wl-standalone-logger/main.py``
+     - Train/eval curves, history export and ``report`` with a plain PyTorch loop
+
+What each level needs on its own:
+
+- An **experiment directory**. The config level provides it via ``root_log_dir``;
+  the other three read ``WEIGHTSLAB_ROOT_LOG_DIR`` (the variable
+  ``weightslab start [DIR]`` exports), which the examples set themselves.
+- ``wl.serve()`` **warns instead of failing** when no serving config was wrapped,
+  and ``wl.start_training()`` only waits on the levels you actually registered, so
+  a single-level run reaches its first guarded step.
+
+Two boundaries are worth knowing before mixing and matching:
+
+- Per-sample and per-instance signals need the **data** level, because sample ids
+  are routed into the tracked sample dataframe. Step-level curves do not.
+- ``evaluate`` in the CLI needs a registered loader to evaluate.
+
+``tests/general/test_four_way_standalone.py`` checks all four: it asserts, from the
+examples' own source, that no example registers another level's flag, and it drives
+each level's documented CLI commands over a real CLI socket.
+
 Minimal integration order
 -------------------------
 
