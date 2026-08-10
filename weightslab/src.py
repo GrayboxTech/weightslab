@@ -4497,7 +4497,7 @@ def signal_classifier(signal=None):
             s = wl.trajectory_stats(values)
             if s is None:
                 return None
-            return "monotonic" if s["drop"] > 0.4 else "not_monotonic"
+            return "monotonic" if s["drop_z"] > 2 else "not_monotonic"
     """
     def _register(fn):
         global _GLOBAL_CLASSIFIER
