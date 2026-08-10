@@ -98,20 +98,20 @@ then with TensorBoard removed and replaced by WeightsLab.
    device = "cuda" if torch.cuda.is_available() and cfg["device"] in ["auto", "cuda"] else "cpu"
 
    train_ds = datasets.MNIST(cfg["data_root"], train=True, download=True, transform=transforms.ToTensor())
-   -  train_loader = torch.utils.data.DataLoader(train_ds, batch_size=cfg["data"]["train_loader"]["batch_size"], shuffle=True)
+   train_loader = torch.utils.data.DataLoader(train_ds, batch_size=cfg["data"]["train_loader"]["batch_size"], shuffle=True)
 
-   -  model = CNN().to(device)
-   -  optimizer = optim.Adam(model.parameters(), lr=cfg.get("optimizer", {}).get("lr", 1e-3))
-   -  loss = nn.CrossEntropyLoss(reduction="none")
+   model = CNN().to(device)
+   optimizer = optim.Adam(model.parameters(), lr=cfg.get("optimizer", {}).get("lr", 1e-3))
+   loss = nn.CrossEntropyLoss(reduction="none")
    -  writer = SummaryWriter(log_dir="./runs/mnist_baseline")
    +  hp = wl.watch_or_edit(cfg, flag="hyperparameters")
-   +  model = wl.watch_or_edit(CNN().to(device), flag="model", device=device)
+   +  model = wl.watch_or_edit(model, flag="model", device=device)
    +  optimizer = wl.watch_or_edit(
-   +      optim.Adam(model.parameters(), lr=cfg.get("optimizer", {}).get("lr", 1e-3)),
+   +      optimizer,
    +      flag="optimizer",
    +  )
    +  loss = wl.watch_or_edit(
-   +      nn.CrossEntropyLoss(reduction="none"),
+   +      loss,
    +      flag="loss",
    +      signal_name="train/loss",
    +      per_sample=True,

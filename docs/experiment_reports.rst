@@ -7,10 +7,6 @@ classification per signal, dataset stats (sample counts, discard rate, tag
 distribution), and a written analysis grounded in those exact numbers —
 branded with the WeightsLab logo.
 
-.. figure:: _static/logo-light.png
-   :width: 160px
-   :align: right
-   :alt: WeightsLab logo
 
 Generating a report
 --------------------
