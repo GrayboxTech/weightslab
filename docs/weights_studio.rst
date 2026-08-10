@@ -64,7 +64,7 @@ next free port and logs the one it chose.
 Secure mode (HTTPS + mTLS)
 --------------------------
 
-The default is plain HTTP (no cert files required, easiest for local dev). Do this before runnning the python experiment script to enable HTTPS between the browser and the UI server, and mTLS between the UI server and the backend:
+The default is plain HTTP (no cert files required, easiest for local dev). Do this before running the Python experiment script to enable HTTPS between the browser and the UI server, and mTLS between the UI server and the backend:
 
 1. Generate TLS certificates once::
 

@@ -236,7 +236,7 @@ commands:
 examples:
   weightslab se                       # one-time secure setup (then export WEIGHTSLAB_CERTS_DIR)
   weightslab se --force-certs         # regenerate the certs
-  weightslab start                    # launch the UI (unsecured HTTP, default) at :50051
+  weightslab start                    # launch the UI (unsecured HTTP, default) at :8080
                                       # (creates a fresh ./wl-<name> experiment dir)
   weightslab start ./exp/mnist_opt/   # use (or create) this experiment directory
   weightslab start --certs            # launch the UI over HTTPS (needs `weightslab se` first)
