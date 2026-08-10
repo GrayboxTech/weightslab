@@ -573,6 +573,14 @@ def _get_step(step: int | None = None) -> int:
         else:
             m = get_model(full_list[0])
 
+    # A name in list_models() can be an empty placeholder proxy (any get_model()
+    # read creates one). Such a handle has no age, and caching current_step on it
+    # would pin every later signal to the first step it ever saw — which is what
+    # flattened the x-axis of logger-only integrations. Ignore it and let the
+    # caller's `step` stand.
+    if m is not None and ledgers.Proxy.is_proxy(m) and not m.is_set():
+        m = None
+
     if m is not None:
         # Safe attribute access (handle Proxy returning None for missing attr)
         if hasattr(m, 'get_age'):
@@ -816,7 +824,7 @@ def _fwd_params(fn):
     except (ValueError, TypeError):
         return frozenset()
 
-_WL_KWARGS = ('flag', 'batch_ids', 'group_id', 'preds', 'signals', 'targets')
+_WL_KWARGS = ('flag', 'batch_ids', 'group_id', 'preds', 'signals', 'targets', 'step')
 
 
 def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
@@ -911,8 +919,10 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     # Extract scalar from tensor
     scalar, batch_scalar = _extract_scalar_from_tensor(batch_scalar, out, batch_ids)
 
-    # Log if requested
-    step = _get_step()
+    # Log if requested. A registered model's age always wins; the caller's
+    # ``step=`` is the fallback, which is what makes wrapped signals usable
+    # without the model level (logger-only integrations).
+    step = _get_step(wl_kw.get('step'))
 
     # Save per-instance values to dataframe with annotation_id
     if per_instance and instance_values is not None:
@@ -1379,10 +1389,29 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         if fl in ('hp', 'hyperparams', 'params', 'hyperparameters', 'parameters', 'config'):
             # If obj is a string, treat as a file path and start watcher
             try:
+                # `obj` is either a live dict or a path to a YAML config. A path
+                # carries no keys, so build the dict view we resolve settings
+                # from by merging the file's content over `defaults`, and feed it
+                # back as `defaults` so the registration below sees root_log_dir.
+                if isinstance(obj, str):
+                    _hp_cfg = dict(kwargs.get('defaults') or {})
+                    if os.path.exists(obj):
+                        try:
+                            import yaml as _yaml
+                            with open(obj, 'r') as _fh:
+                                _hp_cfg.update(_yaml.safe_load(_fh) or {})
+                        except Exception as _e:
+                            logger.warning(
+                                "Could not read hyperparameters file %r (%s); "
+                                "using defaults only.", obj, _e)
+                    kwargs['defaults'] = _hp_cfg
+                else:
+                    _hp_cfg = obj
+
                 # Initialize CheckpointManager if we have a root dir (see
                 # _resolve_configured_root_log_dir for the resolution order).
-                obj['root_log_dir'] = _resolve_configured_root_log_dir(
-                    obj.get('root_log_dir'))
+                _hp_cfg['root_log_dir'] = _resolve_configured_root_log_dir(
+                    _hp_cfg.get('root_log_dir'))
                 try:
                     # Check if a checkpoint manager is already registered in ledger
                     try:
@@ -1394,7 +1423,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                             raise KeyError("No manager in ledger")
                     except (KeyError, AttributeError):
                         # Create new manager and register it
-                        _checkpoint_manager = CheckpointManager(root_log_dir=obj['root_log_dir'])
+                        _checkpoint_manager = CheckpointManager(root_log_dir=_hp_cfg['root_log_dir'])
                         try:
                             ledgers.register_checkpoint_manager(_checkpoint_manager)
                             logger.info("Registered new checkpoint manager in ledger")
@@ -1421,7 +1450,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                                 exp_hash=latest_hash,
                                 load_model=False,
                                 load_weights=False,
-                                load_config=obj.get('checkpoint_manager', {}).get('load_config', True),
+                                load_config=_hp_cfg.get('checkpoint_manager', {}).get('load_config', True),
                                 force=True,
                                 load_data=False
                             )
@@ -2096,9 +2125,33 @@ def discard_samples(
         return False
 
 
+def _origin_df_view(df_manager, origin: str | None, limit: int | None):
+    """Rows of the sample dataframe belonging to *origin* (a loader name).
+
+    ``origin`` is matched against the ``origin`` column — the value the data
+    wrapper writes per row, i.e. the ``loader_name`` given to
+    ``wl.watch_or_edit(..., flag="data")`` (``"train_loader"``, ``"val_loader"``,
+    ...). ``None`` keeps every split.
+    """
+    origin_col = SampleStatsEx.ORIGIN.value
+    limit = -1 if not limit else int(limit)
+    if origin is None:
+        return df_manager.get_df_view(limit=limit)
+    return df_manager.get_df_view(column=origin_col, value=origin, limit=limit)
+
+
+def _sample_ids_of(df) -> list:
+    """Unique ``sample_id`` values of *df*, whose index is
+    ``(sample_id, annotation_id)``. Falls back to a flat index."""
+    index = df.index
+    if getattr(index, 'nlevels', 1) > 1:
+        return index.get_level_values(0).unique().tolist()
+    return index.unique().tolist()
+
+
 def get_samples_by_tag(
     tag: str,
-    origin: str = 'train',
+    origin: str = None,
     limit: int = None
 ) -> list[int]:
     """
@@ -2106,7 +2159,9 @@ def get_samples_by_tag(
 
     Args:
         tag: Tag name to search for
-        origin: Dataset split ('train', 'eval', etc.). Default: 'train'
+        origin: Loader name to restrict to, as passed to
+            ``wl.watch_or_edit(..., flag="data", loader_name=...)`` (for example
+            ``'train_loader'``). ``None`` (default) searches every split.
         limit: Maximum number of sample IDs to return (None = all)
 
     Returns:
@@ -2114,7 +2169,7 @@ def get_samples_by_tag(
 
     Examples:
         >>> # Get all difficult samples
-        >>> difficult_ids = get_samples_by_tag('difficult', origin='train')
+        >>> difficult_ids = get_samples_by_tag('difficult', origin='train_loader')
         >>> print(f"Found {len(difficult_ids)} difficult samples")
     """
     from weightslab.backend.ledgers import get_dataframe
@@ -2126,17 +2181,15 @@ def get_samples_by_tag(
 
     try:
         tag_col = f"{SampleStatsEx.TAG.value}:{tag.strip()}"
-        df = df_manager.get_df_view(origin, limit=limit)
+        df = _origin_df_view(df_manager, origin, limit)
 
         if tag_col not in df.columns:
-            logger.warning(f"Tag '{tag}' not found in {origin} dataset")
+            logger.warning(f"Tag '{tag}' not found in {origin or 'any'} dataset")
             return []
 
         # Filter samples where tag column is True
         tagged_df = df[df[tag_col] == True]
-        sample_ids = tagged_df.index.tolist()
-
-        return sample_ids
+        return _sample_ids_of(tagged_df)
 
     except Exception as e:
         logger.error(f"Failed to get samples by tag: {e}", exc_info=True)
@@ -2144,20 +2197,22 @@ def get_samples_by_tag(
 
 
 def get_discarded_samples(
-    origin: str = 'train',
+    origin: str = None,
     limit: int = None
 ) -> list[int]:
     """
     Get sample IDs that are marked as discarded.
 
     Args:
-        origin: Dataset split ('train', 'eval', etc.). Default: 'train'
+        origin: Loader name to restrict to, as passed to
+            ``wl.watch_or_edit(..., flag="data", loader_name=...)`` (for example
+            ``'train_loader'``). ``None`` (default) searches every split.
         limit: Maximum number of sample IDs to return (None = all)
     Returns:
         List of discarded sample IDs
     Examples:
         >>> # Get all discarded samples
-        >>> discarded_ids = get_discarded_samples(origin='train')
+        >>> discarded_ids = get_discarded_samples(origin='train_loader')
         >>> print(f"Found {len(discarded_ids)} discarded samples")
     """
     from weightslab.backend.ledgers import get_dataframe
@@ -2169,17 +2224,16 @@ def get_discarded_samples(
 
     try:
         discard_col = SampleStatsEx.DISCARDED.value
-        df = df_manager.get_df_view(origin, limit=limit)
+        df = _origin_df_view(df_manager, origin, limit)
 
         if discard_col not in df.columns:
-            logger.warning(f"Discard column not found in {origin} dataset")
+            logger.warning(
+                f"Discard column not found in {origin or 'any'} dataset")
             return []
 
         # Filter samples where discard column is True
         discarded_df = df[df[discard_col] == True]
-        sample_ids = discarded_df.index.tolist()
-
-        return sample_ids
+        return _sample_ids_of(discarded_df)
 
     except Exception as e:
         logger.error(f"Failed to get discarded samples: {e}", exc_info=True)
@@ -4443,7 +4497,7 @@ def signal_classifier(signal=None):
             s = wl.trajectory_stats(values)
             if s is None:
                 return None
-            return "monotonic" if s["drop"] > 0.4 else "not_monotonic"
+            return "monotonic" if s["drop_z"] > 2 else "not_monotonic"
     """
     def _register(fn):
         global _GLOBAL_CLASSIFIER
@@ -4968,9 +5022,17 @@ def _ai_report_generation_result(
         except Exception:
             root_log_dir = None
     if not root_log_dir:
+        # A logger-only integration registers no model/config, so no checkpoint
+        # manager exists to ask. Fall back to the directory `weightslab start
+        # [DIR]` advertises, which is also what such a script exports itself.
+        env_dir = os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR")
+        if env_dir and os.path.isdir(env_dir):
+            root_log_dir = env_dir
+    if not root_log_dir:
         raise RuntimeError(
             "ai_report_generation: no experiment directory available. Start an "
-            "experiment (wl.watch_or_edit / wl.serve) or pass root_log_dir=..."
+            "experiment (wl.watch_or_edit / wl.serve), set WEIGHTSLAB_ROOT_LOG_DIR, "
+            "or pass root_log_dir=..."
         )
 
     logger_q = get_logger()

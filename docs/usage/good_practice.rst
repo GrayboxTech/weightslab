@@ -143,43 +143,34 @@ what the ``DataSampleTrackingWrapper`` yields from ``__iter__``.
 iii. Signal storage mode — choosing what to send
 -------------------------------------------------
 
-When the studio triggers **inference on the train set** (eval mode on a tagged
-subset), it runs the forward pass and collects predictions. Decide upfront how
-much data you want to store per step, since storing dense predictions for every
-sample can become expensive.
+Choose this based on storage budget and how often you need overlays during
+training.
 
-**Light mode** — store everything (predictions + targets) per step:
+**Light mode** — train keeps only per-sample loss, eval keeps full data:
 
 .. code-block:: python
 
-   loss_per_sample = sig["loss"](outputs, targets, batch_ids=ids, preds=preds)
+   # Training step: store per-sample loss only
+   train_loss = sig["loss"](outputs, targets, batch_ids=ids)
 
-Use this for small datasets or during debugging. The studio can render the
-prediction overlay and target overlay simultaneously.
+   # Evaluation step: store predictions + targets for overlay analysis
+   eval_preds = decode_and_nms(outputs.detach())
+   eval_loss = sig["loss"](outputs, targets, batch_ids=ids, preds=eval_preds, targets=targets)
 
-**Standard mode** — store only the loss per step and per sample, omit predictions during training:
+Use this when you want lighter train-time writes but still need rich eval-time
+inspection in Studio.
 
-.. code-block:: python
-
-   loss_per_sample = sig["loss"](outputs, targets, batch_ids=ids)
-
-Predictions and targets are not written to disk. The studio still plots the
-per-sample loss curve; overlays are only available when the studio explicitly
-triggers an eval pass (which passes ``preds`` separately).
-
-**Standard mode with eval-time predictions** — pass processed predictions and
-optionally a different target tensor for eval:
+**Standard mode** — both train and eval store full data:
 
 .. code-block:: python
 
-   # During eval (triggered by the studio or your own eval loop):
-   preds_processed = decode_and_nms(outputs.detach())
-   loss_per_sample = sig["loss"](
-      outputs, targets,
-      batch_ids=ids,
-      preds=preds_processed,
-      targets=targets
-   )   # optional: override target if it differs from the one passed to the loss
+   # Training step
+   train_preds = decode_and_nms(outputs.detach())
+   train_loss = sig["loss"](outputs, targets, batch_ids=ids, preds=train_preds, targets=targets)
+
+   # Evaluation step
+   eval_preds = decode_and_nms(outputs.detach())
+   eval_loss = sig["loss"](outputs, targets, batch_ids=ids, preds=eval_preds, targets=targets)
 
 ``preds`` should be **processed** predictions (after NMS, argmax, etc.) rather
 than raw model outputs, because the studio renders them directly as overlays.
@@ -198,14 +189,10 @@ Summary table
      - Stores
      - Use when
    * - Light
-     - ``sig(out, tgt, batch_ids=ids, preds=preds)``
-     - loss + predictions + targets
-     - Small dataset, debugging, overlay needed every step
+     - train: ``sig(out, tgt, batch_ids=ids)`` / eval: ``sig(out, tgt, batch_ids=ids, preds=preds, targets=tgt)``
+     - train: loss only / eval: loss + predictions + targets
+     - Large or medium datasets, lower write cost during training
    * - Standard
-     - ``sig(out, tgt, batch_ids=ids)``
-     - loss only
-     - Large dataset, production, overlays on eval only
-   * - Standard+
-     - ``sig(out, tgt, batch_ids=ids, preds=preds, targets=tgt)``
-     - loss + predictions + targets (eval step only)
-     - Large dataset, overlay on studio-triggered eval passes
+     - train + eval: ``sig(out, tgt, batch_ids=ids, preds=preds, targets=tgt)``
+     - train + eval: loss + predictions + targets
+     - Smaller datasets, maximum observability on both phases

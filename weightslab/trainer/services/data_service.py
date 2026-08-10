@@ -65,6 +65,20 @@ _DEFAULT_POINT_CLOUD_CHUNK_BYTES = 1 << 20 # 1 MiB
 # doesn't produce unwieldy per-cell lists. Override with WL_SIGNAL_HISTORY_MAX_POINTS.
 #
 # Parsed defensively so a bad env var can't crash module import.
+def _is_registered(handle) -> bool:
+    """True when a ledger handle actually wraps an object.
+
+    Reading ``get_dataframe()`` & co. inserts an empty placeholder proxy, so a
+    non-``None`` handle is not proof that anything was registered — touching one
+    raises "Proxy target not set".
+    """
+    if handle is None:
+        return False
+    if Proxy.is_proxy(handle):
+        return handle.is_set()
+    return True
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -941,6 +955,15 @@ class DataService:
         Uses the shared dataframe manager instead of the H5 store and avoids
         blocking on IO. Falls back to last snapshot if retrieval fails.
         """
+        # No tracked dataset (a model-, config- or logger-only integration) means
+        # there is no sample dataframe to pull. That is a normal state, not a
+        # failure, so say so plainly instead of falling into the except below with
+        # the manager proxy's "Proxy target not set".
+        if not _is_registered(self._df_manager):
+            logger.debug("[DataService] No dataframe manager registered yet "
+                         "(no dataset wrapped with flag=\"data\"); data view is empty.")
+            return pd.DataFrame()
+
         try:
             # Load dataframe from the shared dataframe manager with arrays autoloaded from h5 storage
             df = self._df_manager.get_combined_df() if self._df_manager is not None else pd.DataFrame()

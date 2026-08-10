@@ -9,7 +9,7 @@ from typing import Any, Optional
 from enum import Enum
 from threading import Event
 
-from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name, get_checkpoint_manager, get_model
+from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name, get_checkpoint_manager, get_model, get_dataloader, list_models, list_dataloaders, list_hyperparams, Proxy
 from weightslab.components.tracking import TrackingMode
 from weightslab.watchdog.lock_monitor import MonitoredRLock
 
@@ -98,6 +98,25 @@ def reset_in_evaluation(token: contextvars.Token[bool]) -> None:
     _in_evaluation.reset(token)
 
 
+def _any_registered(list_names, get_handle) -> bool:
+    """True when a ledger registry holds at least one *real* registration.
+
+    Any ``get_*()`` read inserts an empty placeholder proxy, so a name showing up
+    in ``list_models()`` / ``list_dataloaders()`` / ``list_hyperparams()`` is not
+    by itself proof that the level was wrapped.
+    """
+    try:
+        for name in list_names() or []:
+            handle = get_handle(name)
+            if Proxy.is_proxy(handle) and not handle.is_set():
+                continue
+            if handle is not None:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 class PauseController:
     """
         Shared between model (reader: wait) and control thread (writer: pause/resume).
@@ -175,9 +194,25 @@ class PauseController:
         self._get_checkpoint_manager()
         if self.checkpoint_manager == None:
             return False
-        fl = self.checkpoint_manager.get_hp_hash() != "00000000" and self.checkpoint_manager.get_model_hash() != "00000000" and self.checkpoint_manager.get_data_hash() != "00000000"
 
-        return fl
+        # Only levels the user actually registered can ever produce a hash. A
+        # single-level integration (model-only, data-only, logger-only, ...)
+        # leaves the others at "00000000" forever, so gating on all three would
+        # make resume() impossible there and the first guarded step would block
+        # for good. Wait on the registered components, ignore the absent ones.
+        components = (
+            (list_hyperparams, get_hyperparams, self.checkpoint_manager.get_hp_hash),
+            (list_models, get_model, self.checkpoint_manager.get_model_hash),
+            (list_dataloaders, get_dataloader, self.checkpoint_manager.get_data_hash),
+        )
+
+        for list_names, get_handle, get_hash in components:
+            if not _any_registered(list_names, get_handle):
+                continue
+            if get_hash() == "00000000":
+                return False
+
+        return True
 
 
 # Global pause controller instance
@@ -285,6 +320,17 @@ class GuardContext:
 
         if f:
             pause_controller.pause()
+
+        # One training step just finished and the gradients are still there: let the
+        # model level log its own signals. Without this a model-only integration
+        # (no wrapped loss/metric) would never write anything to the logger.
+        if self.for_training and self.model is not None and exc_type is None:
+            try:
+                log_signals = getattr(self.model, 'log_model_signals', None)
+                if callable(log_signals):
+                    log_signals()
+            except Exception as e:
+                logger.debug(f"Model-level signal logging failed: {e}")
 
         # Revert the model state
         if self.model is not None and hasattr(self, '_prev_training_mode'):

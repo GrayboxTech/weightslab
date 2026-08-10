@@ -515,13 +515,24 @@ def grpc_serve(
     """Configure trainer services such as gRPC server.
     Args:
         n_workers_grpc (int): Number of threads for the gRPC server.
-        grpc_port (int): Port number for the gRPC server.
+        grpc_host (str): Interface to bind. Defaults to ``$GRPC_BACKEND_HOST``,
+            else ``0.0.0.0``.
+        grpc_port (int): Port number for the gRPC server. Defaults to
+            ``$GRPC_BACKEND_PORT``, else ``50051``.
+        force_parameters (bool): Kept for backward compatibility; explicit
+            ``grpc_host`` / ``grpc_port`` arguments now take precedence over the
+            environment either way.
     """
     import weightslab.trainer.trainer_services as trainer
     from weightslab.trainer.trainer_tools import force_kill_all_python_processes
 
-    grpc_host = os.getenv("GRPC_BACKEND_HOST", "0.0.0.0") if not force_parameters or grpc_host is None else grpc_host
-    grpc_port = int(os.getenv("GRPC_BACKEND_PORT", 50051)) if not force_parameters or grpc_port is None else grpc_port
+    # Explicit arguments win, env vars are the fallback, then the defaults.
+    # (The previous form was `env if not force_parameters or arg is None else arg`,
+    # which parses as `(not force_parameters) or (arg is None)` — so with the
+    # default force_parameters=False the env/default ALWAYS won and an explicit
+    # `wl.serve(grpc_port=...)` was silently ignored.)
+    grpc_host = grpc_host if grpc_host is not None else os.getenv("GRPC_BACKEND_HOST", "0.0.0.0")
+    grpc_port = int(grpc_port) if grpc_port is not None else int(os.getenv("GRPC_BACKEND_PORT", 50051))
     watchdog_threshold_s = float(os.getenv("GRPC_WATCHDOG_STUCK_SECONDS", "180")) # 3 minutes default stuck threshold
     watchdog_interval_s = float(os.getenv("GRPC_WATCHDOG_INTERVAL_SECONDS", "5"))
     watchdog_exit_on_stuck = str(os.getenv("GRPC_WATCHDOG_EXIT_ON_STUCK", "0")).strip().lower() in {"1", "true", "yes", "on"}

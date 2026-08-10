@@ -64,9 +64,7 @@ next free port and logs the one it chose.
 Secure mode (HTTPS + mTLS)
 --------------------------
 
-The default is plain HTTP (no cert files required, easiest for local dev).
-To enable HTTPS between the browser and the UI server, and mTLS between the
-UI server and the backend:
+The default is plain HTTP (no cert files required, easiest for local dev). Do this before running the Python experiment script to enable HTTPS between the browser and the UI server, and mTLS between the UI server and the backend:
 
 1. Generate TLS certificates once::
 
@@ -87,7 +85,7 @@ UI server and the backend:
    - Expects the backend CA at ``ca.crt``
 
 3. Configure the backend to require mTLS::
-
+    Should be automatic if certs have been created to default directory "~/.weightslab-certs".
      export GRPC_TLS_ENABLED=1
      export GRPC_TLS_REQUIRE_CLIENT_AUTH=1
      export WEIGHTSLAB_CERTS_DIR=~/.weightslab-certs
