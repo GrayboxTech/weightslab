@@ -65,7 +65,7 @@ dependencies = [
   # grpcio-tools ~=1.68 to keep the gencode Colab-compatible; a newer grpcio-tools
   # bumps the gencode and reintroduces the VersionError on Colab. Upper bound <8
   # keeps modern runtimes (7.x) working.
-  "protobuf>=5.28.1,<8",
+  "protobuf>=6.31.1,<8",
   "pydantic>=2.7,<3",
 
   # Imaging
