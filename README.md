@@ -29,7 +29,7 @@
   ·
   <a href="https://grayboxtech.github.io/weightslab/latest/quickstart.html">Docs</a>
   ·
-  <a href="https://youtu.be/GBBDDaJQLWk">Demo (Images)</a>
+  <a href="https://youtu.be/3HDf3mT7Gtw">Demo (Images)</a>
   ·
   <a href="https://youtu.be/pSng0aIXGCY">Demo (VLA)</a>
   ·
