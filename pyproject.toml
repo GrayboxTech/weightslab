@@ -94,6 +94,18 @@ dependencies = [
 
   # Reporting
   "matplotlib>=3.7,<4",
+
+  # Resource monitoring (CPU/memory/disk/network/process + NVIDIA GPU via NVML).
+  # "nvidia-ml-py" is NVIDIA's officially maintained NVML binding, published
+  # under the `pynvml` import name (the standalone `pynvml` PyPI package is the
+  # unmaintained community fork -- do not swap this for it). Core dependency so
+  # GPU metrics work out of the box on GPU machines; the monitor no-ops
+  # gracefully when no NVIDIA driver is present (CPU-only machines). Versioned
+  # after the CUDA driver generation it binds (already at 13.x), not semver --
+  # keep the upper bound loose so a newer driver-generation release isn't
+  # blocked.
+  "psutil>=5.9,<8",
+  "nvidia-ml-py>=11,<14",
 ]
 
 [project.optional-dependencies]

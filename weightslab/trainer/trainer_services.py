@@ -731,5 +731,15 @@ def grpc_serve(
             grpc_host, grpc_port, n_workers_grpc,
         )
 
+    # Resource monitoring (CPU/memory/disk/network/GPU/process) runs for the
+    # whole server lifetime, independent of training steps. Enabled by
+    # default; see docs/resource_monitoring.rst for the config file and
+    # env var overrides (WEIGHTSLAB_DISABLE_RESOURCE_MONITORING, etc.).
+    try:
+        from weightslab.monitoring.resource_monitor import start_resource_monitor_from_config
+        start_resource_monitor_from_config()
+    except Exception:
+        logger.exception("[gRPC] Failed to start resource monitor")
+
 if __name__ == "__main__":
     grpc_serve()
