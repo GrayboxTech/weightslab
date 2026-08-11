@@ -377,6 +377,10 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         logger.debug(f"\nExperimentServiceServicer.GetDataSplits({request})")
         return self._exp_service.data_service.GetDataSplits(request, context)
 
+    def ExportAnnotations(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.ExportAnnotations({request})")
+        return self._exp_service.data_service.ExportAnnotations(request, context)
+
     def CheckAgentHealth(self, request, context):
         logger.debug(f"\nExperimentServiceServicer.CheckAgentHealth({request})")
         # Prefer explicit AgentService when present (new wiring).

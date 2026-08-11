@@ -30,6 +30,7 @@ Public API surface
 - ``wl.trigger_pending_evaluation_async``  *(optional, for the background gRPC/CLI worker)*
 - ``wl.pointcloud_thumbnail`` / ``wl.pointcloud_boxes``  *(decorators — LiDAR / point-cloud tasks)*
 - ``wl.ai_report_generation``  *(agent-written HTML experiment report)*
+- ``wl.export_annotations``  *(export boxes/masks to CVAT, Label Studio, or V7)*
 - ``wl.clear_all``
 - ``wl.seed_everything``
 - ``wl.set_log_directory``
@@ -1378,6 +1379,56 @@ Dump the ``loss_shape`` categorical tag and signals for sample-level rows only
     wl.write_dataframe(
         columns=["signals", "tag:loss_shape"],
         instance_id=0,
+    )
+
+export_annotations
+-------------------
+
+**Signature**
+
+.. code-block:: python
+
+   wl.export_annotations(
+       fmt,                  # "cvat" | "label_studio" | "v7"
+       path=None,
+       origin=None,
+       class_names=None,
+       use_predictions=False,
+   )
+
+**Purpose**
+
+Export bounding-box/segmentation annotations to a relabeling-tool format —
+the Python-API counterpart to Weights Studio's "Export" button and the
+``weightslab export`` CLI command. See :doc:`export` for the full format
+reference and known limitations (image-path/class-name resolution).
+
+**Arguments**
+
+- ``fmt`` *(str)* — ``"cvat"`` (single XML file), ``"label_studio"`` (single
+  JSON file), or ``"v7"`` (zip of per-image Darwin JSON files).
+- ``path`` *(str, optional)* — output file path **or** directory. ``None``
+  (default) uses ``root_log_dir`` from the active checkpoint manager, with
+  the format's default filename (e.g. ``annotations_cvat.xml``).
+- ``origin`` *(str, optional)* — restrict to one registered split/loader
+  (e.g. ``"train_loader"``). ``None`` exports every registered split.
+- ``class_names`` *(dict or list, optional)* — explicit class-id -> name
+  mapping, overriding any auto-detected ``dataset.class_names`` attribute.
+  Without either, labels fall back to ``"class_<id>"``.
+- ``use_predictions`` *(bool)* — export model predictions instead of
+  ground-truth targets. Default ``False``.
+
+**Examples**
+
+Export everything to CVAT, auto-named under ``root_log_dir``::
+
+    wl.export_annotations("cvat")
+
+Export only the validation split to Label Studio, with explicit class names::
+
+    wl.export_annotations(
+        "label_studio", "val_annotations.json",
+        origin="val_loader", class_names=["background", "cat", "dog"],
     )
 
 ai_report_generation

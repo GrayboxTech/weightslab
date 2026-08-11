@@ -127,6 +127,14 @@ dev = [
   "httpx>=0.27,<1",
 ]
 
+# Optional: segmentation mask -> polygon extraction for annotation export
+# (CVAT/Label Studio/V7). Bounding-box export needs none of this; only
+# lazily imported inside weightslab.export when a segmentation mask is
+# actually encountered.
+export = [
+  "opencv-python-headless>=4.8,<5",
+]
+
 utest = [
   "torchaudio>=2.1,<2.9; python_version < '3.13'",
   "torchaudio>=2.9,<3; python_version >= '3.13'",

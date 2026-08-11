@@ -62,6 +62,12 @@ service ExperimentService {
   rpc TriggerEvaluation (TriggerEvaluationRequest) returns (TriggerEvaluationResponse);
   rpc GetEvaluationStatus (GetEvaluationStatusRequest) returns (GetEvaluationStatusResponse);
   rpc CancelEvaluation (CancelEvaluationRequest) returns (CancelEvaluationResponse);
+
+  // Export bounding-box/segmentation annotations to a relabeling-tool format
+  // (CVAT XML, Label Studio JSON, or V7/Darwin JSON). Unary: the whole file
+  // (or a zip, for formats that need one file per image) comes back as bytes
+  // in a single response.
+  rpc ExportAnnotations (ExportAnnotationsRequest) returns (ExportAnnotationsResponse);
 }
 
 // --- Logger Data Sync ---
@@ -716,4 +722,26 @@ message GenerateNotebookCodeResponse {
   string explanation = 2;  // Short natural-language explanation.
   bool ok = 3;
   string error = 4;
+}
+
+// --- Annotation export (relabeling-tool formats) ---
+enum AnnotationExportFormat {
+  EXPORT_FORMAT_CVAT = 0;
+  EXPORT_FORMAT_LABEL_STUDIO = 1;
+  EXPORT_FORMAT_V7_DARWIN = 2;
+}
+
+message ExportAnnotationsRequest {
+  AnnotationExportFormat format = 1;
+  string origin = 2;              // restrict to one split/loader; "" = all loaders
+  bool include_predictions = 3;   // export model predictions instead of ground-truth targets
+}
+
+message ExportAnnotationsResponse {
+  bool success = 1;
+  string message = 2;
+  bytes payload = 3;    // export file bytes (a zip, for formats that need one file per image)
+  string filename = 4;  // suggested filename (with extension), e.g. "annotations_cvat.xml"
+  string mime_type = 5; // e.g. "application/xml", "application/json", "application/zip"
+  int32 image_count = 6; // number of images included, for UI feedback
 }
