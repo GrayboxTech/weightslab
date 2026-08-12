@@ -649,6 +649,17 @@ def load_raw_image_array(dataset, index, rank: int = 0) -> tuple:
             thumb_arr = np.asarray(thumb_pil)
             return thumb_arr, False, tuple(thumb_arr.shape), thumb_pil
 
+        # Video samples are [T, H, W, C] and share their rank with volumetric
+        # scans, so the dataset must opt in (task_type or media_kind) before we
+        # treat them as clips. Preview them with a single poster frame; the
+        # playable clip is streamed separately by the GetMedia RPC, which keeps
+        # the grid and list cheap regardless of clip length.
+        from weightslab.data.video_utils import is_video_sample, video_poster_frame
+        if is_video_sample(dataset, np_img, _raw_task):
+            poster_pil = video_poster_frame(dataset, np_img)
+            poster_arr = np.asarray(poster_pil)
+            return poster_arr, False, tuple(poster_arr.shape), poster_pil
+
         # Extract middle slice for thumbnail
         if is_volumetric:
             middle_slice = _extract_slice_from_4d(np_img, slice_idx=None)
@@ -694,6 +705,27 @@ def load_raw_point_cloud(dataset, index, rank: int = 0):
     if arr is None or not looks_like_point_cloud(np.asarray(arr)):
         return None
     return np.asarray(arr, dtype=np.float32)
+
+
+def load_raw_video(dataset, index, rank: int = 0):
+    """Load the raw clip array [T, H, W, C] for one sample (no poster render).
+
+    Same plucking rules as ``load_raw_image_array`` but returns every frame so
+    the GetMedia RPC can mux and stream a playable clip. Returns None when the
+    sample is not a video.
+    """
+    from weightslab.data.video_utils import is_video_sample
+
+    wrapped = getattr(dataset, "wrapped_dataset", dataset)
+    if not hasattr(wrapped, '__getitem__'):
+        return None
+    arr, _, _ = _get_image_array_and_metadata(wrapped, index, rank=rank)
+    if arr is None:
+        return None
+    task_type = getattr(wrapped, "task_type", getattr(dataset, "task_type", None))
+    if not is_video_sample(dataset, arr, task_type):
+        return None
+    return np.asarray(arr)
 
 
 def load_uid(dataset, sample_id):

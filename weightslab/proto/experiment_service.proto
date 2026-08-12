@@ -33,6 +33,12 @@ service ExperimentService {
   // Raw point cloud of one sample (task_type "detection_pointcloud"), server-streamed
   // in binary chunks for the interactive 3D viewer.
   rpc GetPointCloud (PointCloudRequest) returns (stream PointCloudChunk);
+  // Playable media of one sample (task_type "video_generation" /
+  // "audio_generation"), server-streamed in binary chunks for the modal
+  // player. Grid and list previews never call this — they use the poster
+  // frame carried by the ordinary raw_data stat — so clip length does not
+  // affect browsing cost.
+  rpc GetMedia (MediaRequest) returns (stream MediaChunk);
   rpc EditDataSample (DataEditsRequest) returns (DataEditsResponse);
   rpc GetDataSplits (Empty) returns (DataSplitsResponse);
   rpc CheckAgentHealth (Empty) returns (AgentHealthResponse);
@@ -514,6 +520,10 @@ message PointCloudRequest {
   string sample_id = 1;
   string origin = 2;       // loader name (e.g. "train_loader")
   int32 max_points = 3;    // 0 = use the server default cap
+  // Metadata field to stream, i.e. the "media:<field>" column attached by
+  // wl.save_media (e.g. "pred_cloud"). Empty means the sample's own point
+  // cloud (task_type "detection_pointcloud"), which is the existing behavior.
+  string field = 4;
 }
 
 message PointCloudChunk {
@@ -531,6 +541,39 @@ message PointCloudChunk {
   // ["x","y","z","intensity"] or ["x","y","z","nx","ny","nz","r","g","b"].
   // Drives the viewer's available colour / shading modes.
   repeated string feature_names = 9;
+}
+
+message MediaRequest {
+  string sample_id = 1;
+  string origin = 2;       // loader name (e.g. "train_loader")
+  // "video" (default) streams the muxed clip; "audio" streams only the
+  // soundtrack, which the frame explorer uses to draw a waveform without
+  // re-downloading the video.
+  string kind = 3;
+  int32 max_frames = 4;    // 0 = use the server default cap
+  // Metadata field to stream, i.e. the "media:<field>" column attached by
+  // wl.save_media (e.g. "pred_video"). Empty means the sample's own input
+  // clip, which is what the poster in the grid shows.
+  string field = 5;
+}
+
+message MediaChunk {
+  bool success = 1;
+  string message = 2;
+  // Set on the first chunk only:
+  string mime_type = 3;        // "video/mp4" | "image/gif" | "audio/wav"
+  int32 frame_count = 4;       // frames actually encoded (after any capping)
+  float fps = 5;
+  bool has_audio = 6;          // true when the muxed clip carries a soundtrack
+  int32 width = 7;
+  int32 height = 8;
+  int32 total_bytes = 9;       // full payload size, for progress reporting
+  float duration_seconds = 10;
+  int32 sample_rate = 11;      // audio streams only
+  // Every chunk:
+  bytes data = 12;
+  int32 chunk_index = 13;
+  int32 total_chunks = 14;
 }
 
 enum SampleEditType {

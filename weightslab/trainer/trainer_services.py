@@ -369,6 +369,11 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         # Server-streaming RPC: delegate the generator directly.
         return self._exp_service.data_service.GetPointCloud(request, context)
 
+    def GetMedia(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.GetMedia({request})")
+        # Server-streaming RPC: delegate the generator directly.
+        return self._exp_service.data_service.GetMedia(request, context)
+
     def EditDataSample(self, request, context):
         logger.debug(f"\nExperimentServiceServicer.EditDataSample({request})")
         return self._exp_service.data_service.EditDataSample(request, context)

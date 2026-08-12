@@ -5,7 +5,7 @@ import warnings
 
 from weightslab.proto import experiment_service_pb2 as weightslab_dot_proto_dot_experiment__service__pb2
 
-GRPC_GENERATED_VERSION = '1.76.0'
+GRPC_GENERATED_VERSION = '1.74.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in weightslab/proto/experiment_service_pb2_grpc.py depends on'
+        + f' but the generated code in weightslab/proto/experiment_service_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -93,6 +93,11 @@ class ExperimentServiceStub(object):
                 '/ExperimentService/GetPointCloud',
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.PointCloudRequest.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.PointCloudChunk.FromString,
+                _registered_method=True)
+        self.GetMedia = channel.unary_stream(
+                '/ExperimentService/GetMedia',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.MediaRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.MediaChunk.FromString,
                 _registered_method=True)
         self.EditDataSample = channel.unary_unary(
                 '/ExperimentService/EditDataSample',
@@ -259,6 +264,17 @@ class ExperimentServiceServicer(object):
     def GetPointCloud(self, request, context):
         """Raw point cloud of one sample (task_type "detection_pointcloud"), server-streamed
         in binary chunks for the interactive 3D viewer.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetMedia(self, request, context):
+        """Playable media of one sample (task_type "video_generation" /
+        "audio_generation"), server-streamed in binary chunks for the modal
+        player. Grid and list previews never call this — they use the poster
+        frame carried by the ordinary raw_data stat — so clip length does not
+        affect browsing cost.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -432,6 +448,11 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     servicer.GetPointCloud,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.PointCloudRequest.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.PointCloudChunk.SerializeToString,
+            ),
+            'GetMedia': grpc.unary_stream_rpc_method_handler(
+                    servicer.GetMedia,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.MediaRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.MediaChunk.SerializeToString,
             ),
             'EditDataSample': grpc.unary_unary_rpc_method_handler(
                     servicer.EditDataSample,
@@ -838,6 +859,33 @@ class ExperimentService(object):
             '/ExperimentService/GetPointCloud',
             weightslab_dot_proto_dot_experiment__service__pb2.PointCloudRequest.SerializeToString,
             weightslab_dot_proto_dot_experiment__service__pb2.PointCloudChunk.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetMedia(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/ExperimentService/GetMedia',
+            weightslab_dot_proto_dot_experiment__service__pb2.MediaRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.MediaChunk.FromString,
             options,
             channel_credentials,
             insecure,

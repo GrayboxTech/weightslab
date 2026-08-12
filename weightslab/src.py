@@ -2782,6 +2782,197 @@ def save_group_signals(
     DATAFRAME_M.update_by_groups_bulk(origin=origin, group_ids=active_group_ids, updates_list=all_updates)
 
 
+def _encode_one_media(item, kind: str, fps: float, audio, sample_rate: int,
+                      dataset=None):
+    """Encode one media item for transport. Returns (data, mime, poster, meta).
+
+    ``poster`` is the still the grid and list render; the full payload is only
+    fetched when the user opens the sample.
+    """
+    import io as _io
+
+    import numpy as _np
+    from PIL import Image as _Image
+
+    from weightslab.data import media_store as _ms
+    from weightslab.data import video_utils as _vu
+    from weightslab.trainer.services.data_image_utils import encode_image_webp
+
+    def _to_numpy(value):
+        if hasattr(value, "detach"):
+            value = value.detach().cpu()
+        if hasattr(value, "numpy"):
+            value = value.numpy()
+        return _np.asarray(value)
+
+    arr = _to_numpy(item) if item is not None else None
+
+    if kind == _ms.KIND_AUDIO:
+        data = _vu.encode_audio_wav(arr, sample_rate)
+        duration = (len(arr) / float(sample_rate)) if sample_rate else 0.0
+        # Audio has no still; the list shows a "♪" chip instead of a thumbnail.
+        return data, "audio/wav", b"", {
+            "sample_rate": int(sample_rate or 0),
+            "duration_seconds": round(float(duration), 3),
+        }
+
+    if kind == _ms.KIND_POINTCLOUD:
+        from weightslab.data.point_cloud_utils import (
+            get_pc_range, get_point_feature_names, pack_point_cloud,
+            render_thumbnail_2d_for_dataset,
+        )
+        points = _np.asarray(arr, dtype=_np.float32)
+        data, num_points, num_features = pack_point_cloud(points)
+        poster = b""
+        try:
+            poster = encode_image_webp(
+                render_thumbnail_2d_for_dataset(dataset, points), quality=70)
+        except Exception as exc:
+            logger.debug("point-cloud poster render failed: %r", exc)
+        # pc_range/feature_names are what the interactive 3D viewer needs to
+        # frame the camera and offer the right colour modes; without them here
+        # a field-streamed cloud (GetPointCloud with `field` set) would open
+        # with an unframed, unlabeled scene.
+        pc_range = get_pc_range(dataset, points) or ()
+        feature_names = get_point_feature_names(dataset, num_features)
+        return data, "application/octet-stream", poster, {
+            "num_points": int(num_points),
+            "num_features": int(num_features),
+            "pc_range": [float(v) for v in pc_range],
+            "feature_names": list(feature_names),
+        }
+
+    if kind == _ms.KIND_VIDEO:
+        # [T, C, H, W] is the common torch layout; normalize to [T, H, W, C].
+        if arr.ndim == 4 and arr.shape[1] in (1, 3, 4) and arr.shape[1] < min(arr.shape[2], arr.shape[3]):
+            arr = _np.transpose(arr, (0, 2, 3, 1))
+        data, mime, has_audio = _vu.encode_clip(
+            arr, fps, audio=audio, sample_rate=sample_rate)
+        poster = b""
+        try:
+            poster = encode_image_webp(_vu.video_poster_frame(dataset, arr), quality=70)
+        except Exception as exc:
+            logger.debug("video poster render failed: %r", exc)
+        return data, mime, poster, {
+            "frame_count": int(arr.shape[0]),
+            "fps": float(fps),
+            "has_audio": bool(has_audio),
+            "width": int(arr.shape[2]),
+            "height": int(arr.shape[1]),
+            "duration_seconds": round(float(arr.shape[0]) / max(1.0, float(fps)), 3),
+        }
+
+    # image / mask: a single still. [C, H, W] -> [H, W, C].
+    if arr.ndim == 3 and arr.shape[0] in (1, 3, 4) and arr.shape[0] < min(arr.shape[1], arr.shape[2]):
+        arr = _np.transpose(arr, (1, 2, 0))
+    frame = _vu._frames_to_uint8(arr[None])[0]
+    pil = _vu._frame_to_pil(frame)
+    buffer = _io.BytesIO()
+    pil.save(buffer, format="PNG")
+    data = buffer.getvalue()
+    poster = encode_image_webp(pil.convert("RGB"), quality=70)
+    return data, "image/png", poster, {
+        "width": int(pil.width), "height": int(pil.height),
+    }
+
+
+def save_media(
+    field: str,
+    batch_ids,
+    media,
+    kind: str = "image",
+    fps: float = 8.0,
+    audio=None,
+    sample_rate: int = 0,
+    origin: str | None = None,
+    dataset=None,
+):
+    """Attach media to a metadata field so the studio can visualize it.
+
+    This is what makes a **generated** result viewable next to its input: any
+    field — not just the sample's own input — can carry an image, a mask, a
+    video clip, an audio track or a point cloud. In the studio the field becomes
+    a column showing a thumbnail per row (sized to the list's row height), and
+    clicking a thumbnail opens the full viewer: zoomable image, mask overlay,
+    video player with frame scrubbing and sound, or the interactive 3D cloud.
+
+    Args:
+        field: metadata field name, e.g. "pred_video". Stored in the dataframe
+            as the column ``media:pred_video``.
+        batch_ids: the sample ids this media belongs to (same order as ``media``).
+        media: a sequence, one entry per id. Video entries are ``[T, H, W, C]``
+            (or ``[T, C, H, W]``); images/masks are ``[H, W]``/``[H, W, C]``;
+            point clouds are ``[N, F]`` float; audio is a 1-D waveform.
+        kind: one of "image", "mask", "video", "audio", "pointcloud".
+        fps: frame rate for video entries.
+        audio: optional per-sample waveforms muxed into video entries; pass a
+            single waveform to reuse it for every sample.
+        sample_rate: sample rate for ``audio`` (required for it to be muxed).
+        origin: loader name; defaults to the active one.
+        dataset: optional dataset, used only for its poster/thumbnail hooks.
+
+    Example:
+        >>> generated = to_clip_space(sampled)          # [B, T, H, W, C] uint8
+        >>> wl.save_media("pred_video", batch_ids=uids, media=generated,
+        ...               kind="video", fps=8, audio=waveforms, sample_rate=16000)
+    """
+    from weightslab.data import media_store
+
+    global DATAFRAME_M
+    if DATAFRAME_M is None:
+        DATAFRAME_M = get_dataframe()
+    if DATAFRAME_M is None:
+        logger.warning("save_media: no dataframe registered; skipping.")
+        return
+
+    if batch_ids is None or media is None:
+        return
+    if isinstance(batch_ids, th.Tensor):
+        ids = [str(i) for i in batch_ids.detach().cpu().tolist()]
+    else:
+        ids = [str(i) for i in batch_ids]
+    if len(ids) == 0:
+        return
+
+    origin = origin or get_active_origin() or "train_loader"
+    column = media_store.media_column(field)
+
+    # A single waveform is broadcast to every sample; a sequence is per-sample.
+    audio_is_per_sample = (
+        audio is not None
+        and hasattr(audio, "__len__")
+        and len(audio) == len(ids)
+        and hasattr(audio[0], "__len__")
+    )
+
+    for index, sample_id in enumerate(ids):
+        if index >= len(media):
+            break
+        try:
+            item_audio = audio[index] if audio_is_per_sample else audio
+            data, mime, poster, meta = _encode_one_media(
+                media[index], kind=kind, fps=fps, audio=item_audio,
+                sample_rate=sample_rate, dataset=dataset)
+            if not data:
+                continue
+            entry = {
+                "field": field, "sample_id": sample_id, "data": data,
+                "mime": mime, "kind": kind, "poster": poster, "meta": meta,
+            }
+            media_store.put(field, sample_id, data, mime, kind,
+                            poster=poster, meta=meta)
+            # Only the small descriptor goes in the dataframe; the bytes stay in
+            # the media store and are streamed on demand by GetMedia.
+            DATAFRAME_M.update_values(
+                origin=origin,
+                sample_id=int(sample_id) if str(sample_id).isdigit() else sample_id,
+                updates={column: media_store.descriptor_json(entry)},
+            )
+        except Exception as exc:
+            logger.warning("save_media(%s) failed for sample %s: %r",
+                           field, sample_id, exc)
+
+
 def clear_all():
     """Clear all WeightsLab registries (models, dataloaders, etc.)."""
     ledgers.clear_all()
