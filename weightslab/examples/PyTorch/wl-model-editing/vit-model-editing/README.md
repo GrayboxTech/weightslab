@@ -47,7 +47,7 @@ the current dependency engine does not model those relationships reliably.
 From the repository root:
 
 ```bash
-bash weightslab/examples/PyTorch/model-editing/vit-model-editing/setup.sh
+bash weightslab/examples/PyTorch/wl-model-editing/vit-model-editing/setup.sh
 ```
 
 The default environment is `.venv-vit-edit`. Override it with
@@ -56,7 +56,7 @@ The default environment is `.venv-vit-edit`. Override it with
 ## Run both experiments
 
 ```bash
-bash weightslab/examples/PyTorch/model-editing/vit-model-editing/run_all.sh
+bash weightslab/examples/PyTorch/wl-model-editing/vit-model-editing/run_all.sh
 ```
 
 Reports are written under `outputs/vit_model_editing/`, which is gitignored:
@@ -69,7 +69,7 @@ head experiment still runs. For a strict full-model gate:
 
 ```bash
 .venv-vit-edit/bin/python \
-  weightslab/examples/PyTorch/model-editing/vit-model-editing/probe_full_vit.py
+  weightslab/examples/PyTorch/wl-model-editing/vit-model-editing/probe_full_vit.py
 ```
 
 That command exits non-zero until complete ViT dependency mapping works.
@@ -80,7 +80,7 @@ Fast local smoke run (default, no downloads):
 
 ```bash
 .venv-vit-edit/bin/python \
-  weightslab/examples/PyTorch/model-editing/vit-model-editing/run_head_experiment.py \
+  weightslab/examples/PyTorch/wl-model-editing/vit-model-editing/run_head_experiment.py \
   --image-size 32 --train-samples 16 --eval-samples 8
 ```
 
@@ -88,7 +88,7 @@ Standard 224x224 input geometry with randomly initialized weights:
 
 ```bash
 .venv-vit-edit/bin/python \
-  weightslab/examples/PyTorch/model-editing/vit-model-editing/run_head_experiment.py \
+  weightslab/examples/PyTorch/wl-model-editing/vit-model-editing/run_head_experiment.py \
   --image-size 224
 ```
 
@@ -96,7 +96,7 @@ Pretrained ImageNet backbone (downloads torchvision weights):
 
 ```bash
 .venv-vit-edit/bin/python \
-  weightslab/examples/PyTorch/model-editing/vit-model-editing/run_head_experiment.py \
+  weightslab/examples/PyTorch/wl-model-editing/vit-model-editing/run_head_experiment.py \
   --image-size 224 --pretrained
 ```
 
