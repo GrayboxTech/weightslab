@@ -313,11 +313,9 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                 # Keep deterministic order by model_age before sampling
                 signal_history = sorted(signal_history, key=lambda item: item.get("model_age", 0))
 
-                # Downsample if we have more than 1000 points
-                if len(signal_history) > max_points:
-                    # Calculate step to downsample (e.g., if 5000 points, step=5 to get ~1000)
-                    step = max(1, len(signal_history) // max_points)
-                    signal_history = signal_history[::step]
+                # Downsample if we have more than max_points points (always keeps
+                # the first and last point, so the most recent value is never lost).
+                signal_history = _downsample_uniform(signal_history, max_points)
 
                 for s in signal_history:
                     points.append(
