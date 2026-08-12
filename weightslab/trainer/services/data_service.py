@@ -650,7 +650,12 @@ class DataService:
                         member_rank = 0
 
                     _pv_np_img, _, _, pil_img = load_raw_image_array(dataset, ds_idx, rank=member_rank)
-                    if looks_like_tabular(_pv_np_img):
+                    if isinstance(_pv_np_img, str):
+                        # Text-generation sample: cache the text itself, no image.
+                        stats.append(create_data_stat(
+                            'raw_data', 'text', shape=[1], value_string=_pv_np_img))
+                        pil_img = None
+                    elif looks_like_tabular(_pv_np_img):
                         # Tabular sample: cache the feature values (lossless) as a
                         # 'vector' raw_data stat + heatmap thumbnail, not an image.
                         stats.append(build_tabular_raw_data_stat(_pv_np_img))
@@ -1964,10 +1969,22 @@ class DataService:
                 else:
                     np_img, is_volumetric, original_shape, middle_pil = None, False, [], None
 
+                # Text-generation input: the sample's payload IS the text (a
+                # prompt, a conversation turn, ...) — there is no image to
+                # encode at all, lossy or otherwise.
+                if isinstance(np_img, str):
+                    data_stats.append(
+                        create_data_stat(
+                            name='raw_data',
+                            stat_type='text',
+                            shape=[1],
+                            value_string=np_img,
+                        )
+                    )
                 # Tabular input: the model input is a 1-D feature vector, not an
                 # image. Transmit the actual values (lossless) as a 'vector'
                 # raw_data stat instead of a lossy WebP image.
-                if looks_like_tabular(np_img):
+                elif looks_like_tabular(np_img):
                     data_stats.append(build_tabular_raw_data_stat(np_img))
                 elif middle_pil is not None:
                     original_size = middle_pil.size

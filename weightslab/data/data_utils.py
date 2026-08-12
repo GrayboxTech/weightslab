@@ -386,6 +386,12 @@ def _get_image_array_and_metadata(wrapped, index, rank: int = 0) -> tuple:
     if hasattr(np_img, 'numpy'):
         np_img = np_img.numpy()
 
+    # A text-generation sample's "image" slot is the prompt itself (a plain
+    # str) — bail out before any array-shaped logic below, which assumes
+    # .ndim/.shape exist.
+    if isinstance(np_img, str):
+        return np_img, False, None
+
     is_volumetric = np_img.ndim >= 4 # 3 is for RGB; while 4 is 3D # TODO (GP): Should be fix because this will not work with grayscale image wo. color channel
 
     # For 4D volumetric data, detect and transpose channel-first formats:
@@ -618,6 +624,15 @@ def load_raw_image_array(dataset, index, rank: int = 0) -> tuple:
 
     if hasattr(wrapped, '__getitem__'):
         np_img, is_volumetric, original_shape = _get_image_array_and_metadata(wrapped, index, rank=rank)
+
+        # Text-generation samples (a prompt, an RLHF conversation, ...) have no
+        # pixels at all — the text itself is the payload. Every check below
+        # this point assumes an array (.ndim/.shape), so this must come first.
+        # The caller (load_raw_image_array's callers in data_service.py)
+        # detects this case via isinstance(..., str) and skips image encoding
+        # entirely in favor of a plain text stat.
+        if isinstance(np_img, str):
+            return np_img, False, original_shape, None
 
         # Tabular samples (1-D feature vectors) have no spatial dims and cannot be
         # PIL-encoded as an image. Render a small heatmap for display continuity;

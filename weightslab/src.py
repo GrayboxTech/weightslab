@@ -2805,6 +2805,14 @@ def _encode_one_media(item, kind: str, fps: float, audio, sample_rate: int,
             value = value.numpy()
         return _np.asarray(value)
 
+    if kind == _ms.KIND_TEXT:
+        # The item IS the text (a caption, a reference completion, ...) — no
+        # array conversion, no poster: the studio shows a "<text>" tag, same
+        # as an unstillable audio field.
+        text = "" if item is None else str(item)
+        data = text.encode("utf-8")
+        return data, "text/plain", b"", {"length": len(text)}
+
     arr = _to_numpy(item) if item is not None else None
 
     if kind == _ms.KIND_AUDIO:
@@ -2902,8 +2910,9 @@ def save_media(
         batch_ids: the sample ids this media belongs to (same order as ``media``).
         media: a sequence, one entry per id. Video entries are ``[T, H, W, C]``
             (or ``[T, C, H, W]``); images/masks are ``[H, W]``/``[H, W, C]``;
-            point clouds are ``[N, F]`` float; audio is a 1-D waveform.
-        kind: one of "image", "mask", "video", "audio", "pointcloud".
+            point clouds are ``[N, F]`` float; audio is a 1-D waveform; text
+            entries are plain strings.
+        kind: one of "image", "mask", "video", "audio", "pointcloud", "text".
         fps: frame rate for video entries.
         audio: optional per-sample waveforms muxed into video entries; pass a
             single waveform to reuse it for every sample.

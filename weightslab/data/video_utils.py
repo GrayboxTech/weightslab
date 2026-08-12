@@ -45,15 +45,21 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Canonical task types for generative media.
+# Canonical task types for generative media. TEXT_GENERATION_TASK lives here
+# too (not just video/audio/image) because this module is the shared registry
+# data_service.py checks before treating a target/prediction as a mask — text
+# generation needs that exclusion exactly like the others, even though its
+# own preview path (a plain string, no pixels) is handled in data_utils.py.
 VIDEO_GENERATION_TASK = "video_generation"
 IMAGE_GENERATION_TASK = "image_generation"
 AUDIO_GENERATION_TASK = "audio_generation"
+TEXT_GENERATION_TASK = "text_generation"
 
 _GENERATION_TASKS = (
     VIDEO_GENERATION_TASK,
     IMAGE_GENERATION_TASK,
     AUDIO_GENERATION_TASK,
+    TEXT_GENERATION_TASK,
 )
 
 # Dataset attribute names.
