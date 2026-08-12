@@ -53,6 +53,35 @@ class TestExperimentServiceUnit(unittest.TestCase):
         self.assertEqual(response.points[0].model_age, 0)
         self.assertEqual(response.points[1].model_age, 1)
 
+    def test_get_latest_logger_data_full_history_downsample_keeps_last_point(self):
+        # Regression test: a fixed-stride slice (signal_history[::step]) starts at
+        # index 0 and drops the tail of a fixed-length run. With 10000 points and
+        # max_points=1000, step=10 lands the last kept index at 9990, silently
+        # dropping steps 9991-9999. _downsample_uniform must be used instead so the
+        # most recent point is always present.
+        signal_logger = MagicMock()
+        signal_logger.get_signal_history.return_value = [
+            {
+                "metric_name": "train/loss_CE",
+                "model_age": age,
+                "metric_value": 1.0 / (age + 1),
+                "experiment_hash": "exp-hash",
+            }
+            for age in range(10000)
+        ]
+        ctx = _DummyCtx(components={"signal_logger": signal_logger})
+        with patch("weightslab.trainer.services.experiment_service.DataService"):
+            service = ExperimentService(ctx)
+
+        request = pb2.GetLatestLoggerDataRequest(request_full_history=True, max_points=1000, break_by_slices=False)
+        response = service.GetLatestLoggerData(request, None)
+
+        model_ages = [p.model_age for p in response.points]
+        self.assertLessEqual(len(model_ages), 1000)
+        self.assertEqual(model_ages[0], 0)
+        self.assertEqual(max(model_ages), 9999)
+        self.assertEqual(model_ages[-1], 9999)
+
     def test_get_latest_logger_data_queue_mode(self):
         signal_logger = MagicMock()
         signal_logger.get_and_clear_queue.return_value = [
