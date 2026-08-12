@@ -27,6 +27,17 @@ outgoing message: this call wants a text/JSON reply for the SDK agent to
 parse and act on itself, not file writes as a side effect. That is the
 opposite default from the Weights Studio landing-page chat, which
 deliberately runs OpenCode's full toolset.
+
+`_ensure_reachable` (called at the top of every `_call`) is the other half
+of that convergence: if `base_url` wasn't explicitly chosen and isn't
+currently answering, it resolves or spawns one via
+`weightslab/opencode_process.py`'s cross-process lock file, so this agent
+and the browser landing-page chat end up on the SAME OpenCode server
+regardless of which one happens to start first -- two separate sessions on
+it (this class still creates a fresh one per call, as above), not one
+shared session, since the two sides send incompatible message shapes
+(structured-JSON/no-tools here, free-form/full-tools there) that would
+otherwise bleed into each other's context.
 """
 
 from __future__ import annotations
@@ -57,7 +68,8 @@ class OpenCodeChat:
     across calls (`_call` is the only state-touching method, and it is
     self-contained per invocation)."""
 
-    def __init__(self, base_url: str, model: Optional[str] = None, timeout: float = 60.0):
+    def __init__(self, base_url: str, model: Optional[str] = None, timeout: float = 60.0,
+                 workspace_dir: Optional[str] = None, url_is_explicit: bool = True):
         self.base_url = (base_url or "http://127.0.0.1:4096").rstrip("/")
         self.model = model
         self.timeout = timeout
@@ -68,6 +80,14 @@ class OpenCodeChat:
         # There is no persistent OpenCode session to total across calls (see
         # module docstring), so this is deliberately per-call, not cumulative.
         self.last_usage: Optional[dict] = None
+        # See _ensure_reachable: workspace_dir is where opencode_process.py's
+        # cross-process lock file for this experiment lives, and
+        # url_is_explicit says whether base_url came from something the user
+        # (or agent_config.yaml) actually chose -- if so, a dead address
+        # stays dead rather than being silently swapped for an auto-spawned
+        # one on a different port.
+        self.workspace_dir = workspace_dir
+        self.url_is_explicit = url_is_explicit
 
     # -- wire helpers --------------------------------------------------- #
 
@@ -244,9 +264,36 @@ class OpenCodeChat:
 
     # -- public surface --------------------------------------------------- #
 
+    def _ensure_reachable(self) -> None:
+        """Self-heal `base_url` before the first network call of a turn, so
+        this side and the browser landing-page chat converge on ONE OpenCode
+        server (see weightslab/opencode_process.py) regardless of which one
+        actually starts first -- without this, an agent constructed before
+        anything else has ever needed a server would stay pointed at a dead
+        default address for its entire life.
+
+        Deliberately lazy (called here, not from __init__): constructing
+        this class must stay fast/side-effect-free even when nothing is
+        listening yet, since it is built unconditionally on every
+        DataService startup whether or not the user ever opens the agent
+        chat (see docs/agent.rst on why connectivity is never eagerly
+        checked). A dead explicit URL (url_is_explicit=True) is left alone
+        -- that address was deliberately chosen, not a placeholder to
+        auto-replace.
+        """
+        if self.url_is_explicit:
+            return
+        from weightslab.opencode_process import opencode_healthy, resolve_or_spawn_opencode
+        if opencode_healthy(self.base_url):
+            return
+        result = resolve_or_spawn_opencode(self.workspace_dir or ".")
+        if result.get("ok") and result.get("url"):
+            self.base_url = result["url"].rstrip("/")
+
     def _call(self, prompt_value):
         from langchain_core.messages import AIMessage
 
+        self._ensure_reachable()
         text = prompt_value.to_string() if hasattr(prompt_value, "to_string") else str(prompt_value)
         session_id = self._create_session()
         reply = self._collect_reply(session_id, text)

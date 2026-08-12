@@ -162,6 +162,50 @@ class TestOpencodeSessionUnit(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertFalse(os.path.isfile(os.path.join(self.tmp, "AGENTS.md")))
 
+    def test_successful_spawn_writes_a_lock_file_for_this_workspace(self):
+        # The other half of the cross-process handoff: the backend SDK agent
+        # (agent.py's OpenCodeChat) discovers THIS server via the same file
+        # -- see test_opencode_process.py's cross-process test for the full
+        # round trip.
+        with patch.object(ui_server, "_resolve_opencode_argv", return_value=_FAKE_ARGV):
+            result = self.session.ensure(self.tmp, "http://localhost:5173")
+        self.assertTrue(result["ok"], result)
+        lock = ui_server.opencode_process.read_lock(self.tmp)
+        self.assertEqual(lock["url"], result["url"])
+
+    def test_adopts_a_healthy_lockfile_instead_of_spawning_a_second_server(self):
+        # Simulates order (a) from the tabbed-agent-window plan: the backend
+        # SDK agent already published a server for this workspace before
+        # `weightslab start` (this session) ever called ensure().
+        other = ui_server._OpencodeSession()
+        try:
+            with patch.object(ui_server, "_resolve_opencode_argv", return_value=_FAKE_ARGV):
+                published = other.ensure(self.tmp, None)
+            self.assertTrue(published["ok"], published)
+
+            with patch.object(ui_server, "_resolve_opencode_argv") as argv_mock:
+                result = self.session.ensure(self.tmp, "http://localhost:5173")
+        finally:
+            other.shutdown()
+
+        argv_mock.assert_not_called()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["url"], published["url"])
+        self.assertEqual(result.get("adopted"), "lockfile")
+        # Adopted, not spawned -- nothing of this session's own to kill.
+        self.assertIsNone(self.session._process)
+
+    def test_stale_lockfile_is_ignored_and_a_fresh_server_is_spawned(self):
+        # The process a stale lock file names is long gone -- must fall
+        # through to a normal spawn rather than failing or hanging.
+        ui_server.opencode_process.write_lock(self.tmp, "http://127.0.0.1:1", pid=999999)
+        with patch.object(ui_server, "_resolve_opencode_argv", return_value=_FAKE_ARGV):
+            result = self.session.ensure(self.tmp, "http://localhost:5173")
+        self.assertTrue(result["ok"], result)
+        self.assertNotEqual(result["url"], "http://127.0.0.1:1")
+        # The stale entry was overwritten with the newly-spawned server.
+        self.assertEqual(ui_server.opencode_process.read_lock(self.tmp)["url"], result["url"])
+
 
 class TestEnsureWorkspaceAgentsMd(unittest.TestCase):
     """_ensure_workspace_agents_md directly -- no OpenCode process involved."""
@@ -256,14 +300,6 @@ class _ServerTestCase(unittest.TestCase):
         )
         if origin:
             req.add_header("Origin", origin)
-        return urllib.request.urlopen(req, timeout=10)
-
-    def _post_json(self, path, body):
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{self.port}{path}", method="POST",
-            data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-        )
         return urllib.request.urlopen(req, timeout=10)
 
 
@@ -411,9 +447,9 @@ class TestLoopRegistryUnit(unittest.TestCase):
 
         sent_texts = []
 
-        def _fake_send(_base_url, _session_id, text, timeout=600.0):  # noqa: ARG001
+        def _fake_send(_base_url, _session_id, text, _model=None, timeout=600.0):  # noqa: ARG001
             sent_texts.append(text)
-            return "tick result"
+            return "tick result", None
 
         with patch.object(ui_server, "_opencode_send_and_collect", side_effect=_fake_send):
             self.registry._fire("1", "http://fake")
@@ -425,46 +461,6 @@ class TestLoopRegistryUnit(unittest.TestCase):
             self.registry._fire("1", "http://fake")
             self.assertEqual(sent_texts[1], "check the loss")
             job.timer.cancel()
-
-    def test_fire_skips_the_tick_when_a_manual_message_is_in_flight(self):
-        job = ui_server._LoopJob("1", "check the loss", 60.0, "/tmp")
-        job.session_id, job.base_url = "sess-1", "http://fake"
-        job.preamble_sent = True  # isolate the busy-skip path from preamble logic
-        self.registry._jobs["1"] = job
-
-        job.lock.acquire()  # simulate a manual send from the loop's chat tab
-        try:
-            with patch.object(ui_server, "_opencode_send_and_collect") as mock_send:
-                self.registry._fire("1", "http://fake")
-                mock_send.assert_not_called()
-        finally:
-            job.lock.release()
-
-        self.assertIn("already in progress", job.last_error)
-        self.assertTrue(job.preamble_sent)  # untouched -- the send never ran
-        self.assertIsNotNone(job.next_run_at)  # rescheduled despite the skip
-        job.timer.cancel()
-
-    def test_send_message_rejects_empty_text(self):
-        job = ui_server._LoopJob("1", "p", 60.0, "/tmp")
-        self.registry._jobs["1"] = job
-        result = self.registry.send_message("1", "   ")
-        self.assertFalse(result["ok"])
-
-    def test_send_message_unknown_job(self):
-        result = self.registry.send_message("nope", "hi")
-        self.assertFalse(result["ok"])
-        self.assertIn("No loop job", result["error"])
-
-    def test_send_message_success_updates_last_result(self):
-        job = ui_server._LoopJob("1", "p", 60.0, "/tmp")
-        job.session_id, job.base_url = "sess-1", "http://fake"
-        self.registry._jobs["1"] = job
-        with patch.object(ui_server, "_opencode_send_and_collect", return_value="the reply"):
-            result = self.registry.send_message("1", "hello")
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(result["result"], "the reply")
-        self.assertEqual(job.last_result, "the reply")
 
     def test_get_messages_success(self):
         job = ui_server._LoopJob("1", "p", 60.0, "/tmp")
@@ -481,13 +477,13 @@ class TestLoopRegistryUnit(unittest.TestCase):
         self.assertFalse(result["ok"])
 
 
-class TestLoopMessageEndpoints(_ServerTestCase):
-    """GET/POST /agent-server/loop/<id>/messages|message -- a loop tab's
-    scrollback + manual-send, proxied through the module-level _loop_registry
-    singleton to a job's own OpenCode session (mocked here; no real OpenCode
-    process). Loopback-gating itself mirrors the existing loop routes
-    (_stop_loop et al.), which have no dedicated test for the negative case
-    either -- a real test client is always loopback."""
+class TestLoopMessagesEndpoint(_ServerTestCase):
+    """GET /agent-server/loop/<id>/messages -- a loop tab's read-only
+    transcript, proxied through the module-level _loop_registry singleton to
+    a job's own OpenCode session (mocked here; no real OpenCode process).
+    Loopback-gating itself mirrors the existing loop routes (_stop_loop et
+    al.), which have no dedicated test for the negative case either -- a
+    real test client is always loopback."""
 
     def _seed_job(self):
         job = ui_server._LoopJob("1", "check the loss", 60.0, self.tmp)
@@ -512,20 +508,6 @@ class TestLoopMessageEndpoints(_ServerTestCase):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self._get("/agent-server/loop/999/messages")
         self.assertEqual(ctx.exception.code, 404)
-
-    def test_post_message_sends_and_returns_the_result(self):
-        self._seed_job()
-        with patch.object(ui_server, "_opencode_send_and_collect", return_value="the reply"):
-            with self._post_json("/agent-server/loop/1/message", {"text": "hello"}) as r:
-                data = json.loads(r.read().decode())
-        self.assertTrue(data["ok"], data)
-        self.assertEqual(data["result"], "the reply")
-
-    def test_post_message_rejects_empty_text(self):
-        self._seed_job()
-        with self.assertRaises(urllib.error.HTTPError) as ctx:
-            self._post_json("/agent-server/loop/1/message", {"text": ""})
-        self.assertEqual(ctx.exception.code, 400)
 
 
 if __name__ == "__main__":

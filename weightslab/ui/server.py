@@ -46,6 +46,8 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import grpc
 
+from weightslab import opencode_process
+
 # --------------------------------------------------------------------------- #
 # Constants
 # --------------------------------------------------------------------------- #
@@ -340,6 +342,65 @@ def _kill_process_tree(process: "subprocess.Popen") -> None:
         pass
 
 
+def _kill_pid_tree(pid: int) -> None:
+    """Same tree-kill as _kill_process_tree, but for a PID this server never
+    held a subprocess.Popen handle for -- see _TrackedProcesses, below."""
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception:  # pragma: no cover - best-effort cleanup
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except Exception:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except Exception:  # pragma: no cover - already gone
+                pass
+
+
+class _TrackedProcesses:
+    """PIDs the agent (landing-page chat or a /loop job) told us about right
+    after launching something DETACHED (training, a relaunched crashed run,
+    ...), via ``POST /agent-server/track-process``.
+
+    A detached process (``Start-Process ... -WindowStyle Hidden``, or POSIX
+    ``setsid``) is invisible to _kill_process_tree's own ancestor-based
+    tree-kill: that walk only finds descendants whose PID/PPID chain is
+    traceable through STILL-LIVE intermediate processes at kill time, and a
+    detached launcher's immediate shell typically exits almost immediately
+    after spawning it, breaking that chain permanently (Windows keeps no
+    record of an exited process, so a later `taskkill /T` from any ancestor
+    higher up can never discover a child of a parent that's already gone).
+    Tracking the PID directly here sidesteps the whole problem -- this
+    server kills it explicitly, by PID, needing no intermediate chain at
+    all.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._pids: "set[int]" = set()
+
+    def track(self, pid: int) -> None:
+        with self._lock:
+            self._pids.add(pid)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            pids = list(self._pids)
+            self._pids.clear()
+        for pid in pids:
+            _kill_pid_tree(pid)
+
+
+_tracked_processes = _TrackedProcesses()
+atexit.register(_tracked_processes.shutdown)
+
+
 _jupyter_session = _JupyterSession()
 atexit.register(_jupyter_session.shutdown)
 
@@ -464,7 +525,16 @@ class _OpencodeSession:
         spawning a child -- this is what makes the shared root config in
         agent.py's _load_config actually converge: point both the SDK agent
         and this UI server at one already-running server via one env var,
-        rather than each independently spawning its own."""
+        rather than each independently spawning its own.
+
+        Failing that, check opencode_process.py's lock file for this same
+        workspace directory: the backend SDK agent (agent.py's
+        DataManipulationAgent, via OpenCodeChat._ensure_reachable) writes
+        one there the first time IT needs a server and none exists yet, so
+        a `weightslab start <dir>` that comes along afterward -- with no
+        OPENCODE_URL set by anyone -- still adopts that same server instead
+        of spawning a second one for the identical experiment directory.
+        """
         _ensure_workspace_agents_md(workspace_dir)
         with self._lock:
             if self._running_locked():
@@ -478,6 +548,15 @@ class _OpencodeSession:
                 self._workspace = workspace_dir
                 self._error = None
             return {"ok": True, "url": external_url, "reused": False, "workspace": workspace_dir}
+
+        lock = opencode_process.read_lock(workspace_dir)
+        if lock and lock.get("url") and _opencode_healthy(lock["url"]):
+            with self._lock:
+                self._external_url = lock["url"]
+                self._workspace = workspace_dir
+                self._error = None
+            return {"ok": True, "url": lock["url"], "reused": False,
+                     "workspace": workspace_dir, "adopted": "lockfile"}
 
         with self._lock:
             argv = _resolve_opencode_argv()
@@ -525,6 +604,11 @@ class _OpencodeSession:
             if process.poll() is not None:
                 break
             if _opencode_healthy(base_url):
+                # So a backend SDK agent that starts AFTER this UI server
+                # (order (b): `weightslab start` first) finds this same
+                # server via the lock file instead of spawning its own --
+                # symmetric with the read above, which covers order (a).
+                opencode_process.write_lock(workspace_dir, base_url, process.pid)
                 return {"ok": True, "url": base_url, "reused": False,
                         "workspace": workspace_dir}
             time.sleep(0.4)
@@ -652,7 +736,21 @@ def _read_example_main(usecase: str) -> Optional[str]:
 
 # Minimum interval a loop can be scheduled at -- guards against a typo'd
 # "/loop 30s ..." hammering the model every few seconds.
-_LOOP_MIN_INTERVAL_SECONDS = 60.0
+_LOOP_MIN_INTERVAL_SECONDS = 30.0
+
+# Caps a single check-in's wall-clock time (_opencode_send_and_collect's own
+# default is 600s, generous for the SDK/landing chat's own interactive use).
+# 150s was tried first and was wrong: it was sized for "what's the last loss
+# value" wandering off into `--help`/directory-listing guessing (a real
+# problem, fixed by the preamble's own efficiency guidance instead, see
+# _LOOP_SYSTEM_PREAMBLE), but a loop's task can just as legitimately be
+# "look at the training trends and decide what to do -- discard samples,
+# freeze layers, edit the model" -- multi-step agentic work on a slow/free
+# model that genuinely needs minutes, not seconds. 150s cut that off mid-
+# investigation every single tick (confirmed live: job.last_error == "timed
+# out" on back-to-back ticks of exactly this kind of prompt). This is a
+# backstop against a truly runaway session, not a budget for ordinary work.
+_LOOP_CHECKIN_TIMEOUT_SECONDS = 450.0
 
 # Loops run against the live training process with a broad toolset (bash,
 # file edits, pause/discard/restart) -- an unbounded number of them is an
@@ -660,35 +758,62 @@ _LOOP_MIN_INTERVAL_SECONDS = 60.0
 # surfaces since _loop_registry is a single process-wide instance.
 _LOOP_MAX_CONCURRENT = 3
 
-# Every mutating capability this job needs already exists as a local CLI verb
-# (weightslab.cli:main, backed by weightslab/backend/cli.py's localhost TCP
-# command server to the live training process) -- no new bridge/tool is built
-# for this. The loop's OpenCode session gets the SAME full toolset the landing
-# page chat runs with (bash/read/write/edit/patch, no restriction), so it can
-# invoke these directly.
+# Every mutating capability this job needs already exists as a verb typed
+# INSIDE `weightslab cli`'s interactive REPL (weightslab.cli:main -> backend/
+# cli.py's cli_client_main, a localhost TCP command server to the live
+# training process) -- there is NO separate top-level `weightslab status`/
+# `weightslab pause` etc; those are argparse subcommands for `se`/`start`/
+# `tunnel`/`cli` only. Confirmed the hard way: an earlier preamble phrased
+# these as if they were their own shell commands, and a model followed that
+# literally -- `weightslab status` (a nonexistent subcommand, silently a
+# no-op/usage error) followed by several minutes of guessing (`--help`,
+# directory listings, log greps) before it independently discovered piping
+# into `cli` was the real mechanism. Since bash tool calls are one-shot (no
+# persistent stdin), a command reaches that REPL by piping it in and letting
+# EOF close the session, e.g. `echo "status" | weightslab cli`.
+#
+# The loop's OpenCode session gets the SAME full toolset the landing page
+# chat runs with (bash/read/write/edit/patch, no restriction), so it can pipe
+# into `cli` directly.
 _LOOP_SYSTEM_PREAMBLE = (
-    "You are a recurring monitoring agent for a live WeightsLab training run, "
-    "checking in periodically. Your workspace is the experiment directory; you "
-    "have bash, read, write, edit, and patch tools rooted there.\n\n"
-    "A local `weightslab` CLI is already available via bash for controlling "
-    "the live training run, not just editing files:\n"
-    "  - `weightslab pause` / `weightslab resume` -- freeze/resume weight "
-    "updates (a safe pause; skips the optimizer step, does not kill the process)\n"
-    "  - `weightslab discard <sample_id>` -- discard one sample by id\n"
-    "  - `weightslab agent query \"<natural language>\"` -- ask the data-"
-    "manipulation agent to do something in plain English, e.g. "
-    "`weightslab agent query \"discard samples where loss > 5\"` or "
-    "`weightslab agent query \"tag mislabeled samples with tag:review\"` -- "
-    "this goes through the normal LLM-driven intent pipeline, not just exact ids\n"
-    "  - `weightslab status` -- a snapshot of hyperparameters/model/training state\n\n"
-    "You may also read and edit training code directly (e.g. fix a broken "
-    "signal function) and, if training has crashed or stalled, attempt to "
-    "restart it via bash -- this is best-effort: look for the process "
-    "(`ps`/`pgrep`), stop it if still running, and re-launch the training "
-    "command if you can determine what it was from shell history, a run "
-    "script, or logs in this directory. There is no dedicated restart "
-    "command, so use your judgement and explain what you did.\n\n"
-    "Your monitoring task for this check-in:\n{prompt}"
+    "You are a recurring monitoring agent for a live WeightsLab run. "
+    "Workspace: the experiment directory (bash/read/write/edit/patch rooted there).\n\n"
+    "`weightslab cli` is the ONLY way to inspect/control the run -- it's an "
+    "interactive session, not separate shell commands. Pipe ONE line in per "
+    "command (bash is one-shot; EOF ends the session), e.g.:\n"
+    "  echo \"status\" | weightslab cli\n"
+    "Lines you can pipe in:\n"
+    "  status                    -- component NAMES + model age only, NO metric/hyperparam values\n"
+    "  agent query \"<question>\"  -- plain-English read OR edit (e.g. \"what is the last train loss\", "
+    "\"discard samples where loss > 5\") -- the right tool for any metric/signal question, status never has that\n"
+    "  pause / resume             -- freeze/resume weight updates\n"
+    "  discard <sample_id>        -- discard one sample by id\n\n"
+    "Be fast: for a simple question, pipe one command in and answer from its "
+    "reply. Only go further (logs, editing code, restarting a crashed run via "
+    "ps/pgrep + relaunch) when the task actually needs it.\n\n"
+    "Launch anything long-running (training, a relaunched crashed run, a "
+    "server) DETACHED so the command returns immediately -- e.g. (PowerShell) "
+    "`$p = Start-Process python -ArgumentList \"-u\",\"train.py\" "
+    "-WindowStyle Hidden -PassThru`, never a bare `python train.py` in the "
+    "foreground. A foreground launch blocks THIS tool call -- and therefore "
+    "this whole check-in, and the next one after it -- until the entire run "
+    "finishes, since this session processes one turn at a time.\n\n"
+    "A DETACHED process like that is NOT automatically stopped when this "
+    "workspace is (Ctrl+C on `weightslab start`, or the process otherwise "
+    "exiting) -- it has no OS-level relationship to this workspace's own "
+    "process tree once launched this way. Register its PID right after "
+    "launching it, so it is: `Invoke-RestMethod -Method Post -Uri "
+    "'{origin}/agent-server/track-process' -ContentType 'application/json' "
+    "-Body (@{{pid=$p.Id}} | ConvertTo-Json)`. Do this for anything you "
+    "relaunch, not just the first run.\n\n"
+    "Your reply renders Markdown and LaTeX ($...$/$$...$$ or \\(...\\)/\\[...\\]) "
+    "-- use real formulas for anything math-shaped instead of describing them in prose.\n\n"
+    # weights_studio/src/agent/loopChatPane.ts looks for this EXACT trailing
+    # "Task:\n" and shows only what follows it (the actual prompt) -- the
+    # preamble above is real instruction content the model needs, but not
+    # something the user asked to read every time a loop tab opens. If this
+    # tail ever changes, update the matching string there too.
+    "Task:\n{prompt}"
 )
 
 
@@ -701,7 +826,113 @@ def _opencode_json_request(base_url: str, path: str, method: str = "GET", body: 
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _opencode_send_and_collect(base_url: str, session_id: str, text: str, timeout: float = 600.0) -> str:
+def _parse_model_value(value) -> Optional[dict]:
+    """"provider/model-id" -> {"providerID", "modelID"}.
+
+    Split on the FIRST slash only -- model ids routinely contain their own
+    ("openrouter/anthropic/claude-haiku-4.5" is provider `openrouter`, model
+    `anthropic/claude-haiku-4.5"). Mirrors weights_studio's opencodeClient.ts
+    parseModelValue, which reads the same strings back out of this config.
+    """
+    if not isinstance(value, str) or "/" not in value:
+        return None
+    provider, _, model = value.partition("/")
+    if not provider or not model:
+        return None
+    return {"providerID": provider, "modelID": model}
+
+
+def _opencode_resolve_model(base_url: str, explicit: Optional[dict] = None) -> Optional[dict]:
+    """Which model a loop's check-ins should run on, most specific first.
+
+    A loop can't inherit a model implicitly: its check-ins run in their own
+    session, from this process, with no chat attached. But it also shouldn't
+    have to be told one by whichever surface happened to type /loop -- the
+    answer already exists in the same OpenCode the chat is using:
+
+      1. `explicit` -- the model the chat that started this loop is on right
+         now. The most current signal there is, when a caller can offer it.
+      2. `GET /config`'s own `model` -- the default the model picker writes
+         back to opencode.json on every pick (opencodeClient.ts's
+         setDefaultModel), so it IS "whatever the user last chose", and it
+         survives the browser, the CLI and other machines.
+      3. The provider defaults from `/config/providers` -- what OpenCode
+         itself would have fallen back to. Resolved here rather than left
+         implicit so the job can record and display what it picked.
+
+    None if even that is unavailable, in which case the check-in goes out
+    without a model and OpenCode decides, exactly as before.
+    """
+    if isinstance(explicit, dict) and explicit.get("providerID") and explicit.get("modelID"):
+        return {"providerID": str(explicit["providerID"]), "modelID": str(explicit["modelID"])}
+
+    try:
+        config = _opencode_json_request(base_url, "/config", timeout=10.0)
+        parsed = _parse_model_value((config or {}).get("model"))
+        if parsed:
+            return parsed
+    except Exception:  # noqa: BLE001 - fall through to the next source
+        pass
+
+    try:
+        providers = _opencode_json_request(base_url, "/config/providers", timeout=10.0)
+        defaults = (providers or {}).get("default") or {}
+        for provider in (providers or {}).get("providers") or []:
+            provider_id = provider.get("id")
+            if provider_id and defaults.get(provider_id):
+                return {"providerID": str(provider_id), "modelID": str(defaults[provider_id])}
+    except Exception:  # noqa: BLE001 - no model, OpenCode picks
+        pass
+
+    return None
+
+
+def _opencode_error_text(props: dict) -> str:
+    """Flatten a `session.error` event's payload into one line.
+
+    Shape is not pinned down by GET /doc beyond "an error object", and the
+    interesting part is nested at a different depth depending on where the
+    failure came from (provider rejection vs. internal) -- so this digs for a
+    message rather than assuming one path, and falls back to the raw JSON so
+    an unrecognised shape still reaches the user instead of being swallowed.
+    """
+    error = props.get("error")
+    if isinstance(error, str):
+        return error
+    if isinstance(error, dict):
+        data = error.get("data")
+        if isinstance(data, dict):
+            for key in ("message", "error", "detail"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        for key in ("message", "name"):
+            value = error.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        try:
+            return json.dumps(error)[:400]
+        except (TypeError, ValueError):
+            pass
+    return "The agent server reported an error for this check-in."
+
+
+def _opencode_send_and_collect(
+    base_url: str,
+    session_id: str,
+    text: str,
+    model: Optional[dict] = None,
+    timeout: float = 600.0,
+) -> tuple:
+    """Returns `(text, error)` -- `error` is None on a clean turn.
+
+    Both halves matter: a turn can end via `session.error` having produced no
+    text at all (a provider rejecting the request outright, e.g. a model with
+    no tool-use endpoints against a toolset-carrying prompt), and that used to
+    come back as an empty string indistinguishable from "the agent had nothing
+    to say". Nothing raised, so the job recorded no error either, and the tab
+    showed the check-in prompt with silence under it, every interval, forever.
+    """
     """Open the SSE event stream, THEN send the message, THEN read the stream
     until this session goes idle -- same stream-first ordering and event
     parsing as weights_studio/src/landing/agent/opencodeClient.ts and
@@ -726,9 +957,17 @@ def _opencode_send_and_collect(base_url: str, session_id: str, text: str, timeou
 
     def _send() -> None:
         try:
+            # `model` mirrors what the chat surfaces send ({providerID,
+            # modelID}); omitted, OpenCode falls back to its own configured
+            # default, which is not necessarily one that supports tool use --
+            # and this prompt hands the agent a full toolset, so a default
+            # like an image-generation model fails the turn outright.
+            body = {"parts": [{"type": "text", "text": text}]}
+            if model:
+                body["model"] = model
             _opencode_json_request(
                 base_url, f"/session/{session_id}/message", method="POST",
-                body={"parts": [{"type": "text", "text": text}]}, timeout=timeout,
+                body=body, timeout=timeout,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced via send_errors
             send_errors.append(exc)
@@ -736,13 +975,16 @@ def _opencode_send_and_collect(base_url: str, session_id: str, text: str, timeou
     sender = threading.Thread(target=_send, daemon=True)
     text_parts: dict = {}
     assistant_message_ids: set = set()
+    error: Optional[str] = None
 
+    hit_deadline = False
     try:
         sender.start()
         data_lines: list = []
         deadline = time.monotonic() + timeout
         for raw_line in stream:
             if time.monotonic() > deadline:
+                hit_deadline = True
                 break
             line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
             if line == "":
@@ -769,7 +1011,11 @@ def _opencode_send_and_collect(base_url: str, session_id: str, text: str, timeou
                                 message_id in assistant_message_ids and part.get("type") == "text" \
                                 and isinstance(part.get("text"), str):
                             text_parts[str(part.get("id") or message_id)] = part["text"]
-                    elif event_type in ("session.idle", "session.error") and \
+                    elif event_type == "session.error" and \
+                            str(props.get("sessionID") or "") == session_id:
+                        error = _opencode_error_text(props)
+                        break
+                    elif event_type == "session.idle" and \
                             str(props.get("sessionID") or "") == session_id:
                         break
                 continue
@@ -784,9 +1030,29 @@ def _opencode_send_and_collect(base_url: str, session_id: str, text: str, timeou
 
     sender.join(timeout=1.0)
     if send_errors and not text_parts:
-        raise send_errors[0]
+        exc = send_errors[0]
+        # The message-send POST itself (not the SSE read loop, which has its
+        # own `hit_deadline` check above) is what actually blocks for the
+        # whole turn -- OpenCode's POST /session/{id}/message doesn't return
+        # until the model is done, so THIS is where a check-in that runs long
+        # actually times out at the socket level. Left as a raw exception,
+        # `str(exc)` for a socket timeout is just "timed out" -- accurate but
+        # unhelpful next to the deadline-check path's own clear message, so
+        # this is reworded to match it rather than leaking the bare Python
+        # exception text into job.last_error.
+        if isinstance(exc, (TimeoutError, OSError)):
+            raise TimeoutError(f"Check-in did not finish within {int(timeout)}s and was cut off.") from exc
+        raise exc
 
-    return "".join(text_parts[key] for key in text_parts)
+    # Distinct from "no reply" below (_fire's own fallback, for a turn that
+    # ended cleanly with nothing to show) -- this one DID something, it just
+    # ran out of time doing it (e.g. wandering through several slow bash
+    # calls instead of answering directly). Whatever text had streamed in by
+    # then is kept and returned alongside this, rather than thrown away.
+    if hit_deadline and error is None:
+        error = f"Check-in did not finish within {int(timeout)}s and was cut off."
+
+    return "".join(text_parts[key] for key in text_parts), error
 
 
 def _opencode_get_messages(base_url: str, session_id: str) -> list:
@@ -800,11 +1066,27 @@ def _opencode_get_messages(base_url: str, session_id: str) -> list:
 
 
 class _LoopJob:
-    def __init__(self, job_id: str, prompt: str, interval_seconds: float, workspace: str) -> None:
+    def __init__(self, job_id: str, prompt: str, interval_seconds: float, workspace: str,
+                 model: Optional[dict] = None, origin: Optional[str] = None) -> None:
         self.id = job_id
         self.prompt = prompt
         self.interval_seconds = interval_seconds
         self.workspace = workspace
+        # This server's own address, as the browser saw it when /loop start
+        # was called -- interpolated into _LOOP_SYSTEM_PREAMBLE so the loop's
+        # model can call /agent-server/track-process itself, same reasoning
+        # as agentChat.ts's use of location.origin for the landing chat.
+        self.origin = origin
+        # {providerID, modelID} chosen in the chat that started this loop, or
+        # None to let OpenCode pick its default. Fixed for the job's life --
+        # a check-in is meant to be the same measurement every interval.
+        self.model = model
+        # True only while a check-in is actually in flight. The tab polls
+        # this: without it there is no difference on screen between "the
+        # agent is working on this right now" and "nothing is happening",
+        # which is most of a loop's life given the 1-minute minimum interval.
+        self.running = False
+        self.last_run_started_at: Optional[float] = None
         self.session_id: Optional[str] = None
         self.base_url: Optional[str] = None
         self.next_run_at: Optional[float] = None
@@ -812,13 +1094,6 @@ class _LoopJob:
         self.last_error: Optional[str] = None
         self.timer: Optional[threading.Timer] = None
         self.stopped = False
-        # Serializes every send against this job's session -- OpenCode's
-        # /event stream is one GLOBAL feed filtered client-side by sessionID
-        # (see _opencode_send_and_collect), so two unlocked concurrent sends
-        # on the same session would cross-contaminate each other's collected
-        # text. Held by both the scheduled tick (_fire) and a manual message
-        # from the loop's chat tab (send_message) -- never both at once.
-        self.lock = threading.Lock()
         # True once the monitoring preamble (role + available CLI verbs) has
         # been sent as this session's first message -- after that, both the
         # scheduled tick and manual messages send plain text. Separate from
@@ -846,7 +1121,8 @@ class _LoopRegistry:
         self._jobs: dict = {}
         self._next_id = 1
 
-    def start(self, prompt: str, interval_seconds: float, workspace_dir: str, origin: Optional[str]) -> dict:
+    def start(self, prompt: str, interval_seconds: float, workspace_dir: str, origin: Optional[str],
+              model: Optional[dict] = None) -> dict:
         prompt = (prompt or "").strip()
         if not prompt:
             return {"ok": False, "error": "A monitoring prompt is required."}
@@ -865,6 +1141,13 @@ class _LoopRegistry:
         if not ensured.get("ok"):
             return {"ok": False, "error": ensured.get("error") or "Could not start the agent server."}
         base_url = ensured["url"]
+
+        # Resolved once, here, and pinned for the job's life: a monitoring
+        # loop is meant to be the same measurement every interval, so a model
+        # changed in the chat later must not silently change what this job
+        # has been reporting. Recorded on the job (and surfaced by list())
+        # so a run of failing check-ins can be traced to the model behind it.
+        model = _opencode_resolve_model(base_url, model)
 
         # Created eagerly now -- not lazily on the first tick, as before --
         # so a loop's chat tab has a session to show/send into immediately,
@@ -899,55 +1182,13 @@ class _LoopRegistry:
                 }
             job_id = str(self._next_id)
             self._next_id += 1
-            job = _LoopJob(job_id, prompt, interval_seconds, workspace_dir)
+            job = _LoopJob(job_id, prompt, interval_seconds, workspace_dir, model, origin=origin)
             job.base_url = base_url
             job.session_id = session_id
             self._jobs[job_id] = job
 
         threading.Thread(target=self._fire, args=(job_id, base_url), daemon=True).start()
         return {"ok": True, "id": job_id, "intervalSeconds": interval_seconds}
-
-    def _send_locked(self, job: "_LoopJob", base_url: str, text: str) -> None:
-        """Send `text` to `job`'s session under its lock, prepending the
-        monitoring preamble exactly once (whichever caller -- a scheduled
-        tick or a manual message -- happens to send first). Shared by _fire
-        and send_message so both go through the same serialization and
-        last_result/last_error bookkeeping.
-
-        Raises if the lock is already held (a send is already in flight) --
-        callers decide what "busy" means for them (skip a tick vs. tell the
-        user to wait) rather than this method blocking or guessing."""
-        if not job.lock.acquire(blocking=False):
-            raise RuntimeError("A check-in for this loop is already in progress.")
-        try:
-            send_preamble = not job.preamble_sent
-            full_text = _LOOP_SYSTEM_PREAMBLE.format(prompt=text) if send_preamble else text
-            result = _opencode_send_and_collect(base_url, job.session_id, full_text)
-            with self._lock:
-                if job.id in self._jobs:
-                    job.last_result = result
-                    job.last_error = None
-                    if send_preamble:
-                        job.preamble_sent = True
-        finally:
-            job.lock.release()
-
-    def send_message(self, job_id: str, text: str) -> dict:
-        """A manual, ad hoc message into a loop's own session -- typed by the
-        user in that loop's chat tab, interleaved with its scheduled
-        check-ins rather than a separate conversation."""
-        text = (text or "").strip()
-        if not text:
-            return {"ok": False, "error": "Message cannot be empty."}
-        with self._lock:
-            job = self._jobs.get(job_id)
-        if job is None:
-            return {"ok": False, "error": f"No loop job {job_id}."}
-        try:
-            self._send_locked(job, job.base_url, text)
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
-        return {"ok": True, "result": job.last_result}
 
     def get_messages(self, job_id: str) -> dict:
         with self._lock:
@@ -966,14 +1207,37 @@ class _LoopRegistry:
         if job is None or job.stopped:
             return  # stopped before this tick ran
 
+        with self._lock:
+            job.running = True
+            job.last_run_started_at = time.time()
+
         try:
-            self._send_locked(job, base_url, job.prompt)
+            # The monitoring preamble (role + available CLI verbs) goes out
+            # as this session's first message, exactly once; every check-in
+            # after that is just the plain prompt.
+            send_preamble = not job.preamble_sent
+            text = (
+                _LOOP_SYSTEM_PREAMBLE.format(prompt=job.prompt, origin=job.origin or "http://127.0.0.1:8080")
+                if send_preamble else job.prompt
+            )
+            result, error = _opencode_send_and_collect(
+                base_url, job.session_id, text, job.model, timeout=_LOOP_CHECKIN_TIMEOUT_SECONDS,
+            )
+            with self._lock:
+                if job_id in self._jobs:
+                    job.last_result = result
+                    # A turn that ends with neither text nor a reported error
+                    # is still a failed check-in from the user's side -- the
+                    # tab would show the prompt and nothing under it. Say so
+                    # rather than leaving the silence unexplained.
+                    job.last_error = error or (
+                        None if result.strip()
+                        else "The check-in produced no reply. If this repeats, the model "
+                             "selected for this loop may not support tool use."
+                    )
+                    if send_preamble:
+                        job.preamble_sent = True
         except Exception as exc:
-            # Includes the "already in progress" case from _send_locked --
-            # a manual message was mid-flight, so this tick is simply
-            # skipped (preamble_sent, if still False, stays False) rather
-            # than blocking the timer thread; the reschedule below still
-            # runs, so the next interval tries again.
             with self._lock:
                 if job_id in self._jobs:
                     job.last_error = str(exc)
@@ -982,6 +1246,11 @@ class _LoopRegistry:
             job = self._jobs.get(job_id)
             if job is None or job.stopped:
                 return  # stopped while this tick was running
+            job.running = False
+            # Measured from when the answer LANDED, not from when the tick
+            # fired -- a check-in that takes two minutes on a five-minute
+            # loop leaves five clear minutes before the next one, instead of
+            # the interval quietly eating the agent's own working time.
             job.next_run_at = time.time() + job.interval_seconds
             timer = threading.Timer(job.interval_seconds, self._fire, args=(job_id, base_url))
             timer.daemon = True
@@ -1047,6 +1316,17 @@ class _LoopRegistry:
                 "nextRunAt": j.next_run_at,
                 "lastResult": j.last_result,
                 "lastError": j.last_error,
+                # What the tab needs to tell "working on it" apart from
+                # "waiting for the next interval" -- the countdown alone
+                # can't, since next_run_at only moves once a run finishes.
+                "running": j.running,
+                "lastRunStartedAt": j.last_run_started_at,
+                # "provider/model-id", or None if none could be resolved and
+                # OpenCode is choosing per check-in. Shown in the loop's tab:
+                # when check-ins fail for a model-shaped reason (no tool-use
+                # endpoints being the common one), the model this job is
+                # actually pinned to is the first thing worth seeing.
+                "model": f"{j.model['providerID']}/{j.model['modelID']}" if j.model else None,
             }
             for j in jobs
         ]
@@ -1155,9 +1435,10 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         elif path.startswith("/agent-server/loop/") and path.endswith("/update"):
             loop_id = path[len("/agent-server/loop/"):-len("/update")]
             self._update_loop(loop_id)
-        elif path.startswith("/agent-server/loop/") and path.endswith("/message"):
-            loop_id = path[len("/agent-server/loop/"):-len("/message")]
-            self._send_loop_message(loop_id)
+        elif path == "/agent-server/data-query":
+            self._data_query()
+        elif path == "/agent-server/track-process":
+            self._track_process()
         elif path.startswith(self.api_prefix + "/") or path == self.api_prefix:
             self._proxy_grpc_web(path)
         else:
@@ -1328,7 +1609,14 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
             scheme = "https" if isinstance(getattr(self, "connection", None), ssl.SSLSocket) else "http"
             origin = f"{scheme}://{host}"
 
-        result = _loop_registry.start(prompt, interval_minutes * 60.0, workspace, origin)
+        # Whatever model the chat that typed /loop is itself on, when it can
+        # say. Entirely optional -- the registry resolves the rest from
+        # OpenCode's own config either way, see _opencode_resolve_model.
+        model = body.get("model")
+        if not (isinstance(model, dict) and model.get("providerID") and model.get("modelID")):
+            model = None
+
+        result = _loop_registry.start(prompt, interval_minutes * 60.0, workspace, origin, model)
         status = HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST
         self._send_json(status, result)
 
@@ -1364,10 +1652,9 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         self._send_json(status, result)
 
     def _get_loop_messages(self, loop_id: str):
-        """Backs a loop's chat tab: its scrollback is just this job's own
-        OpenCode session history -- scheduled ticks and manual messages
-        (_send_loop_message below) both land as ordinary turns in the same
-        session, so nothing needs merging here, only fetching."""
+        """Backs a loop tab's read-only transcript: its scrollback is just
+        this job's own OpenCode session history, written to solely by the
+        scheduled check-in (_fire) -- nothing to merge here, only fetching."""
         if self.client_address[0] not in _LOOPBACK_ADDRESSES:
             self._send_json(HTTPStatus.FORBIDDEN,
                              {"ok": False, "error": "Only reachable from localhost."})
@@ -1376,20 +1663,85 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         status = HTTPStatus.OK if result.get("ok") else HTTPStatus.NOT_FOUND
         self._send_json(status, result)
 
-    def _send_loop_message(self, loop_id: str):
-        """A user-typed message into a loop's chat tab, interleaved with its
-        scheduled check-ins on the same session. Request/response, matching
-        the existing blocking-call UX of the backend SDK agent's query bar --
-        not the Frontend Agent tab's SSE streaming."""
+    def _data_query(self):
+        """Lets the landing-page agent chat perform dataset/model actions --
+        discard, tag, sort, filter, analyze, compute stats, and the rest of
+        DataManipulationAgent's `action.*`/handler surface -- itself, via its
+        bash tool, instead of needing a second tab for it (the merged Agent
+        Window's Backend Agent capability -- see agentChat.ts's standing
+        instruction that points the model at this endpoint).
+
+        Deliberately NOT a new code path: this calls the SAME
+        ExperimentService.ApplyDataQuery RPC the (now-retired) gRPC query bar
+        always used, over the SAME upstream channel `_proxy_grpc_web` already
+        proxies everything else through -- so every safety invariant that
+        pipeline already enforces (WL never deletes rows, only flags them;
+        protected columns can't be silently overwritten; etc., see
+        data_service.py/agent.py) applies here unchanged. The difference is
+        only in HOW the request gets built: a real DataQueryRequest message,
+        called as the genuinely unary RPC it is, rather than grpc-web's
+        forward-raw-bytes-as-unary-stream trick (see _proxy_grpc_web) -- that
+        shortcut only works when the caller already HAS a serialized
+        protobuf body to forward, and this one starts from a plain JSON
+        {query, accumulate} instead.
+        """
         if self.client_address[0] not in _LOOPBACK_ADDRESSES:
             self._send_json(HTTPStatus.FORBIDDEN,
                              {"ok": False, "error": "Only reachable from localhost."})
             return
+
         body = self._read_json_body()
-        text = str(body.get("text") or "")
-        result = _loop_registry.send_message(loop_id, text)
-        status = HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST
-        self._send_json(status, result)
+        query = str(body.get("query") or "").strip()
+        if not query:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "A query is required."})
+            return
+        accumulate = bool(body.get("accumulate", False))
+
+        from weightslab.proto import experiment_service_pb2 as pb2
+
+        request = pb2.DataQueryRequest(query=query, accumulate=accumulate, is_natural_language=True)
+        call = self.channel.unary_unary(
+            "/ExperimentService/ApplyDataQuery",
+            request_serializer=pb2.DataQueryRequest.SerializeToString,
+            response_deserializer=pb2.DataQueryResponse.FromString,
+        )
+        try:
+            response = call(request, metadata=self._collect_metadata(), timeout=self.rpc_timeout)
+        except grpc.RpcError as err:
+            message = err.details() or str(err)
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": message})
+            return
+
+        self._send_json(HTTPStatus.OK, {
+            "ok": bool(response.success),
+            "message": response.message,
+            "numberOfAllSamples": response.number_of_all_samples,
+            "numberOfSamplesInTheLoop": response.number_of_samples_in_the_loop,
+            "numberOfDiscardedSamples": response.number_of_discarded_samples,
+            "uniqueTags": list(response.unique_tags),
+            "analysisResult": response.analysis_result,
+        })
+
+    def _track_process(self):
+        """Registers a PID the agent (landing-page chat or a /loop job) just
+        launched DETACHED, so Ctrl+C on this workspace stops it too -- see
+        _TrackedProcesses' own docstring for why a detached process needs
+        this instead of being reachable through the normal process-tree
+        kill every OTHER child of this server already gets."""
+        if self.client_address[0] not in _LOOPBACK_ADDRESSES:
+            self._send_json(HTTPStatus.FORBIDDEN,
+                             {"ok": False, "error": "Only reachable from localhost."})
+            return
+
+        body = self._read_json_body()
+        try:
+            pid = int(body.get("pid"))
+        except (TypeError, ValueError):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "pid must be an integer."})
+            return
+
+        _tracked_processes.track(pid)
+        self._send_json(HTTPStatus.OK, {"ok": True})
 
     def _get_agent_docs(self):
         """AGENTS.md content for the landing chat's preset prompts to attach,
@@ -1852,6 +2204,7 @@ def serve_ui(
         httpd.shutdown()
         httpd.server_close()
         _jupyter_session.shutdown()
+        _tracked_processes.shutdown()
     return httpd
 
 

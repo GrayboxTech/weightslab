@@ -51,6 +51,43 @@ class TestLoopRegistryUnit(unittest.TestCase):
             time.sleep(0.01)
         self.fail("loop job never completed its first tick")
 
+    def test_model_resolution_prefers_the_caller_then_config_then_provider_defaults(self):
+        """The three sources, in order -- see _opencode_resolve_model. The
+        point of the chain is that a loop is configured from the SAME place
+        the chat is, rather than needing to be told by whichever surface
+        happened to start it."""
+        explicit = {"providerID": "openrouter", "modelID": "anthropic/claude-haiku-4.5"}
+
+        # 1. explicit wins outright -- no lookups at all.
+        with patch.object(ui_server, "_opencode_json_request") as req:
+            self.assertEqual(ui_server._opencode_resolve_model("http://fake", explicit), explicit)
+            req.assert_not_called()
+
+        # 2. opencode.json's own default (what the chat's picker writes back).
+        def _config_has_model(_base, path, **_kw):
+            if path == "/config":
+                return {"model": "openrouter/anthropic/claude-haiku-4.5"}
+            raise AssertionError(f"should not have reached {path}")
+
+        with patch.object(ui_server, "_opencode_json_request", side_effect=_config_has_model):
+            self.assertEqual(ui_server._opencode_resolve_model("http://fake", None), explicit)
+
+        # 3. provider defaults, when the config names no model of its own.
+        def _only_provider_defaults(_base, path, **_kw):
+            if path == "/config":
+                return {}
+            return {"providers": [{"id": "openrouter"}], "default": {"openrouter": "openai/gpt-5"}}
+
+        with patch.object(ui_server, "_opencode_json_request", side_effect=_only_provider_defaults):
+            self.assertEqual(
+                ui_server._opencode_resolve_model("http://fake", None),
+                {"providerID": "openrouter", "modelID": "openai/gpt-5"},
+            )
+
+        # Nothing reachable -- no model, and OpenCode decides per check-in.
+        with patch.object(ui_server, "_opencode_json_request", side_effect=OSError("down")):
+            self.assertIsNone(ui_server._opencode_resolve_model("http://fake", None))
+
     def test_rejects_an_empty_prompt(self):
         result = self.registry.start("   ", 120, "/tmp", None)
         self.assertFalse(result["ok"])
@@ -76,8 +113,12 @@ class TestLoopRegistryUnit(unittest.TestCase):
         self.assertEqual(self.registry.list(), [])
 
     def test_first_tick_creates_a_session_seeded_with_the_system_preamble(self):
+        # Model resolution goes through _opencode_json_request too (it reads
+        # OpenCode's config) -- stubbed out so create_mock below is only ever
+        # the session-creation call this test is actually about.
         with patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}) as create_mock, \
-                patch.object(ui_server, "_opencode_send_and_collect", return_value="all good") as send_mock:
+                patch.object(ui_server, "_opencode_resolve_model", return_value=None), \
+                patch.object(ui_server, "_opencode_send_and_collect", return_value=("all good", None)) as send_mock:
             result = self.registry.start("watch the loss", 120, "/tmp", "http://localhost:5173")
             self.assertTrue(result["ok"], result)
             job = self._wait_for_first_tick(result["id"])
@@ -88,12 +129,18 @@ class TestLoopRegistryUnit(unittest.TestCase):
         self.assertEqual(create_mock.call_args.args[1], "/session")
         sent_text = send_mock.call_args.args[2]
         self.assertIn("watch the loss", sent_text)
-        self.assertIn("weightslab pause", sent_text)  # system preamble documents the CLI verbs
+        self.assertIn("pause / resume", sent_text)  # system preamble documents the CLI verbs
+        # A detached relaunch has no OS-level tie to this workspace, so the
+        # preamble must tell the model to register it -- with THIS job's own
+        # origin, not a placeholder -- for Ctrl+C-on-the-workspace cleanup.
+        self.assertIn("http://localhost:5173/agent-server/track-process", sent_text)
+        self.assertIn("-PassThru", sent_text)
 
     def test_second_tick_reuses_the_session_and_sends_the_bare_prompt(self):
         with patch.object(ui_server, "_LOOP_MIN_INTERVAL_SECONDS", 0.01), \
                 patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}) as create_mock, \
-                patch.object(ui_server, "_opencode_send_and_collect", return_value="ok") as send_mock:
+                patch.object(ui_server, "_opencode_resolve_model", return_value=None), \
+                patch.object(ui_server, "_opencode_send_and_collect", return_value=("ok", None)) as send_mock:
             result = self.registry.start("watch the loss", 0.02, "/tmp", None)
             self._wait_for_first_tick(result["id"])
 
@@ -116,9 +163,93 @@ class TestLoopRegistryUnit(unittest.TestCase):
         self.assertEqual(job["lastError"], "boom")
         self.assertIsNone(job["lastResult"])
 
+    def test_records_the_reported_error_when_a_tick_ends_without_raising(self):
+        """A turn can end via session.error having produced no text at all --
+        a provider rejecting the request outright (e.g. a model with no
+        tool-use endpoints, against a prompt that hands the agent a full
+        toolset). Nothing raises, so this used to leave lastError None and
+        lastResult "": the loop's tab showed the check-in prompt with silence
+        under it, every interval, with nothing anywhere saying why."""
+        reported = 'No endpoints found that support tool use.'
+        with patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}), \
+                patch.object(ui_server, "_opencode_send_and_collect", return_value=("", reported)):
+            result = self.registry.start("watch training", 120, "/tmp", None)
+            job = self._wait_for_first_tick(result["id"])
+
+        self.assertEqual(job["lastError"], reported)
+
+    def test_explains_an_empty_reply_that_reported_no_error_at_all(self):
+        with patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}), \
+                patch.object(ui_server, "_opencode_send_and_collect", return_value=("   ", None)):
+            result = self.registry.start("watch training", 120, "/tmp", None)
+            job = self._wait_for_first_tick(result["id"])
+
+        self.assertIsNotNone(job["lastError"])
+        self.assertIn("no reply", job["lastError"])
+
+    def test_passes_the_requested_model_through_to_every_check_in(self):
+        model = {"providerID": "openrouter", "modelID": "anthropic/claude-haiku-4.5"}
+        with patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}), \
+                patch.object(ui_server, "_opencode_resolve_model", side_effect=lambda _u, m: m), \
+                patch.object(ui_server, "_opencode_send_and_collect", return_value=("ok", None)) as send_mock:
+            result = self.registry.start("watch training", 120, "/tmp", None, model)
+            job = self._wait_for_first_tick(result["id"])
+
+        self.assertEqual(send_mock.call_args.args[3], model)
+        self.assertEqual(job["model"], "openrouter/anthropic/claude-haiku-4.5")
+
+    def test_resolves_a_model_from_opencode_config_when_the_caller_offers_none(self):
+        """A loop started from a surface with no model picker of its own (or
+        with none chosen yet) still gets a concrete model: whatever the chat's
+        picker last wrote into opencode.json. Resolved ONCE at start and
+        pinned, so a model changed in the chat afterwards doesn't silently
+        change what an already-running job has been reporting."""
+        resolved = {"providerID": "openrouter", "modelID": "anthropic/claude-haiku-4.5"}
+        with patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}), \
+                patch.object(ui_server, "_opencode_resolve_model", return_value=resolved) as resolve_mock, \
+                patch.object(ui_server, "_opencode_send_and_collect", return_value=("ok", None)) as send_mock:
+            result = self.registry.start("watch training", 120, "/tmp", None, None)
+            job = self._wait_for_first_tick(result["id"])
+
+        resolve_mock.assert_called_once()
+        self.assertIsNone(resolve_mock.call_args.args[1])  # nothing explicit to prefer
+        self.assertEqual(send_mock.call_args.args[3], resolved)
+        self.assertEqual(job["model"], "openrouter/anthropic/claude-haiku-4.5")
+
+    def test_a_job_reports_running_only_while_a_check_in_is_in_flight(self):
+        """The tab has no other way to tell "the agent is working on this
+        right now" from "nothing is happening": next_run_at deliberately only
+        moves once a run FINISHES, so during one it still holds the previous
+        run's already-elapsed value."""
+        started = threading.Event()
+        release = threading.Event()
+
+        def _slow(*_args, **_kwargs):
+            started.set()
+            release.wait(timeout=5)
+            return ("done", None)
+
+        with patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}), \
+                patch.object(ui_server, "_opencode_send_and_collect", side_effect=_slow):
+            result = self.registry.start("watch training", 120, "/tmp", None)
+            job_id = result["id"]
+            self.assertTrue(started.wait(timeout=5))
+
+            in_flight = next(j for j in self.registry.list() if j["id"] == job_id)
+            self.assertTrue(in_flight["running"])
+            # ...and the countdown has not been moved yet, which is exactly
+            # why `running` has to be reported separately.
+            self.assertIsNone(in_flight["nextRunAt"])
+
+            release.set()
+            job = self._wait_for_first_tick(job_id)
+
+        self.assertFalse(job["running"])
+        self.assertIsNotNone(job["nextRunAt"])
+
     def test_stop_removes_the_job_and_prevents_a_further_tick(self):
         with patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}), \
-                patch.object(ui_server, "_opencode_send_and_collect", return_value="ok") as send_mock:
+                patch.object(ui_server, "_opencode_send_and_collect", return_value=("ok", None)) as send_mock:
             result = self.registry.start("watch training", 120, "/tmp", None)
             self._wait_for_first_tick(result["id"])
 
@@ -136,7 +267,7 @@ class TestLoopRegistryUnit(unittest.TestCase):
 
     def test_list_reflects_multiple_concurrent_jobs(self):
         with patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}), \
-                patch.object(ui_server, "_opencode_send_and_collect", return_value="ok"):
+                patch.object(ui_server, "_opencode_send_and_collect", return_value=("ok", None)):
             first = self.registry.start("watch a", 120, "/tmp", None)
             second = self.registry.start("watch b", 120, "/tmp", None)
             self._wait_for_first_tick(first["id"])
@@ -147,7 +278,7 @@ class TestLoopRegistryUnit(unittest.TestCase):
 
     def test_shutdown_stops_every_job(self):
         with patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}), \
-                patch.object(ui_server, "_opencode_send_and_collect", return_value="ok"):
+                patch.object(ui_server, "_opencode_send_and_collect", return_value=("ok", None)):
             result = self.registry.start("watch training", 120, "/tmp", None)
             self._wait_for_first_tick(result["id"])
 
@@ -156,7 +287,7 @@ class TestLoopRegistryUnit(unittest.TestCase):
 
     def test_rejects_a_fourth_concurrent_job(self):
         with patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}), \
-                patch.object(ui_server, "_opencode_send_and_collect", return_value="ok"):
+                patch.object(ui_server, "_opencode_send_and_collect", return_value=("ok", None)):
             for i in range(ui_server._LOOP_MAX_CONCURRENT):
                 result = self.registry.start(f"watch {i}", 120, "/tmp", None)
                 self.assertTrue(result["ok"], result)
@@ -169,7 +300,7 @@ class TestLoopRegistryUnit(unittest.TestCase):
 
     def test_update_changes_the_prompt_without_touching_the_interval(self):
         with patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}), \
-                patch.object(ui_server, "_opencode_send_and_collect", return_value="ok"):
+                patch.object(ui_server, "_opencode_send_and_collect", return_value=("ok", None)):
             result = self.registry.start("watch training", 120, "/tmp", None)
             self._wait_for_first_tick(result["id"])
 
@@ -182,7 +313,7 @@ class TestLoopRegistryUnit(unittest.TestCase):
 
     def test_update_changes_the_interval_and_reschedules_immediately(self):
         with patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}), \
-                patch.object(ui_server, "_opencode_send_and_collect", return_value="ok") as send_mock:
+                patch.object(ui_server, "_opencode_send_and_collect", return_value=("ok", None)) as send_mock:
             result = self.registry.start("watch training", 120, "/tmp", None)
             self._wait_for_first_tick(result["id"])
 
@@ -207,7 +338,7 @@ class TestLoopRegistryUnit(unittest.TestCase):
 
     def test_update_rejects_an_empty_prompt(self):
         with patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}), \
-                patch.object(ui_server, "_opencode_send_and_collect", return_value="ok"):
+                patch.object(ui_server, "_opencode_send_and_collect", return_value=("ok", None)):
             result = self.registry.start("watch training", 120, "/tmp", None)
             self._wait_for_first_tick(result["id"])
 
@@ -218,7 +349,7 @@ class TestLoopRegistryUnit(unittest.TestCase):
 
     def test_update_rejects_an_interval_below_the_minimum(self):
         with patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}), \
-                patch.object(ui_server, "_opencode_send_and_collect", return_value="ok"):
+                patch.object(ui_server, "_opencode_send_and_collect", return_value=("ok", None)):
             result = self.registry.start("watch training", 120, "/tmp", None)
             self._wait_for_first_tick(result["id"])
 
@@ -332,7 +463,7 @@ class TestLoopEndpoints(_LoopServerTestCase):
         with patch.object(ui_server._opencode_session, "ensure",
                            return_value={"ok": True, "url": "http://127.0.0.1:1", "workspace": self.tmp, "reused": False}), \
                 patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}), \
-                patch.object(ui_server, "_opencode_send_and_collect", return_value="all quiet"):
+                patch.object(ui_server, "_opencode_send_and_collect", return_value=("all quiet", None)):
             with self._post_json("/agent-server/loop/start", {"prompt": "watch training", "intervalMinutes": 30}) as r:
                 started = json.loads(r.read().decode())
             self.assertTrue(started["ok"], started)

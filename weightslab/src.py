@@ -2756,6 +2756,16 @@ def save_group_signals(
         except Exception:
             pass # Never block training on best-effort discard check
 
+    # Look up each group's current NB_SEEN so we can increment it (it lives in the
+    # ledger, not in the `updates` dict being built below, which starts empty every call).
+    current_nb_seen_by_gid = {}
+    if step is not None and DATAFRAME_M is not None and hasattr(DATAFRAME_M, 'get_group_column_values'):
+        try:
+            current_nb_seen_by_gid = DATAFRAME_M.get_group_column_values(
+                group_ids, origin, SampleStatsEx.NB_SEEN.value)
+        except Exception:
+            pass # Never block training on best-effort NB_SEEN lookup
+
     # Broadcast to all members in ledger (skip tainted groups)
     all_updates = []
     active_group_ids = []
@@ -2770,7 +2780,7 @@ def save_group_signals(
 
         if step is not None:
             updates[SampleStatsEx.LAST_SEEN.value] = step
-            updates[SampleStatsEx.NB_SEEN.value] = 0 if SampleStatsEx.NB_SEEN.value not in updates else updates[SampleStatsEx.NB_SEEN.value] + 1
+            updates[SampleStatsEx.NB_SEEN.value] = current_nb_seen_by_gid.get(gid, 0) + 1
 
         all_updates.append(updates)
         active_group_ids.append(gid)

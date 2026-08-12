@@ -78,6 +78,37 @@ class TestOpenCodeConfigLoading(unittest.TestCase):
         self.assertEqual(agent.opencode_url, "http://127.0.0.1:5555")
         self.assertEqual(agent.opencode_model, "openrouter/anthropic/claude-opus-4.6")
 
+    def test_default_url_is_not_marked_explicit(self):
+        # Nobody chose this address -- OpenCodeChat._ensure_reachable must be
+        # free to replace it via auto-discovery/spawn if it's ever dead.
+        import os
+        with mock.patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("OPENCODE_URL", None)
+            _, agent = _make_agent()
+        self.assertFalse(agent._opencode_url_explicit)
+
+    def test_env_provided_url_is_marked_explicit(self):
+        # The opposite: an operator who deliberately set OPENCODE_URL is
+        # opting OUT of auto-discovery, not asking for it.
+        with mock.patch.dict("os.environ", {"OPENCODE_URL": "http://127.0.0.1:5555"}, clear=False):
+            _, agent = _make_agent()
+        self.assertTrue(agent._opencode_url_explicit)
+
+    def test_workspace_dir_follows_weightslab_root_log_dir(self):
+        # The same directory `weightslab start <dir>` roots the browser
+        # landing-page agent at -- the shared key opencode_process.py's lock
+        # file is discovered/published under.
+        with mock.patch.dict("os.environ", {"WEIGHTSLAB_ROOT_LOG_DIR": "/tmp/some-experiment"}, clear=False):
+            _, agent = _make_agent()
+        self.assertEqual(agent.opencode_workspace_dir, "/tmp/some-experiment")
+
+    def test_workspace_dir_falls_back_to_cwd_when_unset(self):
+        import os
+        with mock.patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("WEIGHTSLAB_ROOT_LOG_DIR", None)
+            _, agent = _make_agent()
+        self.assertEqual(agent.opencode_workspace_dir, os.getcwd())
+
 
 class TestSetupProvidersOpenCode(unittest.TestCase):
     def test_opencode_chain_is_built(self):
@@ -87,7 +118,11 @@ class TestSetupProvidersOpenCode(unittest.TestCase):
             mock_cls.return_value.as_runnable.return_value = fake_runnable
             initialized = agent._setup_providers()
 
-        mock_cls.assert_called_once_with(agent.opencode_url, agent.opencode_model)
+        mock_cls.assert_called_once_with(
+            agent.opencode_url, agent.opencode_model,
+            workspace_dir=agent.opencode_workspace_dir,
+            url_is_explicit=agent._opencode_url_explicit,
+        )
         self.assertTrue(initialized)
         self.assertIs(agent.chain_opencode, fake_runnable)
 

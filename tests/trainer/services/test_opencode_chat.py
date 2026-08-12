@@ -14,6 +14,7 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 from weightslab.trainer.services.agent.opencode_chat import OpenCodeChat, OpenCodeError
 
@@ -294,6 +295,73 @@ class TestHandleEvent(unittest.TestCase):
         })
         outcome = OpenCodeChat._handle_event(payload, "s1", set(), {})
         self.assertIsNone(outcome)
+
+
+class TestEnsureReachable(unittest.TestCase):
+    """The other half of the cross-process handoff opencode_process.py
+    implements: this side self-heals its own base_url via that module's
+    resolve_or_spawn_opencode instead of staying pointed at a dead address
+    forever. The module itself (env/lockfile/spawn precedence, real
+    subprocess spawn+poll) is covered by tests/test_opencode_process.py --
+    these mock it out to pin down exactly when OpenCodeChat calls it."""
+
+    def test_explicit_url_is_never_auto_replaced_even_if_dead(self):
+        chat = OpenCodeChat("http://127.0.0.1:1", workspace_dir="/tmp/x", url_is_explicit=True)
+        with mock.patch("weightslab.opencode_process.opencode_healthy") as healthy, \
+                mock.patch("weightslab.opencode_process.resolve_or_spawn_opencode") as resolve:
+            chat._ensure_reachable()
+        healthy.assert_not_called()
+        resolve.assert_not_called()
+        self.assertEqual(chat.base_url, "http://127.0.0.1:1")
+
+    def test_already_healthy_non_explicit_url_is_left_alone(self):
+        chat = OpenCodeChat("http://127.0.0.1:4096", workspace_dir="/tmp/x", url_is_explicit=False)
+        with mock.patch("weightslab.opencode_process.opencode_healthy", return_value=True) as healthy, \
+                mock.patch("weightslab.opencode_process.resolve_or_spawn_opencode") as resolve:
+            chat._ensure_reachable()
+        healthy.assert_called_once_with("http://127.0.0.1:4096")
+        resolve.assert_not_called()
+        self.assertEqual(chat.base_url, "http://127.0.0.1:4096")
+
+    def test_dead_non_explicit_url_resolves_or_spawns_a_replacement(self):
+        chat = OpenCodeChat("http://127.0.0.1:4096", workspace_dir="/tmp/x", url_is_explicit=False)
+        with mock.patch("weightslab.opencode_process.opencode_healthy", return_value=False), \
+                mock.patch("weightslab.opencode_process.resolve_or_spawn_opencode",
+                           return_value={"ok": True, "url": "http://127.0.0.1:9999"}) as resolve:
+            chat._ensure_reachable()
+        resolve.assert_called_once_with("/tmp/x")
+        self.assertEqual(chat.base_url, "http://127.0.0.1:9999")
+
+    def test_failed_resolve_leaves_the_dead_url_in_place(self):
+        # A visible connection error on the next real call is more honest
+        # than silently pretending nothing changed.
+        chat = OpenCodeChat("http://127.0.0.1:4096", workspace_dir="/tmp/x", url_is_explicit=False)
+        with mock.patch("weightslab.opencode_process.opencode_healthy", return_value=False), \
+                mock.patch("weightslab.opencode_process.resolve_or_spawn_opencode",
+                           return_value={"ok": False, "error": "no opencode"}):
+            chat._ensure_reachable()
+        self.assertEqual(chat.base_url, "http://127.0.0.1:4096")
+
+    def test_missing_workspace_dir_falls_back_to_the_current_directory(self):
+        chat = OpenCodeChat("http://127.0.0.1:4096", url_is_explicit=False)  # workspace_dir defaults to None
+        with mock.patch("weightslab.opencode_process.opencode_healthy", return_value=False), \
+                mock.patch("weightslab.opencode_process.resolve_or_spawn_opencode",
+                           return_value={"ok": True, "url": "http://127.0.0.1:9999"}) as resolve:
+            chat._ensure_reachable()
+        resolve.assert_called_once_with(".")
+
+    def test_call_invokes_ensure_reachable_before_creating_a_session(self):
+        # _call is the single real entry point all three of
+        # DataManipulationAgent's call sites go through (see module
+        # docstring) -- this pins down that self-healing actually happens
+        # on the path real turns take, not just when called directly.
+        chat = OpenCodeChat("http://127.0.0.1:4096", url_is_explicit=False)
+        calls = []
+        chat._ensure_reachable = lambda: calls.append("ensure_reachable")
+        chat._create_session = lambda: (calls.append("create_session") or "ses_x")
+        chat._collect_reply = lambda session_id, text: (calls.append("collect_reply") or "ok")
+        chat._call("hello")
+        self.assertEqual(calls, ["ensure_reachable", "create_session", "collect_reply"])
 
 
 if __name__ == "__main__":

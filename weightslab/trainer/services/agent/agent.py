@@ -720,8 +720,20 @@ class DataManipulationAgent:
         # reads (forwarded to window.WS_OPENCODE_URL by weightslab/ui/server.py's
         # _UI_ENV_GLOBALS) -- set it once and both sides point at one server.
         self.preferred_provider = "opencode"
+        # Tracked separately from the resolved value itself: an address the
+        # user (or agent_config.yaml, below) actually chose must never be
+        # silently overridden by auto-discovery later (see
+        # OpenCodeChat._ensure_reachable) -- only the bare "nobody said
+        # anything" default is eligible for that.
+        self._opencode_url_explicit = "OPENCODE_URL" in os.environ
         self.opencode_url = os.environ.get("OPENCODE_URL", "http://127.0.0.1:4096")
         self.opencode_model = os.environ.get("OPENCODE_MODEL", "")
+        # The same directory `weightslab start <dir>` roots the browser
+        # landing-page agent at (WEIGHTSLAB_ROOT_LOG_DIR) -- the shared key
+        # opencode_process.py's lock file is discovered/published under, so
+        # this side and that one converge on one server with no extra
+        # coordination. See _setup_providers/OpenCodeChat._ensure_reachable.
+        self.opencode_workspace_dir = os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR") or os.getcwd()
 
         repo_root = Path(__file__).resolve().parents[4] # weightslab/ root
         inner_pkg = Path(__file__).resolve().parents[3]
@@ -749,6 +761,8 @@ class DataManipulationAgent:
                 a_cfg = cfg["agent"]
 
                 # OPENCODE
+                if a_cfg.get("opencode_url"):
+                    self._opencode_url_explicit = True
                 self.opencode_url = a_cfg.get("opencode_url", self.opencode_url)
                 self.opencode_model = a_cfg.get("opencode_model", self.opencode_model)
 
@@ -778,7 +792,11 @@ class DataManipulationAgent:
             # Kept alongside the runnable (not just `self.chain_opencode`) so
             # get_context_usage() can read `.last_usage` off it after a call --
             # `as_runnable()` only hands back a RunnableLambda wrapping it.
-            self._opencode_chat = OpenCodeChat(self.opencode_url, self.opencode_model)
+            self._opencode_chat = OpenCodeChat(
+                self.opencode_url, self.opencode_model,
+                workspace_dir=self.opencode_workspace_dir,
+                url_is_explicit=self._opencode_url_explicit,
+            )
             self.chain_opencode = self._opencode_chat.as_runnable()
             initialized = True
             _LOGGER.info(
