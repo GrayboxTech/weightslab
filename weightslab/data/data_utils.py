@@ -747,6 +747,23 @@ def load_raw_video(dataset, index, rank: int = 0):
     if arr is None:
         return None
     task_type = getattr(wrapped, "task_type", getattr(dataset, "task_type", None))
+    if not task_type:
+        # Some datasets vary task_type PER SAMPLE via the metadata dict their
+        # own __getitem__ returns (the tracked loader's documented "more than
+        # two elements" contract) instead of one fixed dataset-level
+        # attribute -- e.g. a dataset combining several main-sample
+        # modalities behind one loader. Peek at it before falling back to the
+        # shape-only heuristic in is_video_sample, which cannot tell a video
+        # clip apart from volumetric image data on shape alone.
+        try:
+            raw_item = wrapped[index]
+            if isinstance(raw_item, tuple) and len(raw_item) > 3:
+                for m in raw_item[3:]:
+                    if isinstance(m, dict) and m.get("task_type"):
+                        task_type = m["task_type"]
+                        break
+        except Exception:
+            pass
     if not is_video_sample(dataset, arr, task_type):
         return None
     return np.asarray(arr)
