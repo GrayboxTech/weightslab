@@ -27,6 +27,8 @@ import os
 import threading
 from collections import OrderedDict
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 # Dataframe column prefix. Mirrors the existing "tag:" convention.
@@ -65,6 +67,46 @@ def field_from_column(column: str) -> str:
 
 def is_media_column(column: str) -> bool:
     return str(column or "").startswith(MEDIA_COLUMN_PREFIX)
+
+
+def classify_kind(value):
+    """Best-effort auto-detection of a metadata value's media kind, from its
+    shape/type alone — no field-name convention, no explicit kind= needed.
+
+    Returns one of KIND_TEXT / KIND_VIDEO / KIND_POINTCLOUD / KIND_MASK /
+    KIND_IMAGE, or None for a plain scalar (already fine as a raw DataFrame
+    value, no encoding needed). Used by DataSampleTrackingWrapper's
+    auto_render_metadata option, so a dataset's own __getitem__ metadata dict
+    can carry raw content directly, with no wl.save_media() call required.
+    """
+    if value is None or isinstance(value, (bool, int, float)):
+        return None
+    if isinstance(value, str):
+        return KIND_TEXT
+
+    if hasattr(value, "detach"):
+        value = value.detach().cpu()
+    if hasattr(value, "numpy"):
+        value = value.numpy()
+    try:
+        arr = np.asarray(value)
+    except Exception:
+        return None
+    if arr.ndim == 0 or arr.size == 0:
+        return None
+
+    from weightslab.data.point_cloud_utils import looks_like_point_cloud
+    from weightslab.data.video_utils import looks_like_video
+
+    if looks_like_video(arr):
+        return KIND_VIDEO
+    if looks_like_point_cloud(arr):
+        return KIND_POINTCLOUD
+    if arr.ndim == 2 and np.issubdtype(arr.dtype, np.integer):
+        span = int(arr.max()) - int(arr.min())
+        if span < 64:
+            return KIND_MASK
+    return KIND_IMAGE
 
 
 def max_bytes() -> int:
