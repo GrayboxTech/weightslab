@@ -544,7 +544,7 @@ def load_metadata(dataset, sample_id):
     return None
 
 
-def load_raw_image(dataset, index, slice_idx: int = None, rank: int = 0) -> Image.Image:
+def load_raw_image(dataset, index, slice_idx: int = None, rank: int = 0) -> Image.Image | None:
     """Load raw image from dataset at given index.
 
     For 4D volumetric data (Z, H, W, C) or (Z, H, W), extracts a single slice.
@@ -557,7 +557,8 @@ def load_raw_image(dataset, index, slice_idx: int = None, rank: int = 0) -> Imag
         rank: Member rank for grouped data
 
     Returns:
-        PIL Image of the 2D slice
+        PIL Image of the 2D slice, or None for a text-generation sample
+        (its "image" slot is a plain string — there is no image to load).
     """
     # Get dataset wrapper if exists
     wrapped = getattr(dataset, "wrapped_dataset", dataset)
@@ -572,6 +573,14 @@ def load_raw_image(dataset, index, slice_idx: int = None, rank: int = 0) -> Imag
         return img.convert("RGB")
     elif hasattr(wrapped, '__getitem__') or hasattr(wrapped, "data") or hasattr(wrapped, "dataset"):
         np_img, is_volumetric, original_shape = _get_image_array_and_metadata(wrapped, index, rank=rank)
+
+        # A text-generation sample's "image" slot is a plain str, not pixels —
+        # there is nothing to build a PIL preview from. None is this
+        # function's existing "nothing to show" convention (its only caller,
+        # data_service.py's natural-sort default-signal computation, already
+        # treats a None return as "skip this sample" rather than an error).
+        if isinstance(np_img, str):
+            return None
 
         # Handle 4D volumetric data
         if is_volumetric:
