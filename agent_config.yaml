@@ -17,6 +17,7 @@ agent:
   opencode_url: http://127.0.0.1:4096
 
   # OpenCode model, "providerID/modelID" (can also be set as env variable
-  # OPENCODE_MODEL). Empty string lets the OpenCode server use its own
-  # configured default model.
+  # OPENCODE_MODEL). Empty string self-heals to whatever OpenCode's own
+  # config was last set to, or a configured provider default, falling back
+  # to the free-tier "opencode/deepseek-v4-flash-free" if neither resolves.
   opencode_model: ""

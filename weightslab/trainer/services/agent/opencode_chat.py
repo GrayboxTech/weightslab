@@ -57,6 +57,15 @@ _LOGGER = logging.getLogger(__name__)
 # tool on the OpenCode side keeps working without a change here.
 _MUTATING_TOOLS = ("write", "edit", "patch", "bash")
 
+# Last-resort model for _ensure_model_resolved, below: a free-tier model so a
+# totally fresh OpenCode install (no provider credentials configured at all,
+# so /config has no model and /config/providers has no defaults either)
+# still gets a usable text-reasoning model, instead of leaving `self.model`
+# unset -- which is exactly the "OpenCode picks WHATEVER model happens to be
+# configured, arbitrarily" failure this method exists to avoid in the first
+# place.
+_DEFAULT_MODEL = "opencode/deepseek-v4-flash-free"
+
 
 class OpenCodeError(RuntimeError):
     """Raised when a call to the OpenCode server fails outright (not just an
@@ -69,7 +78,8 @@ class OpenCodeChat:
     self-contained per invocation)."""
 
     def __init__(self, base_url: str, model: Optional[str] = None, timeout: float = 60.0,
-                 workspace_dir: Optional[str] = None, url_is_explicit: bool = True):
+                 workspace_dir: Optional[str] = None, url_is_explicit: bool = True,
+                 model_is_explicit: bool = True):
         self.base_url = (base_url or "http://127.0.0.1:4096").rstrip("/")
         self.model = model
         self.timeout = timeout
@@ -88,6 +98,13 @@ class OpenCodeChat:
         # one on a different port.
         self.workspace_dir = workspace_dir
         self.url_is_explicit = url_is_explicit
+        # See _ensure_model_resolved: model_is_explicit says whether `model`
+        # came from something the user (or agent_config.yaml) actually
+        # chose -- if not, an empty model here isn't "let OpenCode pick",
+        # it's "OpenCode already picks arbitrarily when none is given"
+        # (confirmed live: an image-generation preview model, useless for
+        # this class's structured-JSON-reply use case).
+        self.model_is_explicit = model_is_explicit
 
     # -- wire helpers --------------------------------------------------- #
 
@@ -290,10 +307,63 @@ class OpenCodeChat:
         if result.get("ok") and result.get("url"):
             self.base_url = result["url"].rstrip("/")
 
+    def _ensure_model_resolved(self) -> None:
+        """Self-heal `self.model` before the first network call of a turn,
+        same reasoning as _ensure_reachable but for the model instead of the
+        address: leaving it unset does NOT mean "OpenCode picks a sensible
+        default" -- it means OpenCode picks WHATEVER model happens to be
+        configured, arbitrarily (confirmed live: an image-generation
+        preview model was picked this way, and produced replies useless for
+        this class's structured-JSON intent-parsing, since it isn't a
+        text-reasoning model at all).
+
+        Resolution order mirrors weightslab/ui/server.py's own
+        _opencode_resolve_model (a /loop check-in hits the identical
+        problem, with no chat attached to inherit a model from):
+          1. `GET /config`'s own `model` field -- the one the model picker
+             writes back to opencode.json on every pick (opencodeClient.ts's
+             setDefaultModel), so it's "whatever the user last actually
+             chose", and survives across the browser, the CLI, and other
+             machines.
+          2. `/config/providers`'s own `default` mapping -- what OpenCode
+             itself would otherwise have fallen back to for whichever
+             provider is configured.
+          3. `_DEFAULT_MODEL` -- a free-tier model, used only when both of the
+             above come back empty (a fresh OpenCode install with no
+             provider credentials configured at all).
+        Resolved once and cached on self.model. An explicit model
+        (model_is_explicit=True) is left alone -- deliberately chosen, not
+        a placeholder to override.
+        """
+        if self.model_is_explicit or self.model:
+            return
+        try:
+            with self._request("/config") as resp:
+                config = json.loads(resp.read().decode("utf-8"))
+            model_id = (config or {}).get("model")
+            if isinstance(model_id, str) and "/" in model_id:
+                self.model = model_id
+                return
+        except Exception:  # noqa: BLE001 - fall through to the next source
+            pass
+        try:
+            with self._request("/config/providers") as resp:
+                providers_data = json.loads(resp.read().decode("utf-8"))
+            defaults = (providers_data or {}).get("default") or {}
+            for provider in (providers_data or {}).get("providers") or []:
+                provider_id = provider.get("id")
+                if provider_id and defaults.get(provider_id):
+                    self.model = f"{provider_id}/{defaults[provider_id]}"
+                    return
+        except Exception:  # noqa: BLE001 - fall through to the hardcoded default
+            pass
+        self.model = _DEFAULT_MODEL
+
     def _call(self, prompt_value):
         from langchain_core.messages import AIMessage
 
         self._ensure_reachable()
+        self._ensure_model_resolved()
         text = prompt_value.to_string() if hasattr(prompt_value, "to_string") else str(prompt_value)
         session_id = self._create_session()
         reply = self._collect_reply(session_id, text)

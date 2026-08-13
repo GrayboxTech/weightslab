@@ -358,10 +358,105 @@ class TestEnsureReachable(unittest.TestCase):
         chat = OpenCodeChat("http://127.0.0.1:4096", url_is_explicit=False)
         calls = []
         chat._ensure_reachable = lambda: calls.append("ensure_reachable")
+        chat._ensure_model_resolved = lambda: calls.append("ensure_model_resolved")
         chat._create_session = lambda: (calls.append("create_session") or "ses_x")
         chat._collect_reply = lambda session_id, text: (calls.append("collect_reply") or "ok")
         chat._call("hello")
-        self.assertEqual(calls, ["ensure_reachable", "create_session", "collect_reply"])
+        self.assertEqual(
+            calls,
+            ["ensure_reachable", "ensure_model_resolved", "create_session", "collect_reply"],
+        )
+
+
+class TestEnsureModelResolved(unittest.TestCase):
+    """Confirmed live: leaving `model` unset does NOT mean "OpenCode picks a
+    sensible default" -- it means OpenCode picks whatever's configured,
+    arbitrarily (an image-generation preview model, in the case that
+    surfaced this). _ensure_model_resolved is the fix: resolve a REAL
+    default (the user's last actual pick, or a provider's own configured
+    default) instead of leaving it to chance. Mirrors TestEnsureReachable's
+    own mocked-request style -- the wire format itself (GET /config,
+    GET /config/providers) is exercised for real in
+    TestGetAvailableModelsOpenCode (test_agent_opencode_provider.py)."""
+
+    def _fake_response(self, payload):
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode()
+        return _Resp()
+
+    def test_explicit_model_is_never_auto_replaced(self):
+        chat = OpenCodeChat("http://127.0.0.1:4096", model="openrouter/anthropic/claude-opus-4.6", model_is_explicit=True)
+        with mock.patch.object(chat, "_request") as request_mock:
+            chat._ensure_model_resolved()
+        request_mock.assert_not_called()
+        self.assertEqual(chat.model, "openrouter/anthropic/claude-opus-4.6")
+
+    def test_already_set_non_explicit_model_is_left_alone(self):
+        # Already resolved once (e.g. a prior call) -- don't re-resolve or
+        # re-request every single turn.
+        chat = OpenCodeChat("http://127.0.0.1:4096", model="openrouter/openai/gpt-5", model_is_explicit=False)
+        with mock.patch.object(chat, "_request") as request_mock:
+            chat._ensure_model_resolved()
+        request_mock.assert_not_called()
+        self.assertEqual(chat.model, "openrouter/openai/gpt-5")
+
+    def test_unset_model_resolves_from_config_own_model_field(self):
+        chat = OpenCodeChat("http://127.0.0.1:4096", model=None, model_is_explicit=False)
+        with mock.patch.object(chat, "_request", return_value=self._fake_response({"model": "anthropic/claude-haiku-4.5"})) as request_mock:
+            chat._ensure_model_resolved()
+        request_mock.assert_called_once_with("/config")
+        self.assertEqual(chat.model, "anthropic/claude-haiku-4.5")
+
+    def test_falls_back_to_provider_default_when_config_has_no_model(self):
+        chat = OpenCodeChat("http://127.0.0.1:4096", model=None, model_is_explicit=False)
+        providers_payload = {
+            "providers": [{"id": "openrouter"}, {"id": "ollama"}],
+            "default": {"openrouter": "openai/gpt-5-mini"},
+        }
+        responses = [self._fake_response({}), self._fake_response(providers_payload)]
+        with mock.patch.object(chat, "_request", side_effect=lambda *a, **k: responses.pop(0)) as request_mock:
+            chat._ensure_model_resolved()
+        self.assertEqual(request_mock.call_args_list[0].args, ("/config",))
+        self.assertEqual(request_mock.call_args_list[1].args, ("/config/providers",))
+        self.assertEqual(chat.model, "openrouter/openai/gpt-5-mini")
+
+    def test_no_resolvable_model_falls_back_to_the_hardcoded_default(self):
+        chat = OpenCodeChat("http://127.0.0.1:4096", model=None, model_is_explicit=False)
+        with mock.patch.object(chat, "_request", side_effect=OSError("refused")):
+            chat._ensure_model_resolved()  # must not raise
+        self.assertEqual(chat.model, "opencode/deepseek-v4-flash-free")
+
+    def test_falls_back_to_the_hardcoded_default_when_providers_have_no_default_either(self):
+        # /config and /config/providers both answer, but neither has anything
+        # usable (a fresh OpenCode install with no provider credentials at
+        # all) -- still must not leave `model` unset.
+        chat = OpenCodeChat("http://127.0.0.1:4096", model=None, model_is_explicit=False)
+        responses = [
+            self._fake_response({}),
+            self._fake_response({"providers": [{"id": "openrouter"}], "default": {}}),
+        ]
+        with mock.patch.object(chat, "_request", side_effect=lambda *a, **k: responses.pop(0)):
+            chat._ensure_model_resolved()
+        self.assertEqual(chat.model, "opencode/deepseek-v4-flash-free")
+
+    def test_config_field_that_is_not_provider_slash_model_falls_through(self):
+        # A malformed/unexpected `model` field (missing the "/") is treated
+        # the same as absent, not used as-is.
+        chat = OpenCodeChat("http://127.0.0.1:4096", model=None, model_is_explicit=False)
+        responses = [
+            self._fake_response({"model": "not-a-provider-model-pair"}),
+            self._fake_response({"providers": [{"id": "openrouter"}], "default": {"openrouter": "openai/gpt-5"}}),
+        ]
+        with mock.patch.object(chat, "_request", side_effect=lambda *a, **k: responses.pop(0)):
+            chat._ensure_model_resolved()
+        self.assertEqual(chat.model, "openrouter/openai/gpt-5")
 
 
 if __name__ == "__main__":

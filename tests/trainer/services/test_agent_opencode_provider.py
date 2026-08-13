@@ -122,6 +122,7 @@ class TestSetupProvidersOpenCode(unittest.TestCase):
             agent.opencode_url, agent.opencode_model,
             workspace_dir=agent.opencode_workspace_dir,
             url_is_explicit=agent._opencode_url_explicit,
+            model_is_explicit=agent._opencode_model_explicit,
         )
         self.assertTrue(initialized)
         self.assertIs(agent.chain_opencode, fake_runnable)
@@ -200,7 +201,11 @@ class TestChangeModelOpenCode(unittest.TestCase):
 class TestGetAvailableModelsOpenCode(unittest.TestCase):
     def test_flattens_providers_into_provider_slash_model_strings(self):
         _, agent = _make_agent()
-        agent.opencode_url = "http://127.0.0.1:4096"
+        # Stub out the self-heal itself (covered on its own in
+        # TestOpencodeBaseUrlHelper below) so this test only exercises the
+        # response-flattening logic against a fixed URL.
+        agent._opencode_chat._ensure_reachable = MagicMock()
+        agent._opencode_chat.base_url = "http://127.0.0.1:4096"
 
         fake_payload = {
             "providers": [
@@ -235,11 +240,39 @@ class TestGetAvailableModelsOpenCode(unittest.TestCase):
 
     def test_reports_failure_when_opencode_server_unreachable(self):
         _, agent = _make_agent()
+        agent._opencode_chat._ensure_reachable = MagicMock()
         with mock.patch("urllib.request.urlopen", side_effect=OSError("refused")):
             ok, models, message = agent.get_available_models()
         self.assertFalse(ok)
         self.assertEqual(models, [])
         self.assertIn("OpenCode", message)
+
+    def test_self_heals_the_base_url_before_querying(self):
+        """The bug this covers: `agent models` used to hit the raw
+        OPENCODE_URL directly and fail outright ("connection refused") if
+        nothing had spawned/discovered an OpenCode server yet -- unlike a
+        chat turn, which self-heals via OpenCodeChat._ensure_reachable. Pins
+        down that get_available_models now goes through the same self-heal
+        (via _opencode_base_url) before querying /config/providers."""
+        _, agent = _make_agent()
+        with mock.patch.object(agent._opencode_chat, "_ensure_reachable") as ensure_mock:
+            with mock.patch("urllib.request.urlopen", side_effect=OSError("refused")):
+                agent.get_available_models()
+        ensure_mock.assert_called_once()
+
+
+class TestOpencodeBaseUrlHelper(unittest.TestCase):
+    def test_falls_back_to_opencode_url_when_chat_not_yet_built(self):
+        _, agent = _make_agent()
+        agent._opencode_chat = None
+        agent.opencode_url = "http://127.0.0.1:7777"
+        self.assertEqual(agent._opencode_base_url(), "http://127.0.0.1:7777")
+
+    def test_delegates_to_the_chats_self_healed_base_url(self):
+        _, agent = _make_agent()
+        agent._opencode_chat = MagicMock(base_url="http://127.0.0.1:9999")
+        self.assertEqual(agent._opencode_base_url(), "http://127.0.0.1:9999")
+        agent._opencode_chat._ensure_reachable.assert_called_once()
 
 
 class TestGetContextUsage(unittest.TestCase):
@@ -287,7 +320,7 @@ class TestGetContextUsage(unittest.TestCase):
         _, agent = _make_agent()
         agent.opencode_url = "http://127.0.0.1:4096"
         agent.opencode_model = "openrouter/anthropic/claude-opus-4.6"
-        agent._opencode_chat = MagicMock(last_usage={
+        agent._opencode_chat = MagicMock(base_url="http://127.0.0.1:4096", last_usage={
             "input": 100, "output": 20, "reasoning": 5, "cache_read": 60, "cache_write": 10,
         })
 
@@ -318,7 +351,7 @@ class TestGetContextUsage(unittest.TestCase):
         usage numbers are still worth showing without a window/percentage."""
         _, agent = _make_agent()
         agent.opencode_model = "openrouter/anthropic/claude-opus-4.6"
-        agent._opencode_chat = MagicMock(last_usage={
+        agent._opencode_chat = MagicMock(base_url="http://127.0.0.1:4096", last_usage={
             "input": 10, "output": 2, "reasoning": 0, "cache_read": 0, "cache_write": 0,
         })
 

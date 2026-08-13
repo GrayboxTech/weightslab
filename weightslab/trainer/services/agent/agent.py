@@ -727,6 +727,13 @@ class DataManipulationAgent:
         # anything" default is eligible for that.
         self._opencode_url_explicit = "OPENCODE_URL" in os.environ
         self.opencode_url = os.environ.get("OPENCODE_URL", "http://127.0.0.1:4096")
+        # Same tracking, for the model this time: an unset value here is NOT
+        # "let OpenCode pick a sensible default" -- it's "OpenCode picks
+        # whatever's configured, arbitrarily" (see
+        # OpenCodeChat._ensure_model_resolved for the live-confirmed failure
+        # this caused). Only a value the user (or agent_config.yaml, below)
+        # actually chose is exempt from that self-healing.
+        self._opencode_model_explicit = "OPENCODE_MODEL" in os.environ
         self.opencode_model = os.environ.get("OPENCODE_MODEL", "")
         # The same directory `weightslab start <dir>` roots the browser
         # landing-page agent at (WEIGHTSLAB_ROOT_LOG_DIR) -- the shared key
@@ -764,6 +771,8 @@ class DataManipulationAgent:
                 if a_cfg.get("opencode_url"):
                     self._opencode_url_explicit = True
                 self.opencode_url = a_cfg.get("opencode_url", self.opencode_url)
+                if a_cfg.get("opencode_model"):
+                    self._opencode_model_explicit = True
                 self.opencode_model = a_cfg.get("opencode_model", self.opencode_model)
 
                 _LOGGER.info(f"Applied agent configuration from {path}")
@@ -796,6 +805,7 @@ class DataManipulationAgent:
                 self.opencode_url, self.opencode_model,
                 workspace_dir=self.opencode_workspace_dir,
                 url_is_explicit=self._opencode_url_explicit,
+                model_is_explicit=self._opencode_model_explicit,
             )
             self.chain_opencode = self._opencode_chat.as_runnable()
             initialized = True
@@ -861,6 +871,19 @@ class DataManipulationAgent:
             return False, "Could not reach the OpenCode server. Please verify OPENCODE_URL and that it is running."
         return True, f"Model switched to {self.opencode_model}. Ready to help you."
 
+    def _opencode_base_url(self) -> str:
+        """Same self-heal `OpenCodeChat._ensure_reachable` gives every chat
+        turn, for the CLI paths below that talk to the OpenCode server
+        directly instead of through a chat call: without this, `agent
+        models`/`_fetch_context_window` stayed pointed at the bare
+        OPENCODE_URL default and failed outright ("connection refused")
+        whenever nothing had spawned/discovered an OpenCode server yet,
+        even though a chat turn right after would have self-healed fine."""
+        if self._opencode_chat is not None:
+            self._opencode_chat._ensure_reachable()
+            return self._opencode_chat.base_url
+        return self.opencode_url
+
     def get_available_models(self) -> "tuple[bool, list[str], str]":
         """
         Fetch every provider/model OpenCode is authenticated for, flattened
@@ -874,7 +897,7 @@ class DataManipulationAgent:
         import json as _json
 
         try:
-            url = f"{self.opencode_url.rstrip('/')}/config/providers"
+            url = f"{self._opencode_base_url().rstrip('/')}/config/providers"
             with _ur.urlopen(_ur.Request(url), timeout=10) as resp:
                 data = _json.loads(resp.read().decode())
             models = []
@@ -908,7 +931,7 @@ class DataManipulationAgent:
         import json as _json
 
         try:
-            url = f"{self.opencode_url.rstrip('/')}/config/providers"
+            url = f"{self._opencode_base_url().rstrip('/')}/config/providers"
             with _ur.urlopen(_ur.Request(url), timeout=10) as resp:
                 data = _json.loads(resp.read().decode())
             for provider in data.get("providers", []):

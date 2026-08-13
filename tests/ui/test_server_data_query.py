@@ -81,6 +81,10 @@ class _ServerTestCase(unittest.TestCase):
         )
         return urllib.request.urlopen(req, timeout=10)
 
+    def _get_json(self, path):
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}", timeout=10) as r:
+            return json.loads(r.read().decode())
+
 
 class TestDataQueryEndpoint(_ServerTestCase):
     def test_builds_a_real_dataqueryrequest_and_translates_the_response(self):
@@ -149,6 +153,58 @@ class TestDataQueryEndpoint(_ServerTestCase):
             data = json.loads(exc.read().decode())
         self.assertFalse(data["ok"])
         self.assertIn("dataframe not loaded yet", data["error"])
+
+
+class TestLatestDataQueryEndpoint(_ServerTestCase):
+    """The agent's own bash/curl call to /agent-server/data-query never
+    touches the browser's JS -- agentChat.ts instead polls
+    GET /agent-server/data-query/latest once per finished turn to find out
+    a query ran and replay the grid-refresh/subview-banner reaction. See
+    _LatestDataQuery's docstring in server.py.
+
+    _latest_data_query is a module-level singleton (shared by every
+    serve_ui() instance in this process), so it's swapped out per-test the
+    same way test_server_tracked_processes.py does for _tracked_processes --
+    otherwise seq/records would leak across tests."""
+
+    def setUp(self):
+        super().setUp()
+        self._orig_latest_data_query = ui_server._latest_data_query
+        ui_server._latest_data_query = ui_server._LatestDataQuery()
+
+    def tearDown(self):
+        ui_server._latest_data_query = self._orig_latest_data_query
+        super().tearDown()
+
+    def test_reports_seq_zero_when_nothing_has_run_yet(self):
+        data = self._get_json("/agent-server/data-query/latest")
+        self.assertEqual(data, {"seq": 0})
+
+    def test_reflects_the_most_recent_data_query_call(self):
+        self.servicer.next_response = pb2.DataQueryResponse(
+            success=True, message="Filtered to label 7.",
+            number_of_all_samples=100, number_of_samples_in_the_loop=12,
+        )
+        with self._post_json("/agent-server/data-query", {"query": "show only label 7"}) as r:
+            r.read()
+
+        data = self._get_json("/agent-server/data-query/latest")
+        self.assertEqual(data["seq"], 1)
+        self.assertEqual(data["query"], "show only label 7")
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["message"], "Filtered to label 7.")
+        self.assertEqual(data["numberOfAllSamples"], 100)
+        self.assertEqual(data["numberOfSamplesInTheLoop"], 12)
+
+    def test_seq_increments_on_each_new_call_so_the_frontend_can_dedupe(self):
+        with self._post_json("/agent-server/data-query", {"query": "first"}) as r:
+            r.read()
+        with self._post_json("/agent-server/data-query", {"query": "second"}) as r:
+            r.read()
+
+        data = self._get_json("/agent-server/data-query/latest")
+        self.assertEqual(data["seq"], 2)
+        self.assertEqual(data["query"], "second")
 
 
 if __name__ == "__main__":

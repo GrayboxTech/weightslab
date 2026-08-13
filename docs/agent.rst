@@ -311,7 +311,12 @@ server, so a model you authenticate once is available everywhere.
 ``OPENCODE_MODEL`` (or ``agent_config.yaml``'s ``agent.opencode_model``) picks
 the default model for the backend SDK agent, as an OpenCode
 ``providerID/modelID`` string (e.g. ``openrouter/anthropic/claude-opus-4.6``).
-Leave it unset to use OpenCode's own configured default.
+Leave it unset to fall back, in order, to: whatever model OpenCode's own
+``/config`` was last set to (the model picker's own pick, e.g. from the
+Weights Studio landing page), then whichever provider default OpenCode
+reports via ``/config/providers``, and finally the free-tier
+``opencode/deepseek-v4-flash-free`` if neither of those resolves to anything
+(a fresh OpenCode install with no provider credentials configured at all).
 
 Credentials and provider setup live in OpenCode itself, never in WeightsLab:
 

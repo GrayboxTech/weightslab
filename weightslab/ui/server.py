@@ -401,6 +401,47 @@ _tracked_processes = _TrackedProcesses()
 atexit.register(_tracked_processes.shutdown)
 
 
+class _LatestDataQuery:
+    """The most recent query the landing-page agent ran itself via
+    POST /agent-server/data-query, so the browser can find out about it
+    without the agent's own bash/curl call ever touching the page's JS.
+
+    A query typed directly into the UI updates the grid and the "now
+    viewing a subset -- reset?" banner as part of the SAME client-side call
+    that sent it (main.ts's handleQuerySubmit). The agent's bash tool has
+    no such hook into the page -- its curl call is a plain HTTP round trip
+    from a shell process, invisible to any open tab. agentChat.ts instead
+    polls GET /agent-server/data-query/latest once per turn (on
+    session.idle, not continuously) and compares `seq` against the last one
+    it already reacted to; a new one replays main.ts's own grid/banner
+    logic for this query's response. `query` is kept alongside the
+    response fields because the banner is rendered with the query's own
+    text, which the browser has no other way to learn for a bridge-
+    triggered call.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._seq = 0
+        self._query: Optional[str] = None
+        self._payload: dict = {}
+
+    def record(self, query: str, payload: dict) -> None:
+        with self._lock:
+            self._seq += 1
+            self._query = query
+            self._payload = dict(payload)
+
+    def get(self) -> dict:
+        with self._lock:
+            if self._seq == 0:
+                return {"seq": 0}
+            return {"seq": self._seq, "query": self._query, **self._payload}
+
+
+_latest_data_query = _LatestDataQuery()
+
+
 _jupyter_session = _JupyterSession()
 atexit.register(_jupyter_session.shutdown)
 
@@ -1499,6 +1540,9 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         if path == "/agent-server/docs":
             self._get_agent_docs()
             return
+        if path == "/agent-server/data-query/latest":
+            self._get_latest_data_query()
+            return
         if path == "/local-notebook/list":
             self._list_local_notebooks()
             return
@@ -1804,7 +1848,7 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": message})
             return
 
-        self._send_json(HTTPStatus.OK, {
+        payload = {
             "ok": bool(response.success),
             "message": response.message,
             "numberOfAllSamples": response.number_of_all_samples,
@@ -1812,7 +1856,30 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
             "numberOfDiscardedSamples": response.number_of_discarded_samples,
             "uniqueTags": list(response.unique_tags),
             "analysisResult": response.analysis_result,
-        })
+            "agentIntentType": int(response.agent_intent_type),
+        }
+        # The agent's own bash tool called this endpoint directly -- nothing
+        # in the browser's own JS observed the request or its response the
+        # way it would for a query typed into the UI, so the grid/subview
+        # banner never updates on its own without this: see
+        # _latest_data_query's docstring for how the frontend picks it up.
+        _latest_data_query.record(query, payload)
+        self._send_json(HTTPStatus.OK, payload)
+
+    def _get_latest_data_query(self):
+        """Polled once by agentChat.ts whenever a Frontend Agent turn ends
+        (session.idle) -- NOT continuously -- so main.ts can replay the
+        SAME grid-refresh/subview-banner reaction a query typed directly
+        into the (now-retired) backend query bar always triggered
+        client-side, for a query the agent just ran itself instead (see
+        _data_query/_latest_data_query). {"seq": 0} if nothing has run yet
+        this process; the frontend only reacts when seq is NEWER than the
+        last one it already handled."""
+        if self.client_address[0] not in _LOOPBACK_ADDRESSES:
+            self._send_json(HTTPStatus.FORBIDDEN,
+                             {"ok": False, "error": "Only reachable from localhost."})
+            return
+        self._send_json(HTTPStatus.OK, _latest_data_query.get())
 
     def _track_process(self):
         """Registers a PID the agent (landing-page chat or a /loop job) just
