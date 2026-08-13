@@ -20,4 +20,4 @@ agent:
   # OPENCODE_MODEL). Empty string self-heals to whatever OpenCode's own
   # config was last set to, or a configured provider default, falling back
   # to the free-tier "opencode/deepseek-v4-flash-free" if neither resolves.
-  opencode_model: ""
+  opencode_model: "opencode/deepseek-v4-flash-free"
