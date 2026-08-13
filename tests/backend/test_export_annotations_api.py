@@ -16,11 +16,12 @@ class TestExportAnnotationsApi:
         with patch("weightslab.export.exporter.save_export", return_value=target) as mock_save:
             result = export_annotations(
                 "cvat", target, origin="train_loader", class_names=["bg", "car"], use_predictions=True,
+                tags=["ToReview"],
             )
 
         mock_save.assert_called_once_with(
             "cvat", target,
-            origin="train_loader", class_names=["bg", "car"], use_predictions=True,
+            origin="train_loader", class_names=["bg", "car"], use_predictions=True, tags=["ToReview"],
         )
         assert result == os.path.abspath(target)
 
@@ -31,7 +32,7 @@ class TestExportAnnotationsApi:
 
         mock_save.assert_called_once_with(
             "label_studio", target,
-            origin=None, class_names=None, use_predictions=False,
+            origin=None, class_names=None, use_predictions=False, tags=None,
         )
 
     def test_path_none_falls_back_to_root_log_dir(self, tmp_path):
@@ -45,7 +46,7 @@ class TestExportAnnotationsApi:
 
         mock_save.assert_called_once_with(
             "v7", str(tmp_path),
-            origin=None, class_names=None, use_predictions=False,
+            origin=None, class_names=None, use_predictions=False, tags=None,
         )
         assert result == os.path.abspath(written)
 
@@ -57,5 +58,5 @@ class TestExportAnnotationsApi:
 
         mock_save.assert_called_once_with(
             "cvat", ".",
-            origin=None, class_names=None, use_predictions=False,
+            origin=None, class_names=None, use_predictions=False, tags=None,
         )

@@ -215,12 +215,38 @@ def _resolve_image_dims(path: Optional[str], mask_arr: Optional[np.ndarray], def
     return default_size
 
 
+def _tag_column(tag: str) -> str:
+    tag = tag.strip()
+    prefix = f"{SampleStats.Ex.TAG.value}:"
+    return tag if tag.startswith(prefix) else f"{prefix}{tag}"
+
+
+def _filter_by_tags(df, tags: Optional[List[str]]):
+    """Keep only rows carrying ANY of `tags` (boolean True, or a non-empty
+    categorical value -- both kinds of tag reuse the same ``tag:<name>``
+    column, see ``wl.tag_samples``/``wl.set_categorical_tag``).
+    """
+    if not tags:
+        return df
+
+    tag_cols = [col for col in (_tag_column(t) for t in tags) if col in df.columns]
+    if not tag_cols:
+        return df.iloc[0:0]
+
+    mask = False
+    for col in tag_cols:
+        col_mask = df[col].notna() & (df[col] != False) & (df[col] != "")
+        mask = col_mask if mask is False else (mask | col_mask)
+    return df[mask]
+
+
 def collect_image_annotations(
     origin: Optional[str] = None,
     class_names: Optional[Union[dict, list, tuple]] = None,
     use_predictions: bool = False,
     default_image_size: Tuple[int, int] = (0, 0),
     image_extension: str = ".jpg",
+    tags: Optional[List[str]] = None,
 ) -> List[ImageAnnotations]:
     """Build the per-image annotation list from the registered dataframe.
 
@@ -234,6 +260,8 @@ def collect_image_annotations(
             be resolved from a mask or the source image file.
         image_extension: extension used for the synthetic filename
             (``sample_<id><ext>``) when no real image path can be resolved.
+        tags: restrict to samples carrying ANY of these tags (``tag:`` prefix
+            optional, e.g. ``["ToReview"]``); ``None``/empty exports every sample.
     """
     from weightslab.backend.ledgers import get_dataframe
 
@@ -249,6 +277,10 @@ def collect_image_annotations(
         if ORIGIN not in df.columns:
             return []
         df = df[df[ORIGIN] == origin]
+    if df.empty:
+        return []
+
+    df = _filter_by_tags(df, tags)
     if df.empty:
         return []
 

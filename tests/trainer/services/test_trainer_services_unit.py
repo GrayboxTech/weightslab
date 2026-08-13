@@ -523,7 +523,7 @@ class TestDataServiceExportAnnotationsUnit(unittest.TestCase):
         ) as mock_export:
             response = service.ExportAnnotations(req, None)
 
-        mock_export.assert_called_once_with("cvat", origin="train_loader", use_predictions=False)
+        mock_export.assert_called_once_with("cvat", origin="train_loader", use_predictions=False, tags=None)
         self.assertTrue(response.success)
         self.assertEqual(response.payload, b"<annotations/>")
         self.assertEqual(response.filename, "annotations_cvat.xml")
@@ -540,7 +540,21 @@ class TestDataServiceExportAnnotationsUnit(unittest.TestCase):
         ) as mock_export:
             service.ExportAnnotations(req, None)
 
-        mock_export.assert_called_once_with("label_studio", origin=None, use_predictions=True)
+        mock_export.assert_called_once_with("label_studio", origin=None, use_predictions=True, tags=None)
+
+    def test_export_annotations_passes_tags(self):
+        service = DataService.__new__(DataService)
+        req = pb2.ExportAnnotationsRequest(format=pb2.EXPORT_FORMAT_CVAT, tags=["ToReview", "outlier"])
+
+        with patch(
+            "weightslab.export.exporter.export_annotations",
+            return_value=(b"<annotations/>", "annotations_cvat.xml", "application/xml", 1),
+        ) as mock_export:
+            service.ExportAnnotations(req, None)
+
+        mock_export.assert_called_once_with(
+            "cvat", origin=None, use_predictions=False, tags=["ToReview", "outlier"],
+        )
 
     def test_export_annotations_unknown_format_value(self):
         service = DataService.__new__(DataService)

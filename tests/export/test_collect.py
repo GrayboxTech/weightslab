@@ -16,9 +16,11 @@ import pytest
 
 from weightslab.export.collect import (
     _boxes_from_cell,
+    _filter_by_tags,
     _is_bbox_array,
     _label_for_class,
     _resolve_image_dims,
+    _tag_column,
     collect_image_annotations,
 )
 
@@ -94,6 +96,53 @@ class TestResolveImageDims:
 
     def test_default_used_when_no_mask_and_no_path(self):
         assert _resolve_image_dims(None, None, (640, 480)) == (640, 480)
+
+
+class TestTagColumn:
+
+    def test_bare_name_gets_prefixed(self):
+        assert _tag_column("ToReview") == "tag:ToReview"
+
+    def test_already_prefixed_name_is_untouched(self):
+        assert _tag_column("tag:ToReview") == "tag:ToReview"
+
+    def test_strips_whitespace(self):
+        assert _tag_column("  ToReview  ") == "tag:ToReview"
+
+
+class TestFilterByTags:
+
+    def _df(self):
+        return pd.DataFrame({
+            "tag:ToReview": [True, False, None],
+            "tag:weather": ["rainy", "", None],
+        })
+
+    def test_no_tags_returns_df_unchanged(self):
+        df = self._df()
+        assert _filter_by_tags(df, None) is df
+        assert _filter_by_tags(df, []) is df
+
+    def test_boolean_tag_keeps_only_true_rows(self):
+        result = _filter_by_tags(self._df(), ["ToReview"])
+        assert list(result.index) == [0]
+
+    def test_categorical_tag_keeps_non_empty_string_rows(self):
+        result = _filter_by_tags(self._df(), ["weather"])
+        assert list(result.index) == [0]
+
+    def test_multiple_tags_are_ored(self):
+        df = pd.DataFrame({"tag:a": [True, False], "tag:b": [False, True]})
+        result = _filter_by_tags(df, ["a", "b"])
+        assert list(result.index) == [0, 1]
+
+    def test_unknown_tag_column_returns_empty(self):
+        result = _filter_by_tags(self._df(), ["doesnotexist"])
+        assert result.empty
+
+    def test_tag_prefix_optional(self):
+        result = _filter_by_tags(self._df(), ["tag:ToReview"])
+        assert list(result.index) == [0]
 
 
 class TestCollectImageAnnotations:
@@ -180,6 +229,18 @@ class TestCollectImageAnnotations:
         df = pd.DataFrame({"origin": ["train"]}, index=index)
         with patch("weightslab.backend.ledgers.get_dataframe", return_value=self._mock_manager(df)):
             assert collect_image_annotations() == []
+
+    def test_tag_filter_restricts_to_tagged_samples(self):
+        df = self._fixture_df()
+        df["tag:ToReview"] = [True, False, False, False, False]
+        class_names = ["bg", "cat", "dog", "car", "person"]
+        with patch("weightslab.backend.ledgers.get_dataframe", return_value=self._mock_manager(df)):
+            images = collect_image_annotations(tags=["ToReview"], class_names=class_names)
+        assert [img.sample_id for img in images] == ["s1"]
+
+    def test_tag_filter_no_match_returns_empty_list(self):
+        with patch("weightslab.backend.ledgers.get_dataframe", return_value=self._mock_manager(self._fixture_df())):
+            assert collect_image_annotations(tags=["doesnotexist"]) == []
 
 
 if __name__ == "__main__":

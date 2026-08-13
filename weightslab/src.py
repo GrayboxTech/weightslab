@@ -4872,6 +4872,7 @@ def export_annotations(
     origin: str | None = None,
     class_names: dict | list | None = None,
     use_predictions: bool = False,
+    tags: list[str] | None = None,
 ) -> str:
     """Export bounding-box/segmentation annotations to a relabeling-tool format.
 
@@ -4903,6 +4904,11 @@ def export_annotations(
         to ``"class_<id>"``.
     use_predictions : bool, optional
         Export model predictions instead of ground-truth targets.
+    tags : list of str, optional
+        Restrict export to samples carrying ANY of these tags (``tag:``
+        prefix optional, e.g. ``["ToReview"]``), matching either a boolean
+        tag set via :func:`tag_samples` or a categorical value set via
+        :func:`set_categorical_tag`. ``None`` (default) exports every sample.
 
     Returns
     -------
@@ -4932,6 +4938,10 @@ def export_annotations(
             "label_studio", "val_annotations.json",
             origin="val_loader", class_names=["background", "cat", "dog"],
         )
+
+    Export only the samples tagged "ToReview" to CVAT, for a relabeling pass::
+
+        wl.export_annotations("cvat", tags=["ToReview"])
     """
     import os as _os
 
@@ -4951,7 +4961,7 @@ def export_annotations(
 
     written_path = save_export(
         fmt, path,
-        origin=origin, class_names=class_names, use_predictions=use_predictions,
+        origin=origin, class_names=class_names, use_predictions=use_predictions, tags=tags,
     )
     return _os.path.abspath(written_path)
 

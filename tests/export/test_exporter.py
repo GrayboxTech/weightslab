@@ -42,9 +42,19 @@ class TestExportAnnotations:
 
     def test_passes_kwargs_through_to_collect(self, fake_images):
         with patch("weightslab.export.exporter.collect_image_annotations", return_value=fake_images) as mock_collect:
-            export_annotations("cvat", origin="train_loader", class_names=["bg", "car"], use_predictions=True)
+            export_annotations(
+                "cvat", origin="train_loader", class_names=["bg", "car"], use_predictions=True,
+                tags=["ToReview"],
+            )
         mock_collect.assert_called_once_with(
-            origin="train_loader", class_names=["bg", "car"], use_predictions=True
+            origin="train_loader", class_names=["bg", "car"], use_predictions=True, tags=["ToReview"],
+        )
+
+    def test_tags_default_to_none(self, fake_images):
+        with patch("weightslab.export.exporter.collect_image_annotations", return_value=fake_images) as mock_collect:
+            export_annotations("cvat")
+        mock_collect.assert_called_once_with(
+            origin=None, class_names=None, use_predictions=False, tags=None,
         )
 
 

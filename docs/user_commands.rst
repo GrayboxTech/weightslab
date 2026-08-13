@@ -295,7 +295,7 @@ weightslab export
 .. code-block:: bash
 
    weightslab export --format {cvat,label_studio,v7} [OUTPUT]
-                      [--origin ORIGIN] [--predictions] [--host HOST] [--port PORT]
+                      [--origin ORIGIN] [--predictions] [--tag TAG ...] [--host HOST] [--port PORT]
 
 Exports bounding-box/segmentation annotations from a **running** experiment
 to a relabeling-tool format — connects over gRPC exactly like ``weightslab
@@ -313,6 +313,9 @@ reference, class-name/image-path resolution, and caveats.
 - ``--origin`` *(str)* — restrict to one registered split/loader (e.g.
   ``train_loader``). Default: every registered split.
 - ``--predictions`` — export model predictions instead of ground-truth targets.
+- ``--tag`` *(str, repeatable)* — restrict to samples carrying this tag
+  (e.g. ``ToReview``); repeat for multiple tags (matches ANY of them).
+  Default: every sample.
 - ``--host`` *(str)* — backend host to connect to. Default: **127.0.0.1**.
 - ``--port`` *(int)* — backend gRPC port to connect to. Default:
   ``$GRPC_BACKEND_PORT`` or **50051**.
@@ -325,6 +328,7 @@ reference, class-name/image-path resolution, and caveats.
    weightslab export -f label_studio annotations.json   # explicit output file
    weightslab export -f v7 out/ --origin val_loader      # V7/Darwin, val split only
    weightslab export -f cvat --predictions               # export model predictions
+   weightslab export -f cvat --tag ToReview              # only samples tagged ToReview
 
 .. _cli-console:
 
