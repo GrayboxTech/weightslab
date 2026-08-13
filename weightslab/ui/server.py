@@ -1345,6 +1345,98 @@ _loop_registry = _LoopRegistry()
 atexit.register(_loop_registry.shutdown)
 
 
+def _run_shutdown_cleanup() -> None:
+    """Every termination path this server can take (Ctrl+C, closing the
+    terminal, a bare `kill`) converges here. Each of these four is
+    independent and best-effort, so order doesn't matter and one raising
+    doesn't stop the others -- see each class's own shutdown()."""
+    _tracked_processes.shutdown()
+    _opencode_session.shutdown()
+    _loop_registry.shutdown()
+    _jupyter_session.shutdown()
+
+
+def _raise_keyboard_interrupt(signum, frame) -> None:
+    raise KeyboardInterrupt()
+
+
+# CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT -- the ones that
+# mean "this process is going away", as opposed to CTRL_C_EVENT (0) /
+# CTRL_BREAK_EVENT (1), which Python already turns into SIGINT/SIGBREAK on
+# its own and which this handler explicitly leaves alone.
+_WINDOWS_TERMINATING_CTRL_EVENTS = (2, 5, 6)
+
+# Holds the ctypes callback so it isn't garbage-collected out from under
+# Windows once registered -- SetConsoleCtrlHandler only keeps a raw function
+# pointer, not a reference that would keep the wrapping Python object alive.
+_console_ctrl_handler_ref = None
+
+
+def _on_windows_ctrl_event(ctrl_type: int) -> bool:
+    """The actual console-control-event logic, kept separate from the
+    ctypes registration below so it's unit-testable without a real Windows
+    console or a real SetConsoleCtrlHandler call."""
+    if ctrl_type in _WINDOWS_TERMINATING_CTRL_EVENTS:
+        _run_shutdown_cleanup()
+        return True
+    return False
+
+
+def _install_windows_console_handler() -> None:
+    """Closing the console window, logging off, or a system shutdown sends
+    CTRL_CLOSE_EVENT/CTRL_LOGOFF_EVENT/CTRL_SHUTDOWN_EVENT -- none of which
+    the `signal` module can catch (that only covers CTRL_C_EVENT/
+    CTRL_BREAK_EVENT, as SIGINT/SIGBREAK). SetConsoleCtrlHandler is the only
+    way to intercept the others, so this calls it directly via ctypes rather
+    than adding a pywin32 dependency for one function. Runs on an
+    OS-spawned thread, not the main one -- Windows also kills the process
+    shortly after delivering one of these regardless of what the handler
+    does, so _run_shutdown_cleanup (not this registration) is what has to
+    stay fast.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    global _console_ctrl_handler_ref
+    handler_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+    _console_ctrl_handler_ref = handler_type(_on_windows_ctrl_event)
+    try:
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(_console_ctrl_handler_ref, True)
+    except Exception:  # pragma: no cover - best-effort; Ctrl+C still works
+        pass
+
+
+def _install_termination_handlers() -> None:
+    """Makes closing the terminal or a bare `kill` run the SAME cleanup as
+    Ctrl+C, instead of leaving a DETACHED launch this server was tracking
+    (see _TrackedProcesses), plus its own OpenCode/Jupyter children,
+    orphaned -- confirmed live: neither SIGTERM/SIGHUP (POSIX) nor
+    CTRL_CLOSE_EVENT (Windows) becomes a catchable Python exception the way
+    SIGINT does by default, so without this, only Ctrl+C itself was ever
+    covered.
+
+    POSIX: SIGTERM/SIGHUP re-raised as KeyboardInterrupt, so they run
+    through the EXACT same `except KeyboardInterrupt` below rather than a
+    second, duplicate cleanup path.
+
+    Windows: see _install_windows_console_handler.
+    """
+    try:
+        signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+        if hasattr(signal, "SIGHUP"):  # not defined on Windows
+            signal.signal(signal.SIGHUP, _raise_keyboard_interrupt)
+    except ValueError:
+        # Only the main thread of the main interpreter may install signal
+        # handlers -- best-effort if serve_ui(block=True) is ever called
+        # from somewhere else (e.g. embedded in another app's own thread).
+        # Ctrl+C (SIGINT) is still caught either way; only the closed-
+        # terminal/bare-kill cases this function exists for are unaffected.
+        pass
+
+    if os.name == "nt":
+        _install_windows_console_handler()
+
+
 # --------------------------------------------------------------------------- #
 # Request handler
 # --------------------------------------------------------------------------- #
@@ -2196,6 +2288,10 @@ def serve_ui(
         thread.start()
         return httpd
 
+    # Only for the blocking (real CLI) path -- see _install_termination_handlers'
+    # own docstring for why plain Ctrl+C alone used to be the only covered case.
+    _install_termination_handlers()
+
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -2203,8 +2299,7 @@ def serve_ui(
     finally:
         httpd.shutdown()
         httpd.server_close()
-        _jupyter_session.shutdown()
-        _tracked_processes.shutdown()
+        _run_shutdown_cleanup()
     return httpd
 
 
