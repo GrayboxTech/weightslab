@@ -71,7 +71,8 @@ def _boxes_from_cell(value: Any) -> List[Tuple[float, float, float, float, Optio
     boxes = []
     for row in rows:
         row = np.asanyarray(row, dtype=float)
-        cls_id = int(round(row[-1])) if row.shape[0] >= 5 else None
+        cls_col = 4 if row.shape[0] >= 6 else -1
+        cls_id = int(round(row[cls_col])) if row.shape[0] >= 5 else None
         boxes.append((float(row[0]), float(row[1]), float(row[2]), float(row[3]), cls_id))
     return boxes
 
