@@ -655,8 +655,15 @@ def export_annotations_cli(args):
     host = args.host or "127.0.0.1"
     port = args.port or int(os.getenv("GRPC_BACKEND_PORT", "50051"))
 
+    _max_msg = int(os.getenv("GRPC_MAX_MESSAGE_BYTES", 256 * 1024 * 1024))
     try:
-        channel = grpc.insecure_channel(f"{host}:{port}")
+        channel = grpc.insecure_channel(
+            f"{host}:{port}",
+            options=[
+                ("grpc.max_send_message_length", _max_msg),
+                ("grpc.max_receive_message_length", _max_msg),
+            ],
+        )
         grpc.channel_ready_future(channel).result(timeout=10)
     except Exception as exc:
         logger.error(
