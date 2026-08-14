@@ -13,7 +13,7 @@ import weightslab.cli as wl_cli
 
 
 def _args(**overrides):
-    base = dict(format="cvat", output=None, origin=None, predictions=False, host=None, port=None)
+    base = dict(format="cvat", output=None, origin=None, predictions=False, tags=None, host=None, port=None)
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -103,6 +103,38 @@ class TestExportAnnotationsCli(unittest.TestCase):
         self.assertEqual(sent_request.format, pb2.EXPORT_FORMAT_V7_DARWIN)
         self.assertEqual(sent_request.origin, "val_loader")
         self.assertTrue(sent_request.include_predictions)
+
+    def test_request_carries_repeated_tags(self):
+        mock_stub = MagicMock()
+        mock_stub.ExportAnnotations.return_value = MagicMock(
+            success=True, payload=b"", filename="f", mime_type="application/xml", image_count=0,
+        )
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("grpc.insecure_channel", return_value=MagicMock()), \
+                 patch("grpc.channel_ready_future", return_value=MagicMock()), \
+                 patch("weightslab.proto.experiment_service_pb2_grpc.ExperimentServiceStub", return_value=mock_stub):
+                wl_cli.export_annotations_cli(_args(output=tmp_dir, tags=["ToReview", "outlier"]))
+
+        sent_request = mock_stub.ExportAnnotations.call_args[0][0]
+        self.assertEqual(list(sent_request.tags), ["ToReview", "outlier"])
+
+    def test_request_tags_default_empty(self):
+        mock_stub = MagicMock()
+        mock_stub.ExportAnnotations.return_value = MagicMock(
+            success=True, payload=b"", filename="f", mime_type="application/xml", image_count=0,
+        )
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("grpc.insecure_channel", return_value=MagicMock()), \
+                 patch("grpc.channel_ready_future", return_value=MagicMock()), \
+                 patch("weightslab.proto.experiment_service_pb2_grpc.ExperimentServiceStub", return_value=mock_stub):
+                wl_cli.export_annotations_cli(_args(output=tmp_dir))
+
+        sent_request = mock_stub.ExportAnnotations.call_args[0][0]
+        self.assertEqual(list(sent_request.tags), [])
 
 
 if __name__ == "__main__":

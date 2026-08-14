@@ -5432,6 +5432,7 @@ class DataService:
                 fmt,
                 origin=request.origin or None,
                 use_predictions=request.include_predictions,
+                tags=list(request.tags) or None,
             )
             return pb2.ExportAnnotationsResponse(
                 success=True,

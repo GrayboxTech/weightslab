@@ -5,7 +5,7 @@ Weights Studio "Export" button, and the ``weightslab export`` CLI command.
 
 import logging
 import os
-from typing import Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 from weightslab.export.collect import collect_image_annotations
 from weightslab.export.formats.cvat import to_cvat_xml
@@ -29,6 +29,7 @@ def export_annotations(
     origin: Optional[str] = None,
     class_names: Optional[Union[dict, list, tuple]] = None,
     use_predictions: bool = False,
+    tags: Optional[List[str]] = None,
 ) -> Tuple[bytes, str, str, int]:
     """Collect annotations from the registered dataframe and encode them as `fmt`.
 
@@ -38,6 +39,8 @@ def export_annotations(
         class_names: explicit class-id -> name mapping, overriding any
             auto-detected ``dataset.class_names``.
         use_predictions: export model predictions instead of ground-truth targets.
+        tags: restrict to samples carrying ANY of these tags (e.g. ``["ToReview"]``);
+            ``None``/empty exports every sample.
 
     Returns:
         ``(payload_bytes, filename, mime_type, image_count)``.
@@ -46,7 +49,9 @@ def export_annotations(
     if fmt not in _ENCODERS:
         raise ValueError(f"Unknown export format {fmt!r}. Supported: {', '.join(SUPPORTED_FORMATS)}")
 
-    images = collect_image_annotations(origin=origin, class_names=class_names, use_predictions=use_predictions)
+    images = collect_image_annotations(
+        origin=origin, class_names=class_names, use_predictions=use_predictions, tags=tags,
+    )
     encoder, filename, mime_type = _ENCODERS[fmt]
     payload = encoder(images)
     logger.info("[export] Encoded %d image(s) to %s format (%d bytes)", len(images), fmt, len(payload))

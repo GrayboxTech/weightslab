@@ -60,6 +60,7 @@ Usage
    import weightslab as wl
 
    wl.export_annotations("cvat")                              # everything, under root_log_dir
+   wl.export_annotations("cvat", tags=["ToReview"])           # only samples tagged ToReview
    wl.export_annotations("label_studio", "val.json", origin="val_loader")
    wl.export_annotations("v7", "out/", class_names=["bg", "cat", "dog"])
 
@@ -71,6 +72,7 @@ See :doc:`user_functions` for the full :func:`wl.export_annotations` reference.
 
    weightslab export --format cvat                      # everything, CVAT XML, into "."
    weightslab export -f v7 out/ --origin val_loader      # V7/Darwin, val split only
+   weightslab export -f cvat --tag ToReview              # only samples tagged ToReview
 
 Connects over gRPC to a running experiment (``127.0.0.1:50051`` by default),
 same as ``weightslab cli``. See :doc:`user_commands` for every flag.
@@ -79,8 +81,30 @@ same as ``weightslab cli``. See :doc:`user_commands` for every flag.
 
 The "Export" button sits next to the Save and Grid settings controls in the
 Details panel. Clicking it opens a small format picker (CVAT / Label
-Studio / V7); the chosen format triggers an ``ExportAnnotations`` gRPC call
-and the response downloads as a file in your browser.
+Studio / V7) with an optional tag selector; the chosen format (and tags, if
+any) trigger an ``ExportAnnotations`` gRPC call and the response downloads
+as a file in your browser.
+
+**In-app chat agent**
+
+Because the chat agent (see :doc:`agent`) has general tool access to the
+live experiment process, you can also just ask for this in plain language --
+e.g. "export the samples tagged ToReview to CVAT format for relabeling" --
+and it calls :func:`wl.export_annotations` with the matching ``tags=``
+argument itself. No special wiring is needed beyond the API existing.
+
+Filtering by tag
+------------------
+
+All three entry points accept a tag filter (``tags=`` in Python, ``--tag`` on
+the CLI, repeatable; the tag picker in the UI) that restricts the export to
+samples carrying **any** of the given tags -- boolean tags set via
+:func:`wl.tag_samples` or categorical values set via
+:func:`wl.set_categorical_tag` both work, since they share the same
+``tag:<name>`` column. Omit it to export every sample. This is the mechanism
+for a "send only what needs another look" relabeling handoff, e.g. tagging
+uncertain samples as ``ToReview`` during data exploration and exporting just
+that subset.
 
 How annotations are resolved
 ------------------------------

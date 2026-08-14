@@ -1394,6 +1394,7 @@ export_annotations
        origin=None,
        class_names=None,
        use_predictions=False,
+       tags=None,
    )
 
 **Purpose**
@@ -1417,6 +1418,10 @@ reference and known limitations (image-path/class-name resolution).
   Without either, labels fall back to ``"class_<id>"``.
 - ``use_predictions`` *(bool)* — export model predictions instead of
   ground-truth targets. Default ``False``.
+- ``tags`` *(list of str, optional)* — restrict to samples carrying ANY of
+  these tags (``tag:`` prefix optional, e.g. ``["ToReview"]``), matching a
+  boolean tag from :func:`tag_samples` or a categorical value from
+  :func:`set_categorical_tag`. ``None`` (default) exports every sample.
 
 **Examples**
 
@@ -1430,6 +1435,10 @@ Export only the validation split to Label Studio, with explicit class names::
         "label_studio", "val_annotations.json",
         origin="val_loader", class_names=["background", "cat", "dog"],
     )
+
+Export only the samples tagged "ToReview" to CVAT, for a relabeling pass::
+
+    wl.export_annotations("cvat", tags=["ToReview"])
 
 ai_report_generation
 --------------------

@@ -32,7 +32,7 @@ from weightslab.backend import ledgers
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_INTERVAL_SECONDS = 45.0
+DEFAULT_INTERVAL_SECONDS = 15.0
 DEFAULT_CATEGORIES = ("cpu", "memory", "gpu", "disk", "network", "process")
 
 

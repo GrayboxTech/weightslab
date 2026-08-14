@@ -236,6 +236,8 @@ commands:
                              OUTPUT            file path or directory (default: ".")
                              --origin O        restrict to one split/loader (default: all)
                              --predictions     export model predictions, not ground truth
+                             --tag TAG         restrict to samples with this tag; repeat for
+                                               multiple (matches ANY), default: all samples
                              --host H          backend host (default: 127.0.0.1)
                              --port N          backend gRPC port (default: 50051)
 
@@ -257,6 +259,7 @@ examples:
   weightslab tunnel bore.pub:12345    # expose a remote (Colab) backend at localhost:50051
   weightslab export --format cvat     # export all annotations to CVAT XML in "."
   weightslab export -f v7 out/ --origin val_loader   # V7/Darwin, val split only, into out/
+  weightslab export -f cvat --tag ToReview            # only samples tagged ToReview, for relabeling
 """
 
 
@@ -667,6 +670,7 @@ def export_annotations_cli(args):
         format=getattr(pb2, _EXPORT_FORMAT_VALUES[args.format]),
         origin=args.origin or "",
         include_predictions=bool(args.predictions),
+        tags=args.tags or [],
     )
     try:
         response = stub.ExportAnnotations(request, timeout=120)
@@ -983,6 +987,11 @@ def _build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument(
         '--predictions', action='store_true',
         help="Export model predictions instead of ground-truth targets.")
+    export_parser.add_argument(
+        '--tag', dest='tags', action='append', default=None,
+        help="Restrict to samples carrying this tag (e.g. ToReview). Repeat "
+             "for multiple tags -- a sample matching ANY of them is included. "
+             "Default: all samples.")
     export_parser.add_argument(
         '--host', default=None, help="Backend host to connect to (default: 127.0.0.1)")
     export_parser.add_argument(

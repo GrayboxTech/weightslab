@@ -735,6 +735,7 @@ message ExportAnnotationsRequest {
   AnnotationExportFormat format = 1;
   string origin = 2;              // restrict to one split/loader; "" = all loaders
   bool include_predictions = 3;   // export model predictions instead of ground-truth targets
+  repeated string tags = 4;       // restrict to samples carrying ANY of these tags (tag: prefix optional); empty = all samples
 }
 
 message ExportAnnotationsResponse {
