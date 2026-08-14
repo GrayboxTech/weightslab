@@ -567,6 +567,41 @@ subclass) that unwinds the stack and releases the lock via ``finally`` /
        detected.  Useful when running under a process supervisor (e.g. systemd) that handles the restart externally.
 
 
+Resource Monitoring
+~~~~~~~~~~~~~~~~~~~~
+
+Enabled by default: a background thread samples CPU, memory, disk, network,
+GPU (NVML), and process-level usage and logs each value as a signal, visible
+in Weights Studio like any other loss/metric curve. See
+:doc:`resource_monitoring` for the full metric list, the ``resource_monitoring.yaml``
+schema, and category-level toggles.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Variable
+     - Default
+     - Description
+   * - ``WEIGHTSLAB_DISABLE_RESOURCE_MONITORING``
+     - ``0``
+     - If set to ``1`` / ``true`` / ``yes`` / ``on``, disables resource
+       monitoring entirely.
+   * - ``WL_RESOURCE_MONITOR_INTERVAL_SECONDS``
+     - ``15``
+     - How often (seconds) the monitor samples and logs a new batch of metrics.
+   * - ``WL_RESOURCE_MONITOR_CATEGORIES``
+     - *(unset — all on)*
+     - Comma-separated category allowlist (``cpu``, ``memory``, ``disk``,
+       ``network``, ``process``, ``gpu``). Anything not listed is disabled.
+   * - ``WL_RESOURCE_MONITOR_DISK_PATH``
+     - OS root
+     - Filesystem path reported by the ``disk`` category's usage metrics.
+   * - ``WL_RESOURCE_MONITOR_CONFIG_PATH``
+     - *(empty)*
+     - Optional directory override for ``resource_monitoring.yaml``.
+
+
 Data and Cache
 ~~~~~~~~~~~~~~
 

@@ -109,6 +109,12 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       Ask the agent for a branded HTML report: signal health plots, dataset stats, and a written analysis.
 
+   .. grid-item-card:: Annotation Export
+      :link: export
+      :link-type: doc
+
+      Export bounding boxes and segmentation masks to CVAT, Label Studio, or V7 for relabeling.
+
    .. grid-item-card:: gRPC Communication
       :link: grpc/index
       :link-type: doc
@@ -156,6 +162,8 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    agent
    hyperparameters
    logger
+   resource_monitoring
+   export
    checkpointing
    experiment_reports
    .. weights_studio
