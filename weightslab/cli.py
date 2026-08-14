@@ -673,7 +673,11 @@ def export_annotations_cli(args):
         tags=args.tags or [],
     )
     try:
-        response = stub.ExportAnnotations(request, timeout=120)
+        metadata = []
+        token = os.getenv("GRPC_AUTH_TOKEN", "").strip()
+        if token:
+            metadata.append(("authorization", f"Bearer {token}"))
+        response = stub.ExportAnnotations(request, timeout=120, metadata=metadata or None)
     except grpc.RpcError as exc:
         logger.error(f"Export RPC failed: {exc}")
         sys.exit(1)
