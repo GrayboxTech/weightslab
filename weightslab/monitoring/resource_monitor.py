@@ -27,9 +27,12 @@ from typing import Dict, Optional
 import psutil
 import yaml
 
+from weightslab.backend import ledgers
+
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_INTERVAL_SECONDS = 15.0
+DEFAULT_INTERVAL_SECONDS = 45.0
 DEFAULT_CATEGORIES = ("cpu", "memory", "gpu", "disk", "network", "process")
 
 
@@ -168,7 +171,7 @@ class ResourceMonitor:
                 logger.exception("[ResourceMonitor] Unexpected error while sampling resources")
 
     def _tick(self) -> None:
-        step = int(round(time.monotonic() - self._start_monotonic))
+        step = int(round(time.monotonic() - self._start_monotonic)) if ledgers.get_model() == None else ledgers.get_model().get_age()
         metrics: Dict[str, float] = {}
 
         if self._categories.get("cpu", True):
