@@ -66,14 +66,20 @@ def save_export(fmt: str, output_path: str, **kwargs) -> str:
     """
     payload, default_filename, _mime_type, image_count = export_annotations(fmt, **kwargs)
 
-    if os.path.isdir(output_path) or output_path.endswith(("/", "\\")):
+    _root, _ext = os.path.splitext(output_path)
+    treat_as_dir = (
+        os.path.isdir(output_path)
+        or output_path.endswith(("/", "\\"))
+        or (_ext == "" and not os.path.exists(output_path))
+    )
+
+    if treat_as_dir:
         os.makedirs(output_path, exist_ok=True)
         output_path = os.path.join(output_path, default_filename)
     else:
         parent = os.path.dirname(output_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-
     with open(output_path, "wb") as f:
         f.write(payload)
 
