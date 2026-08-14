@@ -42,7 +42,7 @@ def _is_bbox_array(value: Any) -> bool:
         arr = np.asanyarray(value)
     except Exception:
         return False
-    return arr.ndim == 2 and arr.shape[-1] in range(3, 10)
+    return arr.ndim == 2 and arr.shape[-1] in range(4, 7)
 
 
 def _boxes_from_cell(value: Any) -> List[Tuple[float, float, float, float, Optional[int]]]:
