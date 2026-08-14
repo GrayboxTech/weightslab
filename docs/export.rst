@@ -60,9 +60,9 @@ Usage
    import weightslab as wl
 
    wl.export_annotations("cvat")                              # everything, under root_log_dir
+   wl.export_annotations("cvat", tags=["ToReview"])           # only samples tagged ToReview
    wl.export_annotations("label_studio", "val.json", origin="val_loader")
    wl.export_annotations("v7", "out/", class_names=["bg", "cat", "dog"])
-   wl.export_annotations("cvat", tags=["ToReview"])           # only samples tagged ToReview
 
 See :doc:`user_functions` for the full :func:`wl.export_annotations` reference.
 
