@@ -73,6 +73,14 @@ message GetLatestLoggerDataRequest {
   string graph_name = 5;           // specific signal/graph name to filter (used when break_by_slices=true)
 }
 
+// One sample whose signal value at a step sits far off the curve's own trend.
+// Emitted alongside the averaged point it was averaged into, so the UI can show
+// "this step's mean is 0.39, but sample 8123 contributed 2.71".
+message SignalOutlier {
+  string sample_id = 1;
+  float value = 2;                 // that sample's raw signal value at this step
+}
+
 message LoggerDataPoint {
   string metric_name = 1;          // The metric/signal name (e.g., "train/loss", "eval/accuracy")
   int32 model_age = 2;
@@ -85,6 +93,16 @@ message LoggerDataPoint {
   repeated string evaluation_tags = 9;
   string point_note = 10;
   bool audit_mode = 11;            // True if logged during audit mode (read-only inspection)
+  // Samples in this step's batch that deviated from the curve's rolling trend,
+  // strongest first and capped at WL_SIGNAL_OUTLIER_TOP_N. Empty for the common
+  // case where the whole batch tracked the trend.
+  repeated SignalOutlier outliers = 12;
+  // How many samples in the batch were flagged, before the top-N cap. Lets the
+  // UI tell "one sample spiked" apart from "the entire batch is off-trend".
+  int32 outlier_count = 13;
+  // Batch size the average was taken over, so outlier_count can be read as a
+  // fraction of the batch rather than an absolute.
+  int32 sample_count = 14;
 }
 
 message GetLatestLoggerDataResponse {
