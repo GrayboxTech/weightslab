@@ -111,6 +111,11 @@ def _logger_point_pb(metric_name: str, entry: dict, sample_id: str = "") -> "pb2
         outliers=_outliers_pb(entry),
         outlier_count=int(entry.get("outlier_count", 0) or 0),
         sample_count=int(entry.get("sample_count", 0) or 0),
+        trend_value=float(entry.get("trend_value") or 0.0),
+        trend_margin=float(entry.get("trend_margin") or 0.0),
+        # Explicit flag: a band of (0, 0) is indistinguishable from "no band" on
+        # the wire, since proto3 scalars have no presence.
+        has_trend_band=entry.get("trend_value") is not None,
     )
 
 

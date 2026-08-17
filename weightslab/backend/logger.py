@@ -50,7 +50,8 @@ logger = logging.getLogger(__name__)
 _SIGNAL_COLS = [
     "metric_name", "experiment_hash", "step", "metric_value", "timestamp",
     "audit_mode", "is_evaluation_marker", "split_name", "evaluation_tags",
-    "point_note", "outliers", "outlier_count", "sample_count", "seq",
+    "point_note", "outliers", "outlier_count", "sample_count",
+    "trend_value", "trend_margin", "seq",
 ]
 _SAMPLE_COLS = ["metric_name", "experiment_hash", "sample_id", "step", "value", "seq"]
 _INSTANCE_COLS = [
@@ -410,6 +411,8 @@ class LoggerQueue:
                 outliers VARCHAR,
                 outlier_count INTEGER,
                 sample_count INTEGER,
+                trend_value DOUBLE,
+                trend_margin DOUBLE,
                 seq BIGINT
             );
             CREATE TABLE IF NOT EXISTS {prefix}per_sample (
@@ -441,6 +444,10 @@ class LoggerQueue:
         ("outliers", "VARCHAR", "''"),
         ("outlier_count", "INTEGER", "0"),
         ("sample_count", "INTEGER", "0"),
+        # NULL (not 0) so "no band recorded" stays distinguishable from a real
+        # band centred on zero.
+        ("trend_value", "DOUBLE", "NULL"),
+        ("trend_margin", "DOUBLE", "NULL"),
     )
 
     def _ensure_tables(self) -> None:
@@ -669,13 +676,17 @@ class LoggerQueue:
 
     def _stage_signal_row(self, graph_name, exp_hash, step, metric_value, timestamp,
                           audit_mode, is_marker, split_name, eval_tags, point_note,
-                          outliers=None, outlier_count=0, sample_count=0):
+                          outliers=None, outlier_count=0, sample_count=0,
+                          trend_value=None, trend_margin=None):
         self._stage_signals.append((
             graph_name, exp_hash, int(step), float(metric_value), int(timestamp),
             bool(audit_mode), bool(is_marker), split_name or "",
             json.dumps(list(eval_tags or [])), point_note or "",
             json.dumps(list(outliers)) if outliers else "",
-            int(outlier_count), int(sample_count), self._next_seq(),
+            int(outlier_count), int(sample_count),
+            None if trend_value is None else float(trend_value),
+            None if trend_margin is None else float(trend_margin),
+            self._next_seq(),
         ))
         self._maybe_autoflush()
 
@@ -799,18 +810,28 @@ class LoggerQueue:
             signal_entry["evaluation_tags"] = list(evaluation_tags or [])
 
         outliers, outlier_count = [], 0
+        trend_value, trend_margin = None, None
         sample_count = len(batch_samples) if batch_samples else 0
-        if batch_samples and _outliers_enabled():
+        if _outliers_enabled() and not is_marker:
             tracker = self._trend_trackers[(graph_name, exp_hash)]
-            # Detect against the trend as it stood BEFORE this step, so a spike
-            # is measured against clean history instead of partly against itself.
-            outliers, outlier_count = tracker.find_outliers(batch_samples)
+            # Snapshot the band BEFORE folding this point in, so a spike is
+            # measured against clean history instead of partly against itself.
+            # This is the same band find_outliers uses, which is what lets the UI
+            # draw the region a flagged sample fell outside of.
+            margin = tracker.margin()
+            if margin is not None:
+                trend_value, trend_margin = tracker.ema, margin
+            if batch_samples:
+                outliers, outlier_count = tracker.find_outliers(batch_samples)
             tracker.observe(metric_value)
         if outliers:
             signal_entry["outliers"] = outliers
             signal_entry["outlier_count"] = outlier_count
         if sample_count:
             signal_entry["sample_count"] = sample_count
+        if trend_value is not None:
+            signal_entry["trend_value"] = trend_value
+            signal_entry["trend_margin"] = trend_margin
 
         with self._lock:
             self._stage_signal_row(
@@ -819,6 +840,7 @@ class LoggerQueue:
                 list(evaluation_tags or []), "",
                 outliers=outliers, outlier_count=outlier_count,
                 sample_count=sample_count,
+                trend_value=trend_value, trend_margin=trend_margin,
             )
         return signal_entry
 
@@ -1221,14 +1243,14 @@ class LoggerQueue:
                 """
                 SELECT metric_name, experiment_hash, step, metric_value, timestamp,
                        audit_mode, is_evaluation_marker, split_name, evaluation_tags, point_note,
-                       outliers, outlier_count, sample_count
+                       outliers, outlier_count, sample_count, trend_value, trend_margin
                 FROM signals ORDER BY seq
                 """
             ).fetchall()
 
         result: dict = {}
         for (metric, h, step, val, ts, audit, marker, split, tags, note,
-             outliers, outlier_count, sample_count) in rows:
+             outliers, outlier_count, sample_count, trend_value, trend_margin) in rows:
             entry = {
                 "model_age": step,
                 "metric_name": metric,
@@ -1248,6 +1270,9 @@ class LoggerQueue:
                 entry["outlier_count"] = int(outlier_count or 0)
             if sample_count:
                 entry["sample_count"] = int(sample_count)
+            if trend_value is not None and trend_margin is not None:
+                entry["trend_value"] = float(trend_value)
+                entry["trend_margin"] = float(trend_margin)
             result.setdefault(metric, {}).setdefault(h, {}).setdefault(step, []).append(entry)
         return result
 
@@ -1791,6 +1816,8 @@ class LoggerQueue:
                     outliers=entry.get("outliers") or None,
                     outlier_count=int(entry.get("outlier_count", 0) or 0),
                     sample_count=int(entry.get("sample_count", 0) or 0),
+                    trend_value=entry.get("trend_value"),
+                    trend_margin=entry.get("trend_margin"),
                 )
 
         if isinstance(signals, dict):

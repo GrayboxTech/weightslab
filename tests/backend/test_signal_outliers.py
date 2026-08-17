@@ -177,6 +177,135 @@ class AddScalarsOutlierTest(unittest.TestCase):
         self.assertTrue(all(not e.get("outliers") for e in entries.values()))
 
 
+class TrendBandTest(unittest.TestCase):
+    """The band the UI draws is the SAME band detection judges against.
+
+    Drawing it is what makes an anomaly legible: unlike smoothing (which averages
+    a spike toward its neighbours and hides it), the band leaves values alone and
+    a value outside it reads as off-trend.
+    """
+
+    def test_no_band_during_warmup(self):
+        lg = _lg()
+        _warm_and_spike(lg, spike=None, calm_steps=40)
+        entries = _entries(lg)
+        self.assertNotIn("trend_value", entries[0])
+        self.assertNotIn("trend_margin", entries[0])
+
+    def test_band_present_once_warm(self):
+        lg = _lg()
+        _warm_and_spike(lg, spike=None, calm_steps=40)
+        entry = _entries(lg)[20]
+        self.assertIn("trend_value", entry)
+        self.assertGreater(entry["trend_margin"], 0.0)
+        self.assertAlmostEqual(entry["trend_value"], 0.40, places=2)
+
+    def test_outlier_falls_outside_its_own_band(self):
+        """The dot the UI draws must land outside the region it draws, or the
+        visual wouldn't mean anything."""
+        lg = _lg()
+        step = _warm_and_spike(lg, spike=5.0)
+        entry = _entries(lg)[step]
+
+        low = entry["trend_value"] - entry["trend_margin"]
+        high = entry["trend_value"] + entry["trend_margin"]
+        outlier_value = entry["outliers"][0]["value"]
+        self.assertFalse(low <= outlier_value <= high)
+        # The step MEAN is dragged outside too, so the curve visibly leaves the
+        # band — the Neptune-style cue, not just a lone marker.
+        self.assertFalse(low <= entry["metric_value"] <= high)
+
+    def test_band_is_the_one_detection_used(self):
+        """Band and flag must be consistent: a step with a band but no outlier
+        should have all its samples inside that band."""
+        lg = _lg()
+        _warm_and_spike(lg, spike=None, calm_steps=40, calm_value=0.40)
+        entry = _entries(lg)[25]
+        low = entry["trend_value"] - entry["trend_margin"]
+        high = entry["trend_value"] + entry["trend_margin"]
+        self.assertNotIn("outliers", entry)
+        self.assertTrue(low <= 0.40 <= high)
+
+    def test_signals_without_per_sample_data_still_get_a_band(self):
+        """A band describes the CURVE, so an aggregate-only signal gets one even
+        though it has no samples to attribute an outlier to."""
+        lg = _lg()
+        for step in range(40):
+            lg.add_scalars("lr", {"lr": 0.001}, step, {}, aggregate_by_step=False)
+        entry = _entries(lg, "lr")[30]
+        self.assertIn("trend_value", entry)
+        self.assertNotIn("outliers", entry)
+
+    def test_eval_markers_do_not_carry_a_band(self):
+        """Eval markers are separate points under their own hash; folding them
+        into the training curve's trend would corrupt it."""
+        lg = _lg()
+        _warm_and_spike(lg, spike=None, calm_steps=40)
+        lg.start_evaluation_mode("evalhash_1", "test_loader", [])
+        lg.add_scalars("train/loss", {}, 41, {"a": 0.4, "b": 0.5}, aggregate_by_step=True)
+        results = lg.stop_evaluation_mode(41)
+        self.assertTrue(results)
+
+        marker = None
+        for steps in lg.get_signal_history()["train/loss"].values():
+            for entries in steps.values():
+                for entry in entries:
+                    if entry.get("is_evaluation_marker"):
+                        marker = entry
+        self.assertIsNotNone(marker)
+        self.assertNotIn("trend_value", marker)
+
+    def test_band_disabled_with_outliers(self):
+        lg = _lg()
+        with patch.dict(os.environ, {"WL_SIGNAL_OUTLIER_ENABLED": "0"}):
+            _warm_and_spike(lg, spike=None, calm_steps=40)
+        self.assertNotIn("trend_value", _entries(lg)[20])
+
+    def test_band_survives_the_db_round_trip(self):
+        import tempfile
+        db_path = os.path.join(tempfile.mkdtemp(), "band.duckdb")
+        lg = _lg()
+        lg.set_db_path(db_path)
+        _warm_and_spike(lg, spike=None, calm_steps=40)
+        lg._flush_stage()
+        entry = _entries(lg)[20]
+        self.assertIn("trend_value", entry)
+        self.assertIn("trend_margin", entry)
+
+    def test_load_signal_history_round_trips_the_band(self):
+        lg = _lg()
+        lg.load_signal_history({
+            "m": {"h": {3: [{
+                "metric_value": 1.0, "timestamp": 0,
+                "trend_value": 0.9, "trend_margin": 0.25,
+            }]}}
+        })
+        entry = _entries(lg, "m")[3]
+        self.assertAlmostEqual(entry["trend_value"], 0.9)
+        self.assertAlmostEqual(entry["trend_margin"], 0.25)
+
+    def test_service_forwards_the_band_with_a_presence_flag(self):
+        from weightslab.trainer.services.experiment_service import _logger_point_pb
+
+        with_band = _logger_point_pb("m", {
+            "model_age": 1, "metric_value": 1.0,
+            "trend_value": 0.0, "trend_margin": 0.0,
+        })
+        # A genuine zero-centred, zero-width band must not read as absent —
+        # proto3 scalars have no presence, hence the explicit flag.
+        self.assertTrue(with_band.has_trend_band)
+
+        without = _logger_point_pb("m", {"model_age": 1, "metric_value": 1.0})
+        self.assertFalse(without.has_trend_band)
+
+        real = _logger_point_pb("m", {
+            "model_age": 1, "trend_value": 0.41, "trend_margin": 0.05,
+        })
+        self.assertTrue(real.has_trend_band)
+        self.assertAlmostEqual(real.trend_value, 0.41, places=5)
+        self.assertAlmostEqual(real.trend_margin, 0.05, places=5)
+
+
 class StepOutlierIdsTest(unittest.TestCase):
     def test_returns_ids_for_the_step(self):
         lg = _lg()

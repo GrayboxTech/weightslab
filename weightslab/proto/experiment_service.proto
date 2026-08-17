@@ -103,6 +103,15 @@ message LoggerDataPoint {
   // Batch size the average was taken over, so outlier_count can be read as a
   // fraction of the batch rather than an absolute.
   int32 sample_count = 14;
+  // The on-trend band this point was judged against: centre (the rolling EMA of
+  // the curve) and half-width. Plotting it as an error band with a visible
+  // border is what makes an anomaly legible — a value outside the band reads as
+  // off-trend at a glance, and it shows WHY a sample was flagged. Distinct from
+  // curve smoothing, which averages spikes away rather than exposing them.
+  // has_trend_band is false while the tracker is still warming up.
+  float trend_value = 15;
+  float trend_margin = 16;
+  bool has_trend_band = 17;
 }
 
 message GetLatestLoggerDataResponse {
