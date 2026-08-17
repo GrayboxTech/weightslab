@@ -113,9 +113,12 @@ def _logger_point_pb(metric_name: str, entry: dict, sample_id: str = "") -> "pb2
         sample_count=int(entry.get("sample_count", 0) or 0),
         trend_value=float(entry.get("trend_value") or 0.0),
         trend_margin=float(entry.get("trend_margin") or 0.0),
-        # Explicit flag: a band of (0, 0) is indistinguishable from "no band" on
+        # Explicit flags: a band of (0, 0) is indistinguishable from "no band" on
         # the wire, since proto3 scalars have no presence.
         has_trend_band=entry.get("trend_value") is not None,
+        value_min=float(entry.get("value_min") or 0.0),
+        value_max=float(entry.get("value_max") or 0.0),
+        has_value_range=entry.get("value_min") is not None,
     )
 
 
@@ -248,6 +251,51 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             _level = logger.warning if elapsed_ms > 2000 else logger.debug
             _level("GetLatestLoggerData: done elapsed=%.1fms in_flight_peak=%d client_active=%s",
                    elapsed_ms, _in_flight, _active)
+
+    def GetStepSamples(self, request, context):
+        """Return every sample id behind one plotted step.
+
+        The plot's "Highlight step samples" action shows the whole batch for a
+        point, so the answer must come from the per-sample table rather than from
+        the outlier list recorded on the aggregated point.
+        """
+        self._ctx.ensure_components()
+        signal_logger = self._ctx.components.get("signal_logger")
+        if signal_logger is None:
+            return pb2.StepSamplesResponse(
+                success=False, message="Signal logger unavailable")
+
+        metric_name = str(request.metric_name or "")
+        if not metric_name:
+            return pb2.StepSamplesResponse(
+                success=False, message="metric_name is required")
+
+        try:
+            sample_ids, total = signal_logger.get_step_sample_ids(
+                metric_name,
+                str(request.experiment_hash or ""),
+                int(request.model_age),
+                int(request.max_samples or 0),
+            )
+        except Exception as exc:
+            logger.exception("GetStepSamples failed for %s", metric_name)
+            return pb2.StepSamplesResponse(success=False, message=str(exc))
+
+        if not sample_ids:
+            # Not an error: signals that log only an aggregate have no per-sample
+            # rows, and the UI needs to tell that apart from a failure.
+            return pb2.StepSamplesResponse(
+                success=True,
+                message=f"No per-sample data recorded for {metric_name} at step {request.model_age}",
+                sample_ids=[], total_available=0,
+            )
+
+        return pb2.StepSamplesResponse(
+            success=True,
+            message=f"{len(sample_ids)} of {total} sample(s)",
+            sample_ids=sample_ids,
+            total_available=total,
+        )
 
     def _get_latest_logger_data_impl(self, request, context):
         self._ctx.ensure_components()

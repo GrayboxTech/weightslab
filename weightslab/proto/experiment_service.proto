@@ -30,6 +30,10 @@ service ExperimentService {
   // downsampled to at most max_points and is only included when the sample has
   // at least 3 recorded points.
   rpc GetSignalTrajectory (GetSignalTrajectoryRequest) returns (GetSignalTrajectoryResponse);
+  // Every sample id that contributed to one step of one signal. Backs the plot's
+  // right-click "Highlight step samples": the whole batch behind a point, not
+  // just the samples that were flagged as off-trend.
+  rpc GetStepSamples (StepSamplesRequest) returns (StepSamplesResponse);
   // Raw point cloud of one sample (task_type "detection_pointcloud"), server-streamed
   // in binary chunks for the interactive 3D viewer.
   rpc GetPointCloud (PointCloudRequest) returns (stream PointCloudChunk);
@@ -104,14 +108,20 @@ message LoggerDataPoint {
   // fraction of the batch rather than an absolute.
   int32 sample_count = 14;
   // The on-trend band this point was judged against: centre (the rolling EMA of
-  // the curve) and half-width. Plotting it as an error band with a visible
-  // border is what makes an anomaly legible — a value outside the band reads as
-  // off-trend at a glance, and it shows WHY a sample was flagged. Distinct from
-  // curve smoothing, which averages spikes away rather than exposing them.
-  // has_trend_band is false while the tracker is still warming up.
+  // the curve) and half-width. Not drawn directly; it is what decides which
+  // samples count as off-trend. has_trend_band is false while the tracker is
+  // still warming up.
   float trend_value = 15;
   float trend_margin = 16;
   bool has_trend_band = 17;
+  // ABSOLUTE extremes of this step's batch — the real lowest and highest sample
+  // values, not a standard deviation. This is what the UI draws as the error
+  // band around the curve, so a step containing an outlier makes the band spike
+  // out to that value instead of averaging it away.
+  // has_value_range is false for signals that log no per-sample data.
+  float value_min = 18;
+  float value_max = 19;
+  bool has_value_range = 20;
 }
 
 message GetLatestLoggerDataResponse {
@@ -517,6 +527,21 @@ message GetMetaDataResponse {
 }
 
 // --- On-demand per-signal trajectory (right-click a signal -> plot) ---
+// --- All samples behind one plotted step ---
+message StepSamplesRequest {
+  string metric_name = 1;
+  string experiment_hash = 2;   // "" = any run
+  int32 model_age = 3;
+  int32 max_samples = 4;        // 0 => no cap
+}
+
+message StepSamplesResponse {
+  bool success = 1;
+  string message = 2;
+  repeated string sample_ids = 3;
+  int32 total_available = 4;    // count before max_samples truncation
+}
+
 message GetSignalTrajectoryRequest {
   string signal_name = 1;            // signal to plot (UI spelling; resolved server-side)
   repeated string sample_ids = 2;    // samples currently shown to plot for

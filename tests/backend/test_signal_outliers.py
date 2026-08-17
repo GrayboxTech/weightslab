@@ -452,3 +452,123 @@ class ServiceDownsampleTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ValueRangeTest(unittest.TestCase):
+    """The error band is drawn from the batch's ABSOLUTE extremes.
+
+    That choice is what makes an outlier visible: min/max reach the outlier's own
+    value, so the band spikes out to it, whereas a standard deviation would
+    average it down toward the batch mean.
+    """
+
+    def test_range_recorded_per_step(self):
+        lg = _lg()
+        for step in range(5):
+            lg.add_scalars("m", {}, step, {"a": 0.2, "b": 0.8}, aggregate_by_step=True)
+        lg.add_scalars("m", {}, 5, {"a": 0.5}, aggregate_by_step=True)
+
+        entry = _entries(lg, "m")[2]
+        self.assertAlmostEqual(entry["value_min"], 0.2)
+        self.assertAlmostEqual(entry["value_max"], 0.8)
+        # The curve itself stays the mean.
+        self.assertAlmostEqual(entry["metric_value"], 0.5)
+
+    def test_range_spikes_to_the_outlier(self):
+        lg = _lg()
+        step = _warm_and_spike(lg, spike=5.0)
+        entry = _entries(lg)[step]
+        self.assertAlmostEqual(entry["value_max"], 5.0)
+        # A std-based band would have stayed near the mean; min/max reaches it.
+        self.assertGreater(entry["value_max"], entry["metric_value"])
+
+    def test_no_range_without_per_sample_data(self):
+        lg = _lg()
+        for step in range(5):
+            lg.add_scalars("lr", {"lr": 0.001}, step, {}, aggregate_by_step=False)
+        self.assertNotIn("value_min", _entries(lg, "lr")[2])
+
+    def test_range_survives_db_round_trip_and_restore(self):
+        import tempfile
+        db_path = os.path.join(tempfile.mkdtemp(), "range.duckdb")
+        lg = _lg()
+        lg.set_db_path(db_path)
+        lg.add_scalars("m", {}, 0, {"a": 1.0, "b": 3.0}, aggregate_by_step=True)
+        lg.add_scalars("m", {}, 1, {"a": 2.0}, aggregate_by_step=True)
+        lg._flush_stage()
+        entry = _entries(lg, "m")[0]
+        self.assertAlmostEqual(entry["value_min"], 1.0)
+        self.assertAlmostEqual(entry["value_max"], 3.0)
+
+        restored = _lg()
+        restored.load_signal_history({
+            "m": {"h": {9: [{"metric_value": 2.0, "timestamp": 0,
+                             "value_min": 1.0, "value_max": 3.0}]}}
+        })
+        self.assertAlmostEqual(_entries(restored, "m")[9]["value_max"], 3.0)
+
+    def test_service_forwards_the_range_with_a_presence_flag(self):
+        from weightslab.trainer.services.experiment_service import _logger_point_pb
+
+        point = _logger_point_pb("m", {
+            "model_age": 1, "metric_value": 0.9, "value_min": 0.39, "value_max": 5.0,
+        })
+        self.assertTrue(point.has_value_range)
+        self.assertAlmostEqual(point.value_min, 0.39, places=5)
+        self.assertAlmostEqual(point.value_max, 5.0, places=5)
+
+        # A genuine all-zero range must not read as absent.
+        zeroed = _logger_point_pb("m", {"model_age": 1, "value_min": 0.0, "value_max": 0.0})
+        self.assertTrue(zeroed.has_value_range)
+
+        absent = _logger_point_pb("m", {"model_age": 1})
+        self.assertFalse(absent.has_value_range)
+
+
+class StepSampleIdsTest(unittest.TestCase):
+    """Backs "Highlight step samples", which shows the WHOLE batch behind a point."""
+
+    def _logged(self):
+        lg = _lg()
+        for step in range(3):
+            lg.add_scalars("m", {}, step,
+                           {str(i): 0.5 for i in range(4)}, aggregate_by_step=True)
+        lg.add_scalars("m", {}, 3, {"0": 0.5}, aggregate_by_step=True)
+        return lg
+
+    def test_returns_every_sample_not_just_outliers(self):
+        lg = self._logged()
+        ids, total = lg.get_step_sample_ids("m", None, 1)
+        self.assertEqual(ids, ["0", "1", "2", "3"])
+        self.assertEqual(total, 4)
+
+    def test_empty_for_a_step_with_no_per_sample_rows(self):
+        lg = self._logged()
+        ids, total = lg.get_step_sample_ids("m", None, 99)
+        self.assertEqual((ids, total), ([], 0))
+
+    def test_hash_filter(self):
+        lg = self._logged()
+        self.assertEqual(lg.get_step_sample_ids("m", "nope", 1), ([], 0))
+
+    def test_cap_reports_the_true_total(self):
+        lg = self._logged()
+        ids, total = lg.get_step_sample_ids("m", None, 1, max_samples=2)
+        self.assertEqual(len(ids), 2)
+        self.assertEqual(total, 4, "total must be the pre-cap count")
+
+    def test_numeric_aware_ordering(self):
+        """'9' must precede '10' — string ordering would invert them."""
+        lg = _lg()
+        lg.add_scalars("m", {}, 0, {"9": 0.1, "10": 0.2, "2": 0.3},
+                       aggregate_by_step=True)
+        lg.add_scalars("m", {}, 1, {"9": 0.1}, aggregate_by_step=True)
+        ids, _ = lg.get_step_sample_ids("m", None, 0)
+        self.assertEqual(ids, ["2", "9", "10"])
+
+    def test_non_numeric_ids_fall_back_to_text_order(self):
+        lg = _lg()
+        lg.add_scalars("m", {}, 0, {"img_b": 0.1, "img_a": 0.2}, aggregate_by_step=True)
+        lg.add_scalars("m", {}, 1, {"img_a": 0.1}, aggregate_by_step=True)
+        ids, _ = lg.get_step_sample_ids("m", None, 0)
+        self.assertEqual(ids, ["img_a", "img_b"])

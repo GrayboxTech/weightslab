@@ -51,7 +51,7 @@ _SIGNAL_COLS = [
     "metric_name", "experiment_hash", "step", "metric_value", "timestamp",
     "audit_mode", "is_evaluation_marker", "split_name", "evaluation_tags",
     "point_note", "outliers", "outlier_count", "sample_count",
-    "trend_value", "trend_margin", "seq",
+    "trend_value", "trend_margin", "value_min", "value_max", "seq",
 ]
 _SAMPLE_COLS = ["metric_name", "experiment_hash", "sample_id", "step", "value", "seq"]
 _INSTANCE_COLS = [
@@ -413,6 +413,8 @@ class LoggerQueue:
                 sample_count INTEGER,
                 trend_value DOUBLE,
                 trend_margin DOUBLE,
+                value_min DOUBLE,
+                value_max DOUBLE,
                 seq BIGINT
             );
             CREATE TABLE IF NOT EXISTS {prefix}per_sample (
@@ -448,6 +450,8 @@ class LoggerQueue:
         # band centred on zero.
         ("trend_value", "DOUBLE", "NULL"),
         ("trend_margin", "DOUBLE", "NULL"),
+        ("value_min", "DOUBLE", "NULL"),
+        ("value_max", "DOUBLE", "NULL"),
     )
 
     def _ensure_tables(self) -> None:
@@ -677,7 +681,8 @@ class LoggerQueue:
     def _stage_signal_row(self, graph_name, exp_hash, step, metric_value, timestamp,
                           audit_mode, is_marker, split_name, eval_tags, point_note,
                           outliers=None, outlier_count=0, sample_count=0,
-                          trend_value=None, trend_margin=None):
+                          trend_value=None, trend_margin=None,
+                          value_min=None, value_max=None):
         self._stage_signals.append((
             graph_name, exp_hash, int(step), float(metric_value), int(timestamp),
             bool(audit_mode), bool(is_marker), split_name or "",
@@ -686,6 +691,8 @@ class LoggerQueue:
             int(outlier_count), int(sample_count),
             None if trend_value is None else float(trend_value),
             None if trend_margin is None else float(trend_margin),
+            None if value_min is None else float(value_min),
+            None if value_max is None else float(value_max),
             self._next_seq(),
         ))
         self._maybe_autoflush()
@@ -811,7 +818,16 @@ class LoggerQueue:
 
         outliers, outlier_count = [], 0
         trend_value, trend_margin = None, None
+        value_min, value_max = None, None
         sample_count = len(batch_samples) if batch_samples else 0
+
+        # Absolute extremes of the batch. These are the real lowest/highest
+        # sample values, so the band the UI draws from them spikes out to an
+        # outlier rather than averaging it down the way a std band would.
+        if batch_samples:
+            values = [value for _, value in batch_samples]
+            value_min, value_max = min(values), max(values)
+
         if _outliers_enabled() and not is_marker:
             tracker = self._trend_trackers[(graph_name, exp_hash)]
             # Snapshot the band BEFORE folding this point in, so a spike is
@@ -832,6 +848,9 @@ class LoggerQueue:
         if trend_value is not None:
             signal_entry["trend_value"] = trend_value
             signal_entry["trend_margin"] = trend_margin
+        if value_min is not None:
+            signal_entry["value_min"] = value_min
+            signal_entry["value_max"] = value_max
 
         with self._lock:
             self._stage_signal_row(
@@ -841,6 +860,7 @@ class LoggerQueue:
                 outliers=outliers, outlier_count=outlier_count,
                 sample_count=sample_count,
                 trend_value=trend_value, trend_margin=trend_margin,
+                value_min=value_min, value_max=value_max,
             )
         return signal_entry
 
@@ -1235,6 +1255,45 @@ class LoggerQueue:
                     ids.append(sample_id)
         return ids
 
+    def get_step_sample_ids(self, metric_name: str, experiment_hash: str,
+                            model_age: int, max_samples: int = 0) -> tuple:
+        """Every sample id that contributed to one step of one signal.
+
+        Backs the plot's "Highlight step samples" action, which shows the WHOLE
+        batch behind a point rather than only the off-trend members of it.
+
+        Args:
+            metric_name: Signal name.
+            experiment_hash: Restrict to one run; ``""``/``None`` means any.
+            model_age: The step.
+            max_samples: Cap on returned ids (0 = no cap).
+
+        Returns:
+            ``(ids, total_available)`` — *total_available* is the count before
+            the cap, so a caller can say "showing 200 of 4096".
+        """
+        with self._lock:
+            self._flush_stage()
+            params = [metric_name, int(model_age)]
+            sql = ("SELECT DISTINCT sample_id FROM per_sample "
+                   "WHERE metric_name = ? AND step = ?")
+            if experiment_hash:
+                sql += " AND experiment_hash = ?"
+                params.append(experiment_hash)
+            rows = self._conn.execute(sql, params).fetchall()
+
+        ids = [str(row[0]) for row in rows if row[0] is not None]
+        # Numeric-aware ordering so "9" precedes "10"; falls back to plain text
+        # for non-numeric ids.
+        try:
+            ids.sort(key=lambda value: (0, int(value)))
+        except ValueError:
+            ids.sort()
+        total = len(ids)
+        if max_samples and max_samples > 0:
+            ids = ids[:max_samples]
+        return ids, total
+
     def get_signal_history(self):
         """Reconstruct aggregated history as ``{metric: {hash: {step: [entry, ...]}}}``."""
         with self._lock:
@@ -1243,14 +1302,16 @@ class LoggerQueue:
                 """
                 SELECT metric_name, experiment_hash, step, metric_value, timestamp,
                        audit_mode, is_evaluation_marker, split_name, evaluation_tags, point_note,
-                       outliers, outlier_count, sample_count, trend_value, trend_margin
+                       outliers, outlier_count, sample_count, trend_value, trend_margin,
+                       value_min, value_max
                 FROM signals ORDER BY seq
                 """
             ).fetchall()
 
         result: dict = {}
         for (metric, h, step, val, ts, audit, marker, split, tags, note,
-             outliers, outlier_count, sample_count, trend_value, trend_margin) in rows:
+             outliers, outlier_count, sample_count, trend_value, trend_margin,
+             value_min, value_max) in rows:
             entry = {
                 "model_age": step,
                 "metric_name": metric,
@@ -1273,6 +1334,9 @@ class LoggerQueue:
             if trend_value is not None and trend_margin is not None:
                 entry["trend_value"] = float(trend_value)
                 entry["trend_margin"] = float(trend_margin)
+            if value_min is not None and value_max is not None:
+                entry["value_min"] = float(value_min)
+                entry["value_max"] = float(value_max)
             result.setdefault(metric, {}).setdefault(h, {}).setdefault(step, []).append(entry)
         return result
 
@@ -1818,6 +1882,8 @@ class LoggerQueue:
                     sample_count=int(entry.get("sample_count", 0) or 0),
                     trend_value=entry.get("trend_value"),
                     trend_margin=entry.get("trend_margin"),
+                    value_min=entry.get("value_min"),
+                    value_max=entry.get("value_max"),
                 )
 
         if isinstance(signals, dict):
