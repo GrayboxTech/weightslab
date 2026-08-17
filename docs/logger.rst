@@ -8,7 +8,67 @@ What gets logged
 
 - Scalar signals (losses, metrics)
 - Per-sample signal vectors
+- Per-step **model** signals (gradient/weight norms, activation statistics)
 - Optional predictions/targets for deeper analysis
+
+Two kinds of signal
+-------------------
+
+Signals divide by what a value is *about*, and that decides which verb records
+it:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 30 48
+
+   * - Keyed by
+     - Verb
+     - Example
+   * - Sample
+     - ``wl.save_signals``
+     - The classification loss of one image.
+   * - Annotation
+     - ``wl.save_instance_signals``
+     - The IoU of one bounding box.
+   * - Group
+     - ``wl.save_group_signals``
+     - A contrastive loss over an image pair.
+   * - **Step**
+     - ``wl.save_model_signals``
+     - The gradient norm of layer 5 at step 900.
+
+The first three write onto dataframe rows; the sample grid can then be sorted
+and filtered by them. The fourth does not — a gradient norm belongs to the
+optimization step that produced it, not to any of the samples in the batch, so
+it is plotted as a curve and nothing else. Recording it with ``save_signals``
+would mean broadcasting one number across a whole batch of ids and polluting
+every one of those samples' history with a value that was never about them.
+
+Default plot order
+------------------
+
+The plots board groups curves by signal-name prefix, in this order:
+
+1. **Your experiment's signals** — losses, metrics, and the whole-model
+   ``metrics/global/*`` norms. These are what the board is for, so they stay at
+   the top.
+2. **Per-layer model signals** — everything under ``metrics/layer/``
+   (see :ref:`track_model_signals <model-signals>`).
+3. **Resource monitors** — everything under ``resource/`` (CPU, memory, disk,
+   network, GPU and process telemetry).
+
+The grouping exists because arrival order stops being usable once model signals
+are on: ``track_model_signals`` can emit dozens of ``metrics/layer/*`` curves in
+a single step (74 for the Fashion-MNIST example) and resource monitoring is
+enabled by default, so an unordered board buries the loss curve under
+telemetry. Note that ``metrics/global/*`` deliberately sits in the *first*
+group — a whole-model gradient norm is read next to the loss, not scrolled past
+70 per-layer curves.
+
+This is only a default. Dragging a card puts it exactly where you drop it and
+that arrangement is remembered, per browser; signals that appear later (a
+``metrics/layer/*`` curve showing up once training starts) are filed into their
+group without disturbing anything you have already arranged.
 
 Start services
 --------------
