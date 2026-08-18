@@ -1207,7 +1207,12 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         if track_signals:
             from weightslab.components.model_signals import METRICS, track_model_signals as _track
             # `True` means "all of them"; a list/tuple narrows the set.
-            metrics = METRICS if track_signals is True else tuple(track_signals)
+            if track_signals is True:
+                metrics = METRICS
+            elif isinstance(track_signals, str):
+                metrics = (track_signals,)
+            else:
+                metrics = tuple(track_signals)
             try:
                 _track(
                     _model if _model is not None else wrapper,

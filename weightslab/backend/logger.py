@@ -1221,11 +1221,19 @@ class LoggerQueue:
             return []
         if not isinstance(parsed, list):
             return []
-        return [
-            {"sample_id": str(item.get("sample_id", "")), "value": float(item.get("value", 0.0))}
-            for item in parsed
-            if isinstance(item, dict)
-        ]
+        out = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            sample_id = str(item.get("sample_id", ""))
+            if not sample_id:
+                continue
+            try:
+                value = float(item.get("value", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            out.append({"sample_id": sample_id, "value": value})
+        return out
 
     def get_step_outlier_sample_ids(self, metric_name: str, experiment_hash: str,
                                     model_age: int) -> list:

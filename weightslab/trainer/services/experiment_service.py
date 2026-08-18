@@ -86,8 +86,11 @@ def _outliers_pb(entry) -> list:
         sample_id = str(item.get("sample_id", ""))
         if not sample_id:
             continue
-        out.append(pb2.SignalOutlier(sample_id=sample_id, value=float(item.get("value", 0.0))))
-    return out
+        try:
+            value = float(item.get("value", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        out.append(pb2.SignalOutlier(sample_id=sample_id, value=value))
 
 
 def _logger_point_pb(metric_name: str, entry: dict, sample_id: str = "") -> "pb2.LoggerDataPoint":
@@ -115,10 +118,10 @@ def _logger_point_pb(metric_name: str, entry: dict, sample_id: str = "") -> "pb2
         trend_margin=float(entry.get("trend_margin") or 0.0),
         # Explicit flags: a band of (0, 0) is indistinguishable from "no band" on
         # the wire, since proto3 scalars have no presence.
-        has_trend_band=entry.get("trend_value") is not None,
+        has_trend_band=entry.get("trend_value") is not None and entry.get("trend_margin") is not None,
         value_min=float(entry.get("value_min") or 0.0),
         value_max=float(entry.get("value_max") or 0.0),
-        has_value_range=entry.get("value_min") is not None,
+        has_value_range=entry.get("value_min") is not None and entry.get("value_max") is not None,
     )
 
 
