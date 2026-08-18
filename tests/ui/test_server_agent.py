@@ -225,8 +225,20 @@ class TestEnsureWorkspaceAgentFiles(unittest.TestCase):
         for filename in ui_server.opencode_process.WORKSPACE_SEED_FILES:
             target = os.path.join(self.tmp, filename)
             self.assertTrue(os.path.isfile(target), f"{filename} was not seeded")
-            with open(target, encoding="utf-8") as fh:
-                self.assertEqual(fh.read(), ui_server._read_repo_doc(filename))
+
+        # AGENTS.md is a byte-for-byte copy of the shipped doc.
+        with open(os.path.join(self.tmp, "AGENTS.md"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), ui_server._read_repo_doc("AGENTS.md"))
+
+        # opencode.json is NOT byte-copied: _seed_opencode_config re-serializes it
+        # so it can pin `shell` to what THIS machine has (see its docstring), so
+        # compare the parsed config instead -- shipped keys carried over, plus the
+        # host's shell where one is pinned.
+        with open(os.path.join(self.tmp, "opencode.json"), encoding="utf-8") as fh:
+            seeded = json.load(fh)
+        shipped = json.loads(ui_server._read_repo_doc("opencode.json"))
+        shell = ui_server.opencode_process._default_shell()
+        self.assertEqual(seeded, {**shipped, **({"shell": shell} if shell else {})})
 
     def test_the_seeded_config_points_opencode_at_agents_md(self):
         """The whole reason opencode.json is seeded at all -- without the

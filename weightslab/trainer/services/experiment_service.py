@@ -61,16 +61,27 @@ def _downsample_uniform(series, max_points: int):
     n = len(series)
     if max_points <= 0 or n <= max_points:
         return series
+    return [series[index] for index in _uniform_indices(n, max_points)]
+
+
+def _uniform_indices(n: int, max_points: int) -> list:
+    """Evenly spaced indices across ``[0, n-1]``, inclusive of both endpoints.
+
+    Factored out of ``_downsample_uniform`` so the outlier-preserving variant can
+    reuse the exact same baseline instead of re-deriving one with a fixed stride —
+    a stride starting at 0 silently drops the tail of a fixed-length run (with
+    10000 points capped to 1000 the last kept index is 9990, so the most recent
+    9 steps never reach the plot).
+    """
     if max_points == 1:
-        return [series[-1]]
-    # Evenly spaced indices across [0, n-1], inclusive of both endpoints.
+        return [n - 1]
     seen = set()
     picked = []
     for i in range(max_points):
-        idx = round(i * (n - 1) / (max_points - 1))
-        if idx not in seen:
-            seen.add(idx)
-            picked.append(series[idx])
+        index = round(i * (n - 1) / (max_points - 1))
+        if index not in seen:
+            seen.add(index)
+            picked.append(index)
     return picked
 
 
@@ -91,6 +102,7 @@ def _outliers_pb(entry) -> list:
         except (TypeError, ValueError):
             continue
         out.append(pb2.SignalOutlier(sample_id=sample_id, value=value))
+    return out
 
 
 def _logger_point_pb(metric_name: str, entry: dict, sample_id: str = "") -> "pb2.LoggerDataPoint":
@@ -126,12 +138,16 @@ def _logger_point_pb(metric_name: str, entry: dict, sample_id: str = "") -> "pb2
 
 
 def _downsample_preserving_outliers(signal_history, max_points: int):
-    """Stride ``signal_history`` down to ~``max_points``, never dropping a spike.
+    """Downsample ``signal_history`` to ~``max_points``, never dropping a spike.
 
-    Plain striding is fine for the smooth body of a curve but would throw away
+    Uniform sampling is fine for the smooth body of a curve but would throw away
     exactly the anomalies the plot is meant to surface — an outlier is by nature
-    a single step, so a stride of 5 loses 4 out of 5 of them. Points carrying
-    outliers are therefore always kept, on top of the strided baseline.
+    a single step, so keeping 1 point in 5 loses 4 out of 5 of them. Points
+    carrying outliers are therefore always kept, on top of the uniform baseline.
+
+    The baseline comes from ``_uniform_indices`` rather than a fixed stride so the
+    curve's endpoints survive: the most recent step is what the user is watching,
+    and a stride anchored at index 0 drops the tail of a fixed-length run.
 
     The result can exceed ``max_points`` on a pathologically spiky run; that is
     the intended trade (completeness of anomalies over an exact cap).
@@ -140,14 +156,11 @@ def _downsample_preserving_outliers(signal_history, max_points: int):
     if max_points <= 0 or n <= max_points:
         return signal_history
 
-    stride = max(1, n // max_points)
-    kept, seen = [], set()
-    for index, entry in enumerate(signal_history):
-        if index % stride == 0 or entry.get("outliers"):
-            if index not in seen:
-                seen.add(index)
-                kept.append(entry)
-    return kept
+    keep = set(_uniform_indices(n, max_points))
+    keep.update(
+        index for index, entry in enumerate(signal_history) if entry.get("outliers")
+    )
+    return [signal_history[index] for index in sorted(keep)]
 
 
 class ExperimentService(pb2_grpc.ExperimentServiceServicer):
