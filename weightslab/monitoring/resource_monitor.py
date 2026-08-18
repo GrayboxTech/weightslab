@@ -6,9 +6,19 @@ machine- and process-level resource usage and logs each value through the
 same signal pipeline used for losses/metrics
 (``weightslab.src._log_signal`` -> registered ``LoggerQueue.add_scalars``),
 so the resulting curves show up in Weights Studio exactly like any other
-signal. Since sampling is on a wall-clock cadence rather than tied to
-training steps, the logged "step" for these signals is the number of
-elapsed seconds since the monitor started.
+signal.
+
+Sampling is on a wall-clock cadence, but the x value each sample is logged
+against is the MODEL'S AGE, so a resource curve lines up with the loss curves
+beside it and restarts at 0 when training does. Logging elapsed seconds instead
+(which is what this used to do) produced an axis that only ever counted the
+process's uptime: restarting training from step 0 left the GPU-memory curve
+carrying on from wherever it had got to, on a scale no other plot shared.
+One sample per step is kept -- while training is paused (or between two steps
+slower than the sampling interval) the age doesn't move, and repeating samples at
+the same x would stack a vertical smear of points on top of each other rather
+than extending the curve. Set ``WL_RESOURCE_MONITOR_STEP_SOURCE=seconds`` (or
+``step_source: seconds`` in the YAML) to get the old elapsed-seconds axis back.
 
 GPU metrics use NVML (via the ``pynvml`` import name, shipped by the
 ``nvidia-ml-py`` package) and are skipped gracefully when no NVIDIA driver
@@ -32,12 +42,32 @@ logger = logging.getLogger(__name__)
 DEFAULT_INTERVAL_SECONDS = 15.0
 DEFAULT_CATEGORIES = ("cpu", "memory", "gpu", "disk", "network", "process")
 
+# What the sampled values are plotted against. "model_age" follows the training
+# step (see the module docstring); "seconds" is the legacy elapsed-seconds axis.
+STEP_SOURCES = ("model_age", "seconds")
+DEFAULT_STEP_SOURCE = "model_age"
+
 
 def _bool_env(name: str, default: bool) -> bool:
     val = os.environ.get(name)
     if val is None:
         return default
     return val.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _coerce_step_source(value, fallback: str) -> str:
+    """Accept a step-source setting, ignoring anything unrecognised.
+
+    A typo falls back rather than raising: this runs at server startup, and a
+    misspelled axis is not worth refusing to boot over (it is logged instead).
+    """
+    if value is None:
+        return fallback
+    text = str(value).strip().lower()
+    if text in STEP_SOURCES:
+        return text
+    logger.warning("[ResourceMonitor] Unknown step_source %r — using %r", value, fallback)
+    return fallback
 
 
 def load_resource_monitoring_config() -> dict:
@@ -48,6 +78,8 @@ def load_resource_monitoring_config() -> dict:
     enabled = not _bool_env("WEIGHTSLAB_DISABLE_RESOURCE_MONITORING", False)
     interval_seconds = float(os.environ.get("WL_RESOURCE_MONITOR_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS))
     disk_path = os.environ.get("WL_RESOURCE_MONITOR_DISK_PATH", os.sep)
+    step_source = _coerce_step_source(
+        os.environ.get("WL_RESOURCE_MONITOR_STEP_SOURCE"), DEFAULT_STEP_SOURCE)
     categories = {name: True for name in DEFAULT_CATEGORIES}
 
     env_categories = os.environ.get("WL_RESOURCE_MONITOR_CATEGORIES")
@@ -78,6 +110,7 @@ def load_resource_monitoring_config() -> dict:
             enabled = bool(rm_cfg.get("enabled", enabled))
             interval_seconds = float(rm_cfg.get("interval_seconds", interval_seconds))
             disk_path = rm_cfg.get("disk_path", disk_path)
+            step_source = _coerce_step_source(rm_cfg.get("step_source"), step_source)
 
             cats_cfg = rm_cfg.get("categories")
             if isinstance(cats_cfg, dict):
@@ -96,6 +129,7 @@ def load_resource_monitoring_config() -> dict:
         "interval_seconds": interval_seconds,
         "categories": categories,
         "disk_path": disk_path,
+        "step_source": step_source,
     }
 
 
@@ -107,10 +141,15 @@ class ResourceMonitor:
         interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
         categories: Optional[Dict[str, bool]] = None,
         disk_path: str = os.sep,
+        step_source: str = DEFAULT_STEP_SOURCE,
     ) -> None:
         self._interval_seconds = max(float(interval_seconds), 1.0)
         self._categories = dict(categories) if categories else {name: True for name in DEFAULT_CATEGORIES}
         self._disk_path = disk_path or os.sep
+        self._step_source = _coerce_step_source(step_source, DEFAULT_STEP_SOURCE)
+        # Last x actually logged, so a step that hasn't moved is sampled once
+        # instead of once per tick. None until the first sample.
+        self._last_logged_step: Optional[int] = None
 
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -144,8 +183,9 @@ class ResourceMonitor:
         self._thread = threading.Thread(target=self._loop, name="WL-ResourceMonitor", daemon=True)
         self._thread.start()
         logger.info(
-            "[ResourceMonitor] Started (interval=%.1fs categories=%s)",
+            "[ResourceMonitor] Started (interval=%.1fs step_source=%s categories=%s)",
             self._interval_seconds,
+            self._step_source,
             sorted(name for name, on in self._categories.items() if on),
         )
 
@@ -167,8 +207,53 @@ class ResourceMonitor:
             except Exception:
                 logger.exception("[ResourceMonitor] Unexpected error while sampling resources")
 
+    def _model_age(self) -> Optional[int]:
+        """The watched model's age, or None when there is no model to ask.
+
+        The monitor starts with the gRPC server, which is typically before any
+        model has been registered -- and the ledger proxy raises for a missing
+        attribute rather than returning None, so every step of this lookup is
+        guarded. None means "not knowable yet", not "zero".
+        """
+        try:
+            from weightslab.backend.ledgers import get_model
+            model = get_model()
+        except Exception:
+            return None
+        if model is None:
+            return None
+        try:
+            age = model.get_age()
+        except Exception:
+            return None
+        try:
+            return int(age)
+        except (TypeError, ValueError):
+            return None
+
+    def _current_step(self) -> int:
+        """The x value this tick's samples belong to.
+
+        Before a model exists there is no age to follow, so the samples land at
+        step 0 -- the pre-training baseline, and (thanks to the one-sample-per-step
+        rule in _tick) exactly one point rather than a pile of them at the origin.
+        """
+        if self._step_source == "seconds":
+            return int(round(time.monotonic() - (self._start_monotonic or 0.0)))
+        age = self._model_age()
+        return age if age is not None else 0
+
     def _tick(self) -> None:
-        step = int(round(time.monotonic() - self._start_monotonic))
+        step = self._current_step()
+        # Repeats at the same step are dropped rather than stacked on top of each
+        # other (see the module docstring). Never applied to the seconds axis,
+        # where the step advances on its own and a repeat would mean the clock
+        # stood still.
+        if self._step_source != "seconds":
+            if step == self._last_logged_step:
+                logger.debug("[ResourceMonitor] Step %d unchanged since the last sample — skipping", step)
+                return
+            self._last_logged_step = step
         metrics: Dict[str, float] = {}
 
         if self._categories.get("cpu", True):
@@ -364,6 +449,7 @@ def start_resource_monitor_from_config() -> Optional[ResourceMonitor]:
             interval_seconds=config["interval_seconds"],
             categories=config["categories"],
             disk_path=config["disk_path"],
+            step_source=config.get("step_source", DEFAULT_STEP_SOURCE),
         )
         monitor.start()
         _singleton_instance = monitor

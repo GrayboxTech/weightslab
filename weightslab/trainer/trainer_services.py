@@ -459,6 +459,19 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         logger.debug(f"\nExperimentServiceServicer.GenerateNotebookCode(prompt={request.prompt!r})")
         return self._exp_service.notebook_service.GenerateNotebookCode(request, context)
 
+    def GetStepSamples(self, request, context):
+        """Every sample id behind one plotted step ("Highlight step samples").
+
+        This servicer delegates RPC by RPC, so an implementation that exists on
+        the domain service but has no method here never reaches it: the generated
+        base class answers UNIMPLEMENTED instead. That is what happened to this
+        one -- the studio's highlight action failed on every call and quietly
+        showed only the off-trend samples the plot already had, which reads as
+        "the whole batch is 2 samples" rather than as an error.
+        """
+        logger.debug(f"ExperimentServiceServicer.GetStepSamples({request})")
+        return self._exp_service.GetStepSamples(request, context)
+
     # -------------------------------------------------------------------------
     # Logger data sync for WeightsStudio
     # -------------------------------------------------------------------------

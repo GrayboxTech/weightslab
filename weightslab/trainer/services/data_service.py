@@ -2571,6 +2571,67 @@ class DataService:
             return None
         return cm
 
+    def _agent_set_training(self, running: bool) -> str:
+        """Agent action: pause or resume the training loop.
+
+        Routed through the SAME pause controller as the UI's play/pause button
+        (``components["trainer"]``, whose ``pause()``/``resume()`` also keep the
+        ledger's ``is_training`` in step) rather than by writing the hyperparameter
+        directly: the controller is what actually blocks the training loop, and
+        the ledger flag alone is only a reflection of its state.
+
+        ``resume()`` can legitimately decline -- it refuses until every module's
+        experiment hash has been computed -- so its return value is reported
+        instead of being assumed to have worked.
+        """
+        self._ctx.ensure_components()
+        components = self._ctx.components
+        trainer = components.get("trainer")
+        if trainer is None:
+            return ("Action: no training controller is registered, so there is "
+                    "nothing to pause or resume yet.")
+        try:
+            if running:
+                resumed = trainer.resume()
+                if resumed is False:
+                    return ("Action: could not resume training yet -- the experiment "
+                            "hash is still being computed for some modules. Try again "
+                            "in a moment.")
+                state = "resumed"
+            else:
+                trainer.pause()
+                state = "paused"
+        except Exception as e:
+            return f"Action: failed to {'resume' if running else 'pause'} training: {e}"
+
+        # pause()/resume() already set the ledger flag; this mirrors what the
+        # restore path does (see _handle_data_edits) so the hyperparams dict the
+        # UI polls agrees even on a ledger that didn't take the write.
+        hp = components.get("hyperparams")
+        if hp is not None:
+            try:
+                hp["is_training"] = bool(running)
+            except Exception:
+                logger.debug("Could not mirror is_training onto hyperparams", exc_info=True)
+
+        self._log_agent_training_state(state)
+        return f"Action: training {state}."
+
+    def _log_agent_training_state(self, state: str) -> None:
+        """Audit the pause/resume the same way the RPC path does, so an
+        agent-driven pause is not invisible in the audit log."""
+        try:
+            log_audit = getattr(self, "_log_audit", None)
+            if callable(log_audit):
+                log_audit(
+                    "resume" if state == "resumed" else "pause",
+                    "success",
+                    {"trainer_state": "running" if state == "resumed" else "paused",
+                     "source": "agent"},
+                )
+        except Exception:
+            logger.debug("Could not write audit entry for agent %s", state, exc_info=True)
+
     def _agent_save_checkpoint(self, include_architecture: bool = False) -> str:
         """Agent action: dump a model-weights checkpoint (and, if requested, the
         model architecture) via the live CheckpointManager. Mirrors the manual
@@ -3067,6 +3128,16 @@ class DataService:
             elif action_name == "compute_natural_sort":
                 msg = self._compute_natural_sort_stats()
                 return f"Action: {msg}"
+
+            # Pause / resume the training loop -- the same controller the UI's
+            # play/pause button drives (components["trainer"], see
+            # ExperimentService's is_training command handling).
+            elif action_name in ("pause_training", "pause", "stop_training", "halt_training"):
+                return self._agent_set_training(running=False)
+
+            elif action_name in ("resume_training", "resume", "start_training",
+                                 "continue_training", "unpause_training"):
+                return self._agent_set_training(running=True)
 
             # Save a model checkpoint (weights; + architecture when requested).
             elif action_name in ("save_checkpoint", "save_model", "checkpoint", "dump_model"):

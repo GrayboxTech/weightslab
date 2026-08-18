@@ -286,9 +286,21 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             return pb2.StepSamplesResponse(
                 success=False, message="metric_name is required")
 
+        # The UI asks by the name it displays, which is not always the name the
+        # signal is stored under (see LoggerQueue.resolve_graph_name and the
+        # GetSignalTrajectory RPC, which resolves the same way). Without this a
+        # near-miss spelling reported "no per-sample data" -- indistinguishable
+        # from a signal that genuinely logs only an aggregate.
+        resolved = metric_name
+        try:
+            resolved = signal_logger.resolve_graph_name(metric_name) or metric_name
+        except Exception:
+            logger.debug("GetStepSamples: could not resolve %r, using it as-is",
+                         metric_name, exc_info=True)
+
         try:
             sample_ids, total = signal_logger.get_step_sample_ids(
-                metric_name,
+                resolved,
                 str(request.experiment_hash or ""),
                 int(request.model_age),
                 int(request.max_samples or 0),
@@ -302,7 +314,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             # rows, and the UI needs to tell that apart from a failure.
             return pb2.StepSamplesResponse(
                 success=True,
-                message=f"No per-sample data recorded for {metric_name} at step {request.model_age}",
+                message=f"No per-sample data recorded for {resolved} at step {request.model_age}",
                 sample_ids=[], total_available=0,
             )
 

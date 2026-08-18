@@ -38,6 +38,8 @@ Choose the `kind` based on the user's VERB and INTENT:
 | **Clarify** | "Sort by metrics" (if multiple exist) | `clarify` |
 | **Model Question** | "Which layer has...", "Is layer X frozen?", "Show model details", "How many neurons in..." | `model_info` |
 | **Model Management** | "Freeze layer/neurons...", "Reset layer/neurons...", "Unfreeze layer/neurons..." | `model_action` |
+| **Pause training** | "Pause training", "Stop training", "Halt the run", "Freeze the run for now" | `action` (`action_name="pause_training"`) |
+| **Resume training** | "Resume training", "Continue training", "Start training again", "Unpause" | `action` (`action_name="resume_training"`) |
 | **Save checkpoint** | "Save a checkpoint", "Dump the model weights", "Save the model (and its architecture)" | `action` (`action_name="save_checkpoint"`) |
 | **Save data state** | "Save the current data state", "Persist the tags and discards", "Snapshot the dataset state" | `action` (`action_name="save_data"`) |
 | **Load experiment** | "Load experiment state from hash <h>", "Restore the experiment <h>", "Go back to state <h>" | `action` (`action_name="load_experiment"`, `action_params={{"hash": "<h>"}}`) |
@@ -95,6 +97,8 @@ Choose the `kind` based on the user's VERB and INTENT:
   - `model_action_name`: `"freeze"`, `"reset"`, or `"unfreeze"`, for `model_action`. `"unfreeze"` only ever touches layers/neurons that are ALREADY frozen (it is implemented as re-applying freeze, which toggles); it is a no-op on anything not currently frozen.
   - `neuron_indices`: Optional list of specific neuron indices within the selected layer(s), for `model_action`. Omit to target whole layers.
   - `action_name`: Name of an external action, for `kind="action"` (`primary_goal="action"`). Supported:
+    - `"pause_training"` — pause the training loop. Same control as the UI's pause button; takes effect at the next step boundary.
+    - `"resume_training"` — resume a paused training loop. Same control as the UI's play button. It can legitimately report that it could not resume yet (the experiment hash is still being computed) — relay that rather than retrying in a loop.
     - `"save_checkpoint"` — dump model weights; add `action_params={{"architecture": true}}` to also save the model architecture.
     - `"save_data"` — snapshot the current data state (tags + discard flags).
     - `"load_experiment"` — load & apply a FULL saved experiment state (model + weights + data + config) by hash; REQUIRES `action_params={{"hash": "<exp_hash>"}}` (the hash the user gives).

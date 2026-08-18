@@ -18,6 +18,7 @@ from unittest import mock
 
 from weightslab.monitoring.resource_monitor import (
     DEFAULT_CATEGORIES,
+    DEFAULT_STEP_SOURCE,
     ResourceMonitor,
     load_resource_monitoring_config,
     start_resource_monitor_from_config,
@@ -31,7 +32,85 @@ _ENV_KEYS = (
     "WL_RESOURCE_MONITOR_CATEGORIES",
     "WL_RESOURCE_MONITOR_DISK_PATH",
     "WL_RESOURCE_MONITOR_CONFIG_PATH",
+    "WL_RESOURCE_MONITOR_STEP_SOURCE",
 )
+
+
+class TestResourceMonitorStepAxis(unittest.TestCase):
+    """The x value samples are logged against.
+
+    Resource curves used to be plotted against the monitor's own uptime in
+    seconds, so restarting training from step 0 left them running on from
+    wherever they had reached -- on an axis no other plot shared. They now follow
+    the model's age.
+    """
+
+    def _monitor(self, **kwargs):
+        cats = {name: False for name in DEFAULT_CATEGORIES}
+        cats["cpu"] = True
+        monitor = ResourceMonitor(interval_seconds=1.0, categories=cats, **kwargs)
+        monitor._start_monotonic = 0.0
+        return monitor
+
+    def _steps_for_ages(self, monitor, ages):
+        """Steps logged for a model reporting each age in turn."""
+        steps = []
+        monitor._log_metric = lambda reg_name, value, step: steps.append(step)
+        for age in ages:
+            monitor._model_age = lambda age=age: age
+            monitor._tick()
+        return steps
+
+    def test_step_follows_model_age(self):
+        monitor = self._monitor()
+        self.assertEqual(self._steps_for_ages(monitor, [0, 1, 2]), [0, 1, 2])
+
+    def test_restarted_training_restarts_the_curve_at_zero(self):
+        # The reported bug: after a restart the age goes back to 0 and the
+        # resource curve has to follow it there instead of carrying on.
+        monitor = self._monitor()
+        self.assertEqual(self._steps_for_ages(monitor, [40, 41, 0, 1]), [40, 41, 0, 1])
+
+    def test_a_step_that_has_not_moved_is_sampled_once(self):
+        # Paused training, or two steps further apart than the sampling
+        # interval: repeating the same x would stack points instead of
+        # extending the curve.
+        monitor = self._monitor()
+        self.assertEqual(self._steps_for_ages(monitor, [7, 7, 7, 8]), [7, 8])
+
+    def test_samples_before_any_model_land_on_the_baseline_step(self):
+        # The monitor starts with the gRPC server, before a model is registered:
+        # one baseline point at 0 rather than a pile of them.
+        monitor = self._monitor()
+        logged = []
+        monitor._log_metric = lambda reg_name, value, step: logged.append(step)
+        monitor._model_age = lambda: None
+        monitor._tick()
+        monitor._tick()
+        self.assertEqual(logged, [0])
+
+    def test_model_age_lookup_survives_a_raising_ledger(self):
+        # The ledger proxy raises for a missing attribute rather than returning
+        # None (and get_model itself can raise before registration).
+        monitor = self._monitor()
+        with mock.patch("weightslab.backend.ledgers.get_model", side_effect=RuntimeError("no model")):
+            self.assertIsNone(monitor._model_age())
+
+    def test_seconds_mode_keeps_the_old_uptime_axis(self):
+        monitor = self._monitor(step_source="seconds")
+        logged = []
+        monitor._log_metric = lambda reg_name, value, step: logged.append(step)
+        # Never consults the model, and repeats are not de-duplicated: the clock
+        # advancing is what makes each sample distinct.
+        monitor._model_age = lambda: (_ for _ in ()).throw(AssertionError("model asked in seconds mode"))
+        with mock.patch("time.monotonic", return_value=12.4):
+            monitor._tick()
+            monitor._tick()
+        self.assertEqual(logged, [12, 12])
+
+    def test_an_unknown_step_source_falls_back_instead_of_raising(self):
+        monitor = self._monitor(step_source="fortnights")
+        self.assertEqual(monitor._step_source, DEFAULT_STEP_SOURCE)
 
 
 class TestLoadResourceMonitoringConfig(unittest.TestCase):
@@ -74,6 +153,18 @@ class TestLoadResourceMonitoringConfig(unittest.TestCase):
         with self._patched_env(WEIGHTSLAB_DISABLE_RESOURCE_MONITORING="1"):
             config = load_resource_monitoring_config()
         self.assertFalse(config["enabled"])
+
+    def test_step_source_defaults_to_model_age(self):
+        with self._patched_env():
+            self.assertEqual(load_resource_monitoring_config()["step_source"], "model_age")
+
+    def test_env_var_selects_the_legacy_seconds_axis(self):
+        with self._patched_env(WL_RESOURCE_MONITOR_STEP_SOURCE="seconds"):
+            self.assertEqual(load_resource_monitoring_config()["step_source"], "seconds")
+
+    def test_unknown_step_source_falls_back_to_the_default(self):
+        with self._patched_env(WL_RESOURCE_MONITOR_STEP_SOURCE="epochs"):
+            self.assertEqual(load_resource_monitoring_config()["step_source"], DEFAULT_STEP_SOURCE)
 
     def test_env_var_restricts_categories(self):
         with self._patched_env(WL_RESOURCE_MONITOR_CATEGORIES="cpu,gpu"):

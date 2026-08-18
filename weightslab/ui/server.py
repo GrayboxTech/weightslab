@@ -1597,6 +1597,8 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
             self._data_query()
         elif path == "/agent-server/track-process":
             self._track_process()
+        elif path == "/agent-server/history":
+            self._dump_agent_history()
         elif path.startswith(self.api_prefix + "/") or path == self.api_prefix:
             self._proxy_grpc_web(path)
         else:
@@ -2030,6 +2032,51 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
     # this UI server and the connected training backend share a filesystem
     # (the documented `weightslab start` usage), so root_log_dir resolved
     # here is the same directory the backend wrote reports into.
+    def _agent_history_dir_path(self) -> str:
+        experiment_dir = self.experiment_dir or os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR") or os.getcwd()
+        return os.path.join(experiment_dir, "agent")
+
+    def _dump_agent_history(self):
+        """Write the agent conversation to the experiment directory.
+
+        POSTed by the chat itself after every finished turn, so a session's
+        transcript lands next to the run it was about (``<experiment>/agent/``)
+        instead of living only in the browser and the OpenCode server's own
+        state -- which is where it used to stay, and which is not part of
+        anything the user keeps, copies or shares with the experiment.
+
+        One file per session, overwritten as the conversation grows: the body
+        carries the whole transcript rather than a delta, so a reload or a
+        missed POST self-heals on the next turn instead of leaving a file with a
+        hole in it.
+        """
+        payload = self._read_json_body()
+        markdown = payload.get("markdown")
+        if not isinstance(markdown, str) or not markdown.strip():
+            self._send_json(HTTPStatus.BAD_REQUEST,
+                            {"ok": False, "error": "markdown is required"})
+            return
+
+        # Client-supplied, so it never reaches the filesystem as-is: everything
+        # outside a safe alphabet becomes '_' and the result is used as a bare
+        # filename inside the agent directory (same guard as the notebook and
+        # report endpoints).
+        session = str(payload.get("session") or "").strip() or "session"
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", session)[:80] or "session"
+
+        directory = self._agent_history_dir_path()
+        try:
+            os.makedirs(directory, exist_ok=True)
+            path = os.path.join(directory, f"conversation-{safe}.md")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(markdown)
+        except OSError as err:
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR,
+                            {"ok": False, "error": str(err)})
+            return
+
+        self._send_json(HTTPStatus.OK, {"ok": True, "path": path})
+
     def _reports_dir_path(self) -> str:
         experiment_dir = self.experiment_dir or os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR") or os.getcwd()
         return os.path.join(experiment_dir, "reports")

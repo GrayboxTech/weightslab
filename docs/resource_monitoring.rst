@@ -109,6 +109,7 @@ touching env vars:
      enabled: true          # master switch
      interval_seconds: 15   # how often (seconds) to sample + log a batch of metrics
      disk_path: "/"         # filesystem path reported by the `disk` category
+     step_source: model_age # x axis: model_age (default) or seconds
      categories:
        cpu: true
        memory: true
@@ -157,6 +158,16 @@ Environment variables
    * - ``WL_RESOURCE_MONITOR_DISK_PATH``
      - OS root (``/`` or ``C:\``)
      - Filesystem path reported by the ``disk`` category's usage metrics.
+   * - ``WL_RESOURCE_MONITOR_STEP_SOURCE``
+     - ``model_age``
+     - What the sampled values are plotted against. ``model_age`` logs each
+       sample at the watched model's current age, so resource curves share the
+       x axis of the loss/metric curves beside them and restart at 0 when
+       training does; one sample is kept per step, so a paused run (whose age
+       does not move) does not stack points at the same x. ``seconds`` restores
+       the previous behaviour: elapsed seconds since the monitor started, which
+       only ever counts process uptime. Before any model is registered, samples
+       land at step 0.
    * - ``WL_RESOURCE_MONITOR_CONFIG_PATH``
      - *(empty)*
      - Optional directory override for ``resource_monitoring.yaml``. When
