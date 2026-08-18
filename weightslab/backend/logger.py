@@ -35,13 +35,14 @@ import logging
 import os
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import duckdb
 import pandas as pd
 import torch as th
 
 from weightslab.backend.ledgers import get_logger, register_logger, get_checkpoint_manager
+from weightslab.backend.optrace import maybe_wrap_duckdb_conn
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,31 @@ _INSTANCE_COLS = [
 _STAGE_FLUSH_THRESHOLD = 50_000
 
 # How often the background flush thread wakes up (see LoggerQueue._flush_loop).
+def _default_loss_shape_interval_seconds() -> float:
+    """How often to re-derive loss-shape categoricals.
+
+    Deliberately much slower than the flush tick: the label is display-only,
+    while each pass costs a classify + tag write + an upsert over the whole
+    ledger (~990ms at 4M rows) on a thread that holds the GIL against training.
+    """
+    try:
+        return float(os.environ.get("WL_LOSS_SHAPE_INTERVAL_SECONDS", "60.0"))
+    except (TypeError, ValueError):
+        return 60.0
+
+
+def _default_history_tail() -> int:
+    """Recent points kept per sample for signal-DAG history reads.
+
+    Bounded so history() costs O(batch) instead of scanning the whole
+    per_sample table (140ms at 20M rows, once per step, and growing).
+    """
+    try:
+        return max(0, int(os.environ.get("WL_HISTORY_TAIL", "16")))
+    except (TypeError, ValueError):
+        return 16
+
+
 def _default_flush_interval_seconds() -> float:
     try:
         return float(os.environ.get("WL_LOGGER_FLUSH_INTERVAL_SECONDS", "2.0"))
@@ -217,7 +243,7 @@ class LoggerQueue:
         # DuckDB connection + write-staging buffers.
         self._lock = threading.RLock()
         self._db_path = db_path
-        self._conn = duckdb.connect(database=db_path)
+        self._conn = maybe_wrap_duckdb_conn(duckdb.connect(database=db_path))
         self._stage_signals: list = []
         self._stage_sample: list = []
         self._stage_instance: list = []
@@ -237,7 +263,14 @@ class LoggerQueue:
         # Cache size is env-configurable (WL_QUERY_CACHE_MAXSIZE, default 2048).
         _qps_maxsize = int(os.environ.get("WL_QUERY_CACHE_MAXSIZE", "2048"))
         self._qps_version: dict = defaultdict(int)
+        # {signal_name: {sample_id, ...}} staged since the last autotag pass.
+        # Lets the pass classify O(change) samples instead of the whole history.
+        self._qps_dirty: dict = defaultdict(set)
         self._qps_cache_step: int = -1
+        # {signal: {sample_id: deque}} -- the recent tail of each sample's
+        # per-sample values, maintained on write so history() never scans.
+        self._tail_len = _default_history_tail()
+        self._recent_tail: dict = defaultdict(dict)
         self._qps_cache = functools.lru_cache(maxsize=_qps_maxsize)(self._query_per_sample_uncached)
         self._qps_step_cache = functools.lru_cache(maxsize=_qps_maxsize)(self._query_per_sample_at_step_uncached)
 
@@ -365,7 +398,9 @@ class LoggerQueue:
                 continue  # no new per-sample data logged since the last pass
             tag_name, classifier = overrides.get(signal_name, (None, None))
             try:
-                write_signal_shapes(signal_name, tag_name=tag_name, classifier=classifier)
+                write_signal_shapes(signal_name, tag_name=tag_name,
+                                    classifier=classifier,
+                                    only_sample_ids=self.drain_dirty_samples(signal_name))
                 self._loss_shape_last_version[signal_name] = current_version
             except Exception as exc:
                 logger.debug(
@@ -373,12 +408,20 @@ class LoggerQueue:
 
     def _flush_loop(self) -> None:
         interval = _default_flush_interval_seconds()
+        autotag_every = _default_loss_shape_interval_seconds()
+        next_autotag = 0.0
         while not self._flush_stop.wait(interval):
             try:
                 self.flush_to_disk()
             except Exception as exc:
                 logger.debug(f"[LoggerQueue] background flush failed: {exc}")
-            self._autotag_loss_shapes()
+            # Autotagging on the flush tick re-derived the shape categorical
+            # every 2s; on its own slower clock it stops stealing the GIL from
+            # the training loop for a label nothing reads that often.
+            now = time.monotonic()
+            if now >= next_autotag:
+                next_autotag = now + autotag_every
+                self._autotag_loss_shapes()
 
     def stop_background_flush(self) -> None:
         """Stop the background flush/loss-shape thread (e.g. at shutdown or in tests)."""
@@ -531,7 +574,7 @@ class LoggerQueue:
                 # Adopt the on-disk file as the live connection. On resume this
                 # is the source of truth; the fresh in-memory rows are ignored.
                 self._conn.close()
-                self._conn = duckdb.connect(database=db_path)
+                self._conn = maybe_wrap_duckdb_conn(duckdb.connect(database=db_path))
                 self._db_path = db_path
                 self._ensure_tables()
                 self._invalidate_qps_cache()
@@ -708,7 +751,41 @@ class LoggerQueue:
             )
         )
         self._qps_version[graph_name] += 1   # invalidate this signal's cached reads
+        self._qps_dirty[graph_name].add(str(sample_id))
+        if self._tail_len:
+            _tail = self._recent_tail[graph_name]
+            _sid = str(sample_id)
+            _q = _tail.get(_sid)
+            if _q is None:
+                _q = _tail[_sid] = deque(maxlen=self._tail_len)
+            _q.append(float(value))
         self._maybe_autoflush()
+
+    def recent_per_sample(self, graph_name: str, sample_ids):
+        """Recent in-memory values per sample: ``{sample_id: [values]}``.
+
+        O(batch). Samples not written in this process are absent rather than
+        empty-listed; callers treat both as "not enough history yet".
+        """
+        tail = self._recent_tail.get(graph_name) or {}
+        out = {}
+        for s in sample_ids:
+            q = tail.get(str(s))
+            if q:
+                out[s] = list(q)
+        return out
+
+    def drain_dirty_samples(self, graph_name):
+        """Sample ids staged for *graph_name* since the last drain, then clear.
+
+        The autotag pass uses this to re-classify only trajectories that gained
+        a point, rather than every sample ever logged."""
+        with self._lock:
+            ids = self._qps_dirty.get(graph_name)
+            if not ids:
+                return set()
+            self._qps_dirty[graph_name] = set()
+            return ids
 
     def _invalidate_qps_cache(self) -> None:
         """Drop both query caches + versions (step advance; bulk delete/clear)."""

@@ -20,6 +20,7 @@ from weightslab.trainer.services.agent_service import AgentService
 from weightslab.trainer.services.notebook_service import NotebookService
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.components.evaluation_controller import eval_controller
+from weightslab.backend.optrace import traced
 
 
 # Logger
@@ -225,6 +226,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
     # -------------------------------------------------------------------------
     # Logger queue sync for WeightsStudio
     # -------------------------------------------------------------------------
+    @traced("experiment", "expsvc.GetLatestLoggerData")
     def GetLatestLoggerData(self, request, context):
         """
         Returns logger data for WeightsStudio polling.
@@ -480,6 +482,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
 
         return pb2.GetLatestLoggerDataResponse(points=points)
 
+    @traced("experiment", "expsvc.RestoreCheckpoint")
     def RestoreCheckpoint(self, request, context):
         """
         Restore a checkpoint from a given experiment hash.
@@ -865,6 +868,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
 
     # Training & hyperparameter commands
     # -------------------------------------------------------------------------
+    @traced("experiment", "expsvc.ExperimentCommand")
     def ExperimentCommand(self, request, context):
         if request.HasField("restart_operation"):
             return self._handle_restart_instance()

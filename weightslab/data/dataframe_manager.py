@@ -25,6 +25,7 @@ from weightslab.data.sample_stats import (
     SAMPLES_STATS_TO_SAVE_TO_H5,
 )
 from weightslab.backend.ledgers import get_hyperparams
+from weightslab.backend.optrace import traced, hit
 
 
 pd.set_option('future.no_silent_downcasting', True)
@@ -92,6 +93,11 @@ class LedgeredDataFrameManager:
         self._store: H5DataFrameStore | None = None
         self._array_store: H5ArrayStore | None = None
         self._origin_revisions: Dict[str, int] = {}
+        # Bumped ONLY when the `discarded` column changes. The deny-list cache
+        # keys on this instead of _origin_revisions, which training bumps every
+        # step (per-sample signal writes) and which therefore never lets a cache
+        # hit -- turning a per-batch len() into a 3.96M-row scan.
+        self._discard_revisions: Dict[str, int] = {}
         self._pending: set[int] = set()
         # Parallel dirty set for the view. _pending is drained by the H5 flush,
         # so the view cannot share it without one consumer starving the other.
@@ -411,6 +417,11 @@ class LedgeredDataFrameManager:
             if self._enable_h5_persistence:
                 self._array_store = array_store
 
+    def _bump_discard_revisions(self, origins: Sequence[Any]) -> None:
+        for origin in origins or []:
+            key = str(origin)
+            self._discard_revisions[key] = self._discard_revisions.get(key, 0) + 1
+
     def _bump_origin_revisions(self, origins: Sequence[Any]) -> None:
         for origin in origins:
             if origin is None or pd.isna(origin):
@@ -476,6 +487,7 @@ class LedgeredDataFrameManager:
         self._categorical_tags[name] = list(dict.fromkeys([*existing, *cats]))
         return list(self._categorical_tags[name])
 
+    @traced("dataframe", "dfm.register_categorical_tag")
     def register_categorical_tag(self, name: str, categories=None, replace: bool = False) -> List[str]:
         """Declare (or extend) a categorical tag and its allowed category values.
 
@@ -565,6 +577,7 @@ class LedgeredDataFrameManager:
         except Exception as e:
             logger.debug(f"[LedgeredDataFrameManager] Failed to load tag registry: {e}")
 
+    @traced("dataframe", "dfm.register_split")
     def register_split(self, origin: str, df: List | pd.DataFrame, store: H5DataFrameStore | None = None, autoload_arrays: bool | list | set = False, return_proxies: bool = True, use_cache: bool = True):
         # Build the annotation-expanded (sample_id, annotation_id) frame.
         # Fast path: when given a list of record dicts, construct the EXPANDED frame
@@ -598,6 +611,7 @@ class LedgeredDataFrameManager:
         # Start flush thread if not already running
         self._ensure_flush_thread()
 
+    @traced("dataframe", "dfm._load_existing_data")
     def _load_existing_data(self, origin: str = None, autoload_arrays: bool | list | set = False, return_proxies: bool = True, use_cache: bool = True):
         # Restore the categorical tag registry so loaded string-valued tag columns
         # get their full allowed category set (not just the values present on disk).
@@ -673,6 +687,7 @@ class LedgeredDataFrameManager:
             else:
                 logger.warning(f"[LedgeredDataFrameManager] Loaded data missing 'sample_id' column for origin={origin}. Skipping load.")
 
+    @traced("dataframe", "dfm.upsert_df")
     def upsert_df(self, df_local: List | pd.DataFrame, origin: str = None, force_flush: bool = False):
         if df_local is None or (isinstance(df_local, pd.DataFrame) and df_local.empty) or len(df_local) == 0:
             return
@@ -778,7 +793,19 @@ class LedgeredDataFrameManager:
                         if len(_pos) and (_pos >= 0).all():
                             for _c in all_cols:
                                 _ci = self._df.columns.get_loc(_c)
-                                self._df.iloc[_pos, _ci] = df_norm.loc[existing_idx, _c].to_numpy()
+                                _vals = df_norm.loc[existing_idx, _c].to_numpy()
+                                # An object array (None for "no value yet") written into
+                                # a float column upcasts the WHOLE column to object and
+                                # it never returns -- an 8x penalty on every later sort.
+                                # Coerce to the target dtype so None becomes NaN instead.
+                                try:
+                                    _tgt = self._df[_c].dtype
+                                    if (_vals.dtype == object
+                                            and getattr(_tgt, "kind", "") in "fiu"):
+                                        _vals = pd.to_numeric(_vals, errors="coerce")
+                                except Exception:
+                                    pass
+                                self._df.iloc[_pos, _ci] = _vals
                         else:
                             self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
 
@@ -812,7 +839,10 @@ class LedgeredDataFrameManager:
                 sample_ids = df_norm.index.tolist()
             self.mark_dirty_batch(sample_ids, force_flush=force_flush)
             self._bump_origin_revisions(affected_origins)
+            if SampleStats.Ex.DISCARDED.value in set(df_norm.columns):
+                self._bump_discard_revisions(affected_origins)
 
+    @traced("dataframe", "dfm.mark_dirty")
     def mark_dirty(self, sample_id: int):
         """Mark sample as dirty for H5 flush.
 
@@ -823,12 +853,14 @@ class LedgeredDataFrameManager:
             self._pending.add(normalized_id)
             self._view_pending.add(normalized_id)
 
+    @traced("dataframe", "dfm.drop_column")
     def drop_column(self, column: str):
         with self._lock:
             if column in self._df.columns:
                 return self._df.pop(column)
             return None
 
+    @traced("dataframe", "dfm.mark_dirty_batch")
     def mark_dirty_batch(self, sample_ids: List[int], force_flush: bool = False):
         with self._lock:
             self._pending.update(set(sample_ids))
@@ -1003,6 +1035,7 @@ class LedgeredDataFrameManager:
         except Exception:
             return preds_raw
 
+    @traced("dataframe", "dfm.enqueue_batch")
     def enqueue_batch(
         self,
         sample_ids: Sequence[int],
@@ -1121,6 +1154,7 @@ class LedgeredDataFrameManager:
             self.first_init = False
             self.flush_async()
 
+    @traced("dataframe", "dfm.enqueue_instance_batch")
     def enqueue_instance_batch(
         self,
         sample_ids: Sequence[Any],
@@ -1267,6 +1301,7 @@ class LedgeredDataFrameManager:
             self.first_init = False
             self.flush_async()
 
+    @traced("dataframe", "dfm.update_values")
     def update_values(self, origin: str, sample_id: int, updates: Dict[str, Any], annotation_id: int = 0):
         """Update values for a sample (or specific annotation if multi-index).
 
@@ -1337,6 +1372,7 @@ class LedgeredDataFrameManager:
                     self._df = pd.concat([self._df, df_local])
             self._bump_origin_revisions([origin])
 
+    @traced("dataframe", "dfm.take_view_dirty")
     def take_view_dirty(self, limit: int | None = None):
         """Drain and return the sample_ids changed since the last view sync.
 
@@ -1345,12 +1381,21 @@ class LedgeredDataFrameManager:
         """
         with self._lock:
             if limit is not None and len(self._view_pending) > limit:
-                self._view_pending.clear()
+                # Do NOT clear here. The caller is expected to rebuild, but that
+                # rebuild can bail (contended update lock) -- and these ids would
+                # then be lost with nothing to re-mark them. clear_view_dirty()
+                # is called once the rebuilt view is actually swapped in.
                 return None
             out = list(self._view_pending)
             self._view_pending.clear()
             return out
 
+    def clear_view_dirty(self):
+        """Drop the view-dirty backlog: a full rebuild has made the view current."""
+        with self._lock:
+            self._view_pending.clear()
+
+    @traced("dataframe", "dfm.get_source_rows")
     def get_source_rows(self, sample_ids, columns=None):
         """Rows for *sample_ids* straight from the source frame. O(len(ids))."""
         with self._lock:
@@ -1364,9 +1409,22 @@ class LedgeredDataFrameManager:
             return sub[columns] if columns else sub
 
     def get_origin_revision(self, origin: str) -> int:
-        with self._lock:
-            return int(self._origin_revisions.get(str(origin), 0))
+        # No lock: a dict read is atomic under the GIL, and this is polled from
+        # __len__ on every batch. Taking self._lock here put the training thread
+        # in contention with the flush thread on the hot path.
+        return int(self._origin_revisions.get(str(origin), 0))
 
+    def get_discard_revision(self, origin: str) -> int:
+        """Revision of the `discarded` column for *origin*.
+
+        Changes only on discard/restore, so a consumer that depends purely on
+        deny-list state can cache against it across training steps. Read without
+        the lock: called per batch, and a stale-by-one read is harmless (the next
+        batch picks the change up), whereas lock contention here is not.
+        """
+        return int(self._discard_revisions.get(str(origin), 0))
+
+    @traced("dataframe", "dfm.update_by_groups_bulk")
     def update_by_groups_bulk(self, origin: str, group_ids: List[Any], updates_list: List[Dict[str, Any]]):
         """Broadcast updates to multiple groups in one pass."""
         if not group_ids or not updates_list:
@@ -1420,6 +1478,7 @@ class LedgeredDataFrameManager:
             if affected_ids:
                 self.mark_dirty_batch(affected_ids)
 
+    @traced("dataframe", "dfm.get_tainted_group_ids")
     def get_tainted_group_ids(self, group_ids: List[Any], origin: str) -> set:
         """Return the subset of group_ids where at least one member is discarded.
 
@@ -1489,6 +1548,7 @@ class LedgeredDataFrameManager:
 
         return values
 
+    @traced("dataframe", "dfm.get_discarded_sample_ids")
     def get_discarded_sample_ids(self, sample_ids: List[Any], origin: str) -> set:
         """Return the subset of sample_ids that are marked as discarded.
 
@@ -1580,6 +1640,7 @@ class LedgeredDataFrameManager:
 
         return values
 
+    @traced("dataframe", "dfm.get_row")
     def get_row(self, origin: str, sample_id: int, annotation_id: int = None) -> pd.Series | pd.DataFrame | None:
         """Get row(s) by sample_id and optional annotation_id.
 
@@ -1619,12 +1680,14 @@ class LedgeredDataFrameManager:
             except (KeyError, TypeError):
                 return None
 
+    @traced("dataframe", "dfm.get_value")
     def get_value(self, origin: str, sample_id: int, column: str):
         row = self.get_row(origin, sample_id)
         if row is None or column not in row:
             return None
         return row[column]
 
+    @traced("dataframe", "dfm.get_df_view")
     def get_df_view(self, column: str = None, limit: int = -1, copy: bool = False, value: str = None) -> pd.DataFrame:
         with self._lock:
             if self._df.empty:
@@ -1640,10 +1703,12 @@ class LedgeredDataFrameManager:
             subset = subset.head(limit)
         return subset.copy() if copy else subset
 
+    @traced("dataframe", "dfm.set_dense")
     def set_dense(self, key: str, sample_id: int, value: np.ndarray):
         with self._lock:
             self._dense_store.setdefault(key, {})[str(sample_id)] = value
 
+    @traced("dataframe", "dfm.get_dense_map")
     def get_dense_map(self, origin: str) -> Dict[str, Dict[int, np.ndarray]]:
         with self._lock:
             origin_store = self._dense_store.get(origin, {})
@@ -1933,7 +1998,9 @@ class LedgeredDataFrameManager:
                 self._apply_updates_frame_locked(instance_df, broadcast=False)
             self._apply_updates_frame_locked(sample_df, broadcast=True)
             # Keep newly-added signal columns float32 and empty object cells as None.
-            self._df = self._optimize_dataframe_memory(self._df)
+            self._df = self._optimize_dataframe_memory(
+                self._df,
+                columns=set(sample_df.columns) | set(instance_df.columns))
 
         # Mark all as pending for h5 flush (outside lock)
         self.mark_dirty_batch(sample_ids)
@@ -1971,13 +2038,22 @@ class LedgeredDataFrameManager:
             applied_index = written_s.append(written_i) if len(written_i) else written_s
             update_cols = sample_df.columns.union(instance_df.columns)
             # Keep newly-added signal columns float32 and empty object cells as None.
-            _df = self._optimize_dataframe_memory(self._df)
+            _df = self._optimize_dataframe_memory(self._df, columns=set(update_cols))
             self._df = _df
         finally:
             self._lock.release()
 
         # Det→seg conversion / array normalization over all written rows.
-        if applied_index is not None and len(applied_index) > 0:
+        # This prepares cells for the H5 write, so it is only worth doing for
+        # columns that write will actually include. When predictions/targets are
+        # excluded from the save list (WEIGHTSLAB_SAVE_PREDICTIONS_IN_H5=0) the
+        # pass would otherwise call get_mask per row -- which reads the source
+        # image to size the mask -- for arrays that are never persisted.
+        _savable = set(_filter_columns_by_patterns(
+            list(update_cols), SAMPLES_STATS_TO_SAVE_TO_H5))
+        _norm_cols = [c for c in update_cols
+                      if c in self._array_columns and c in _savable]
+        if applied_index is not None and len(applied_index) > 0 and _norm_cols:
             if applied_index.has_duplicates:
                 applied_index = applied_index[~applied_index.duplicated()]
             normalized_rows = self._df.loc[applied_index].apply(
@@ -2061,6 +2137,7 @@ class LedgeredDataFrameManager:
             return []
         return list(hits)
 
+    @traced("dataframe", "dfm._flush_snapshot_to_h5")
     def _flush_snapshot_to_h5(self, data_snapshot: pd.DataFrame, work: List[int]):
         """Flush data snapshot to H5 - runs completely outside locks.
 
@@ -2186,12 +2263,41 @@ class LedgeredDataFrameManager:
         if categorical_tags is None:
             categorical_tags = self._categorical_tags
 
+        # Honour `columns`: only the columns this flush actually wrote can have
+        # gained a float64 signal value or a fresh NaN, so scanning the rest is
+        # O(rows) of pure waste on every flush.
+        _scan_cols = (list(df.columns) if columns is None
+                      else [c for c in df.columns if c in columns])
+        hit("dataframe", "dfm._optimize_dataframe_memory",
+            scoped=columns is not None, n_scan=len(_scan_cols), n_total=len(df.columns))
+
+        # === 0) Repair signal columns that were upcast to object ===
+        # A single None written into a float column converts it permanently, and
+        # object columns sort ~8x slower. signals//* are numeric by definition,
+        # so any object one is damage rather than intent. Runs BEFORE the
+        # NaN->None pass below, which only touches object columns and would
+        # otherwise keep them that way.
+        for col in _scan_cols:
+            if not str(col).startswith("signals") or df[col].dtype != object:
+                continue
+            try:
+                coerced = pd.to_numeric(df[col], errors="coerce")
+                # Only if nothing was lost: a genuine non-numeric value means the
+                # column is not what we think it is, so leave it alone.
+                if coerced.notna().sum() == df[col].notna().sum():
+                    df[col] = coerced.astype(np.float32)
+                    logger.debug(
+                        "[LedgeredDataFrameManager] restored '%s' object -> float32", col)
+            except Exception as exc:
+                logger.debug("[LedgeredDataFrameManager] dtype repair skipped for '%s': %s",
+                             col, exc)
+
         # === 1) Downcast float64 signal columns to float32 ===
         # Per-sample / per-instance signal scalars (loss & metric values) don't need
         # float64 precision, so this halves the cost of every ``signals//*`` column
         # with no practical loss for monitoring. Numeric dtype is preserved (NaNs
         # stay NaN). Done before categorical conversion below.
-        for col in df.columns:
+        for col in _scan_cols:
             if str(col).startswith("signals") and df[col].dtype == np.float64:
                 try:
                     df[col] = df[col].astype(np.float32)
@@ -2215,7 +2321,7 @@ class LedgeredDataFrameManager:
         # into a Categorical, its missing cells are stuck as NaN (categorical code
         # -1) and can no longer be set to a plain None — so we clean object cells to
         # None here first, while they are still plain object dtype.
-        for col in df.columns:
+        for col in _scan_cols:
             # The docstring above says numeric/bool/categorical are skipped, but the
             # loop had no dtype check: at registration every signals//* column is all
             # NaN, so this did a full label-aligned write per float column.
@@ -2232,9 +2338,17 @@ class LedgeredDataFrameManager:
             SampleStats.Ex.TASK_TYPE.value, # Task type (e.g. 'classification', 'segmentation')
         ]
 
-        # nunique() over the whole index was recomputed per object column (8s at 4M).
-        _n_rows_cached = (df.index.get_level_values(0).nunique()
-                          if isinstance(df.index, pd.MultiIndex) else len(df))
+        # nunique() over a 4M-row MultiIndex costs ~8s AND holds the GIL, stalling
+        # the training thread inside forward/backward. Only an object-dtype
+        # candidate reads it, so compute it on first use rather than every flush.
+        _n_rows_cache = []
+
+        def _n_rows():
+            if not _n_rows_cache:
+                _n_rows_cache.append(
+                    df.index.get_level_values(0).nunique()
+                    if isinstance(df.index, pd.MultiIndex) else len(df))
+            return _n_rows_cache[0]
         for col in categorical_candidates:
             if col not in df.columns:
                 continue
@@ -2250,11 +2364,10 @@ class LedgeredDataFrameManager:
                 continue
             if df[col].dtype == 'object':
                 n_unique = df[col].nunique()
-                _ = _n_rows_cached
                 # Use unique sample count, not row count — with MultiIndex each
                 # sample has multiple annotation rows which would inflate n_rows
                 # and make the ratio appear better than it really is.
-                n_rows = _n_rows_cached
+                n_rows = _n_rows()
                 compression_ratio = n_unique / n_rows if n_rows > 0 else 1.0
 
                 if compression_ratio < 0.5 and n_unique > 1: # Worth compressing if < 50% unique
@@ -2348,6 +2461,7 @@ class LedgeredDataFrameManager:
         if self._flush_thread:
             self._flush_thread.join(timeout=2.0)
 
+    @traced("dataframe", "dfm.get_combined_df")
     def get_combined_df(
         self,
         autoload_arrays: bool | list | set = False,
@@ -2383,6 +2497,7 @@ class LedgeredDataFrameManager:
 
         return df
 
+    @traced("dataframe", "dfm.get_collapse_annotations_to_samples_df")
     def get_collapse_annotations_to_samples_df(self, df: pd.DataFrame | None = None) -> pd.DataFrame:
         """Collapse a (sample_id, annotation_id) multi-index df to one row per sample.
 
@@ -2631,6 +2746,7 @@ class LedgeredDataFrameManager:
         with self._lock:
             return len(self._pending) >= self._flush_max_rows or self._force_flush
 
+    @traced("dataframe", "dfm.flush_async")
     def flush_async(self):
         """Signal flush thread. Returns once buffer has been drained (not after H5 write).
 
@@ -2655,6 +2771,7 @@ class LedgeredDataFrameManager:
             time.sleep(0.1)
         logger.warning("[LedgeredDataFrameManager] flush_async timed out waiting for buffer drain after 60s")
 
+    @traced("dataframe", "dfm.flush_if_needed_nonblocking")
     def flush_if_needed_nonblocking(self, force: bool = False):
         """Non-blocking flush - if can't acquire lock immediately, defer to next cycle."""
         # Drain buffer quickly, then release lock before any DF/H5 work.
@@ -2672,6 +2789,7 @@ class LedgeredDataFrameManager:
         self._flush_to_h5_if_needed(force=force)
         logger.debug(f"Completed non-blocking flush check. Pending count after flush: {len(self._pending)}.")
 
+    @traced("dataframe", "dfm.flush")
     def flush(self):
         """Blocking flush: buffer → DF → H5.
 

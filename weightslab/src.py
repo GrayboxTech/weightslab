@@ -494,6 +494,16 @@ class BatchSignalContext:
         out = {s: [] for s in self.sample_ids}
         if self.logger is None:
             return out
+        # Read the bounded in-memory tail: O(batch). The full-history query this
+        # replaced scanned the entire per_sample table on every call (140ms at
+        # 20M rows, once per step, growing without bound).
+        if not os.environ.get("WL_HISTORY_FROM_DB"):
+            recent = self.logger.recent_per_sample(signal_name, self.sample_ids)
+            for s in self.sample_ids:
+                vals = recent.get(s)
+                if vals:
+                    out[s] = list(vals)
+            return out
         # query_per_sample accepts a list of ids -> one scan for the whole batch.
         for sid, step, val, _ in self.logger.query_per_sample(signal_name, sample_ids=self.sample_ids):
             out.setdefault(int(sid), []).append(val)   # rows already ordered by seq (= step order)
@@ -1013,13 +1023,27 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                              # batch and call the signal once. It returns a length-B
                              # array. Avoids B Python calls + B SignalContext allocs,
                              # and lets the signal do batched ledger reads.
+                             # inputs= must be populated here too: on the
+                             # subscribe_to path the context was built without it,
+                             # so b.inputs was {} and any signal declaring
+                             # inputs=[...] raised KeyError on every call. The
+                             # subscribed signal IS the declared input here, and
+                             # its per-sample values are already in val_vec.
+                             _decl = meta.get('inputs') or []
+                             _sub = meta.get('subscribe_to')
+                             _vals = [float(v) for v in val_vec]
+                             _bin = {}
+                             for _d in _decl:
+                                 if _sub is None or _d == _sub or _d == reg_name:
+                                     _bin[_d] = _vals
                              bctx = BatchSignalContext(
                                  sample_ids=[int(u) for u in ids_np],
-                                 subscribed_values=[float(v) for v in val_vec],
+                                 subscribed_values=_vals,
                                  logger=_lg,
                                  dataframe=df_proxy,
                                  origin=kwargs.get('origin', 'train'),
                                  step=step,
+                                 inputs=_bin,
                                  logits=preds_raw.detach() if hasattr(preds_raw, 'detach') else preds_raw,
                                  preds=preds.detach() if hasattr(preds, 'detach') else preds,
                                  targets=targets.detach() if hasattr(targets, 'detach') else targets,
@@ -4880,7 +4904,11 @@ def resolve_signal_classifier(signal_name):
     return _GLOBAL_CLASSIFIER or classify_loss_shape
 
 
-def write_signal_shapes(signal_name, tag_name=None, classifier=None):
+_SHAPE_LABELS: dict = {}
+
+
+def write_signal_shapes(signal_name, tag_name=None, classifier=None,
+                        only_sample_ids=None):
     """Reusable engine: classify every sample's trajectory of *signal_name* into
     a categorical tag and return the ``{label: count}`` distribution. Works for
     ANY per-sample signal — loss, accuracy, a second loss, any metric. Reads the
@@ -4892,17 +4920,46 @@ def write_signal_shapes(signal_name, tag_name=None, classifier=None):
     clf = classifier or resolve_signal_classifier(signal_name)
     if tag_name is None:
         tag_name = signal_name + "_shape" if signal_name.endswith('_loss') else signal_name + "_loss_shape"
+
+    # O(change): with only_sample_ids we read and classify just the trajectories
+    # that gained a point since the last pass. Labels for everything else are
+    # carried in _SHAPE_LABELS, so the returned distribution still describes the
+    # whole dataset. Passing None keeps the original whole-history behaviour
+    # (what a one-shot end-of-run report wants).
+    cache = _SHAPE_LABELS.setdefault(signal_name, {})
+    ids = None
+    if only_sample_ids is not None:
+        ids = [str(s) for s in only_sample_ids]
+        if not ids:
+            return {k: v for k, v in _label_counts(cache).items()}
+
+    _lg = get_logger()
+    rows = (_lg.query_per_sample(signal_name, sample_ids=ids)
+            if _lg is not None else [])
     series = {}
-    for sid, step, val, _ in query_signal_history(signal_name):
+    for sid, step, val, _ in rows:
         series.setdefault(sid, []).append((step, val))
+
     by_label = {}
     for sid, pts in series.items():
         label = clf([v for _, v in sorted(pts)])
-        if label is not None:
-            by_label.setdefault(label, []).append(sid)
+        if label is None:
+            continue
+        if cache.get(sid) == label:
+            continue                      # unchanged -> no ledger write needed
+        cache[sid] = label
+        by_label.setdefault(label, []).append(sid)
+
     for label, sids in by_label.items():
         set_categorical_tag(sids, tag_name, label)
-    return {k: len(v) for k, v in by_label.items()}
+    return _label_counts(cache)
+
+
+def _label_counts(cache):
+    out = {}
+    for lab in cache.values():
+        out[lab] = out.get(lab, 0) + 1
+    return out
 
 
 def write_loss_shapes(loss_signal="loss_sample", classifier=None):

@@ -20,6 +20,7 @@ from collections import OrderedDict
 import h5py
 import numpy as np
 
+from weightslab.backend.optrace import traced
 
 # Config global logger
 logger = logging.getLogger(__name__)
@@ -382,6 +383,7 @@ class H5ArrayStore:
             logger.warning(f"[H5ArrayStore] Failed to compute checksum: {e}")
             return ""
 
+    @traced("arraystore", "arraystore._create_backup")
     def _create_backup(self) -> Optional[Path]:
         """Create backup of array file before write."""
         if not self._path.exists():
@@ -395,6 +397,7 @@ class H5ArrayStore:
             logger.warning(f"[H5ArrayStore] Failed to create backup: {e}")
             return None
 
+    @traced("arraystore", "arraystore._restore_backup")
     def _restore_backup(self, backup_path: Path) -> bool:
         """Restore array file from backup on write failure."""
         try:
@@ -425,6 +428,7 @@ class H5ArrayStore:
         key_name = parts[1]
         return sample_id, key_name
 
+    @traced("arraystore", "arraystore.save_array")
     def save_array(
         self,
         sample_id: str,
@@ -514,6 +518,53 @@ class H5ArrayStore:
             finally:
                 self._rw_lock.release_write()
 
+    def _try_inplace_batch(self, prepared):
+        """Overwrite existing datasets in place; None means "cannot, fall back".
+
+        Two passes under the write lock: check every destination exists with a
+        matching shape and dtype, and only then write. A partial in-place write
+        followed by a fallback would corrupt silently, so nothing is written
+        until the whole batch is known to fit.
+        """
+        if not self._path.exists():
+            return None
+        with self._local_lock:
+            self._rw_lock.acquire_write()
+            try:
+                with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout,
+                                           poll_interval=self._poll_interval):
+                    with h5py.File(str(self._path), 'a') as f:
+                        for group_name, key_data in prepared.items():
+                            grp = f.get(group_name)
+                            if grp is None:
+                                return None
+                            for key_name, (array, _meta) in key_data.items():
+                                kg = grp.get(key_name)
+                                if kg is None or 'data' not in kg:
+                                    return None
+                                dset = kg['data']
+                                if dset.shape != array.shape or dset.dtype != array.dtype:
+                                    return None
+                        for group_name, key_data in prepared.items():
+                            for key_name, (array, metadata) in key_data.items():
+                                kg = f[group_name][key_name]
+                                kg['data'][...] = array
+                                for mk, mv in metadata.items():
+                                    kg.attrs[mk] = mv
+                    return {
+                        group_name: {
+                            key_name: self._build_path_reference(group_name, key_name)
+                            for key_name in key_data
+                        }
+                        for group_name, key_data in prepared.items()
+                    }
+            except Exception as exc:
+                logger.debug(f"[H5ArrayStore] in-place batch fell back: {exc}")
+                return None
+            finally:
+                self._rw_lock.release_write()
+
+    @traced("arraystore", "arraystore.save_arrays_batch")
     def save_arrays_batch(
         self,
         arrays_dict: Dict[int, Dict[str, np.ndarray]],
@@ -561,6 +612,15 @@ class H5ArrayStore:
 
         if not prepared:
             return {}
+
+        # O(change): if every array already exists with the same shape and dtype,
+        # overwrite the values in place. That is not a structural change, so it
+        # needs neither the temp file nor the full-file backup (9.5GB per flush
+        # at current ledger size). Returns None if anything would need creating
+        # or resizing, and the original two-phase path below runs unchanged.
+        inplace_refs = self._try_inplace_batch(prepared)
+        if inplace_refs is not None:
+            return inplace_refs
 
         tmp_path = self._path.with_suffix(f".h5.writing_{uuid.uuid4().hex[:8]}")
         try:
@@ -650,6 +710,7 @@ class H5ArrayStore:
             finally:
                 self._rw_lock.release_write()
 
+    @traced("arraystore", "arraystore.recover")
     def recover(self) -> None:
         """
         Recover from a crash during save_arrays_batch.
@@ -673,6 +734,7 @@ class H5ArrayStore:
             if self._restore_backup(backup_path):
                 backup_path.unlink(missing_ok=True)
 
+    @traced("arraystore", "arraystore.load_array")
     def load_array(self, path_ref: str) -> Optional[np.ndarray]:
         """
         Load array from path reference with LRU cache.
@@ -741,6 +803,7 @@ class H5ArrayStore:
         finally:
             self._rw_lock.release_read()
 
+    @traced("arraystore", "arraystore.load_arrays_batch")
     def load_arrays_batch(self, path_refs: Dict[int, Dict[str, str]]) -> Dict[int, Dict[str, np.ndarray]]:
         """
         Load multiple arrays in batch.
@@ -805,6 +868,7 @@ class H5ArrayStore:
         finally:
             self._rw_lock.release_read()
 
+    @traced("arraystore", "arraystore.delete_sample")
     def delete_sample(self, sample_id: int) -> bool:
         """
         Delete all arrays for a given sample_id.
