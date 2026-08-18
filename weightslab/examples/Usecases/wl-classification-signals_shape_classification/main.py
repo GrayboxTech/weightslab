@@ -19,7 +19,6 @@ Universal loss: the watched crit runs on the test split each epoch too, so test
 samples get a loss trajectory and a shape as well.
 
 Env overrides (else the config.yaml value is used):
-  WL_STRESS_EPOCHS       (int)  number of training epochs.
   WL_STRESS_OUT          (str)  output dir; wiped and recreated on start. Holds
                          data/, wl_logs/, metrics.jsonl and report.csv.
   WL_QUERY_CACHE_MAXSIZE (int)  backend tuning knob (read in
@@ -29,6 +28,7 @@ Env overrides (else the config.yaml value is used):
                          queries at the cost of memory.
 """
 import os, time, gc, json, shutil
+import itertools
 import yaml
 import torch
 import numpy as np
@@ -62,7 +62,6 @@ def load_config():
 
     cfg.setdefault("experiment_name", "signals-mnist")
     cfg.setdefault("device", "auto")
-    cfg.setdefault("epochs", 10)
     cfg.setdefault("out", "/tmp/wl_stress")
     cfg.setdefault("batch_size", 64)
     cfg.setdefault("loss_signal_name", "loss_sample")
@@ -80,7 +79,6 @@ def load_config():
     cfg["data"]["test_loader"].setdefault("shuffle", False)
 
     # Env overrides for scripted stress runs (env wins over the yaml value).
-    cfg["epochs"] = int(os.environ.get("WL_STRESS_EPOCHS", cfg["epochs"]))
     cfg["out"] = os.environ.get("WL_STRESS_OUT", cfg["out"])
     cfg["query_cache_maxsize"] = int(
         os.environ.get("WL_QUERY_CACHE_MAXSIZE", cfg["query_cache_maxsize"]))
@@ -166,7 +164,6 @@ def main():
     cfg = load_config()
     LOSS = cfg["loss_signal_name"]
     OUT = cfg["out"]
-    EPOCHS = cfg["epochs"]
     BATCH = int(cfg["data"]["train_loader"]["batch_size"])
     LR = float(cfg["optimizer"]["lr"])
     # Backend reads this from the environment when it builds the query cache.
@@ -221,8 +218,12 @@ def main():
     log(f"[run] tracked train={len(train_ds)} test={len(test_ds)}")
 
     # --- 6) Train / eval loop ---
+    # Unbounded: WeightsLab runs until you stop it (studio pause button, CLI, or
+    # Ctrl+C), so there is no epoch budget to exhaust. The report below is
+    # rewritten at the end of every epoch rather than once after the loop --
+    # after an endless loop, "once after" never happens.
     step_times, gstep, t_run = [], 0, time.perf_counter()
-    for ep in range(1, EPOCHS + 1):
+    for ep in itertools.count(1):
         ep_ms = train(loader, model, opt, crit, dev, sync)
         gstep += len(ep_ms)
         test(test_loader, model, crit, dev)
@@ -230,26 +231,29 @@ def main():
         rec = {"epoch": ep, "gstep": gstep, "wl_ms": round(wl_ms, 2), "vanilla_ms": round(vanilla_ms, 2),
                "rss_gb": round(rss_gb(), 2), "elapsed_s": round(time.perf_counter() - t_run, 1)}
         metrics.write(json.dumps(rec) + "\n"); metrics.flush()
-        log(f"[run] ep {ep:3d}/{EPOCHS} | WL {wl_ms:6.2f} ms vs vanilla {vanilla_ms:.2f} "
+        log(f"[run] ep {ep:3d} | WL {wl_ms:6.2f} ms vs vanilla {vanilla_ms:.2f} "
             f"= +{100*(wl_ms/vanilla_ms-1):.0f}% | RSS {rec['rss_gb']:.2f} GB | {rec['elapsed_s']:.0f}s")
 
-    # --- 7) Report + summary ---
-    # loss_shape_signal=LOSS runs our @wl.signal_classifier once, synchronously,
-    # so the categorical 'tag:loss_shape' column is guaranteed fresh in the dump.
-    path = wl.write_dataframe(OUT + "/report.csv", format="csv",
-                              columns=["signals", "tags"], loss_shape_signal=LOSS)
-    df = pd.read_csv(path)
-    shape_cols = [c for c in df.columns if c.endswith("loss_shape")]
-    sc = shape_cols[0] if shape_cols else None
-    dist = Counter(df[sc].dropna()) if sc else Counter()
-    covered = int(df[sc].notna().sum()) if sc else 0
-    med = float(np.median(step_times))
-    metrics.close()
-    log("\n[run] ===== SUMMARY =====")
-    log(f"[run] vanilla {vanilla_ms:.2f} ms | WL median {med:.2f} ms/step (+{100*(med/vanilla_ms-1):.0f}%)")
-    log(f"[run] report {len(df)} rows | loss_shape covered {covered}/{len(df)}")
-    log(f"[run] shape distribution (monotonic/not_monotonic): {dict(dist)}")
-    log(f"[run] report -> {path}")
+        # --- 7) Report + summary, refreshed every epoch ---
+        # loss_shape_signal=LOSS runs our @wl.signal_classifier once,
+        # synchronously, so the categorical 'tag:loss_shape' column is guaranteed
+        # fresh in the dump. Same path each time: the report is a snapshot of the
+        # run so far, not one file per epoch. `metrics` is left open (it is
+        # flushed above) since there is no longer an "after the loop" to close it
+        # in -- the process exits when the user stops it.
+        path = wl.write_dataframe(OUT + "/report.csv", format="csv",
+                                  columns=["signals", "tags"], loss_shape_signal=LOSS)
+        df = pd.read_csv(path)
+        shape_cols = [c for c in df.columns if c.endswith("loss_shape")]
+        sc = shape_cols[0] if shape_cols else None
+        dist = Counter(df[sc].dropna()) if sc else Counter()
+        covered = int(df[sc].notna().sum()) if sc else 0
+        med = float(np.median(step_times))
+        log("\n[run] ===== SUMMARY (after epoch %d) =====" % ep)
+        log(f"[run] vanilla {vanilla_ms:.2f} ms | WL median {med:.2f} ms/step (+{100*(med/vanilla_ms-1):.0f}%)")
+        log(f"[run] report {len(df)} rows | loss_shape covered {covered}/{len(df)}")
+        log(f"[run] shape distribution (monotonic/not_monotonic): {dict(dist)}")
+        log(f"[run] report -> {path}")
 
 
 if __name__ == "__main__":

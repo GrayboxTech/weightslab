@@ -308,15 +308,18 @@ if __name__ == "__main__":
     # ================= Training loop =================
     wl.start_training(timeout=3)
 
-    steps = cfg.get("training_steps_to_do")
-    steps = int(steps) if steps is not None else None
     eval_ratio = int(cfg.get("eval_full_to_train_steps_ratio", 100))
     sample_every = int(cfg.get("sample_every", 250))
     grad_clip = float(cfg.get("max_grad_norm", 1.0))
 
-    train_range = tqdm.tqdm(
-        range(steps) if steps is not None else itertools.count(),
-        desc=f"video-gen[{mode}]", ncols=120)
+    # Training runs until YOU stop it -- from the studio's pause button, the CLI,
+    # or Ctrl+C. itertools.count() rather than range(training_steps_to_do): a
+    # predefined step budget ends the process mid-experiment, which is the
+    # opposite of how WeightsLab is used (inspect the curves, edit the data or
+    # the architecture, keep going). `training_steps_to_do` remains a live
+    # hyperparameter for the UI's own "run N more steps" control; it is not a
+    # ceiling on this loop.
+    train_range = tqdm.tqdm(itertools.count(), desc=f"video-gen[{mode}]", ncols=120)
 
     _model.train()
     eval_loss = None

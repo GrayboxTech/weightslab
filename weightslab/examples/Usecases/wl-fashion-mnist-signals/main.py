@@ -300,7 +300,6 @@ if __name__ == "__main__":
     tqdm_display = parameters.get("tqdm_display", True)
     eval_ratio = parameters.get("eval_full_to_train_steps_ratio", 250)
     enable_h5 = parameters.get("enable_h5_persistence", True)
-    steps_to_do = parameters.get("training_steps_to_do", 3000)
 
     # ---- MODEL -------------------------------------------------------------
     # `track_model_signals=True` is the whole feature: it installs the hooks
@@ -387,15 +386,22 @@ if __name__ == "__main__":
     print_layer_legend(model)
     print("=" * 72 + "\n")
 
+    # Training runs until YOU stop it -- from the studio's pause button, the CLI,
+    # or Ctrl+C. itertools.count() rather than range(training_steps_to_do): a
+    # predefined step budget ends the process mid-experiment, which is the
+    # opposite of how WeightsLab is used (inspect the curves, edit the data or
+    # the architecture, keep going). `training_steps_to_do` remains a live
+    # hyperparameter for the UI's own "run N more steps" control; it is not a
+    # ceiling on this loop.
     if tqdm_display:
         train_range = tqdm.tqdm(
-            range(steps_to_do) if steps_to_do is not None else itertools.count(),
+            itertools.count(),
             desc="Training",
-            bar_format="{desc}: {n}/{total} [{elapsed}<{remaining}, {rate_fmt}] {bar} | {postfix}",
+            bar_format="{desc}: {n} steps [{elapsed}, {rate_fmt}] {bar} | {postfix}",
             ncols=140, position=0, leave=True,
         )
     else:
-        train_range = range(steps_to_do) if steps_to_do is not None else itertools.count()
+        train_range = itertools.count()
 
     wl.start_training(timeout=3)
 
@@ -434,7 +440,6 @@ if __name__ == "__main__":
     # Flush async signals before reading anything back, then dump both the
     # step-keyed signal history (where every metrics/* curve lives) and the
     # per-sample grid.
-    wl.drain_signals()
     wl.write_history()
     wl.write_dataframe()
 

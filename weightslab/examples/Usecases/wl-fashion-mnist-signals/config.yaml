@@ -1,7 +1,7 @@
 # Fashion-MNIST classification with per-step model signals.
 experiment_name: fashion_mnist_model_signals
 device: auto
-training_steps_to_do: 3000   # null = train until stopped from the UI
+training_steps_to_do: null  # no ceiling: training runs until you stop it (studio, CLI, Ctrl+C)
 # root_log_dir:              # defaults to $WEIGHTSLAB_ROOT_LOG_DIR, else a temp dir
 
 optimizer:

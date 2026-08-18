@@ -149,7 +149,6 @@ if __name__ == "__main__":
         print(f"No root_log_dir specified, using temporary directory: {parameters['root_log_dir']}")
     os.makedirs(parameters["root_log_dir"], exist_ok=True)
     log_dir = parameters["root_log_dir"]
-    max_steps = parameters["training_steps_to_do"]
     eval_full_to_train_steps_ratio = parameters["eval_full_to_train_steps_ratio"]
     verbose = parameters.get("verbose", True)
     tqdm_display = parameters.get("tqdm_display", True)
@@ -289,7 +288,7 @@ if __name__ == "__main__":
 
     print("=" * 60)
     print(" STARTING PENN-FUDAN PEDESTRIAN DETECTION TRAINING")
-    print(f" Total steps: {max_steps}")
+    print(" Total steps: unbounded (stop from the studio, the CLI, or Ctrl+C)")
     print(f" Evaluation every {eval_full_to_train_steps_ratio} steps")
     print(f" Logs will be saved to: {log_dir}")
     print(f" Data root: {data_root}")

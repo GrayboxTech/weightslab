@@ -9,7 +9,6 @@ experiment_name: signals-mnist
 device: auto                 # auto | cpu | cuda
 
 # Run parameters
-epochs: 10                   # env override: WL_STRESS_EPOCHS
 out: /tmp/wl_stress          # env override: WL_STRESS_OUT — wiped & recreated on start
                              # (holds data/, wl_logs/, metrics.jsonl, report.csv)
 batch_size: 64
