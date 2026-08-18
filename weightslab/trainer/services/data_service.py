@@ -5351,12 +5351,25 @@ class DataService:
                 )
 
             # --- Numeric path (unchanged) ---
-            bars = max(1, min(n, max_bins))
             vals = numeric_vals.to_numpy()
-            edges = (np.arange(bars + 1) * n) // bars
-            bin_of_row = np.searchsorted(edges, np.arange(n), side="right") - 1
+            # Mask BEFORE choosing boundaries: bins are a search surface, so each
+            # one should hold a comparable number of SAMPLES THAT HAVE A VALUE.
+            # Cutting by position across the whole view instead made every bucket
+            # span len(view)/max_bins rows, so a sparsely-populated column landed
+            # entirely in the first few buckets.
             fin = np.isfinite(vals)
-            gf = pd.DataFrame({"b": bin_of_row[fin], "v": vals[fin],
+            n_fin = int(fin.sum())
+            if n_fin == 0:
+                return pb2.HistogramResponse(
+                    success=True,
+                    message=f"histogram {column}: no rows carry a value",
+                    total_rows=n, bins=[], is_categorical=False, categorical_bars=[])
+            bars = max(1, min(n_fin, max_bins))
+            # Positions WITHIN the finite subset; vals[fin] keeps the view's row
+            # order, so equal-population still means equal-population by order.
+            edges = (np.arange(bars + 1) * n_fin) // bars
+            bin_of_row = np.searchsorted(edges, np.arange(n_fin), side="right") - 1
+            gf = pd.DataFrame({"b": bin_of_row, "v": vals[fin],
                                "o": origin[fin], "d": disc[fin]})
             stats = gf.groupby("b")["v"].agg(["min", "max", "mean", "count"])
             sub_by_bin = {}
