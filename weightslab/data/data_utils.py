@@ -386,6 +386,12 @@ def _get_image_array_and_metadata(wrapped, index, rank: int = 0) -> tuple:
     if hasattr(np_img, 'numpy'):
         np_img = np_img.numpy()
 
+    # A text-generation sample's "image" slot is the prompt itself (a plain
+    # str) — bail out before any array-shaped logic below, which assumes
+    # .ndim/.shape exist.
+    if isinstance(np_img, str):
+        return np_img, False, None
+
     is_volumetric = np_img.ndim >= 4 # 3 is for RGB; while 4 is 3D # TODO (GP): Should be fix because this will not work with grayscale image wo. color channel
 
     # For 4D volumetric data, detect and transpose channel-first formats:
@@ -538,7 +544,7 @@ def load_metadata(dataset, sample_id):
     return None
 
 
-def load_raw_image(dataset, index, slice_idx: int = None, rank: int = 0) -> Image.Image:
+def load_raw_image(dataset, index, slice_idx: int = None, rank: int = 0) -> Image.Image | None:
     """Load raw image from dataset at given index.
 
     For 4D volumetric data (Z, H, W, C) or (Z, H, W), extracts a single slice.
@@ -551,7 +557,8 @@ def load_raw_image(dataset, index, slice_idx: int = None, rank: int = 0) -> Imag
         rank: Member rank for grouped data
 
     Returns:
-        PIL Image of the 2D slice
+        PIL Image of the 2D slice, or None for a text-generation sample
+        (its "image" slot is a plain string — there is no image to load).
     """
     # Get dataset wrapper if exists
     wrapped = getattr(dataset, "wrapped_dataset", dataset)
@@ -566,6 +573,14 @@ def load_raw_image(dataset, index, slice_idx: int = None, rank: int = 0) -> Imag
         return img.convert("RGB")
     elif hasattr(wrapped, '__getitem__') or hasattr(wrapped, "data") or hasattr(wrapped, "dataset"):
         np_img, is_volumetric, original_shape = _get_image_array_and_metadata(wrapped, index, rank=rank)
+
+        # A text-generation sample's "image" slot is a plain str, not pixels —
+        # there is nothing to build a PIL preview from. None is this
+        # function's existing "nothing to show" convention (its only caller,
+        # data_service.py's natural-sort default-signal computation, already
+        # treats a None return as "skip this sample" rather than an error).
+        if isinstance(np_img, str):
+            return None
 
         # Handle 4D volumetric data
         if is_volumetric:
@@ -619,6 +634,15 @@ def load_raw_image_array(dataset, index, rank: int = 0) -> tuple:
     if hasattr(wrapped, '__getitem__'):
         np_img, is_volumetric, original_shape = _get_image_array_and_metadata(wrapped, index, rank=rank)
 
+        # Text-generation samples (a prompt, an RLHF conversation, ...) have no
+        # pixels at all — the text itself is the payload. Every check below
+        # this point assumes an array (.ndim/.shape), so this must come first.
+        # The caller (load_raw_image_array's callers in data_service.py)
+        # detects this case via isinstance(..., str) and skips image encoding
+        # entirely in favor of a plain text stat.
+        if isinstance(np_img, str):
+            return np_img, False, original_shape, None
+
         # Tabular samples (1-D feature vectors) have no spatial dims and cannot be
         # PIL-encoded as an image. Render a small heatmap for display continuity;
         # the caller transmits the actual values via build_tabular_raw_data_stat.
@@ -648,6 +672,17 @@ def load_raw_image_array(dataset, index, rank: int = 0) -> tuple:
             thumb_pil = render_thumbnail_2d_for_dataset(dataset, np_img)
             thumb_arr = np.asarray(thumb_pil)
             return thumb_arr, False, tuple(thumb_arr.shape), thumb_pil
+
+        # Video samples are [T, H, W, C] and share their rank with volumetric
+        # scans, so the dataset must opt in (task_type or media_kind) before we
+        # treat them as clips. Preview them with a single poster frame; the
+        # playable clip is streamed separately by the GetMedia RPC, which keeps
+        # the grid and list cheap regardless of clip length.
+        from weightslab.data.video_utils import is_video_sample, video_poster_frame
+        if is_video_sample(dataset, np_img, _raw_task):
+            poster_pil = video_poster_frame(dataset, np_img)
+            poster_arr = np.asarray(poster_pil)
+            return poster_arr, False, tuple(poster_arr.shape), poster_pil
 
         # Extract middle slice for thumbnail
         if is_volumetric:
@@ -694,6 +729,44 @@ def load_raw_point_cloud(dataset, index, rank: int = 0):
     if arr is None or not looks_like_point_cloud(np.asarray(arr)):
         return None
     return np.asarray(arr, dtype=np.float32)
+
+
+def load_raw_video(dataset, index, rank: int = 0):
+    """Load the raw clip array [T, H, W, C] for one sample (no poster render).
+
+    Same plucking rules as ``load_raw_image_array`` but returns every frame so
+    the GetMedia RPC can mux and stream a playable clip. Returns None when the
+    sample is not a video.
+    """
+    from weightslab.data.video_utils import is_video_sample
+
+    wrapped = getattr(dataset, "wrapped_dataset", dataset)
+    if not hasattr(wrapped, '__getitem__'):
+        return None
+    arr, _, _ = _get_image_array_and_metadata(wrapped, index, rank=rank)
+    if arr is None:
+        return None
+    task_type = getattr(wrapped, "task_type", getattr(dataset, "task_type", None))
+    if not task_type:
+        # Some datasets vary task_type PER SAMPLE via the metadata dict their
+        # own __getitem__ returns (the tracked loader's documented "more than
+        # two elements" contract) instead of one fixed dataset-level
+        # attribute -- e.g. a dataset combining several main-sample
+        # modalities behind one loader. Peek at it before falling back to the
+        # shape-only heuristic in is_video_sample, which cannot tell a video
+        # clip apart from volumetric image data on shape alone.
+        try:
+            raw_item = wrapped[index]
+            if isinstance(raw_item, tuple) and len(raw_item) > 3:
+                for m in raw_item[3:]:
+                    if isinstance(m, dict) and m.get("task_type"):
+                        task_type = m["task_type"]
+                        break
+        except Exception:
+            pass
+    if not is_video_sample(dataset, arr, task_type):
+        return None
+    return np.asarray(arr)
 
 
 def load_uid(dataset, sample_id):

@@ -38,6 +38,10 @@ from weightslab.data.point_cloud_utils import (
     POINT_CLOUD_DETECTION_TASK,
     is_point_cloud_detection_task,
 )
+from weightslab.data.video_utils import (
+    describe_clip, is_generation_task, is_video_task,
+)
+from weightslab.data import media_store
 from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview, encode_image_to_raw_bytes
 from weightslab.data.data_utils import load_raw_image_array
 
@@ -107,6 +111,72 @@ def _point_cloud_chunk_bytes() -> int:
         )
         return _DEFAULT_POINT_CLOUD_CHUNK_BYTES
     return val
+
+
+# Streamed chunk size for GetMedia. Smaller than the point-cloud chunk because
+# these messages cross grpc-web to a browser, where oversized frames are the
+# usual cause of stalled streams. Override with WL_MEDIA_CHUNK_BYTES.
+_DEFAULT_MEDIA_CHUNK_BYTES = 1 << 18 # 256 KiB
+
+
+def _media_chunk_bytes() -> int:
+    """Read WL_MEDIA_CHUNK_BYTES; non-positive/invalid falls back to the default."""
+    return _env_int("WL_MEDIA_CHUNK_BYTES", _DEFAULT_MEDIA_CHUNK_BYTES)
+
+
+# Task types whose target/prediction is never a spatial mask or box set, and so
+# must skip the RLE/detection interpretation entirely. For generative tasks the
+# target is a caption or a reference clip: RLE-encoding a [T, H, W, C] clip
+# would be both meaningless and ruinously expensive, so they route to the
+# text/scalar branch alongside classification and tabular.
+_NON_MASK_TASKS = ("classification", "tabular")
+
+
+def _is_non_mask_task(task_type) -> bool:
+    """True when labels/predictions for this task must not be read as masks."""
+    return task_type in _NON_MASK_TASKS or is_generation_task(task_type)
+
+
+def _build_media_stats(row) -> list:
+    """DataStats for every ``media:<field>`` column present on this row.
+
+    Emits stat type "media" carrying the descriptor in ``value_string`` and the
+    poster still in ``thumbnail``. Rows whose media has been evicted from the
+    store still get the descriptor, so the column keeps its shape; the frontend
+    just has no still to draw.
+
+    A module-level function, not a method: it needs no instance state, and
+    binding it to the service would force every white-box test stub of
+    _process_sample_row to grow another attribute.
+    """
+    stats = []
+    try:
+        sample_id = row.get(SampleStatsEx.SAMPLE_ID.value) if hasattr(row, "get") else None
+        if sample_id is None:
+            # sample_id is the dataframe INDEX, not a column, on real rows.
+            sample_id = getattr(row, "name", None)
+            if isinstance(sample_id, tuple):
+                sample_id = sample_id[0]
+        keys = row.keys() if hasattr(row, "keys") else []
+        for column in keys:
+            if not media_store.is_media_column(column):
+                continue
+            value = row.get(column)
+            if value is None or (isinstance(value, float) and np.isnan(value)):
+                continue
+            field = media_store.field_from_column(column)
+            stats.append(
+                create_data_stat(
+                    name=str(column),
+                    stat_type="media",
+                    shape=[1],
+                    value_string=str(value),
+                    thumbnail=media_store.get_poster(field, sample_id),
+                )
+            )
+    except Exception as exc:
+        logger.debug("media stat build failed: %r", exc)
+    return stats
 
 
 def peek_is_tabular_sample(dataset, sample_id) -> bool:
@@ -488,6 +558,15 @@ class DataService:
         else:
             self._preview_cache_ready.set() # No preload → mark immediately ready
 
+        # Encoded-media LRU for GetMedia (insertion-ordered dict). Muxing a clip
+        # costs an ffmpeg round-trip, so opening, closing and re-opening the
+        # same sample — or paging its frames — must not re-encode.
+        # gRPC serves handlers from a thread pool, so concurrent GetMedia calls
+        # share this dict: every read/insert/evict goes through the lock, and
+        # the (expensive) encode always happens outside it.
+        self._media_cache: dict = {}
+        self._media_cache_lock = threading.Lock()
+
         logger.info("DataService initialized.")
 
     @staticmethod
@@ -575,7 +654,12 @@ class DataService:
                         member_rank = 0
 
                     _pv_np_img, _, _, pil_img = load_raw_image_array(dataset, ds_idx, rank=member_rank)
-                    if looks_like_tabular(_pv_np_img):
+                    if isinstance(_pv_np_img, str):
+                        # Text-generation sample: cache the text itself, no image.
+                        stats.append(create_data_stat(
+                            'raw_data', 'text', shape=[1], value_string=_pv_np_img))
+                        pil_img = None
+                    elif looks_like_tabular(_pv_np_img):
                         # Tabular sample: cache the feature values (lossless) as a
                         # 'vector' raw_data stat + heatmap thumbnail, not an image.
                         stats.append(build_tabular_raw_data_stat(_pv_np_img))
@@ -1432,7 +1516,7 @@ class DataService:
 
             # ====== Step 7: Process labels ======
             t_label_convert = 0.0
-            if not skip_label_for_request and task_type not in ("classification", "tabular"):
+            if not skip_label_for_request and not _is_non_mask_task(task_type):
                 t0_gt_conv = time.time()
                 label_raw = row.get(SampleStatsEx.TARGET.value) if label is None else label
                 if label_raw is None and dataset is not None:
@@ -1706,7 +1790,7 @@ class DataService:
             if skip_prediction_for_request:
                 pred = None
 
-            if task_type not in ("classification", "tabular") and pred is not None:
+            if not _is_non_mask_task(task_type) and pred is not None:
                 t0_pmask = time.time()
 
                 # 3D (point cloud) detection predictions: same dual payload as
@@ -1889,10 +1973,22 @@ class DataService:
                 else:
                     np_img, is_volumetric, original_shape, middle_pil = None, False, [], None
 
+                # Text-generation input: the sample's payload IS the text (a
+                # prompt, a conversation turn, ...) — there is no image to
+                # encode at all, lossy or otherwise.
+                if isinstance(np_img, str):
+                    data_stats.append(
+                        create_data_stat(
+                            name='raw_data',
+                            stat_type='text',
+                            shape=[1],
+                            value_string=np_img,
+                        )
+                    )
                 # Tabular input: the model input is a 1-D feature vector, not an
                 # image. Transmit the actual values (lossless) as a 'vector'
                 # raw_data stat instead of a lossy WebP image.
-                if looks_like_tabular(np_img):
+                elif looks_like_tabular(np_img):
                     data_stats.append(build_tabular_raw_data_stat(np_img))
                 elif middle_pil is not None:
                     original_size = middle_pil.size
@@ -1993,11 +2089,34 @@ class DataService:
                         )
                     )
 
+                    # For video samples the bytes above are only the poster
+                    # frame, so advertise the clip's shape here. This lets the
+                    # grid badge the cell and the modal size its player without
+                    # anyone paying for a GetMedia round-trip first.
+                    if is_video_task(task_type):
+                        media_info = describe_clip(dataset)
+                        if media_info:
+                            data_stats.append(
+                                create_data_stat(
+                                    name='media_info',
+                                    stat_type='string',
+                                    shape=[1],
+                                    value_string=json.dumps(media_info),
+                                )
+                            )
+
                     # Eagerly release intermediate image data to reduce peak memory
                     # across concurrent thread-pool workers.
                     del raw_data_bytes, middle_pil
                     if np_img is not None:
                         del np_img
+
+            # ====== Step 9b: Media attached to metadata fields ======
+            # Any column written by wl.save_media becomes its own viewable
+            # column: the poster travels here (so the list can draw a thumbnail
+            # per row) while the payload stays in the store until the user opens
+            # it. This is what lets a generated clip sit beside its target.
+            data_stats.extend(_build_media_stats(row))
 
             # ====== Step 10: Create DataRecord ======
             total_time = time.time() - start_total
@@ -3818,7 +3937,13 @@ class DataService:
         # response to 100s of MB and silently break the histogram fetch.
         if not requested_cols:
             _HEAVY_BLOB_COLS = {"prediction_raw"}
-            requested_cols = [c for c in df_slice.columns if c not in _HEAVY_BLOB_COLS]
+            # media:<field> columns are emitted as their own "media" stat (with a
+            # poster) by _build_media_stats; shipping them here too would add a
+            # second column showing the raw descriptor JSON as text.
+            requested_cols = [
+                c for c in df_slice.columns
+                if c not in _HEAVY_BLOB_COLS and not media_store.is_media_column(c)
+            ]
 
         metadata_cols = [
             col for col in requested_cols
@@ -3942,6 +4067,9 @@ class DataService:
             for col in df.columns:
                 name = str(col)
                 if col in _HEAVY_BLOB_COLS or col in _INTERNAL_COLS:
+                    continue
+                # Media columns are surfaced as "media" stats, not text columns.
+                if media_store.is_media_column(col):
                     continue
                 if name in seen:
                     continue
@@ -4841,6 +4969,205 @@ class DataService:
     # configurable via the WL_POINT_CLOUD_CHUNK_BYTES env var (default 1 MiB).
     _POINT_CLOUD_CHUNK_BYTES = _point_cloud_chunk_bytes()
 
+    # Same, for GetMedia (already-compressed MP4/WAV bytes per message).
+    _MEDIA_CHUNK_BYTES = _media_chunk_bytes()
+    # How many encoded clips to keep. Clips are megabytes each, so this only
+    # needs to cover "the sample the user is currently looking at".
+    _MEDIA_CACHE_ENTRIES = 3
+
+    def _locate_sample(self, sample_id: int, origin: str = ""):
+        """Resolve ``sample_id`` to ``(dataset, ds_index, member_rank)``.
+
+        Shared by the media streaming RPCs. When ``origin`` is empty every
+        known loader is scanned, so a sample can still be fetched when the
+        caller does not know which loader owns it.
+        Returns ``(None, None, 0)`` when the sample cannot be located.
+        """
+        origins = [origin] if origin else list(get_dataloaders().keys())
+        for candidate_origin in origins:
+            candidate = self._get_dataset(candidate_origin)
+            if candidate is None:
+                continue
+            try:
+                if hasattr(candidate, "get_physical_location"):
+                    ds_idx, member_rank = candidate.get_physical_location(sample_id)
+                else:
+                    ds_idx = candidate.get_index_from_sample_id(sample_id)
+                    member_rank = 0
+                return candidate, ds_idx, member_rank
+            except (KeyError, ValueError, AttributeError, IndexError):
+                continue
+        return None, None, 0
+
+    def GetMedia(self, request, context):
+        """Stream one sample's playable media (clip or soundtrack) in chunks.
+
+        Used by the studio's modal player for generative media samples
+        (task_type "video_generation" / "audio_generation"). The clip is muxed
+        to MP4 (H.264 + AAC) on demand, capped by request ``max_frames`` /
+        env WL_MAX_VIDEO_FRAMES, and memoized in a small LRU so scrubbing and
+        re-opening the same sample does not re-encode. The first chunk carries
+        the mime type, geometry, fps and duration so the client can size the
+        player before any bytes arrive.
+        """
+        from weightslab.data.data_utils import load_raw_video
+        from weightslab.data import video_utils as vu
+
+        try:
+            sample_id = int(str(request.sample_id))
+            kind = (request.kind or "video").strip().lower()
+            server_cap = int(os.environ.get("WL_MAX_VIDEO_FRAMES", "512"))
+            max_frames = int(request.max_frames) if request.max_frames > 0 else server_cap
+            if server_cap > 0:
+                max_frames = min(max_frames, server_cap)
+
+            # A field request serves media attached to a metadata column by
+            # wl.save_media (e.g. a generated clip); it is already encoded, so
+            # it streams straight out of the store with no re-encode.
+            field = (request.field or "").strip()
+            if field:
+                entry = media_store.get(field, sample_id)
+                if entry is None:
+                    yield pb2.MediaChunk(
+                        success=False,
+                        message=(f"No media stored for field {field!r} on sample "
+                                 f"{request.sample_id}"),
+                    )
+                    return
+                meta = entry.get("meta") or {}
+                cached = {
+                    "data": entry["data"], "mime": entry["mime"],
+                    "frame_count": int(meta.get("frame_count", 0) or 0),
+                    "fps": float(meta.get("fps", 0.0) or 0.0),
+                    "has_audio": bool(meta.get("has_audio", False)),
+                    "width": int(meta.get("width", 0) or 0),
+                    "height": int(meta.get("height", 0) or 0),
+                    "sample_rate": int(meta.get("sample_rate", 0) or 0),
+                    "duration": float(meta.get("duration_seconds", 0.0) or 0.0),
+                }
+                yield from self._stream_media(cached)
+                return
+
+            cache_key = (sample_id, request.origin or "", kind, max_frames)
+            cached = self._media_cache_get(cache_key)
+            if cached is None:
+                dataset, ds_idx, member_rank = self._locate_sample(
+                    sample_id, request.origin)
+                if dataset is None or ds_idx is None:
+                    yield pb2.MediaChunk(
+                        success=False,
+                        message=(f"Sample {request.sample_id} not found "
+                                 f"(origin={request.origin or 'any'})"),
+                    )
+                    return
+
+                frames = load_raw_video(dataset, ds_idx, rank=member_rank)
+                audio, sample_rate = vu.load_sample_audio(dataset, ds_idx)
+
+                if kind == "audio":
+                    if audio is None or not sample_rate:
+                        yield pb2.MediaChunk(
+                            success=False,
+                            message=f"Sample {request.sample_id} has no audio track",
+                        )
+                        return
+                    data = vu.encode_audio_wav(audio, sample_rate)
+                    cached = {
+                        "data": data, "mime": "audio/wav", "frame_count": 0,
+                        "fps": 0.0, "has_audio": True, "width": 0, "height": 0,
+                        "sample_rate": sample_rate,
+                        "duration": (len(audio) / float(sample_rate)) if sample_rate else 0.0,
+                    }
+                else:
+                    if frames is None:
+                        yield pb2.MediaChunk(
+                            success=False,
+                            message=f"Sample {request.sample_id} is not a video",
+                        )
+                        return
+                    # Cap long clips by uniform subsampling so the playback
+                    # still spans the whole clip rather than truncating it.
+                    if max_frames > 0 and frames.shape[0] > max_frames:
+                        picks = np.linspace(
+                            0, frames.shape[0] - 1, max_frames).astype(int)
+                        frames = frames[picks]
+                    fps = vu.get_fps(dataset)
+                    data, mime, has_audio = vu.encode_clip(
+                        frames, fps, audio=audio, sample_rate=sample_rate)
+                    if not data:
+                        yield pb2.MediaChunk(
+                            success=False,
+                            message=("Failed to encode clip — install ffmpeg "
+                                     "(pip install imageio-ffmpeg) for MP4 output"),
+                        )
+                        return
+                    cached = {
+                        "data": data, "mime": mime,
+                        "frame_count": int(frames.shape[0]), "fps": float(fps),
+                        "has_audio": has_audio,
+                        "width": int(frames.shape[2]), "height": int(frames.shape[1]),
+                        "sample_rate": int(sample_rate or 0),
+                        "duration": float(frames.shape[0]) / max(1.0, float(fps)),
+                    }
+                self._media_cache_put(cache_key, cached)
+
+            yield from self._stream_media(cached)
+        except Exception as e:
+            logger.error("Error in GetMedia: %s", str(e), exc_info=True)
+            yield pb2.MediaChunk(
+                success=False,
+                message=f"Failed to retrieve media: {str(e)}",
+            )
+
+    def _stream_media(self, payload: dict):
+        """Chunk one encoded payload out, header on the first chunk only."""
+        data = payload["data"]
+        chunk_size = self._MEDIA_CHUNK_BYTES
+        total_chunks = max(1, (len(data) + chunk_size - 1) // chunk_size)
+        for i in range(total_chunks):
+            chunk = pb2.MediaChunk(
+                success=True,
+                data=data[i * chunk_size:(i + 1) * chunk_size],
+                chunk_index=i,
+                total_chunks=total_chunks,
+            )
+            if i == 0:
+                chunk.mime_type = payload["mime"]
+                chunk.frame_count = payload["frame_count"]
+                chunk.fps = payload["fps"]
+                chunk.has_audio = payload["has_audio"]
+                chunk.width = payload["width"]
+                chunk.height = payload["height"]
+                chunk.total_bytes = len(data)
+                chunk.duration_seconds = payload["duration"]
+                chunk.sample_rate = payload["sample_rate"]
+            yield chunk
+
+    def _media_cache_get(self, key):
+        """Look one entry up in the encoded-media LRU, marking it most recent.
+
+        Returns None on a miss; the caller then encodes *outside* the lock and
+        hands the result back through :meth:`_media_cache_put`.
+        """
+        with self._media_cache_lock:
+            value = self._media_cache.pop(key, None)
+            if value is not None:
+                self._media_cache[key] = value  # re-insert = move to newest
+            return value
+
+    def _media_cache_put(self, key, value) -> None:
+        """Insert into the encoded-media LRU, evicting the oldest entries.
+
+        Encoded clips are large, so this is deliberately tiny — it exists to
+        make re-opening and scrubbing the *same* sample free, not to hold a
+        working set.
+        """
+        with self._media_cache_lock:
+            self._media_cache.pop(key, None)  # keep re-puts from double-counting
+            self._media_cache[key] = value
+            while len(self._media_cache) > self._MEDIA_CACHE_ENTRIES:
+                self._media_cache.pop(next(iter(self._media_cache)))
+
     def GetPointCloud(self, request, context):
         """Stream one sample's raw point cloud as binary float32 chunks.
 
@@ -4857,26 +5184,33 @@ class DataService:
 
         try:
             sample_id = int(str(request.sample_id))
-            origins = [request.origin] if request.origin else []
-            if not origins:
-                # No origin provided: scan known loaders for the sample.
-                origins = list(get_dataloaders().keys())
 
-            dataset, ds_idx, member_rank = None, None, 0
-            for origin in origins:
-                candidate = self._get_dataset(origin)
-                if candidate is None:
-                    continue
-                try:
-                    if hasattr(candidate, "get_physical_location"):
-                        ds_idx, member_rank = candidate.get_physical_location(sample_id)
-                    else:
-                        ds_idx = candidate.get_index_from_sample_id(sample_id)
-                        member_rank = 0
-                    dataset = candidate
-                    break
-                except (KeyError, ValueError, AttributeError, IndexError):
-                    continue
+            # A field request serves a cloud attached to a metadata column by
+            # wl.save_media (e.g. a generated/predicted cloud); it is already
+            # packed, so it streams straight out of the store with no dataset
+            # lookup at all — mirrors GetMedia's field branch.
+            field = (request.field or "").strip()
+            if field:
+                entry = media_store.get(field, sample_id)
+                if entry is None:
+                    yield pb2.PointCloudChunk(
+                        success=False,
+                        message=(f"No point cloud stored for field {field!r} on "
+                                 f"sample {request.sample_id}"),
+                    )
+                    return
+                meta = entry.get("meta") or {}
+                yield from self._stream_point_cloud(
+                    entry["data"],
+                    num_points=int(meta.get("num_points", 0) or 0),
+                    num_features=int(meta.get("num_features", 0) or 0),
+                    pc_range=meta.get("pc_range") or (),
+                    feature_names=meta.get("feature_names") or [],
+                )
+                return
+
+            dataset, ds_idx, member_rank = self._locate_sample(
+                sample_id, request.origin)
 
             if dataset is None or ds_idx is None:
                 yield pb2.PointCloudChunk(
@@ -4903,27 +5237,34 @@ class DataService:
             pc_range = get_pc_range(ds, points) or ()
             feature_names = get_point_feature_names(ds, num_features)
 
-            chunk_size = self._POINT_CLOUD_CHUNK_BYTES
-            total_chunks = max(1, (len(data) + chunk_size - 1) // chunk_size)
-            for i in range(total_chunks):
-                chunk = pb2.PointCloudChunk(
-                    success=True,
-                    data=data[i * chunk_size:(i + 1) * chunk_size],
-                    chunk_index=i,
-                    total_chunks=total_chunks,
-                )
-                if i == 0:
-                    chunk.num_points = num_points
-                    chunk.num_features = num_features
-                    chunk.pc_range.extend(float(v) for v in pc_range)
-                    chunk.feature_names.extend(feature_names)
-                yield chunk
+            yield from self._stream_point_cloud(
+                data, num_points=num_points, num_features=num_features,
+                pc_range=pc_range, feature_names=feature_names)
         except Exception as e:
             logger.error("Error in GetPointCloud: %s", str(e), exc_info=True)
             yield pb2.PointCloudChunk(
                 success=False,
                 message=f"Failed to retrieve point cloud: {str(e)}",
             )
+
+    def _stream_point_cloud(self, data: bytes, num_points: int, num_features: int,
+                            pc_range, feature_names):
+        """Chunk one packed cloud out, header on the first chunk only."""
+        chunk_size = self._POINT_CLOUD_CHUNK_BYTES
+        total_chunks = max(1, (len(data) + chunk_size - 1) // chunk_size)
+        for i in range(total_chunks):
+            chunk = pb2.PointCloudChunk(
+                success=True,
+                data=data[i * chunk_size:(i + 1) * chunk_size],
+                chunk_index=i,
+                total_chunks=total_chunks,
+            )
+            if i == 0:
+                chunk.num_points = num_points
+                chunk.num_features = num_features
+                chunk.pc_range.extend(float(v) for v in pc_range)
+                chunk.feature_names.extend(feature_names)
+            yield chunk
 
     def _set_h5_persistence_enabled(self, enabled: bool) -> bool:
         """Toggle dataframe manager H5 persistence flag when available."""

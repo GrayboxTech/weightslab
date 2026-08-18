@@ -82,6 +82,66 @@ class _StateDictKeys(str, Enum):
         return list(map(lambda c: c.value, cls))
 
 
+def _partition_metadata_for_auto_render(safe_meta: dict):
+    """Split one sample's metadata dict into (raw_values, media_values).
+
+    ``media_values`` are the ones auto_render_metadata will attach via the
+    media store: anything media_store.classify_kind recognizes (an array or a
+    string), plus any "<field>_audio" key -- always consumed as another
+    field's audio companion, never rendered as its own column. Everything
+    else (plain scalars) stays a raw DataFrame value, exactly like today --
+    including task_type: a dataset combining several main-sample modalities
+    behind one loader (see main.py's CombinedDataset) stamps it as a control
+    string, not content, and it must keep landing in its own reserved column
+    (SampleStatsEx.TASK_TYPE), never treated as a "text" media field.
+    """
+    from weightslab.data import media_store as _ms
+
+    media_keys = {
+        k for k, v in safe_meta.items()
+        if k != SampleStatsEx.TASK_TYPE.value
+        and (k.endswith("_audio") or _ms.classify_kind(v) is not None)
+    }
+    if not media_keys:
+        return safe_meta, {}
+    raw = {k: v for k, v in safe_meta.items() if k not in media_keys}
+    media = {k: v for k, v in safe_meta.items() if k in media_keys}
+    return raw, media
+
+
+def _auto_render_pending_metadata(origin: str, pending: list, dataset=None) -> None:
+    """Attach every classified metadata value the same way wl.save_media()
+    would, once per sample. Run right after register_split so every row
+    already exists for save_media's DataFrame update to find.
+    """
+    from weightslab.data import media_store as _ms
+    from weightslab.data.video_utils import get_fps
+    from weightslab.src import save_media
+
+    fps = get_fps(dataset)
+    for sid, media_meta in pending:
+        for field, value in media_meta.items():
+            if field.endswith("_audio"):
+                continue  # only ever consumed below, alongside its video field
+            kind = _ms.classify_kind(value)
+            if kind is None:
+                continue
+            audio, sample_rate = None, 0
+            if kind == _ms.KIND_VIDEO:
+                companion = media_meta.get(f"{field}_audio")
+                if isinstance(companion, (tuple, list)) and len(companion) == 2:
+                    audio, sample_rate = [companion[0]], int(companion[1] or 0)
+            try:
+                save_media(
+                    field, batch_ids=[sid], media=[value], kind=kind,
+                    fps=fps, audio=audio, sample_rate=sample_rate,
+                    origin=origin, dataset=dataset,
+                )
+            except Exception as exc:
+                logger.warning("auto_render_metadata: %s failed for sample %s: %r",
+                               field, sid, exc)
+
+
 class DataSampleTrackingWrapper(Dataset):
     """Wrapper for PyTorch datasets that tracks per-sample statistics and supports tag-based labeling.
 
@@ -104,6 +164,13 @@ class DataSampleTrackingWrapper(Dataset):
         preload_metadata: Whether to attempt preloading metadata into the stats dataframe defaults (can speed up access but may increase init time)
         preload_uids: Whether to attempt preloading unique IDs from metadata instead of generating them (requires metadata to have unique sample_id)
         keep_leakages: Whether to keep cross-loader duplicates that may cause data leakage (not recommended, use for debugging only)
+        auto_render_metadata: Auto-classify every preloaded metadata value by shape/type
+            (array -> image/mask/video/pointcloud, str -> text) and attach it via the
+            same path as wl.save_media(), once per sample at registration -- no
+            explicit save_media() call needed. A value named "<field>_audio" that is a
+            (samples, sample_rate) pair is muxed into "<field>"'s video instead of
+            becoming its own field. Off by default: every other dataset's metadata
+            dict keeps landing as plain DataFrame values, unchanged.
 
 
     Examples:
@@ -141,6 +208,7 @@ class DataSampleTrackingWrapper(Dataset):
         preload_metadata: bool = True,
         preload_uids: bool = False,
         keep_leakages: bool = False,
+        auto_render_metadata: bool = False,
         **_,
     ):
         if len(wrapped_dataset) == 0:
@@ -291,6 +359,7 @@ class DataSampleTrackingWrapper(Dataset):
         default_data = []
         expanded_uids = []
         physical_uids = []
+        _pending_auto_render = [] if auto_render_metadata else None
 
         # User information
         logger.info(
@@ -382,6 +451,10 @@ class DataSampleTrackingWrapper(Dataset):
                 if preload_metadata and metadata:
                     # Do not overwrite standard managed keys with raw un-casted metadata payload
                     safe_meta = {k: v for k, v in metadata.items() if k not in {SampleStatsEx.GROUP_ID.value, SampleStatsEx.SAMPLE_ID.value, SampleStatsEx.ORIGIN.value}}
+                    if auto_render_metadata:
+                        safe_meta, media_meta = _partition_metadata_for_auto_render(safe_meta)
+                        if media_meta:
+                            _pending_auto_render.append((sid, media_meta))
                     row.update(safe_meta)
                     for k, v in list(safe_meta.items()):
                         if isinstance(v, dict):
@@ -405,6 +478,13 @@ class DataSampleTrackingWrapper(Dataset):
                 return_proxies=self.array_return_proxies,
                 use_cache=self.array_use_cache
             )
+
+            # Auto-render every classified metadata value now that every row
+            # above actually exists in the ledger -- save_media's DataFrame
+            # update requires the row to already be registered, so this MUST
+            # run after register_split, not inside the loop that built it.
+            if auto_render_metadata and _pending_auto_render:
+                _auto_render_pending_metadata(self._dataset_split, _pending_auto_render, wrapped_dataset)
 
             # Log tag-based labeling configuration if enabled
             if self._use_tags:

@@ -36,8 +36,8 @@ _LAZY_EXPORTS = {
 # Everything re-exported straight from .src (attribute name == export name).
 for _name in (
     "watch_or_edit", "start_training", "serve", "keep_serving", "save_signals",
-    "save_instance_signals", "save_group_signals", "save_model_signals",
-    "track_model_signals", "tag_samples",
+    "save_instance_signals", "save_group_signals", "save_media", "tag_samples",
+    "save_model_signals", "track_model_signals",
     "register_categorical_tag", "set_categorical_tag", "discard_samples",
     "get_samples_by_tag", "get_discarded_samples", "signal", "eval_fn",
     "compute_signals", "SignalContext", "BatchSignalContext", "StaleSignalError",
@@ -192,6 +192,7 @@ __all__ = [
     "save_signals",
     "save_instance_signals",
     "save_group_signals",
+    "save_media",
     "save_model_signals",
     "track_model_signals",
     "signal",

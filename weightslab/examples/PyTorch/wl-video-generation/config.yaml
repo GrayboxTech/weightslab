@@ -1,0 +1,58 @@
+experiment_name: wl_video_generation
+device: auto
+root_log_dir: ./logs/video_generation/01
+
+# ---------------------------------------------------------------------------
+# Conditioning mode — this is the knob the example is built around.
+#   text        prompt               -> clip   (text-to-video)
+#   text_video  prompt + source clip -> clip   (instructed video editing)
+#   video       source clip          -> clip   (learned "anime" style filter)
+# ---------------------------------------------------------------------------
+mode: text
+
+# Clip geometry. frames: 1 turns this into an IMAGE generator — every code path
+# is length-agnostic. 16 x 64 x 64 fits comfortably in 4 GB of VRAM.
+frames: 16
+resolution: 64
+fps: 8
+
+# Model size. Raise base_channels for quality once you have a real GPU.
+base_channels: 48
+channel_mults: [1, 2, 4]
+
+optimizer:
+  lr: 2.0e-4
+  weight_decay: 0.0
+max_grad_norm: 1.0
+
+training_steps_to_do: 3000
+eval_full_to_train_steps_ratio: 100
+# Attach a generated clip (and its target/source) to each eval sample so
+# they show as their own thumbnail columns in list mode. Costs one sampling
+# pass per eval, so turn it off if you only care about the loss.
+attach_generated_media: true
+sample_every: 250
+sample_steps: 25
+num_preview_samples: 2
+sample_prompts:
+  - "a red ball bouncing"
+  - "a blue ball drifting left"
+
+data:
+  # synthetic  procedural clips + motion-locked audio, ZERO download (default)
+  # disney     sayakpaul/video-dataset-disney-organized — 24 MB, real captions
+  # kinetics   nateraw/kinetics-mini — 136 MB, real AAC soundtracks
+  source: synthetic
+  train_loader:
+    batch_size: 2
+    max_samples: 64
+  test_loader:
+    batch_size: 2
+    max_samples: 16
+
+# Leave empty to use the default ~/.cache/huggingface location.
+hf_cache_dir:
+
+serving_grpc: true
+serving_cli: false
+enable_h5_persistence: true
