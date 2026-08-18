@@ -290,7 +290,7 @@ class TestGRPCWeightsStudioSDKState(_TimeoutMixin, unittest.TestCase):
         # vectorized path and doesn't need it, but GetDataSamples does).
         ds._data_executor = ThreadPoolExecutor(max_workers=2)
         ds._agent = MagicMock()
-        ds._agent.is_ollama_available.return_value = True
+        ds._agent.is_available.return_value = True
         ds.audit_logger = MagicMock()
 
         return ds, df_manager

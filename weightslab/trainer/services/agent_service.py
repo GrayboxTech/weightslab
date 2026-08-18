@@ -77,10 +77,15 @@ class AgentService:
     @safe_grpc(lambda msg: pb2.InitializeAgentResponse(success=False, message=msg))
     def InitializeAgent(self, request, context):
         """
-                Initialize the OpenRouter cloud provider with a user-supplied API key.
+                Initialize the OpenCode agent backend.
 
-                Supported provider (AgentProviderType enum):
-                    PROVIDER_OPENROUTER (0) — openrouter.ai
+                Supported providers (AgentProviderType enum):
+                    PROVIDER_OPENCODE (1) — a local OpenCode server; api_key is
+                        ignored, the credential lives in OpenCode's own config.
+                PROVIDER_OPENROUTER (0) is a legacy enum value kept for wire
+                compatibility with older frontends; requesting it is rejected
+                below rather than removed from the .proto, so an old client
+                sending it gets a clean error instead of a decode failure.
 
         Returns:
             InitializeAgentResponse { success: bool, message: str }
@@ -93,10 +98,10 @@ class AgentService:
             )
 
         provider_name = AGENT_PROVIDER_MAP.get(request.provider)
-        if provider_name != "openrouter":
+        if provider_name != "opencode":
             return pb2.InitializeAgentResponse(
                 success=False,
-                message="Only OpenRouter cloud onboarding is supported.",
+                message="Only OpenCode is supported as the agent backend.",
             )
 
         logger.debug(
@@ -112,7 +117,7 @@ class AgentService:
     @safe_grpc(lambda msg: pb2.ChangeAgentModelResponse(success=False, message=msg))
     def ChangeAgentModel(self, request, context):
         """
-        Switch the active OpenRouter model without re-entering the API key.
+        Switch the active OpenCode model without re-entering credentials.
 
         Returns:
             ChangeAgentModelResponse { success: bool, message: str }
@@ -131,7 +136,7 @@ class AgentService:
     @safe_grpc(lambda msg: pb2.GetAgentModelsResponse(success=False, models=[], message=msg))
     def GetAgentModels(self, request, context):
         """
-        Return the list of models available via the stored OpenRouter API key.
+        Return every provider/model the OpenCode server is authenticated for.
 
         Returns:
             GetAgentModelsResponse { success: bool, models: [str], message: str }
@@ -160,3 +165,59 @@ class AgentService:
         logger.debug("ResetAgent")
         success, message = agent.reset_connection()
         return pb2.ResetAgentResponse(success=success, message=message)
+
+    @safe_grpc(lambda msg: pb2.ClearAgentHistoryResponse(success=False, message=msg))
+    def ClearAgentHistory(self, request, context):
+        """Wipe the agent's conversation history without touching the provider
+        connection -- distinct from ResetAgent."""
+        agent = self._agent
+        if agent is None:
+            return pb2.ClearAgentHistoryResponse(
+                success=False,
+                message="Agent backend is not running.",
+            )
+
+        logger.debug("ClearAgentHistory")
+        success, message = agent.clear_history()
+        return pb2.ClearAgentHistoryResponse(success=success, message=message)
+
+    @safe_grpc(lambda msg: pb2.CompactAgentHistoryResponse(success=False, message=msg))
+    def CompactAgentHistory(self, request, context):
+        """Summarize the agent's conversation history via the active provider,
+        replacing it with the summary."""
+        agent = self._agent
+        if agent is None:
+            return pb2.CompactAgentHistoryResponse(
+                success=False,
+                message="Agent backend is not running.",
+            )
+
+        logger.debug("CompactAgentHistory")
+        success, message = agent.compact_history()
+        return pb2.CompactAgentHistoryResponse(success=success, message=message)
+
+    @safe_grpc(lambda msg: pb2.GetAgentContextUsageResponse(success=False, message=msg))
+    def GetAgentContextUsage(self, request, context):
+        """Context-window usage breakdown for the active model (backs the
+        /context command) -- see DataManipulationAgent.get_context_usage."""
+        agent = self._agent
+        if agent is None:
+            return pb2.GetAgentContextUsageResponse(
+                success=False,
+                message="Agent backend is not running.",
+            )
+
+        logger.debug("GetAgentContextUsage")
+        ok, usage, message = agent.get_context_usage()
+        return pb2.GetAgentContextUsageResponse(
+            success=ok,
+            message=message,
+            model=usage.get("model") or "",
+            context_window=usage.get("context_window") or 0,
+            input_tokens=usage.get("input_tokens") or 0,
+            output_tokens=usage.get("output_tokens") or 0,
+            reasoning_tokens=usage.get("reasoning_tokens") or 0,
+            cache_read_tokens=usage.get("cache_read_tokens") or 0,
+            cache_write_tokens=usage.get("cache_write_tokens") or 0,
+        )
+        return pb2.CompactAgentHistoryResponse(success=success, message=message)

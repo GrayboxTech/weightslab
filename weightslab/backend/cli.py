@@ -210,9 +210,9 @@ def _handle_command(cmd: str) -> Any:
                 },
                 'agent_examples': {
                     'check agent': 'agent status',
-                    'initialize openrouter': 'agent init --api-key sk-or-... --model openai/gpt-4o-mini --timeout 20',
+                    'initialize opencode': 'agent init --model openrouter/anthropic/claude-opus-4.6',
                     'list available models': 'agent models',
-                    'switch model': 'agent model ~google/gemini-flash-latest',
+                    'switch model': 'agent model openrouter/openai/gpt-5',
                     'query the agent': 'agent query discard all samples with loss > 5 and tag them as hard_examples',
                     'query shortcut': 'ask tag train samples with loss > 1.2 as goldset',
                 }
@@ -695,12 +695,12 @@ def _handle_command(cmd: str) -> Any:
                     return {
                         'ok': True,
                         'available': available,
-                        'message': 'Agent available.' if available else 'Agent not configured. Use: agent init --api-key KEY [--model MODEL] [--timeout SEC]',
+                        'message': 'Agent available.' if available else 'Agent not configured. Use: agent init [--model MODEL]',
                         'commands': {
                             'agent status': 'Check whether the agent is available',
-                            'agent init': 'Initialize OpenRouter with API key, model, and optional timeout',
-                            'agent model': 'Switch the active OpenRouter model',
-                            'agent models': 'List available OpenRouter models',
+                            'agent init': 'Initialize the OpenCode agent backend, optionally with a model',
+                            'agent model': 'Switch the active OpenCode model',
+                            'agent models': 'List available OpenCode models',
                             'agent reset': 'Clear the active agent connection',
                             'agent query': 'Execute a natural-language query through the agent',
                         },
@@ -720,8 +720,8 @@ def _handle_command(cmd: str) -> Any:
                     'ok': True,
                     'available': available,
                     'preferred_provider': getattr(agent, 'preferred_provider', None),
-                    'openrouter_model': getattr(agent, 'openrouter_model', None),
-                    'openrouter_timeout': getattr(agent, 'openrouter_request_timeout', None),
+                    'opencode_url': getattr(agent, 'opencode_url', None),
+                    'opencode_model': getattr(agent, 'opencode_model', None),
                     'message': 'Agent available. Ready to help you.' if available else 'Agent not configured. Use agent init.',
                 }
 
@@ -729,51 +729,23 @@ def _handle_command(cmd: str) -> Any:
                 if agent is None:
                     return {'ok': False, 'error': 'agent_unavailable', 'message': 'Agent backend is not attached to the CLI.'}
 
-                api_key = None
-                provider = 'openrouter'
                 model = None
-                timeout = None
 
                 i = 0
                 while i < len(agent_parts):
                     token = agent_parts[i]
-                    if token == '--api-key' and i + 1 < len(agent_parts):
-                        api_key = agent_parts[i + 1]
-                        i += 2
-                    elif token == '--provider' and i + 1 < len(agent_parts):
-                        provider = agent_parts[i + 1]
-                        i += 2
-                    elif token == '--model' and i + 1 < len(agent_parts):
+                    if token == '--model' and i + 1 < len(agent_parts):
                         model = agent_parts[i + 1]
                         i += 2
-                    elif token == '--timeout' and i + 1 < len(agent_parts):
-                        timeout = agent_parts[i + 1]
-                        i += 2
                     else:
-                        return {'ok': False, 'error': 'usage: agent init --api-key KEY [--provider openrouter] [--model MODEL] [--timeout SEC]'}
+                        return {'ok': False, 'error': 'usage: agent init [--model MODEL]'}
 
-                api_key = api_key or os.environ.get('OPENROUTER_API_KEY')
-                if not api_key:
-                    return {'ok': False, 'error': 'usage: agent init --api-key KEY [--provider openrouter] [--model MODEL] [--timeout SEC]'}
-
-                if timeout is not None:
-                    try:
-                        timeout_value = float(timeout)
-                    except ValueError:
-                        return {'ok': False, 'error': 'Invalid --timeout value'}
-                    os.environ['OPENROUTER_REQUEST_TIMEOUT'] = str(timeout_value)
-                    try:
-                        agent.openrouter_request_timeout = timeout_value
-                    except Exception:
-                        pass
-
-                success, message = agent.initialize_with_cloud_key(api_key, provider, model)
+                success, message = agent.initialize_with_cloud_key("", "opencode", model)
                 return {
                     'ok': success,
                     'message': message,
-                    'provider': provider,
-                    'model': getattr(agent, 'openrouter_model', model),
-                    'timeout': getattr(agent, 'openrouter_request_timeout', None),
+                    'provider': 'opencode',
+                    'model': getattr(agent, 'opencode_model', model),
                 }
 
             if subverb in ('model', 'set-model'):
@@ -783,7 +755,7 @@ def _handle_command(cmd: str) -> Any:
                     return {'ok': False, 'error': 'usage: agent model <MODEL_NAME>'}
                 model = ' '.join(agent_parts).strip()
                 success, message = agent.change_model(model)
-                return {'ok': success, 'message': message, 'model': getattr(agent, 'openrouter_model', model)}
+                return {'ok': success, 'message': message, 'model': getattr(agent, 'opencode_model', model)}
 
             if subverb in ('models', 'list-models'):
                 if agent is None:
@@ -835,8 +807,9 @@ def _handle_command(cmd: str) -> Any:
         # button / the agent's generate_experiment_report action)
         # ------------------------------------------------------------------
         if verb in ('report', 'reports'):
-            # Syntax: report [signal ...] [--signals a,b] [--output PATH] [--no-agent]
+            # Syntax: report [signal ...] [--signals a,b] [--distributions a,b] [--output PATH] [--no-agent]
             signals: list = []
+            distributions: list = []
             output_path = None
             use_agent = True
 
@@ -848,13 +821,16 @@ def _handle_command(cmd: str) -> Any:
                 elif token in ('--signals', '--signal') and i + 1 < len(parts):
                     signals += [s for s in parts[i + 1].split(',') if s]
                     i += 1
+                elif token in ('--distributions', '--distribution') and i + 1 < len(parts):
+                    distributions += [s for s in parts[i + 1].split(',') if s]
+                    i += 1
                 elif token in ('--output', '-o') and i + 1 < len(parts):
                     output_path = parts[i + 1]
                     i += 1
                 elif token.startswith('--'):
                     return {'ok': False, 'error': (
                         'usage: report [signal ...] [--signals a,b] '
-                        '[--output PATH] [--no-agent]')}
+                        '[--distributions a,b] [--output PATH] [--no-agent]')}
                 else:
                     signals.append(token)
                 i += 1
@@ -864,7 +840,7 @@ def _handle_command(cmd: str) -> Any:
 
                 result = _ai_report_generation_result(
                     signals=signals or None, output_path=output_path,
-                    use_agent=use_agent,
+                    use_agent=use_agent, distributions=distributions or None,
                 )
             except Exception as e:
                 return {'ok': False, 'error': str(e)}

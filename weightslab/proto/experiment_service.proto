@@ -44,6 +44,20 @@ service ExperimentService {
   rpc ChangeAgentModel (ChangeAgentModelRequest) returns (ChangeAgentModelResponse);
   rpc GetAgentModels (GetAgentModelsRequest) returns (GetAgentModelsResponse);
   rpc ResetAgent (Empty) returns (ResetAgentResponse);
+  // Wipe the agent's conversation history (self.history) without touching the
+  // provider connection -- distinct from ResetAgent, which drops the connection.
+  rpc ClearAgentHistory (Empty) returns (ClearAgentHistoryResponse);
+  // Summarize the agent's conversation history via the active model, replacing
+  // it with the summary. Distinct from OpenCode's own session compaction (which
+  // this does not touch) -- this is the SDK agent's own self.history.
+  rpc CompactAgentHistory (Empty) returns (CompactAgentHistoryResponse);
+  // Context-window usage breakdown for the active model. A fresh OpenCode
+  // session is created per agent call (see opencode_chat.py), so there is no
+  // persistent session to total across turns -- this reports the LAST
+  // completed call's token usage, which is exactly the size of the context
+  // the NEXT call will resend (the full history is baked into the prompt
+  // text every time).
+  rpc GetAgentContextUsage (Empty) returns (GetAgentContextUsageResponse);
 
   // Notebook (shared in-process Python kernel for the studio UI). Cell output is
   // server-streamed in chunks (stdout / stderr / result / image), mirroring
@@ -634,6 +648,12 @@ message AgentHealthResponse {
 // --- Agent Onboarding ---
 enum AgentProviderType {
   PROVIDER_OPENROUTER = 0;
+  // A local OpenCode server (opencode.ai) backs the LLM calls instead of a
+  // direct OpenRouter connection. No api_key is used for this provider -- the
+  // credential lives in OpenCode's own config, entered once via `opencode auth
+  // login` or the Weights Studio landing page's login modal. `model` carries
+  // OpenCode's "providerID/modelID" string (e.g. "openrouter/anthropic/claude-opus-4.6").
+  PROVIDER_OPENCODE = 1;
 }
 
 message InitializeAgentRequest {
@@ -667,6 +687,28 @@ message GetAgentModelsResponse {
 message ResetAgentResponse {
   bool success = 1;
   string message = 2;
+}
+
+message ClearAgentHistoryResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message CompactAgentHistoryResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GetAgentContextUsageResponse {
+  bool success = 1;
+  string message = 2;
+  string model = 3;              // "providerID/modelID" currently active, "" if unknown.
+  int64 context_window = 4;      // Model's context-window size in tokens, 0 if unknown.
+  int64 input_tokens = 5;        // Last completed call's input tokens (system+tools+history+message).
+  int64 output_tokens = 6;
+  int64 reasoning_tokens = 7;
+  int64 cache_read_tokens = 8;   // Portion of input_tokens served from a cached prefix.
+  int64 cache_write_tokens = 9;  // Portion of input_tokens newly written to the cache.
 }
 
 // --- Checkpoint Restore ---

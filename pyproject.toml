@@ -81,10 +81,12 @@ dependencies = [
   # Environment variable loading (used by agent service)
   "python-dotenv>=1,<2",
 
-  # Agent service runtime deps (imported by default module graph)
+  # Agent service runtime deps (imported by default module graph). Only
+  # langchain-core is needed -- it provides the Runnable/ChatPromptTemplate
+  # abstraction OpenCodeChat.as_runnable() plugs into. No OpenCode-specific
+  # SDK package exists; its client is hand-rolled in opencode_chat.py via
+  # stdlib urllib/threading.
   "langchain-core>=0.3,<2",
-  "langchain-ollama>=0.2,<2",
-  "langchain-openai>=0.2,<2",
 
   # Jupyter
   "ipykernel>=6.29,<7",
@@ -172,6 +174,15 @@ weightslab = [
   "ui/static/**/*",
   # Logo used to brand generated experiment reports (weightslab/reporting.py).
   "assets/**/*",
+  # weightslab-integration grounding for the landing chat's preset prompts
+  # and for agents dropped directly into a workspace (see opencode_process's
+  # WORKSPACE_SEED_FILES) -- lives inside the package, not just at the
+  # repo root, so a `pip install weightslab` ships it too.
+  "AGENTS.md",
+  # Seeded next to AGENTS.md in every experiment workspace. OpenCode reads a
+  # project config from the directory it is started in, which is that same
+  # workspace; this one points `instructions` at AGENTS.md.
+  "opencode.json",
 ]
 
 [tool.setuptools.exclude-package-data]

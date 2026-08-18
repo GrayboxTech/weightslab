@@ -160,6 +160,113 @@ def _render_signal_plot(plt, name: str, points: list, color: str) -> Optional[st
         return None
 
 
+def _render_histogram_plot(plt, name: str, values: list, color: str) -> Optional[str]:
+    """Render a value-distribution histogram for one column's per-sample
+    values to a base64 PNG. Mirrors ``_render_signal_plot``'s sizing/failure
+    handling (same figure size, same "never raise, return None" contract) so
+    a Distributions card looks and behaves like a Signals card."""
+    try:
+        fig, ax = plt.subplots(figsize=(5.2, 2.0), dpi=100)
+        n_bins = min(30, max(5, len(set(values))))
+        ax.hist(values, bins=n_bins, color=color, alpha=0.85)
+        ax.set_title(name, fontsize=11, fontweight="bold", loc="left")
+        ax.set_xlabel("value", fontsize=9)
+        ax.set_ylabel("count", fontsize=9)
+        ax.tick_params(labelsize=8)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.grid(True, alpha=0.25, axis="y")
+        fig.tight_layout()
+
+        import io
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
+        plt.close(fig)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception as exc:
+        logger.warning("experiment report: failed to render histogram for %s: %s", name, exc)
+        return None
+
+
+def _resolve_distribution_column(df: pd.DataFrame, requested: str) -> Optional[str]:
+    """Best-effort match of a user-requested column/signal name (e.g.
+    "train_loss") against the sample dataframe's actual columns, which may be
+    nested (e.g. "signals//train_loss") -- the same "bare name maps to the
+    real column" rule intent_prompt.py's COLUMN RESOLUTION RULES applies for
+    the LLM, re-implemented defensively here since ``distributions`` action
+    params reach this module directly, without the LLM's own schema-aware
+    resolution in between.
+
+    Preference order: exact match, then a column whose ``//``-suffix matches
+    case-insensitively, then any column containing the requested name
+    case-insensitively. Returns None if nothing matches."""
+    if df is None or not requested:
+        return None
+    requested = str(requested)
+    columns = [c for c in df.columns if isinstance(c, str)]
+    if requested in columns:
+        return requested
+    lowered = requested.lower()
+    for col in columns:
+        if col.rsplit("//", 1)[-1].lower() == lowered:
+            return col
+    for col in columns:
+        if lowered in col.lower():
+            return col
+    return None
+
+
+def compute_distribution_entries(
+    df: Optional[pd.DataFrame], distributions: Optional[list], plt=None,
+) -> list:
+    """Per-requested-column distribution summary + histogram, for the
+    optional Distributions report section. Unlike ``signals`` (aggregated
+    training curves pulled from the logger -- "how did the mean move over
+    training"), these are value-distribution histograms over the CURRENT
+    per-sample dataframe -- "how spread out is train_loss across samples
+    right now". Opt-in only: an empty/``None`` ``distributions`` list (the
+    default -- nobody asked for one) returns ``[]``, so a report with no
+    distribution request looks exactly like it did before this existed.
+
+    A requested name that can't be resolved to a column, or resolves to a
+    column with no numeric values, still gets an entry (flagged
+    unresolved/empty) so the report can say so explicitly rather than
+    silently dropping what the user asked for -- see
+    ``_distribution_card_html``.
+    """
+    if not distributions or df is None or df.empty:
+        return []
+    entries = []
+    for requested in distributions:
+        col = _resolve_distribution_column(df, requested)
+        if col is None:
+            entries.append({"name": str(requested), "resolved": False})
+            continue
+        try:
+            values = pd.to_numeric(df[col], errors="coerce").dropna()
+        except Exception:
+            values = pd.Series(dtype=float)
+        if values.empty:
+            entries.append({"name": str(requested), "column": col, "resolved": True, "n": 0})
+            continue
+        plot_b64 = (
+            _render_histogram_plot(plt, col, values.tolist(), _COLOR_NEUTRAL)
+            if plt is not None else None
+        )
+        entries.append({
+            "name": str(requested),
+            "column": col,
+            "resolved": True,
+            "n": int(values.count()),
+            "mean": float(values.mean()),
+            "std": float(values.std()) if len(values) > 1 else 0.0,
+            "min": float(values.min()),
+            "max": float(values.max()),
+            "plot_b64": plot_b64,
+        })
+    return entries
+
+
 def compute_dataframe_stats(df: Optional[pd.DataFrame]) -> dict:
     """Summarize the sample dataframe: totals, discard rate, split sizes, and
     tag distributions. Every lookup is defensive (``.get``-style fallbacks)
@@ -308,11 +415,17 @@ def collect_report_context(
     df: Optional[pd.DataFrame],
     signals: Optional[list] = None,
     max_signals: Optional[int] = None,
+    distributions: Optional[list] = None,
 ) -> dict:
     """Gather everything a report needs EXCEPT the narrative: per-signal
-    trajectories + health classification + plots, and dataframe-level stats.
-    ``max_signals=None`` (default) includes every logged signal with enough
-    history -- pass an int to cap it (see select_important_signals).
+    trajectories + health classification + plots, dataframe-level stats, and
+    (opt-in) per-column value-distribution histograms. ``max_signals=None``
+    (default) includes every logged signal with enough history -- pass an int
+    to cap it (see select_important_signals). ``distributions`` names columns
+    to additionally render as histograms (see compute_distribution_entries);
+    omitted/empty means no Distributions section at all, e.g. "add a
+    histogram of train_loss to the report" -> ``distributions=["train_loss"]``
+    on a follow-up call.
 
     Split out from ``render_report`` so the caller (the agent) can hand the
     returned, LLM-friendly-sized ``context["signals"]``/``context["dataframe"]``
@@ -357,6 +470,7 @@ def collect_report_context(
         "root_log_dir": str(root_log_dir),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "signals": signal_entries,
+        "distributions": compute_distribution_entries(df, distributions, plt),
         "dataframe": compute_dataframe_stats(df),
         "loss_shape_tags": summarize_loss_shape_tags(df),
         "plotting_available": plt is not None,
@@ -383,7 +497,11 @@ def _signal_card_html(entry: dict) -> str:
         f'  </div>'
     )
     if entry.get("plot_b64"):
-        body += f'  <img class="wl-report-plot" src="data:image/png;base64,{entry["plot_b64"]}" alt="{name} trajectory" />'
+        body += (
+            f'  <div class="wl-report-plot-wrap">'
+            f'<img class="wl-report-plot" src="data:image/png;base64,{entry["plot_b64"]}" alt="{name} trajectory" />'
+            f'</div>'
+        )
     else:
         body += (
             '  <div class="wl-report-noplot">'
@@ -420,6 +538,60 @@ def _outliers_html(outliers: dict) -> str:
         '<div class="wl-report-outliers">'
         '<span class="wl-report-subhead">Per-sample outliers</span>'
         f'<ul class="wl-report-list">{"".join(parts)}</ul>'
+        '</div>'
+    )
+
+
+def _distribution_card_html(entry: dict) -> str:
+    """One Distributions card: a histogram + n/mean/std/range, or an
+    explanatory note in place of the plot when the requested name couldn't be
+    resolved to a column or the column had no numeric values -- so an
+    unresolvable request still shows up in the report saying so, instead of
+    the whole Distributions section silently rendering one card short."""
+    name = html.escape(str(entry["name"]))
+    head = (
+        '<div class="wl-report-card">'
+        '  <div class="wl-report-card-head">'
+        f'    <span class="wl-report-signal-name">{name}</span>'
+        '  </div>'
+    )
+    if not entry.get("resolved"):
+        return head + (
+            f'  <div class="wl-report-noplot">No column matching &quot;{name}&quot; '
+            'was found in the dataset.</div></div>'
+        )
+    if not entry.get("n"):
+        return head + (
+            '  <div class="wl-report-noplot">No numeric values logged for this column yet.</div></div>'
+        )
+    body = head
+    if entry.get("plot_b64"):
+        body += (
+            f'  <div class="wl-report-plot-wrap">'
+            f'<img class="wl-report-plot" src="data:image/png;base64,{entry["plot_b64"]}" alt="{name} distribution" />'
+            f'</div>'
+        )
+    body += (
+        f'  <div class="wl-report-noplot">n={entry["n"]:,} &middot; mean {_fmt_num(entry["mean"])} '
+        f'&middot; std {_fmt_num(entry["std"])} &middot; range [{_fmt_num(entry["min"])}, {_fmt_num(entry["max"])}]</div>'
+    )
+    body += "</div>"
+    return body
+
+
+def _distributions_section_html(distributions: list) -> str:
+    """The optional Distributions section, e.g. "add a histogram of
+    train_loss" (action_params={"distributions": ["train_loss"]}) -- omitted
+    ENTIRELY (not even an empty placeholder) when nobody asked for one, so a
+    report generated without that request renders exactly as it did before
+    this feature existed."""
+    if not distributions:
+        return ""
+    cards = "".join(_distribution_card_html(e) for e in distributions)
+    return (
+        '<div class="wl-report-section">'
+        '<h2>Distributions</h2>'
+        f'<div class="wl-report-grid">{cards}</div>'
         '</div>'
     )
 
@@ -491,23 +663,74 @@ _HTML_TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8" />
 <title>{title}</title>
+<script>
+  // Applied before first paint (head, synchronous) to avoid a flash of the
+  // wrong theme on load -- restores an explicit choice from a previous visit
+  // to THIS report file (localStorage is per-origin+path for a file:// URL,
+  // so this is scoped to this exact report). No stored choice means "follow
+  // prefers-color-scheme", handled entirely by the CSS below -- no attribute
+  // is set in that case.
+  (function () {{
+    try {{
+      var saved = localStorage.getItem("wl-report-theme");
+      if (saved === "light" || saved === "dark") {{
+        document.documentElement.setAttribute("data-theme", saved);
+      }}
+    }} catch (e) {{}}
+  }})();
+</script>
 <style>
   :root {{
     --wl-good: {color_good};
     --wl-warn: {color_warn};
     --wl-neutral: {color_neutral};
+    --wl-bg: #ffffff;
+    --wl-bg-elevated: #f7f9fb;
+    --wl-banner-a: #f7f9fb;
+    --wl-banner-b: #eef3f8;
+    --wl-fg: #1a1a1a;
+    --wl-fg-muted: #5a6270;
+    --wl-fg-subtle: #888888;
+    --wl-border: #e5e5e5;
+    --wl-card-bg: #ffffff;
+  }}
+  /* Follows the OS/browser theme when the reader hasn't picked one via the
+     toggle button -- [data-theme] (set only by the toggle) always wins. */
+  @media (prefers-color-scheme: dark) {{
+    :root:not([data-theme="light"]) {{
+      --wl-bg: #12161d;
+      --wl-bg-elevated: #1a202b;
+      --wl-banner-a: #1a202b;
+      --wl-banner-b: #151a22;
+      --wl-fg: #e8ecf2;
+      --wl-fg-muted: #a7b0bf;
+      --wl-fg-subtle: #838d9c;
+      --wl-border: #2b3341;
+      --wl-card-bg: #1a202b;
+    }}
+  }}
+  :root[data-theme="dark"] {{
+    --wl-bg: #12161d;
+    --wl-bg-elevated: #1a202b;
+    --wl-banner-a: #1a202b;
+    --wl-banner-b: #151a22;
+    --wl-fg: #e8ecf2;
+    --wl-fg-muted: #a7b0bf;
+    --wl-fg-subtle: #838d9c;
+    --wl-border: #2b3341;
+    --wl-card-bg: #1a202b;
   }}
   body {{
     margin: 0;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    color: #1a1a1a; background: #ffffff; line-height: 1.5;
+    color: var(--wl-fg); background: var(--wl-bg); line-height: 1.5;
   }}
   .wl-report-content {{ padding: 0 clamp(16px, 5vw, 64px) 44px; }}
   .wl-report-banner {{
     display: flex; align-items: center; gap: 20px;
     padding: 28px clamp(16px, 5vw, 64px);
     margin-bottom: 32px;
-    background: linear-gradient(135deg, #f7f9fb 0%, #eef3f8 100%);
+    background: linear-gradient(135deg, var(--wl-banner-a) 0%, var(--wl-banner-b) 100%);
     border-bottom: 3px solid var(--wl-good);
   }}
   .wl-report-banner img {{ height: 46px; }}
@@ -515,15 +738,21 @@ _HTML_TEMPLATE = """<!doctype html>
   .wl-report-banner-title {{ font-size: 1.6rem; font-weight: 800; letter-spacing: -0.01em; }}
   .wl-report-banner-w {{ color: #d63333; }}
   .wl-report-banner-l {{ color: var(--wl-good); }}
-  .wl-report-banner-subtitle {{ font-size: 0.95rem; color: #555; font-weight: 500; }}
-  .wl-report-meta {{ color: #666; font-size: 0.85rem; margin-bottom: 28px; }}
+  .wl-report-banner-subtitle {{ font-size: 0.95rem; color: var(--wl-fg-muted); font-weight: 500; }}
+  .wl-report-theme-toggle {{
+    margin-left: auto; border: 1px solid var(--wl-border); background: var(--wl-card-bg);
+    color: var(--wl-fg); border-radius: 999px; width: 38px; height: 38px; font-size: 1.05rem;
+    cursor: pointer; line-height: 1; flex: none;
+  }}
+  .wl-report-theme-toggle:hover {{ border-color: var(--wl-good); }}
+  .wl-report-meta {{ color: var(--wl-fg-muted); font-size: 0.85rem; margin-bottom: 28px; }}
   .wl-report-section {{ margin: 32px 0; }}
   .wl-report-section h2 {{
     font-size: 1.05rem; text-transform: uppercase; letter-spacing: 0.04em;
-    color: #444; border-bottom: 1px solid #e5e5e5; padding-bottom: 6px;
+    color: var(--wl-fg-muted); border-bottom: 1px solid var(--wl-border); padding-bottom: 6px;
   }}
   .wl-report-narrative {{
-    background: #f7f9fb; border-left: 3px solid var(--wl-good);
+    background: var(--wl-bg-elevated); border-left: 3px solid var(--wl-good);
     padding: 16px 20px; border-radius: 6px; font-size: 0.98rem;
   }}
   .wl-report-grid {{
@@ -531,8 +760,8 @@ _HTML_TEMPLATE = """<!doctype html>
     gap: 18px;
   }}
   .wl-report-card {{
-    border: 1px solid #e5e5e5; border-radius: 10px; padding: 14px 16px;
-    background: #fff;
+    border: 1px solid var(--wl-border); border-radius: 10px; padding: 14px 16px;
+    background: var(--wl-card-bg);
   }}
   .wl-report-card-head {{
     display: flex; justify-content: space-between; align-items: center;
@@ -543,14 +772,19 @@ _HTML_TEMPLATE = """<!doctype html>
     font-size: 0.72rem; font-weight: 600; padding: 3px 9px; border-radius: 999px;
   }}
   .wl-report-badge-row {{ display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 8px; }}
-  .wl-report-plot {{ width: 100%; display: block; border-radius: 6px; }}
-  .wl-report-noplot {{ color: #666; font-size: 0.85rem; padding: 8px 0; }}
-  .wl-report-outliers {{ margin-top: 10px; border-top: 1px dashed #e5e5e5; padding-top: 8px; }}
+  /* Plots are rendered once, on a fixed white matplotlib canvas -- rather than
+     render each one twice (light/dark figure), the image sits in an
+     always-light thumbnail card so its own text/gridlines stay legible no
+     matter which theme the surrounding page is in. */
+  .wl-report-plot-wrap {{ background: #ffffff; border-radius: 6px; padding: 6px; }}
+  .wl-report-plot {{ width: 100%; display: block; border-radius: 3px; }}
+  .wl-report-noplot {{ color: var(--wl-fg-muted); font-size: 0.85rem; padding: 8px 0; }}
+  .wl-report-outliers {{ margin-top: 10px; border-top: 1px dashed var(--wl-border); padding-top: 8px; }}
   .wl-report-shape-block {{ margin-bottom: 18px; }}
   .wl-report-list {{ padding-left: 1.2em; font-size: 0.92rem; }}
-  .wl-report-subhead {{ font-weight: 600; margin: 12px 0 4px; font-size: 0.88rem; color: #444; display: block; }}
-  .wl-report-muted {{ color: #888; font-style: italic; }}
-  .wl-report-footer {{ margin-top: 48px; color: #999; font-size: 0.78rem; text-align: center; }}
+  .wl-report-subhead {{ font-weight: 600; margin: 12px 0 4px; font-size: 0.88rem; color: var(--wl-fg-muted); display: block; }}
+  .wl-report-muted {{ color: var(--wl-fg-subtle); font-style: italic; }}
+  .wl-report-footer {{ margin-top: 48px; color: var(--wl-fg-subtle); font-size: 0.78rem; text-align: center; }}
 </style>
 </head>
 <body>
@@ -560,6 +794,7 @@ _HTML_TEMPLATE = """<!doctype html>
       <span class="wl-report-banner-title"><span class="wl-report-banner-w">Weights</span><span class="wl-report-banner-l">Lab</span></span>
       <span class="wl-report-banner-subtitle">Experiment Report</span>
     </div>
+    <button type="button" id="wl-theme-toggle" class="wl-report-theme-toggle" title="Toggle light/dark mode">&#9789;</button>
   </div>
 
   <div class="wl-report-content">
@@ -577,6 +812,8 @@ _HTML_TEMPLATE = """<!doctype html>
       {signals_html}
     </div>
 
+    {distributions_section_html}
+
     <div class="wl-report-section">
       <h2>Loss-Shape Classification</h2>
       {loss_shape_html}
@@ -589,6 +826,31 @@ _HTML_TEMPLATE = """<!doctype html>
 
     <div class="wl-report-footer">WeightsLab &middot; generated automatically, review before sharing</div>
   </div>
+
+  <script>
+    (function () {{
+      var btn = document.getElementById("wl-theme-toggle");
+      if (!btn) return;
+      function isDark() {{
+        var explicit = document.documentElement.getAttribute("data-theme");
+        if (explicit === "light") return false;
+        if (explicit === "dark") return true;
+        return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+      }}
+      function sync() {{
+        var dark = isDark();
+        btn.textContent = dark ? "\\u2600" : "\\u263D";
+        btn.setAttribute("aria-label", dark ? "Switch to light mode" : "Switch to dark mode");
+      }}
+      btn.addEventListener("click", function () {{
+        var next = isDark() ? "light" : "dark";
+        document.documentElement.setAttribute("data-theme", next);
+        try {{ localStorage.setItem("wl-report-theme", next); }} catch (e) {{}}
+        sync();
+      }});
+      sync();
+    }})();
+  </script>
 </body>
 </html>
 """
@@ -629,6 +891,7 @@ def render_report(context: dict, output_path, narrative: Optional[str] = None) -
         root_log_dir=html.escape(context.get("root_log_dir", "")),
         narrative=narrative_html,
         signals_html=signals_html,
+        distributions_section_html=_distributions_section_html(context.get("distributions") or []),
         loss_shape_html=_loss_shape_section_html(context.get("loss_shape_tags") or []),
         dataframe_html=_dataframe_section_html(context.get("dataframe") or {}),
     )
@@ -642,6 +905,29 @@ def render_report(context: dict, output_path, narrative: Optional[str] = None) -
 def default_report_path(root_log_dir) -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return Path(root_log_dir) / "reports" / f"experiment_report_{stamp}.html"
+
+
+def list_reports(root_log_dir) -> list:
+    """Every ``*.html`` report already written for this experiment, newest
+    first (by mtime) -- the same directory and ordering the Studio report
+    button's right-click dropdown uses (``weightslab/ui/server.py``'s
+    ``_list_experiment_reports``), duplicated here rather than imported since
+    that lives in the UI server module, not this LLM/agent-agnostic one."""
+    reports_dir = Path(root_log_dir) / "reports"
+    if not reports_dir.is_dir():
+        return []
+    paths = [p for p in reports_dir.iterdir() if p.is_file() and p.suffix == ".html"]
+    paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return paths
+
+
+def latest_report_path(root_log_dir) -> Optional[Path]:
+    """The most recently written report for this experiment, or ``None`` if
+    none exists yet -- used to resolve "update the report"/"add X to the
+    report" requests to the file they mean, see ``generate_report``'s
+    ``update_existing``."""
+    reports = list_reports(root_log_dir)
+    return reports[0] if reports else None
 
 
 def summarize_context_for_llm(context: dict) -> str:
@@ -658,6 +944,10 @@ def summarize_context_for_llm(context: dict) -> str:
             {k: v for k, v in entry.items() if k != "plot_b64"}
             for entry in context.get("signals", [])
         ],
+        "distributions": [
+            {k: v for k, v in entry.items() if k != "plot_b64"}
+            for entry in context.get("distributions", [])
+        ],
         "loss_shape_tags": context.get("loss_shape_tags", []),
         "dataframe": context.get("dataframe", {}),
     }, indent=2, default=str)
@@ -670,6 +960,8 @@ def generate_report(
     signals: Optional[list] = None,
     output_path=None,
     narrative_fn: Optional[Callable[[str], str]] = None,
+    distributions: Optional[list] = None,
+    update_existing: bool = False,
 ) -> dict:
     """Collect → narrate → render, in one call. The single implementation
     behind every user-facing entry point (the Studio report button and the
@@ -684,11 +976,29 @@ def generate_report(
     configured, request timed out, ...) degrades the same way — a report with
     no written analysis rather than no report at all.
 
-    Returns ``{"path", "n_signals", "narrative", "narrative_error"}``. Failures
-    to gather data or write the file are NOT swallowed: they raise, because
-    there is no report to hand back.
+    ``distributions`` names columns to render as value-distribution
+    histograms in an extra Distributions section — opt-in, e.g. a follow-up
+    "add a histogram of train_loss to the report" — see
+    ``compute_distribution_entries``.
+
+    ``update_existing`` (default ``False``, ignored if ``output_path`` is
+    given explicitly) — "update the report"/"add X to the report" should
+    overwrite the most recently written report for this experiment rather
+    than create a new timestamped one; "generate a report" with no reference
+    to an existing one should always create a fresh file. Resolved via
+    ``latest_report_path``; when there is nothing to update yet (a fresh
+    experiment, or its ``reports/`` directory was cleared), this falls back
+    to creating a new report exactly as if ``update_existing`` were ``False``
+    — there is nothing wrong with "update" on a first-ever report.
+
+    Returns ``{"path", "n_signals", "narrative", "narrative_error",
+    "updated_existing"}`` — the last key tells the caller whether an existing
+    file was overwritten (``True``) or a new one was created (``False``), so
+    it can phrase its reply accordingly. Failures to gather data or write the
+    file are NOT swallowed: they raise, because there is no report to hand
+    back.
     """
-    context = collect_report_context(root_log_dir, logger_q, df, signals=signals)
+    context = collect_report_context(root_log_dir, logger_q, df, signals=signals, distributions=distributions)
 
     narrative = None
     narrative_error = None
@@ -699,14 +1009,21 @@ def generate_report(
             narrative_error = str(exc)
             logger.warning("experiment report: narrative generation failed: %s", exc)
 
-    path = render_report(
-        context,
-        output_path if output_path is not None else default_report_path(root_log_dir),
-        narrative=narrative,
-    )
+    resolved_output_path = output_path
+    updated_existing = False
+    if resolved_output_path is None and update_existing:
+        existing = latest_report_path(root_log_dir)
+        if existing is not None:
+            resolved_output_path = existing
+            updated_existing = True
+    if resolved_output_path is None:
+        resolved_output_path = default_report_path(root_log_dir)
+
+    path = render_report(context, resolved_output_path, narrative=narrative)
     return {
         "path": path,
         "n_signals": len(context.get("signals") or []),
         "narrative": narrative,
         "narrative_error": narrative_error,
+        "updated_existing": updated_existing,
     }

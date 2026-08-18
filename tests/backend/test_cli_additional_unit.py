@@ -71,29 +71,27 @@ class TestCLIAdditionalUnit(unittest.TestCase):
         self.assertTrue(result["ok"])
         tag_mock.assert_called_once_with(sample_ids=["sample_001", "sample_002", "sample_003"], tag="goldset", mode="add")
 
-    def test_agent_init_accepts_api_key_model_and_timeout(self):
+    def test_agent_init_accepts_a_model(self):
         agent = MagicMock()
-        agent.openrouter_request_timeout = 15.0
-        agent.openrouter_model = "initial-model"
-        agent.initialize_with_cloud_key.return_value = (True, "Agent initialized successfully. Ready to help you.")
+        agent.opencode_model = "initial-model"
+        agent.initialize_with_cloud_key.return_value = (True, "Agent initialized successfully via OpenCode. Ready to help you.")
         cli_backend.set_cli_agent(agent)
 
-        result = _handle_command("agent init --api-key test-key --model openai/gpt-4o-mini --timeout 22")
+        result = _handle_command("agent init --model openrouter/openai/gpt-5")
 
         self.assertTrue(result["ok"])
-        agent.initialize_with_cloud_key.assert_called_once_with("test-key", "openrouter", "openai/gpt-4o-mini")
-        self.assertEqual(agent.openrouter_request_timeout, 22.0)
+        agent.initialize_with_cloud_key.assert_called_once_with("", "opencode", "openrouter/openai/gpt-5")
 
     def test_agent_model_command_switches_model(self):
         agent = MagicMock()
-        agent.openrouter_model = "google/gemini-2.5-flash"
+        agent.opencode_model = "openrouter/anthropic/claude-opus-4.6"
         agent.change_model.return_value = (True, "Model switched")
         cli_backend.set_cli_agent(agent)
 
-        result = _handle_command("agent model google/gemini-2.5-flash")
+        result = _handle_command("agent model openrouter/anthropic/claude-opus-4.6")
 
         self.assertTrue(result["ok"])
-        agent.change_model.assert_called_once_with("google/gemini-2.5-flash")
+        agent.change_model.assert_called_once_with("openrouter/anthropic/claude-opus-4.6")
 
     def test_agent_query_uses_data_service_when_available(self):
         mock_response = MagicMock(

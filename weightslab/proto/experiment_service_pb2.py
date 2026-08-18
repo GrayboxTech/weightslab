@@ -15,7 +15,7 @@ _runtime_version.ValidateProtobufRuntimeVersion(
     28,
     1,
     '',
-    'weightslab/proto/experiment_service.proto'
+    'experiment_service.proto'
 )
 # @@protoc_insertion_point(imports)
 
@@ -28,7 +28,7 @@ DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n)weightslab/proto/
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
-_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'weightslab.proto.experiment_service_pb2', _globals)
+_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'experiment_service_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_ANNOTATSTATUS_METADATAENTRY']._loaded_options = None
