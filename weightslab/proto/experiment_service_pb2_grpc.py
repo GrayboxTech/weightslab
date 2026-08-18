@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in experiment_service_pb2_grpc.py depends on'
+        + f' but the generated code in weightslab/proto/experiment_service_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -88,6 +88,11 @@ class ExperimentServiceStub(object):
                 '/ExperimentService/GetSignalTrajectory',
                 request_serializer=experiment__service__pb2.GetSignalTrajectoryRequest.SerializeToString,
                 response_deserializer=experiment__service__pb2.GetSignalTrajectoryResponse.FromString,
+                _registered_method=True)
+        self.GetStepSamples = channel.unary_unary(
+                '/ExperimentService/GetStepSamples',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesResponse.FromString,
                 _registered_method=True)
         self.GetPointCloud = channel.unary_stream(
                 '/ExperimentService/GetPointCloud',
@@ -189,6 +194,11 @@ class ExperimentServiceStub(object):
                 request_serializer=experiment__service__pb2.CancelEvaluationRequest.SerializeToString,
                 response_deserializer=experiment__service__pb2.CancelEvaluationResponse.FromString,
                 _registered_method=True)
+        self.ExportAnnotations = channel.unary_unary(
+                '/ExperimentService/ExportAnnotations',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsResponse.FromString,
+                _registered_method=True)
 
 
 class ExperimentServiceServicer(object):
@@ -266,6 +276,15 @@ class ExperimentServiceServicer(object):
         signal trajectory"), never on the metadata poll. Each returned curve is
         downsampled to at most max_points and is only included when the sample has
         at least 3 recorded points.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetStepSamples(self, request, context):
+        """Every sample id that contributed to one step of one signal. Backs the plot's
+        right-click "Highlight step samples": the whole batch behind a point, not
+        just the samples that were flagged as off-trend.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -414,6 +433,16 @@ class ExperimentServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ExportAnnotations(self, request, context):
+        """Export bounding-box/segmentation annotations to a relabeling-tool format
+        (CVAT XML, Label Studio JSON, or V7/Darwin JSON). Unary: the whole file
+        (or a zip, for formats that need one file per image) comes back as bytes
+        in a single response.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ExperimentServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -471,6 +500,11 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     servicer.GetSignalTrajectory,
                     request_deserializer=experiment__service__pb2.GetSignalTrajectoryRequest.FromString,
                     response_serializer=experiment__service__pb2.GetSignalTrajectoryResponse.SerializeToString,
+            ),
+            'GetStepSamples': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetStepSamples,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesResponse.SerializeToString,
             ),
             'GetPointCloud': grpc.unary_stream_rpc_method_handler(
                     servicer.GetPointCloud,
@@ -571,6 +605,11 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     servicer.CancelEvaluation,
                     request_deserializer=experiment__service__pb2.CancelEvaluationRequest.FromString,
                     response_serializer=experiment__service__pb2.CancelEvaluationResponse.SerializeToString,
+            ),
+            'ExportAnnotations': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExportAnnotations,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -870,6 +909,33 @@ class ExperimentService(object):
             '/ExperimentService/GetSignalTrajectory',
             experiment__service__pb2.GetSignalTrajectoryRequest.SerializeToString,
             experiment__service__pb2.GetSignalTrajectoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetStepSamples(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetStepSamples',
+            weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -1410,6 +1476,33 @@ class ExperimentService(object):
             '/ExperimentService/CancelEvaluation',
             experiment__service__pb2.CancelEvaluationRequest.SerializeToString,
             experiment__service__pb2.CancelEvaluationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExportAnnotations(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/ExportAnnotations',
+            weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsResponse.FromString,
             options,
             channel_credentials,
             insecure,

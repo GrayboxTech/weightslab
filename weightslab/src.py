@@ -6,6 +6,7 @@ level (for example, ``weightslab.watch_or_edit`` and ``weightslab.signal``).
 import gc
 import os
 import sys
+import math
 import time
 import types
 import ctypes
@@ -1187,10 +1188,43 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # unless the caller explicitly disables it.
         forced_model_wrapping = kwargs.pop('forced_model_wrapping', False)
 
+        # Per-step training-dynamics signals (gradient/weight norms, activation
+        # stats). Popped here rather than forwarded, because ModelInterface has
+        # no business knowing about them: they are hooks ON a wrapped model, not
+        # part of what wrapping means. See components/model_signals.py.
+        track_signals = kwargs.pop('track_model_signals', False)
+        signals_kwargs = {
+            key: kwargs.pop(key)
+            for key in ('model_signals_every_n_steps', 'model_signals_layer_ids')
+            if key in kwargs
+        }
+
         # Now construct the wrapper and let it register into the ledger.
         wrapper = ModelInterface(obj, **kwargs) if forced_model_wrapping or _model == None else _model
 
         # No rebind here since the model wrapper is designed to be a drop-in replacement for the original model
+
+        if track_signals:
+            from weightslab.components.model_signals import METRICS, track_model_signals as _track
+            # `True` means "all of them"; a list/tuple narrows the set.
+            if track_signals is True:
+                metrics = METRICS
+            elif isinstance(track_signals, str):
+                metrics = (track_signals,)
+            else:
+                metrics = tuple(track_signals)
+            try:
+                _track(
+                    _model if _model is not None else wrapper,
+                    metrics=metrics,
+                    every_n_steps=signals_kwargs.get('model_signals_every_n_steps', 1),
+                    layer_ids=signals_kwargs.get('model_signals_layer_ids'),
+                )
+            except Exception as exc:
+                # Instrumentation is observability, never a reason a training
+                # script fails to start -- the run is still fully usable
+                # without these curves.
+                logger.warning(f"Could not install model signal tracking: {exc}")
 
         # Prefer returning the proxy (if one exists) so external callers hold
         # a stable reference that will see updates. If no proxy was
@@ -2845,6 +2879,119 @@ def save_group_signals(
 
     # Bulk update for performance (avoids repeated dataframe scans)
     DATAFRAME_M.update_by_groups_bulk(origin=origin, group_ids=active_group_ids, updates_list=all_updates)
+
+
+def save_model_signals(
+    signals: dict,
+    step: int | None = None,
+):
+    """Save **per-step** scalars that describe the MODEL, not any sample.
+
+    This is the step-keyed sibling of :func:`save_signals` (per sample),
+    :func:`save_instance_signals` (per annotation) and
+    :func:`save_group_signals` (per group). Those three all write onto
+    dataframe rows, because every value they record belongs to something in
+    the dataset. A gradient norm does not: it belongs to the optimization
+    step that produced it, and the batch behind it is incidental. So nothing
+    here touches the dataframe — each value becomes one point on its own
+    signal curve, plotted exactly like a watched loss.
+
+    Reach for this for training-dynamics values: gradient norms, weight
+    norms, activation statistics, learning rate, gradient-to-weight ratios.
+    Anything you would otherwise have had to fake by broadcasting one number
+    across a whole batch of ``batch_ids`` — which pollutes every one of those
+    samples' history with a value that was never about them.
+
+    Naming is what groups the curves in the UI, since ``/`` is a path
+    separator there. The convention the shipped examples use:
+
+        ``metrics/global/<name>``            whole-model values
+        ``metrics/layer/<layer_id>/<name>``  per-layer values
+
+    Args:
+        signals (dict): ``{name: value}``. Values may be Python numbers, or
+            0-d / reducible tensors and arrays (mean-reduced to one scalar).
+            Non-finite values (NaN/inf) are dropped rather than plotted —
+            a diverging run should break the curve, not the dashboard.
+        step (int, optional): Training step. Inferred from the watched
+            model's age when omitted, same as every other ``save_*`` verb.
+
+    Examples:
+        Global gradient norm, straight after ``backward()``::
+
+            total = sum(p.grad.pow(2).sum() for p in model.parameters()
+                        if p.grad is not None)
+            wl.save_model_signals({"metrics/global/grad_norm": total.sqrt()})
+
+        Per-layer weight norm::
+
+            wl.save_model_signals({
+                f"metrics/layer/{lid}/weights_norm": layer.weight.norm()
+                for lid, layer in tracked.items()
+            })
+
+    See also:
+        :func:`track_model_signals` — collects all of the above for you via
+        hooks, so a script never writes this loop by hand.
+    """
+    if not signals:
+        return
+
+    step = _get_step(step=step)
+
+    for name, value in signals.items():
+        # One scalar per name per step. `_extract_scalar_from_tensor` already
+        # handles 0-d tensors, arrays and plain numbers (mean-reducing
+        # anything with extra dims), so a caller can hand over whatever shape
+        # their metric naturally has.
+        scalar, _ = _extract_scalar_from_tensor(value)
+        if scalar is None:
+            try:
+                scalar = float(value)
+            except (TypeError, ValueError):
+                logger.debug(f"save_model_signals: skipping non-numeric signal {name!r}")
+                continue
+
+        # A NaN/inf gradient norm is real information ("this run just blew
+        # up"), but it is not a plottable point — it rescales the whole axis
+        # and hides every healthy value before it. Drop the point and say so
+        # once, so the gap in the curve is the signal.
+        if not math.isfinite(scalar):
+            logger.warning(f"save_model_signals: {name} is {scalar} at step {step}; point dropped")
+            continue
+
+        try:
+            _logger_obj = get_logger()
+        except Exception:
+            _logger_obj = None
+        if _logger_obj is None or not hasattr(_logger_obj, 'add_scalars'):
+            return
+
+        # `aggregate_by_step=False` + no per-sample map is the immediate path:
+        # the point is appended to this signal's history as-is instead of
+        # being averaged into a per-step bucket (see LoggerQueue.add_scalars).
+        # That is what we want — there is only ever one value per step here,
+        # so there is nothing to aggregate, and buffering it would delay the
+        # point by a step for no benefit.
+        _logger_obj.add_scalars(
+            name,
+            {name: scalar},
+            global_step=step,
+            signal_per_sample=None,
+            aggregate_by_step=False,
+        )
+
+
+def track_model_signals(model=None, **kwargs):
+    """Instrument a watched model so its training dynamics log themselves.
+
+    Thin re-export of
+    :func:`weightslab.components.model_signals.track_model_signals`; see that
+    function for the full argument list. Equivalent to passing
+    ``track_model_signals=True`` to ``watch_or_edit(model, flag="model")``.
+    """
+    from weightslab.components.model_signals import track_model_signals as _track
+    return _track(model, **kwargs)
 
 
 def clear_all():
@@ -4929,6 +5076,106 @@ def write_dataframe(
         )
 
     return path
+
+
+def export_annotations(
+    fmt: str,
+    path: str | None = None,
+    origin: str | None = None,
+    class_names: dict | list | None = None,
+    use_predictions: bool = False,
+    tags: list[str] | None = None,
+) -> str:
+    """Export bounding-box/segmentation annotations to a relabeling-tool format.
+
+    Reads ground-truth (or, with *use_predictions*, model-predicted) boxes and
+    segmentation masks from the registered dataframe and writes them to
+    *path* in *fmt*, ready to hand off to an outsourced relabeling pass.
+
+    Parameters
+    ----------
+    fmt : {"cvat", "label_studio", "v7"}
+        Target format:
+
+        - ``"cvat"`` — a single CVAT XML 1.1 file.
+        - ``"label_studio"`` — a single Label Studio JSON file.
+        - ``"v7"`` — a zip of per-image V7/Darwin JSON 2.0 files (Darwin
+          matches annotations to images by filename on import).
+    path : str, optional
+        Output file path **or** directory. When omitted (``None``), the
+        ``root_log_dir`` from the active checkpoint manager is used, with the
+        format's default filename (e.g. ``annotations_cvat.xml``). If *path*
+        is a directory (or has no extension), the default filename is
+        appended inside it.
+    origin : str, optional
+        Restrict export to one registered split/loader (e.g. ``"train_loader"``).
+        ``None`` exports every registered split.
+    class_names : dict or list, optional
+        Explicit class-id -> name mapping, overriding any auto-detected
+        ``dataset.class_names`` attribute. Without either, labels fall back
+        to ``"class_<id>"``.
+    use_predictions : bool, optional
+        Export model predictions instead of ground-truth targets.
+    tags : list of str, optional
+        Restrict export to samples carrying ANY of these tags (``tag:``
+        prefix optional, e.g. ``["ToReview"]``), matching either a boolean
+        tag set via :func:`tag_samples` or a categorical value set via
+        :func:`set_categorical_tag`. ``None`` (default) exports every sample.
+
+    Returns
+    -------
+    str
+        Absolute path of the file (or zip) that was written.
+
+    Notes
+    -----
+    Only annotation coordinates + a filename are exported — image files
+    themselves are neither copied nor embedded. Ensure the filenames used
+    when uploading images to CVAT/Label Studio/V7 match the ones in the
+    export (real image paths are resolved best-effort from the dataset
+    object; unresolved samples get a synthetic ``sample_<id>.jpg`` name).
+
+    Segmentation polygon export requires OpenCV (``pip install
+    weightslab[export]``); bounding-box export needs no extra dependency.
+
+    Examples
+    --------
+    Export everything to CVAT, auto-named under ``root_log_dir``::
+
+        wl.export_annotations("cvat")
+
+    Export only the validation split to Label Studio, with explicit class names::
+
+        wl.export_annotations(
+            "label_studio", "val_annotations.json",
+            origin="val_loader", class_names=["background", "cat", "dog"],
+        )
+
+    Export only the samples tagged "ToReview" to CVAT, for a relabeling pass::
+
+        wl.export_annotations("cvat", tags=["ToReview"])
+    """
+    import os as _os
+
+    from weightslab.export.exporter import save_export
+
+    if path is None:
+        _lg = get_logger()
+        try:
+            _cm = _lg.chkpt_manager if _lg is not None else None
+            _rld = _cm.root_log_dir if _cm is not None else None
+            path = str(_rld) if _rld is not None else "."
+        except Exception as _e:
+            logger.debug("export_annotations: failed to resolve root_log_dir (%s); "
+                         "falling back to current directory.", _e)
+            path = "."
+        logger.debug("export_annotations: no path given, using output directory %r.", path)
+
+    written_path = save_export(
+        fmt, path,
+        origin=origin, class_names=class_names, use_predictions=use_predictions, tags=tags,
+    )
+    return _os.path.abspath(written_path)
 
 
 def _live_data_service():

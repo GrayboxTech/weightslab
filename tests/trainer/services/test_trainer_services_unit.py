@@ -539,5 +539,87 @@ class TestDataServiceHelpersUnit(unittest.TestCase):
         self.assertTrue(service._df_manager.flush.called)
         self.assertTrue(checkpoint_manager.save_data_snapshot.called)
 
+
+class TestDataServiceExportAnnotationsUnit(unittest.TestCase):
+
+    def test_export_annotations_success(self):
+        service = DataService.__new__(DataService)
+        req = pb2.ExportAnnotationsRequest(format=pb2.EXPORT_FORMAT_CVAT, origin="train_loader")
+
+        with patch(
+            "weightslab.export.exporter.export_annotations",
+            return_value=(b"<annotations/>", "annotations_cvat.xml", "application/xml", 3),
+        ) as mock_export:
+            response = service.ExportAnnotations(req, None)
+
+        mock_export.assert_called_once_with("cvat", origin="train_loader", use_predictions=False, tags=None)
+        self.assertTrue(response.success)
+        self.assertEqual(response.payload, b"<annotations/>")
+        self.assertEqual(response.filename, "annotations_cvat.xml")
+        self.assertEqual(response.mime_type, "application/xml")
+        self.assertEqual(response.image_count, 3)
+
+    def test_export_annotations_passes_predictions_flag(self):
+        service = DataService.__new__(DataService)
+        req = pb2.ExportAnnotationsRequest(format=pb2.EXPORT_FORMAT_LABEL_STUDIO, include_predictions=True)
+
+        with patch(
+            "weightslab.export.exporter.export_annotations",
+            return_value=(b"[]", "annotations_label_studio.json", "application/json", 0),
+        ) as mock_export:
+            service.ExportAnnotations(req, None)
+
+        mock_export.assert_called_once_with("label_studio", origin=None, use_predictions=True, tags=None)
+
+    def test_export_annotations_passes_tags(self):
+        service = DataService.__new__(DataService)
+        req = pb2.ExportAnnotationsRequest(format=pb2.EXPORT_FORMAT_CVAT, tags=["ToReview", "outlier"])
+
+        with patch(
+            "weightslab.export.exporter.export_annotations",
+            return_value=(b"<annotations/>", "annotations_cvat.xml", "application/xml", 1),
+        ) as mock_export:
+            service.ExportAnnotations(req, None)
+
+        mock_export.assert_called_once_with(
+            "cvat", origin=None, use_predictions=False, tags=["ToReview", "outlier"],
+        )
+
+    def test_export_annotations_unknown_format_value(self):
+        service = DataService.__new__(DataService)
+        req = pb2.ExportAnnotationsRequest(format=99)
+
+        response = service.ExportAnnotations(req, None)
+
+        self.assertFalse(response.success)
+        self.assertIn("99", response.message)
+
+    def test_export_annotations_missing_optional_dependency(self):
+        service = DataService.__new__(DataService)
+        req = pb2.ExportAnnotationsRequest(format=pb2.EXPORT_FORMAT_V7_DARWIN)
+
+        with patch(
+            "weightslab.export.exporter.export_annotations",
+            side_effect=ImportError("Segmentation polygon export requires OpenCV"),
+        ):
+            response = service.ExportAnnotations(req, None)
+
+        self.assertFalse(response.success)
+        self.assertIn("OpenCV", response.message)
+
+    def test_export_annotations_generic_failure_does_not_raise(self):
+        service = DataService.__new__(DataService)
+        req = pb2.ExportAnnotationsRequest(format=pb2.EXPORT_FORMAT_CVAT)
+
+        with patch(
+            "weightslab.export.exporter.export_annotations",
+            side_effect=RuntimeError("boom"),
+        ):
+            response = service.ExportAnnotations(req, None) # must not raise
+
+        self.assertFalse(response.success)
+        self.assertIn("boom", response.message)
+
+
 if __name__ == "__main__":
     unittest.main()

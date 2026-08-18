@@ -5421,3 +5421,47 @@ class DataService:
                 success=False,
                 split_names=[]
             )
+
+    # Format enum value -> weightslab.export's string key.
+    _EXPORT_FORMAT_NAMES = {
+        pb2.EXPORT_FORMAT_CVAT: "cvat",
+        pb2.EXPORT_FORMAT_LABEL_STUDIO: "label_studio",
+        pb2.EXPORT_FORMAT_V7_DARWIN: "v7",
+    }
+
+    def ExportAnnotations(self, request, context):
+        """Export bounding-box/segmentation annotations to a relabeling-tool
+        format (CVAT XML, Label Studio JSON, or V7/Darwin JSON) and return the
+        encoded file as bytes for the caller (Weights Studio's Export button,
+        or the `weightslab export` CLI) to write/download.
+        """
+        fmt = self._EXPORT_FORMAT_NAMES.get(request.format)
+        if fmt is None:
+            return pb2.ExportAnnotationsResponse(
+                success=False,
+                message=f"Unknown export format value: {request.format}",
+            )
+
+        try:
+            from weightslab.export.exporter import export_annotations
+
+            payload, filename, mime_type, image_count = export_annotations(
+                fmt,
+                origin=request.origin or None,
+                use_predictions=request.include_predictions,
+                tags=list(request.tags) or None,
+            )
+            return pb2.ExportAnnotationsResponse(
+                success=True,
+                message=f"Exported {image_count} image(s) to {fmt} format.",
+                payload=payload,
+                filename=filename,
+                mime_type=mime_type,
+                image_count=image_count,
+            )
+        except ImportError as e:
+            logger.warning(f"ExportAnnotations missing optional dependency: {e}")
+            return pb2.ExportAnnotationsResponse(success=False, message=str(e))
+        except Exception as e:
+            logger.error(f"ExportAnnotations failed: {e}", exc_info=True)
+            return pb2.ExportAnnotationsResponse(success=False, message=f"Export failed: {e}")

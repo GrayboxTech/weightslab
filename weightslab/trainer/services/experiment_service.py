@@ -74,6 +74,82 @@ def _downsample_uniform(series, max_points: int):
     return picked
 
 
+def _outliers_pb(entry) -> list:
+    """Convert a signal entry's stored outliers into ``SignalOutlier`` messages."""
+    raw = entry.get("outliers") or []
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        sample_id = str(item.get("sample_id", ""))
+        if not sample_id:
+            continue
+        try:
+            value = float(item.get("value", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        out.append(pb2.SignalOutlier(sample_id=sample_id, value=value))
+
+
+def _logger_point_pb(metric_name: str, entry: dict, sample_id: str = "") -> "pb2.LoggerDataPoint":
+    """Build one ``LoggerDataPoint`` from a logger history/queue entry dict.
+
+    Shared by the full-history and live-queue paths so the two can't drift on
+    which fields they forward.
+    """
+    return pb2.LoggerDataPoint(
+        metric_name=metric_name,
+        model_age=entry.get("model_age", 0),
+        metric_value=entry.get("metric_value", 0.0),
+        experiment_hash=entry.get("experiment_hash", "N.A."),
+        timestamp=int(entry.get("timestamp", time.time())),
+        sample_id=sample_id,
+        is_evaluation_marker=bool(entry.get("is_evaluation_marker", False)),
+        split_name=str(entry.get("split_name", "")),
+        evaluation_tags=[str(tag) for tag in entry.get("evaluation_tags", []) or []],
+        point_note=str(entry.get("point_note", "")),
+        audit_mode=bool(entry.get("audit_mode", False)),
+        outliers=_outliers_pb(entry),
+        outlier_count=int(entry.get("outlier_count", 0) or 0),
+        sample_count=int(entry.get("sample_count", 0) or 0),
+        trend_value=float(entry.get("trend_value") or 0.0),
+        trend_margin=float(entry.get("trend_margin") or 0.0),
+        # Explicit flags: a band of (0, 0) is indistinguishable from "no band" on
+        # the wire, since proto3 scalars have no presence.
+        has_trend_band=entry.get("trend_value") is not None and entry.get("trend_margin") is not None,
+        value_min=float(entry.get("value_min") or 0.0),
+        value_max=float(entry.get("value_max") or 0.0),
+        has_value_range=entry.get("value_min") is not None and entry.get("value_max") is not None,
+    )
+
+
+def _downsample_preserving_outliers(signal_history, max_points: int):
+    """Stride ``signal_history`` down to ~``max_points``, never dropping a spike.
+
+    Plain striding is fine for the smooth body of a curve but would throw away
+    exactly the anomalies the plot is meant to surface — an outlier is by nature
+    a single step, so a stride of 5 loses 4 out of 5 of them. Points carrying
+    outliers are therefore always kept, on top of the strided baseline.
+
+    The result can exceed ``max_points`` on a pathologically spiky run; that is
+    the intended trade (completeness of anomalies over an exact cap).
+    """
+    n = len(signal_history)
+    if max_points <= 0 or n <= max_points:
+        return signal_history
+
+    stride = max(1, n // max_points)
+    kept, seen = [], set()
+    for index, entry in enumerate(signal_history):
+        if index % stride == 0 or entry.get("outliers"):
+            if index not in seen:
+                seen.add(index)
+                kept.append(entry)
+    return kept
+
+
 class ExperimentService(pb2_grpc.ExperimentServiceServicer):
     """
     Domain-level experiment service that orchestrates model/data services
@@ -178,6 +254,51 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             _level = logger.warning if elapsed_ms > 2000 else logger.debug
             _level("GetLatestLoggerData: done elapsed=%.1fms in_flight_peak=%d client_active=%s",
                    elapsed_ms, _in_flight, _active)
+
+    def GetStepSamples(self, request, context):
+        """Return every sample id behind one plotted step.
+
+        The plot's "Highlight step samples" action shows the whole batch for a
+        point, so the answer must come from the per-sample table rather than from
+        the outlier list recorded on the aggregated point.
+        """
+        self._ctx.ensure_components()
+        signal_logger = self._ctx.components.get("signal_logger")
+        if signal_logger is None:
+            return pb2.StepSamplesResponse(
+                success=False, message="Signal logger unavailable")
+
+        metric_name = str(request.metric_name or "")
+        if not metric_name:
+            return pb2.StepSamplesResponse(
+                success=False, message="metric_name is required")
+
+        try:
+            sample_ids, total = signal_logger.get_step_sample_ids(
+                metric_name,
+                str(request.experiment_hash or ""),
+                int(request.model_age),
+                int(request.max_samples or 0),
+            )
+        except Exception as exc:
+            logger.exception("GetStepSamples failed for %s", metric_name)
+            return pb2.StepSamplesResponse(success=False, message=str(exc))
+
+        if not sample_ids:
+            # Not an error: signals that log only an aggregate have no per-sample
+            # rows, and the UI needs to tell that apart from a failure.
+            return pb2.StepSamplesResponse(
+                success=True,
+                message=f"No per-sample data recorded for {metric_name} at step {request.model_age}",
+                sample_ids=[], total_available=0,
+            )
+
+        return pb2.StepSamplesResponse(
+            success=True,
+            message=f"{len(sample_ids)} of {total} sample(s)",
+            sample_ids=sample_ids,
+            total_available=total,
+        )
 
     def _get_latest_logger_data_impl(self, request, context):
         self._ctx.ensure_components()
@@ -313,26 +434,12 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                 # Keep deterministic order by model_age before sampling
                 signal_history = sorted(signal_history, key=lambda item: item.get("model_age", 0))
 
-                # Downsample if we have more than max_points points (always keeps
-                # the first and last point, so the most recent value is never lost).
-                signal_history = _downsample_uniform(signal_history, max_points)
+                # Downsample if we have more than max_points, keeping every
+                # outlier-bearing step (see _downsample_preserving_outliers).
+                signal_history = _downsample_preserving_outliers(signal_history, max_points)
 
                 for s in signal_history:
-                    points.append(
-                        pb2.LoggerDataPoint(
-                            metric_name=metric_name,
-                            model_age=s.get("model_age", 0),
-                            metric_value=s.get("metric_value", 0.0),
-                            experiment_hash=s.get("experiment_hash", "N.A."),
-                            timestamp=int(s.get("timestamp", time.time())),
-                            sample_id="", # No sample_id in aggregated mode
-                            is_evaluation_marker=bool(s.get("is_evaluation_marker", False)),
-                            split_name=str(s.get("split_name", "")),
-                            evaluation_tags=[str(tag) for tag in s.get("evaluation_tags", []) or []],
-                            point_note=str(s.get("point_note", "")),
-                            audit_mode=bool(s.get("audit_mode", False)),
-                        )
-                    )
+                    points.append(_logger_point_pb(metric_name, s))
         else:
             # Return only queue (new data since last poll)
             if context and not context.is_active():
@@ -344,21 +451,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             if _tq_ms > 200:
                 logger.warning("get_and_clear_queue() took %.1fms (slow — possible lock contention)", _tq_ms)
             for s in queue_data:
-                points.append(
-                    pb2.LoggerDataPoint(
-                        metric_name=s.get("metric_name", ""),
-                        model_age=s.get("model_age", 0),
-                        metric_value=s.get("metric_value", 0.0),
-                        experiment_hash=s.get("experiment_hash", "N.A."),
-                        timestamp=int(s.get("timestamp", time.time())),
-                        sample_id="", # No sample_id in queue mode
-                        is_evaluation_marker=bool(s.get("is_evaluation_marker", False)),
-                        split_name=str(s.get("split_name", "")),
-                        evaluation_tags=[str(tag) for tag in s.get("evaluation_tags", []) or []],
-                        point_note=str(s.get("point_note", "")),
-                        audit_mode=bool(s.get("audit_mode", False)),
-                    )
-                )
+                points.append(_logger_point_pb(s.get("metric_name", ""), s))
 
         return pb2.GetLatestLoggerDataResponse(points=points)
 

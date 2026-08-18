@@ -1,0 +1,29 @@
+# Global configuration
+experiment_name: pennfudan_detection_relabeling
+# root_log_dir:  # Empty to write in tmp directory, or specify a path to store logs
+
+# Serving
+serving_grpc: true
+serving_cli: true
+
+# Configure global dataframe storage
+ledger_enable_h5_persistence: true
+ledger_enable_flushing_threads: true
+ledger_flush_max_rows: 100
+ledger_flush_interval: 60.0
+
+# Dataset
+num_classes: 1            # Penn-Fudan: single class (person)
+image_size: 256
+
+# How many samples get auto-tagged "ToReview" on first launch, purely to give
+# the export-filtered-by-tag workflow something to demo immediately. Set to 0
+# to start with a clean, untagged dataset.
+seed_review_tag_count: 10
+
+# Data (Penn-Fudan pedestrians; ~170 images downloaded on first run under data_root)
+data_root: .\data
+data:
+  data_loader:
+    batch_size: 8
+    max_samples: null     # null = use the full train split

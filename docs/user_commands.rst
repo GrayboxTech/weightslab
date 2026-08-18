@@ -10,7 +10,7 @@ Installed as a console script via pyproject.toml:
 
 .. code-block:: text
 
-   weightslab {se,start,cli,tunnel,help} ...
+   weightslab {se,start,cli,tunnel,export,help} ...
 
 Run weightslab, weightslab -h, or weightslab help to print the full built-in help.
 
@@ -29,6 +29,8 @@ Run weightslab, weightslab -h, or weightslab help to print the full built-in hel
      - Connect to a running experiment interactive console.
    * - weightslab tunnel
      - Forward a remote gRPC backend to a local TCP port.
+   * - weightslab export
+     - Export bounding-box/segmentation annotations to CVAT, Label Studio, or V7.
    * - weightslab help
      - Show the help/banner (same as no command, or -h).
 
@@ -284,6 +286,49 @@ yet), re-resolves the endpoint per connection (so a changing tunnel IP is picked
 up), and runs until ``Ctrl+C``. See the classification Colab notebook
 (``examples/Notebooks/PyTorch/ws-classification.ipynb``) for the end-to-end
 setup.
+
+weightslab export
+~~~~~~~~~~~~~~~~~~
+
+**Syntax**
+
+.. code-block:: bash
+
+   weightslab export --format {cvat,label_studio,v7} [OUTPUT]
+                      [--origin ORIGIN] [--predictions] [--tag TAG ...] [--host HOST] [--port PORT]
+
+Exports bounding-box/segmentation annotations from a **running** experiment
+to a relabeling-tool format — connects over gRPC exactly like ``weightslab
+cli`` does, and is the CLI counterpart to Weights Studio's "Export" button
+and :func:`wl.export_annotations`. See :doc:`export` for the format
+reference, class-name/image-path resolution, and caveats.
+
+**Arguments**
+
+- ``--format``, ``-f`` *(required)* — ``cvat`` (XML), ``label_studio``
+  (JSON), or ``v7`` (Darwin JSON, zipped — one file per image).
+- ``OUTPUT`` *(positional, optional)* — output file path or directory.
+  Default: the current directory, using the format's default filename
+  (e.g. ``annotations_cvat.xml``).
+- ``--origin`` *(str)* — restrict to one registered split/loader (e.g.
+  ``train_loader``). Default: every registered split.
+- ``--predictions`` — export model predictions instead of ground-truth targets.
+- ``--tag`` *(str, repeatable)* — restrict to samples carrying this tag
+  (e.g. ``ToReview``); repeat for multiple tags (matches ANY of them).
+  Default: every sample.
+- ``--host`` *(str)* — backend host to connect to. Default: **127.0.0.1**.
+- ``--port`` *(int)* — backend gRPC port to connect to. Default:
+  ``$GRPC_BACKEND_PORT`` or **50051**.
+
+**Examples**
+
+.. code-block:: bash
+
+   weightslab export --format cvat                     # everything, CVAT XML, into "."
+   weightslab export -f label_studio annotations.json   # explicit output file
+   weightslab export -f v7 out/ --origin val_loader      # V7/Darwin, val split only
+   weightslab export -f cvat --predictions               # export model predictions
+   weightslab export -f cvat --tag ToReview              # only samples tagged ToReview
 
 .. _cli-console:
 

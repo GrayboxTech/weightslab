@@ -30,6 +30,10 @@ service ExperimentService {
   // downsampled to at most max_points and is only included when the sample has
   // at least 3 recorded points.
   rpc GetSignalTrajectory (GetSignalTrajectoryRequest) returns (GetSignalTrajectoryResponse);
+  // Every sample id that contributed to one step of one signal. Backs the plot's
+  // right-click "Highlight step samples": the whole batch behind a point, not
+  // just the samples that were flagged as off-trend.
+  rpc GetStepSamples (StepSamplesRequest) returns (StepSamplesResponse);
   // Raw point cloud of one sample (task_type "detection_pointcloud"), server-streamed
   // in binary chunks for the interactive 3D viewer.
   rpc GetPointCloud (PointCloudRequest) returns (stream PointCloudChunk);
@@ -76,6 +80,12 @@ service ExperimentService {
   rpc TriggerEvaluation (TriggerEvaluationRequest) returns (TriggerEvaluationResponse);
   rpc GetEvaluationStatus (GetEvaluationStatusRequest) returns (GetEvaluationStatusResponse);
   rpc CancelEvaluation (CancelEvaluationRequest) returns (CancelEvaluationResponse);
+
+  // Export bounding-box/segmentation annotations to a relabeling-tool format
+  // (CVAT XML, Label Studio JSON, or V7/Darwin JSON). Unary: the whole file
+  // (or a zip, for formats that need one file per image) comes back as bytes
+  // in a single response.
+  rpc ExportAnnotations (ExportAnnotationsRequest) returns (ExportAnnotationsResponse);
 }
 
 // --- Logger Data Sync ---
@@ -85,6 +95,14 @@ message GetLatestLoggerDataRequest {
   bool break_by_slices = 3;        // true = return per-sample data filtered by tags
   repeated string tags = 4;        // list of tags to filter samples (used when break_by_slices=true)
   string graph_name = 5;           // specific signal/graph name to filter (used when break_by_slices=true)
+}
+
+// One sample whose signal value at a step sits far off the curve's own trend.
+// Emitted alongside the averaged point it was averaged into, so the UI can show
+// "this step's mean is 0.39, but sample 8123 contributed 2.71".
+message SignalOutlier {
+  string sample_id = 1;
+  float value = 2;                 // that sample's raw signal value at this step
 }
 
 message LoggerDataPoint {
@@ -99,6 +117,31 @@ message LoggerDataPoint {
   repeated string evaluation_tags = 9;
   string point_note = 10;
   bool audit_mode = 11;            // True if logged during audit mode (read-only inspection)
+  // Samples in this step's batch that deviated from the curve's rolling trend,
+  // strongest first and capped at WL_SIGNAL_OUTLIER_TOP_N. Empty for the common
+  // case where the whole batch tracked the trend.
+  repeated SignalOutlier outliers = 12;
+  // How many samples in the batch were flagged, before the top-N cap. Lets the
+  // UI tell "one sample spiked" apart from "the entire batch is off-trend".
+  int32 outlier_count = 13;
+  // Batch size the average was taken over, so outlier_count can be read as a
+  // fraction of the batch rather than an absolute.
+  int32 sample_count = 14;
+  // The on-trend band this point was judged against: centre (the rolling EMA of
+  // the curve) and half-width. Not drawn directly; it is what decides which
+  // samples count as off-trend. has_trend_band is false while the tracker is
+  // still warming up.
+  float trend_value = 15;
+  float trend_margin = 16;
+  bool has_trend_band = 17;
+  // ABSOLUTE extremes of this step's batch — the real lowest and highest sample
+  // values, not a standard deviation. This is what the UI draws as the error
+  // band around the curve, so a step containing an outlier makes the band spike
+  // out to that value instead of averaging it away.
+  // has_value_range is false for signals that log no per-sample data.
+  float value_min = 18;
+  float value_max = 19;
+  bool has_value_range = 20;
 }
 
 message GetLatestLoggerDataResponse {
@@ -504,6 +547,21 @@ message GetMetaDataResponse {
 }
 
 // --- On-demand per-signal trajectory (right-click a signal -> plot) ---
+// --- All samples behind one plotted step ---
+message StepSamplesRequest {
+  string metric_name = 1;
+  string experiment_hash = 2;   // "" = any run
+  int32 model_age = 3;
+  int32 max_samples = 4;        // 0 => no cap
+}
+
+message StepSamplesResponse {
+  bool success = 1;
+  string message = 2;
+  repeated string sample_ids = 3;
+  int32 total_available = 4;    // count before max_samples truncation
+}
+
 message GetSignalTrajectoryRequest {
   string signal_name = 1;            // signal to plot (UI spelling; resolved server-side)
   repeated string sample_ids = 2;    // samples currently shown to plot for
@@ -758,4 +816,27 @@ message GenerateNotebookCodeResponse {
   string explanation = 2;  // Short natural-language explanation.
   bool ok = 3;
   string error = 4;
+}
+
+// --- Annotation export (relabeling-tool formats) ---
+enum AnnotationExportFormat {
+  EXPORT_FORMAT_CVAT = 0;
+  EXPORT_FORMAT_LABEL_STUDIO = 1;
+  EXPORT_FORMAT_V7_DARWIN = 2;
+}
+
+message ExportAnnotationsRequest {
+  AnnotationExportFormat format = 1;
+  string origin = 2;              // restrict to one split/loader; "" = all loaders
+  bool include_predictions = 3;   // export model predictions instead of ground-truth targets
+  repeated string tags = 4;       // restrict to samples carrying ANY of these tags (tag: prefix optional); empty = all samples
+}
+
+message ExportAnnotationsResponse {
+  bool success = 1;
+  string message = 2;
+  bytes payload = 3;    // export file bytes (a zip, for formats that need one file per image)
+  string filename = 4;  // suggested filename (with extension), e.g. "annotations_cvat.xml"
+  string mime_type = 5; // e.g. "application/xml", "application/json", "application/zip"
+  int32 image_count = 6; // number of images included, for UI feedback
 }

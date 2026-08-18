@@ -65,7 +65,7 @@ dependencies = [
   # grpcio-tools ~=1.68 to keep the gencode Colab-compatible; a newer grpcio-tools
   # bumps the gencode and reintroduces the VersionError on Colab. Upper bound <8
   # keeps modern runtimes (7.x) working.
-  "protobuf>=5.28.1,<8",
+  "protobuf>=6.31.1,<8",
   "pydantic>=2.7,<3",
 
   # Imaging
@@ -96,6 +96,18 @@ dependencies = [
 
   # Reporting
   "matplotlib>=3.7,<4",
+
+  # Resource monitoring (CPU/memory/disk/network/process + NVIDIA GPU via NVML).
+  # "nvidia-ml-py" is NVIDIA's officially maintained NVML binding, published
+  # under the `pynvml` import name (the standalone `pynvml` PyPI package is the
+  # unmaintained community fork -- do not swap this for it). Core dependency so
+  # GPU metrics work out of the box on GPU machines; the monitor no-ops
+  # gracefully when no NVIDIA driver is present (CPU-only machines). Versioned
+  # after the CUDA driver generation it binds (already at 13.x), not semver --
+  # keep the upper bound loose so a newer driver-generation release isn't
+  # blocked.
+  "psutil>=5.9,<8",
+  "nvidia-ml-py>=11,<14",
 ]
 
 [project.optional-dependencies]
@@ -115,6 +127,14 @@ dev = [
   "grpcio-tools>=1.62,<2",
   "torchinfo>=1.8,<2",
   "httpx>=0.27,<1",
+]
+
+# Optional: segmentation mask -> polygon extraction for annotation export
+# (CVAT/Label Studio/V7). Bounding-box export needs none of this; only
+# lazily imported inside weightslab.export when a segmentation mask is
+# actually encountered.
+export = [
+  "opencv-python-headless>=4.8,<5",
 ]
 
 utest = [
