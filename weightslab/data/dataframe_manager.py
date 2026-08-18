@@ -382,6 +382,22 @@ class LedgeredDataFrameManager:
 
         return str(sample_id)
 
+    def _level0_index(self):
+        """Level-0 (sample_id) values of the ledger index, cached.
+
+        Keyed on the index object's identity: pandas Index is immutable, so a
+        reindex or rebuild yields a new object and invalidates this. Reusing the
+        object also reuses its hash engine, which is what makes a membership
+        probe O(1) instead of O(rows).
+        """
+        idx = self._df.index
+        key = id(idx)
+        if getattr(self, "_lvl0_key", None) != key:
+            self._lvl0_key = key
+            self._lvl0 = (idx.get_level_values(0)
+                          if isinstance(idx, pd.MultiIndex) else idx)
+        return self._lvl0
+
     def _coerce_sample_id_for_index(self, sample_id: Any) -> Any:
         """Coerce sample_id to match current dataframe index representation.
 
@@ -394,8 +410,10 @@ class LedgeredDataFrameManager:
 
         # Check if multi-index
         if isinstance(self._df.index, pd.MultiIndex):
-            # Get level 0 (sample_id level) values
-            level_0_values = self._df.index.get_level_values(0)
+            # Cached: get_level_values(0) built a new Index over every row on each
+            # call, and a new object means a new hash engine, so this probe was
+            # O(rows) per sample.
+            level_0_values = self._level0_index()
             if sid in level_0_values:
                 return sid
             sid_str = str(sid)
@@ -1621,22 +1639,42 @@ class LedgeredDataFrameManager:
 
             coerced_ids = [self._coerce_sample_id_for_index(sid) for sid in sample_ids]
 
+            idx = self._df.index
             try:
-                if isinstance(self._df.index, pd.MultiIndex) and self._df.index.nlevels >= 2:
-                    sample_level = self._df.index.get_level_values(0)
-                    anno_level = self._df.index.get_level_values(1)
-                    mask = sample_level.isin(coerced_ids) & (anno_level == 0)
-                    slice_df = self._df[mask]
-                    sids = slice_df.index.get_level_values(0)
+                # _positional NB_SEEN lookup: the wanted rows are exactly
+                # (sample_id, 0), so resolve their POSITIONS instead of scanning.
+                # The masked form below materialised both index levels and copied
+                # a boolean-masked frame over every row -- ~1.2s/step at 3.96M
+                # just to read a batch of integers.
+                if idx.has_duplicates:
+                    raise ValueError("non-unique index; use the scan path")
+                if isinstance(idx, pd.MultiIndex) and idx.nlevels >= 2:
+                    pos = idx.get_indexer([(cid, 0) for cid in coerced_ids])
                 else:
-                    mask = self._df.index.isin(coerced_ids)
-                    slice_df = self._df[mask]
-                    sids = slice_df.index
-
-                for sid, val in zip(sids, slice_df[column]):
-                    values[self._normalize_sample_id(sid)] = val
+                    pos = idx.get_indexer(list(coerced_ids))
+                col = self._df[column].to_numpy()
+                for cid, p in zip(coerced_ids, pos):
+                    if p >= 0:
+                        values[self._normalize_sample_id(cid)] = col[p]
             except Exception:
-                pass
+                # Fallback: original scan, for a non-unique index or any dtype
+                # mismatch get_indexer will not tolerate.
+                try:
+                    if isinstance(idx, pd.MultiIndex) and idx.nlevels >= 2:
+                        sample_level = idx.get_level_values(0)
+                        anno_level = idx.get_level_values(1)
+                        mask = sample_level.isin(coerced_ids) & (anno_level == 0)
+                        slice_df = self._df[mask]
+                        sids = slice_df.index.get_level_values(0)
+                    else:
+                        mask = idx.isin(coerced_ids)
+                        slice_df = self._df[mask]
+                        sids = slice_df.index
+
+                    for sid, val in zip(sids, slice_df[column]):
+                        values[self._normalize_sample_id(sid)] = val
+                except Exception:
+                    pass
 
         return values
 
