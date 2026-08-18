@@ -179,6 +179,11 @@ class ExperimentServiceStub(object):
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.CancelEvaluationRequest.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.CancelEvaluationResponse.FromString,
                 _registered_method=True)
+        self.ExportAnnotations = channel.unary_unary(
+                '/ExperimentService/ExportAnnotations',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsResponse.FromString,
+                _registered_method=True)
 
 
 class ExperimentServiceServicer(object):
@@ -384,6 +389,16 @@ class ExperimentServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ExportAnnotations(self, request, context):
+        """Export bounding-box/segmentation annotations to a relabeling-tool format
+        (CVAT XML, Label Studio JSON, or V7/Darwin JSON). Unary: the whole file
+        (or a zip, for formats that need one file per image) comes back as bytes
+        in a single response.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ExperimentServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -531,6 +546,11 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     servicer.CancelEvaluation,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.CancelEvaluationRequest.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.CancelEvaluationResponse.SerializeToString,
+            ),
+            'ExportAnnotations': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExportAnnotations,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1316,6 +1336,33 @@ class ExperimentService(object):
             '/ExperimentService/CancelEvaluation',
             weightslab_dot_proto_dot_experiment__service__pb2.CancelEvaluationRequest.SerializeToString,
             weightslab_dot_proto_dot_experiment__service__pb2.CancelEvaluationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExportAnnotations(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/ExportAnnotations',
+            weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsResponse.FromString,
             options,
             channel_credentials,
             insecure,
