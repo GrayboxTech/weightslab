@@ -561,7 +561,11 @@ class DataService:
         # Encoded-media LRU for GetMedia (insertion-ordered dict). Muxing a clip
         # costs an ffmpeg round-trip, so opening, closing and re-opening the
         # same sample — or paging its frames — must not re-encode.
+        # gRPC serves handlers from a thread pool, so concurrent GetMedia calls
+        # share this dict: every read/insert/evict goes through the lock, and
+        # the (expensive) encode always happens outside it.
         self._media_cache: dict = {}
+        self._media_cache_lock = threading.Lock()
 
         logger.info("DataService initialized.")
 
@@ -5028,7 +5032,7 @@ class DataService:
                 return
 
             cache_key = (sample_id, request.origin or "", kind, max_frames)
-            cached = self._media_cache.get(cache_key)
+            cached = self._media_cache_get(cache_key)
             if cached is None:
                 dataset, ds_idx, member_rank = self._locate_sample(
                     sample_id, request.origin)
@@ -5122,6 +5126,18 @@ class DataService:
                 chunk.sample_rate = payload["sample_rate"]
             yield chunk
 
+    def _media_cache_get(self, key):
+        """Look one entry up in the encoded-media LRU, marking it most recent.
+
+        Returns None on a miss; the caller then encodes *outside* the lock and
+        hands the result back through :meth:`_media_cache_put`.
+        """
+        with self._media_cache_lock:
+            value = self._media_cache.pop(key, None)
+            if value is not None:
+                self._media_cache[key] = value  # re-insert = move to newest
+            return value
+
     def _media_cache_put(self, key, value) -> None:
         """Insert into the encoded-media LRU, evicting the oldest entries.
 
@@ -5129,9 +5145,11 @@ class DataService:
         make re-opening and scrubbing the *same* sample free, not to hold a
         working set.
         """
-        self._media_cache[key] = value
-        while len(self._media_cache) > self._MEDIA_CACHE_ENTRIES:
-            self._media_cache.pop(next(iter(self._media_cache)))
+        with self._media_cache_lock:
+            self._media_cache.pop(key, None)  # keep re-puts from double-counting
+            self._media_cache[key] = value
+            while len(self._media_cache) > self._MEDIA_CACHE_ENTRIES:
+                self._media_cache.pop(next(iter(self._media_cache)))
 
     def GetPointCloud(self, request, context):
         """Stream one sample's raw point cloud as binary float32 chunks.

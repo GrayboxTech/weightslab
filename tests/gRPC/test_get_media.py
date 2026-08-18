@@ -1,4 +1,6 @@
 """Servicer-level tests for the GetMedia streaming RPC."""
+import threading
+
 import numpy as np
 import pytest
 
@@ -69,12 +71,14 @@ class _StubService:
     _MEDIA_CACHE_ENTRIES = DataService._MEDIA_CACHE_ENTRIES
     GetMedia = DataService.GetMedia
     _stream_media = DataService._stream_media
+    _media_cache_get = DataService._media_cache_get
     _media_cache_put = DataService._media_cache_put
     _locate_sample = DataService._locate_sample
 
     def __init__(self, dataset):
         self._dataset = dataset
         self._media_cache = {}
+        self._media_cache_lock = threading.Lock()
 
     def _get_dataset(self, origin):
         return self._dataset if origin == "train_loader" else None
@@ -186,6 +190,34 @@ def test_video_and_audio_are_cached_separately():
     _collect(stub)
     _collect(stub, kind="audio")
     assert len(stub._media_cache) == 2
+
+
+def test_media_cache_is_safe_under_concurrent_access():
+    """gRPC serves handlers from a thread pool, so put/evict must be atomic.
+
+    Without the lock, `next(iter(...))` racing an insert raises
+    "dictionary changed size during iteration" or over-evicts.
+    """
+    stub = _StubService(_FakeVideoDataset())
+    errors = []
+
+    def hammer(worker):
+        try:
+            for i in range(400):
+                key = (worker, i % 8)
+                if stub._media_cache_get(key) is None:
+                    stub._media_cache_put(key, {"data": b"x"})
+        except Exception as exc:  # pragma: no cover - only on a real race
+            errors.append(exc)
+
+    threads = [threading.Thread(target=hammer, args=(w,)) for w in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors
+    assert len(stub._media_cache) <= DataService._MEDIA_CACHE_ENTRIES
 
 
 # ---------------------------------------------------------------------------
