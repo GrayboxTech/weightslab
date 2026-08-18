@@ -2,30 +2,25 @@
 Live-LLM evaluation of the Data Manipulation Agent against a batch of
 realistic user prompts.
 
-This suite is OPT-IN: every test calls a REAL LLM through OpenRouter
-(consuming API credits and real wall-clock time), so it is skipped entirely
-unless an OpenRouter API key can be resolved. The key/model are resolved, in
-priority order, from:
+This suite is OPT-IN: every test calls a REAL LLM through a local OpenCode
+server (opencode.ai) (consuming real wall-clock time), so it is skipped
+entirely unless explicitly turned on via the ``UTEST_AGENT_PROMPT_EVALUATION``
+env var (any non-empty value). Unlike the old OpenRouter-backed version of
+this suite, there is no API key to resolve here -- OpenCode's credential
+lives in its own config (``opencode auth login``), not in an env var -- so
+opting in just means "run me", and ``OPENCODE_URL``/``OPENCODE_MODEL`` (the
+SAME vars the agent itself reads) pick which server/model to run against.
 
-  1. The dedicated ``UTEST_AGENT_PROMPT_EVALUATION`` /
-     ``UTEST_AGENT_PROMPT_EVALUATION_MODEL`` env vars (explicit opt-in).
-  2. The standard ``OPENROUTER_API_KEY`` / ``OPENROUTER_MODEL`` env vars —
-     including any loaded from a repo ``.env`` file — so the same credentials
-     the running agent uses also drive this suite with no extra setup.
+So this works from the command line, with a local OpenCode server already
+running and authenticated:
 
-So any of these work from the command line:
-
-    # reuse your existing OpenRouter config (.env or exported env var)
+    set UTEST_AGENT_PROMPT_EVALUATION=1
     pytest weightslab/tests/trainer/services/test_agent_live_prompt_evaluation.py -v
 
-    # or pass explicitly for this run only (PowerShell)
-    $env:OPENROUTER_API_KEY="sk-or-..."; $env:OPENROUTER_MODEL="google/gemini-flash-latest"; pytest ... -v
+    # or target a non-default server/model for this run only (PowerShell)
+    $env:UTEST_AGENT_PROMPT_EVALUATION="1"; $env:OPENCODE_URL="http://127.0.0.1:4096"; $env:OPENCODE_MODEL="openrouter/anthropic/claude-opus-4.6"; pytest ... -v
 
-    # or the dedicated opt-in vars (cmd.exe)
-    set UTEST_AGENT_PROMPT_EVALUATION=sk-or-...
-    pytest ... -v
-
-The model defaults to the agent's own default OpenRouter model when unset.
+The model defaults to the OpenCode server's own configured default when unset.
 
 Each test reproduces a specific, previously-reported bug/scenario and
 verifies the agent's plan, once executed against a realistic synthetic
@@ -58,13 +53,16 @@ from weightslab.trainer.trainer_tools import get_layer_representations
 logger = logging.getLogger(__name__)
 
 
-def _resolve_live_credentials() -> "tuple[str, str | None]":
-    """Resolve the OpenRouter (key, model) for the live suite.
+def _resolve_live_opencode_config() -> "tuple[bool, str]":
+    """Resolve whether to run the live suite, and which OpenCode model to
+    request.
 
-    Mirrors the agent's own config loading: pull in any repo ``.env`` first,
-    then prefer the dedicated UTEST_* opt-in vars, falling back to the standard
-    OPENROUTER_* vars so the same credentials the agent runs on also drive this
-    suite without duplicating them.
+    OpenCode has no API-key concept (its credential lives in the OpenCode
+    server's own config, entered once via ``opencode auth login``), so opting
+    in is just a plain on/off switch -- ``UTEST_AGENT_PROMPT_EVALUATION`` set
+    to any non-empty value. ``OPENCODE_URL``/``OPENCODE_MODEL`` (the SAME env
+    vars the agent itself reads) pick which server/model to run against; any
+    repo ``.env`` is loaded first so they can live there too.
     """
     if load_dotenv is not None:
         # weightslab/tests/trainer/services/<file> -> parents[4] = repo root,
@@ -75,26 +73,19 @@ def _resolve_live_credentials() -> "tuple[str, str | None]":
                 load_dotenv(dotenv_path=candidate, override=False)
         load_dotenv(override=False)
 
-    key = (
-        os.environ.get("UTEST_AGENT_PROMPT_EVALUATION", "").strip()
-        or os.environ.get("OPENROUTER_API_KEY", "").strip()
-    )
-    model = (
-        os.environ.get("UTEST_AGENT_PROMPT_EVALUATION_MODEL", "").strip()
-        or os.environ.get("OPENROUTER_MODEL", "").strip()
-        or None
-    )
-    return key, model
+    run_live = bool(os.environ.get("UTEST_AGENT_PROMPT_EVALUATION", "").strip())
+    model = os.environ.get("OPENCODE_MODEL", "").strip() or None
+    return run_live, model
 
 
-API_KEY, MODEL = _resolve_live_credentials()
+RUN_LIVE, MODEL = _resolve_live_opencode_config()
 
-if not API_KEY:
+if not RUN_LIVE:
     logger.info(
-        "[test_agent_live_prompt_evaluation] No OpenRouter key found "
-        "(checked UTEST_AGENT_PROMPT_EVALUATION and OPENROUTER_API_KEY, incl. .env) -- "
-        "skipping live-LLM agent prompt evaluation tests. Set one of those (and optionally "
-        "OPENROUTER_MODEL) to run this suite against a real model."
+        "[test_agent_live_prompt_evaluation] UTEST_AGENT_PROMPT_EVALUATION not set -- "
+        "skipping live-LLM agent prompt evaluation tests. Set it to any value, with a "
+        "local OpenCode server running and authenticated (see OPENCODE_URL/OPENCODE_MODEL), "
+        "to run this suite against a real model."
     )
 
 
@@ -146,7 +137,7 @@ def _make_live_agent(df: pd.DataFrame, exp_ctx=None) -> DataManipulationAgent:
     # for the data-only tests (no model registered).
     ctx = SimpleNamespace(_all_datasets_df=df, _ctx=exp_ctx)
     agent = DataManipulationAgent(ctx)
-    ok, message = agent.initialize_with_cloud_key(API_KEY, "openrouter", MODEL or agent.openrouter_model)
+    ok, message = agent.initialize_with_cloud_key("", "opencode", MODEL)
     if not ok:
         raise RuntimeError(f"Failed to initialize live agent for testing: {message}")
     return agent
@@ -246,7 +237,7 @@ def _run_ops(df: pd.DataFrame, ops: list, model_service=None) -> "tuple[pd.DataF
     return df, messages
 
 
-@unittest.skipUnless(API_KEY, "UTEST_AGENT_PROMPT_EVALUATION not set; skipping live-LLM agent evaluation")
+@unittest.skipUnless(RUN_LIVE, "UTEST_AGENT_PROMPT_EVALUATION not set; skipping live-LLM agent evaluation")
 class TestAgentLivePromptEvaluation(unittest.TestCase):
     """Runs a battery of realistic user prompts against a REAL LLM and
     verifies the resulting dataframe/message state. Each test is a
@@ -403,7 +394,7 @@ class TestAgentLivePromptEvaluation(unittest.TestCase):
         self.assertTrue(any(op.get("params", {}).get("__agent_reset__") for op in ops), ops)
 
 
-@unittest.skipUnless(API_KEY, "UTEST_AGENT_PROMPT_EVALUATION not set; skipping live-LLM agent evaluation")
+@unittest.skipUnless(RUN_LIVE, "UTEST_AGENT_PROMPT_EVALUATION not set; skipping live-LLM agent evaluation")
 class TestAgentRstDocumentedPrompts(unittest.TestCase):
     """
     One test per example prompt listed in docs/agent.rst's "Example prompts

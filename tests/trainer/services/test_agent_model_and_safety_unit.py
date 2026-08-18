@@ -16,13 +16,9 @@ from weightslab.trainer.services.data_service import DataService, rewrite_boolea
 
 def _install_agent_dependency_stubs():
     stubs = {
-        "langchain_ollama": types.ModuleType("langchain_ollama"),
-        "langchain_openai": types.ModuleType("langchain_openai"),
         "langchain_core": types.ModuleType("langchain_core"),
         "langchain_core.prompts": types.ModuleType("langchain_core.prompts"),
     }
-    stubs["langchain_ollama"].ChatOllama = object
-    stubs["langchain_openai"].ChatOpenAI = object
     stubs["langchain_core.prompts"].ChatPromptTemplate = object
     return stubs
 
@@ -37,9 +33,7 @@ def _make_agent(df=None):
     # `_ctx=None` means `_setup_model_schema` bails out early (no live model),
     # matching how a standalone agent behaves before any model is registered.
     ctx = SimpleNamespace(_all_datasets_df=df, _ctx=None)
-
-    with mock.patch.object(agent_mod, "ChatOpenAI", None), mock.patch.object(agent_mod, "ChatOllama", None):
-        agent = agent_mod.DataManipulationAgent(ctx)
+    agent = agent_mod.DataManipulationAgent(ctx)
 
     return agent_mod, agent
 
@@ -134,8 +128,6 @@ class TestOriginSchemaPromptLine(unittest.TestCase):
             return None
 
         agent._try_query_provider = fake_try_query_provider
-        agent.preferred_provider = "openrouter"
-        agent.fallback_to_local = False
 
         agent.query("keep only validation or test samples")
 
@@ -168,8 +160,6 @@ class TestConversationHistory(unittest.TestCase):
             return next(it)
 
         agent._try_query_provider = fake_try_query_provider
-        agent.preferred_provider = "openrouter"
-        agent.fallback_to_local = False
         return agent, calls
 
     def test_history_starts_empty(self):
@@ -231,64 +221,17 @@ class TestConversationHistory(unittest.TestCase):
         self.assertEqual(agent.history, [])
 
 
-class TestStartupProviderVerification(unittest.TestCase):
+class TestQueryAuthFailureHandling(unittest.TestCase):
     """Reported bug: CheckAgentHealth said the agent was available, but a
-    real query then failed with "401 Unauthorized". Root cause:
-    is_available() only checks that a provider CLIENT OBJECT exists, not
-    that its credentials were ever confirmed to work -- true for any key
-    loaded from agent_config.yaml/env vars, which (unlike the /init UI flow)
-    never runs a connectivity check. _verify_startup_providers() now probes
-    once at construction time, and a 401 detected during a real query
-    invalidates the cached connection so is_available() reflects reality
-    immediately instead of staying stale until the process restarts."""
-
-    def test_startup_verification_disables_a_bad_openrouter_key(self):
-        agent_mod, agent = _make_agent()
-
-        class _FailingChatModel:
-            def __init__(self, *a, **kw): pass
-            def invoke(self, prompt):
-                raise RuntimeError("401 Unauthorized")
-
-        agent.openrouter_api_key = "bad-key"
-        with mock.patch.object(agent_mod, "ChatOpenAI", _FailingChatModel):
-            agent._setup_providers()
-            agent._verify_startup_providers()
-
-        self.assertIsNone(agent.chain_openrouter)
-        self.assertFalse(agent.is_available())
-
-    def test_startup_verification_keeps_a_good_openrouter_key(self):
-        agent_mod, agent = _make_agent()
-
-        class _OkChatModel:
-            def __init__(self, *a, **kw): pass
-            def invoke(self, prompt):
-                return SimpleNamespace(content="OK")
-
-        agent.openrouter_api_key = "good-key"
-        with mock.patch.object(agent_mod, "ChatOpenAI", _OkChatModel):
-            agent._setup_providers()
-            agent._verify_startup_providers()
-
-        self.assertIsNotNone(agent.chain_openrouter)
-        self.assertTrue(agent.is_available())
-
-    def test_startup_verification_skips_probe_when_no_chain_was_built(self):
-        # No openrouter_api_key configured at all -> chain_openrouter stays
-        # None -> nothing to probe, must not raise.
-        _, agent = _make_agent()
-        agent.chain_openrouter = None
-
-        agent._verify_startup_providers()  # should be a no-op, not raise
-
-        self.assertIsNone(agent.chain_openrouter)
+    real query then failed with "401 Unauthorized". A 401 detected during a
+    real query invalidates the cached OpenCode connection so is_available()
+    reflects reality immediately instead of staying stale until the process
+    restarts; a non-auth (e.g. transient/timeout) failure must NOT do that,
+    since the connection might still be perfectly valid."""
 
     def test_401_during_query_invalidates_the_cached_connection(self):
         _, agent = _make_agent()
-        agent.chain_openrouter = object()  # simulates an already-"available" cached client
-        agent.preferred_provider = "openrouter"
-        agent.fallback_to_local = False
+        agent.chain_opencode = object()  # simulates an already-"available" cached client
 
         def fake_try_query_provider(provider, instruction, system_prompt):
             agent._last_query_error = RuntimeError("401 Unauthorized")
@@ -299,7 +242,7 @@ class TestStartupProviderVerification(unittest.TestCase):
         self.assertTrue(agent.is_available())  # stale "available" before the query
         result = agent.query("do something")
 
-        self.assertIsNone(agent.chain_openrouter)
+        self.assertIsNone(agent.chain_opencode)
         self.assertFalse(agent.is_available())
         self.assertIn("Agent not connected", result[0]["params"]["reason"])
 
@@ -307,9 +250,7 @@ class TestStartupProviderVerification(unittest.TestCase):
         # A transient/non-auth failure (e.g. timeout) must NOT disable a
         # connection that might still be perfectly valid.
         _, agent = _make_agent()
-        agent.chain_openrouter = object()
-        agent.preferred_provider = "openrouter"
-        agent.fallback_to_local = False
+        agent.chain_opencode = object()
 
         def fake_try_query_provider(provider, instruction, system_prompt):
             agent._last_query_error = RuntimeError("Connection timed out")
@@ -319,7 +260,7 @@ class TestStartupProviderVerification(unittest.TestCase):
 
         agent.query("do something")
 
-        self.assertIsNotNone(agent.chain_openrouter)
+        self.assertIsNotNone(agent.chain_opencode)
         self.assertTrue(agent.is_available())
 
 

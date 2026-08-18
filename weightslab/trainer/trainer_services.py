@@ -382,6 +382,10 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         logger.debug(f"\nExperimentServiceServicer.GetDataSplits({request})")
         return self._exp_service.data_service.GetDataSplits(request, context)
 
+    def ExportAnnotations(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.ExportAnnotations({request})")
+        return self._exp_service.data_service.ExportAnnotations(request, context)
+
     def CheckAgentHealth(self, request, context):
         logger.debug(f"\nExperimentServiceServicer.CheckAgentHealth({request})")
         # Prefer explicit AgentService when present (new wiring).
@@ -735,6 +739,16 @@ def grpc_serve(
             "[gRPC] Server started with watchdogs disabled (host=%s port=%d workers=%s)",
             grpc_host, grpc_port, n_workers_grpc,
         )
+
+    # Resource monitoring (CPU/memory/disk/network/GPU/process) runs for the
+    # whole server lifetime, independent of training steps. Enabled by
+    # default; see docs/resource_monitoring.rst for the config file and
+    # env var overrides (WEIGHTSLAB_DISABLE_RESOURCE_MONITORING, etc.).
+    try:
+        from weightslab.monitoring.resource_monitor import start_resource_monitor_from_config
+        start_resource_monitor_from_config()
+    except Exception:
+        logger.exception("[gRPC] Failed to start resource monitor")
 
 if __name__ == "__main__":
     grpc_serve()

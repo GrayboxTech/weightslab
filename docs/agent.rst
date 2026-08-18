@@ -16,6 +16,52 @@ leaves the process except the prompt text sent to the configured LLM provider.
    Describe what you want in plain English; the agent translates it into a safe,
    reviewable plan of dataframe and model operations and executes it.
 
+Two agent surfaces, one OpenCode server
+-----------------------------------------
+
+WeightsLab's agent capability is backed entirely by `OpenCode
+<https://opencode.ai>`_ — a local ``opencode serve`` process that WeightsLab
+starts (or reuses) for you. There is no separate OpenRouter/Ollama
+integration to configure: OpenCode itself is the provider layer, and its own
+config (``opencode auth login``, or the login modal described below) holds
+whatever credentials you use — OpenRouter, Anthropic, a local Ollama model,
+anything OpenCode supports.
+
+That one server backs **two very different agent surfaces**, and knowing
+which one you're talking to matters — everything on the rest of this page
+describes the first one:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 40 40
+
+   * -
+     - Backend SDK agent
+     - "Frontend" / OpenCode agent
+   * - Drives
+     - The normal query bar and chat-history-panel conversation
+       (``DataManipulationAgent``, ``weightslab/trainer/services/agent/agent.py``)
+     - The landing-page chat (pre-experiment) and ``/loop`` (during an experiment)
+   * - Toolset
+     - None — every mutating tool (``write``/``edit``/``patch``/``bash``) is
+       explicitly disabled on every call (``opencode_chat.py``'s
+       ``_MUTATING_TOOLS``)
+     - Full toolset — bash, file read/write/edit/patch
+   * - Memory
+     - ``self.history``, cleared/summarized by ``/clear`` and ``/compact``
+     - An OpenCode session (server-side); cleared/summarized the same way, via
+       OpenCode's own session delete/summarize endpoints
+   * - Talks to OpenCode
+     - In one-shot mode: send a prompt, get text back, no side effects
+     - Interactively: it can restart training, edit your code, discard/tag
+       data, run reports
+
+**During an active experiment, the only way to reach the frontend/OpenCode
+agent is** ``/loop`` **from the experiment agent bar.** The landing-page chat
+only exists pre-experiment — once you're connected to a running experiment,
+that surface is gone, and ``/loop`` (see the "``/loop`` reference" section
+near the end of this page) is the sole entry point to the same kind of agent.
+
 What the agent can do
 ---------------------
 
@@ -171,12 +217,15 @@ dataframe state:
 
 .. code-block:: bash
 
-   export UTEST_AGENT_PROMPT_EVALUATION=sk-or-...        # OpenRouter API key
-   export UTEST_AGENT_PROMPT_EVALUATION_MODEL=openai/gpt-4o-mini  # optional
+   # Requires a local OpenCode server already running and authenticated
+   # (opencode has no API-key env var of its own -- see "Initializing the
+   # agent" below).
+   export UTEST_AGENT_PROMPT_EVALUATION=1
+   export OPENCODE_MODEL=openrouter/anthropic/claude-opus-4.6  # optional
    pytest weightslab/tests/trainer/services/test_agent_live_prompt_evaluation.py -v
 
 Without ``UTEST_AGENT_PROMPT_EVALUATION`` set, the suite logs a note and
-skips entirely (it never runs by accident in CI or consumes API credits
+skips entirely (it never runs by accident in CI or against a real model
 unintentionally). A small always-on sanity check for the harness itself
 (fixture shape, op-runner correctness) still runs regardless.
 
@@ -241,15 +290,48 @@ scenario end-to-end against a real model.
 Initializing the agent
 ----------------------
 
-The agent needs an LLM provider before it can serve requests. Two provider
-families are supported:
+The agent needs a reachable OpenCode server before it can serve requests --
+OpenCode is the only supported backend. Nothing to install beyond WeightsLab
+itself: ``opencode-ai``'s bundled binary ships with the UI's dependencies, and
+the UI server (``weightslab/ui/server.py``) starts an ``opencode serve`` child
+process on first use, rooted at your experiment directory, tearing it down
+when the UI server exits.
 
-- **OpenRouter** — cloud-hosted models (recommended; interactive onboarding in
-  the UI).
-- **Ollama** — local inference, available immediately at backend startup when
-  configured in ``agent_config.yaml``.
+Both agent surfaces (see above) converge on the **same** OpenCode server via
+one shared environment variable:
 
-You can initialize it three ways.
+.. code-block:: bash
+
+   export OPENCODE_URL=http://127.0.0.1:4096   # or wherever your own `opencode serve` is running
+
+If ``OPENCODE_URL`` is set and reachable, the UI server adopts it directly
+instead of spawning a child; the backend SDK agent reads the same variable
+(``agent.py``'s ``_load_config``) — set it once and both sides talk to the one
+server, so a model you authenticate once is available everywhere.
+``OPENCODE_MODEL`` (or ``agent_config.yaml``'s ``agent.opencode_model``) picks
+the default model for the backend SDK agent, as an OpenCode
+``providerID/modelID`` string (e.g. ``openrouter/anthropic/claude-opus-4.6``).
+Leave it unset to fall back, in order, to: whatever model OpenCode's own
+``/config`` was last set to (the model picker's own pick, e.g. from the
+Weights Studio landing page), and otherwise the free-tier
+``opencode/deepseek-v4-flash-free`` automatically — a provider's own
+reported default used to be tried in between, but that could itself be an
+arbitrary, non-text-reasoning model whenever any provider had credentials
+configured, so it no longer overrides this.
+
+Credentials and provider setup live in OpenCode itself, never in WeightsLab:
+
+.. code-block:: bash
+
+   opencode auth login   # OpenRouter, Anthropic, a local Ollama endpoint, anything OpenCode supports
+
+or, from the browser, the landing page's login modal drives the same flow
+without a terminal. For a fully local setup, point OpenCode's own config at
+Ollama (or any other local provider it supports) — WeightsLab needs no
+changes on its side; it just asks OpenCode for whichever model you've
+selected.
+
+You can initialize the backend SDK agent three ways.
 
 Option 1 — Weights Studio UI (recommended)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -265,13 +347,12 @@ Type one of these commands into the chat bar:
    * - Command
      - Effect
    * - ``/init``
-     - Opens the OpenRouter onboarding modal. Choose **A — Enter OpenRouter API
-       key** (paste an ``sk-or-…`` key) or **B — Get API key from OpenRouter**
-       (OAuth flow), then pick a model. On success the placeholder switches to a
+     - Connects to the OpenCode server (see ``OPENCODE_URL`` above) and lets
+       you pick a model. On success the placeholder switches to a
        ready-to-use example query.
    * - ``/model``
-     - Opens the model browser to switch the active OpenRouter model without
-       re-entering the API key.
+     - Opens the model browser to switch the active OpenCode model without
+       reconnecting.
    * - ``/reset``
      - Clears the current connection and returns the agent to the uninitialized
        state.
@@ -294,9 +375,9 @@ the interactive console exposes an ``agent`` verb:
 .. code-block:: text
 
    agent status                        # Is the agent available?
-   agent init --api-key sk-or-... --model openai/gpt-4o-mini [--timeout 20]
-   agent models                        # List available OpenRouter models
-   agent model ~google/gemini-flash-latest   # Switch model
+   agent init [--model openrouter/anthropic/claude-opus-4.6]
+   agent models                        # List available OpenCode models
+   agent model openrouter/openai/gpt-5 # Switch model
    agent reset                         # Clear the connection
    agent query <prompt>                # Run a natural-language request
    query <prompt>                      # Shortcut for `agent query`
@@ -314,40 +395,33 @@ UI). For example:
 Option 3 — Startup configuration file
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-To have a provider ready the moment the backend starts (no ``/init`` needed),
-configure ``agent_config.yaml`` and/or environment variables. This is the only
-way to enable the local Ollama provider.
+To have the agent ready the moment the backend starts (no ``/init`` needed),
+configure ``agent_config.yaml`` and/or environment variables.
 
 .. code-block:: yaml
 
    # agent_config.yaml (repo root, package root, cwd, or $AGENT_CONFIG_PATH)
    agent:
-     provider: openrouter          # or "ollama"
-     openrouter_model: ~google/gemini-flash-latest
-     fallback_to_local: false
-     # Local Ollama alternative:
-     ollama_model: llama3.2:3b
-     ollama_host: localhost
-     ollama_port: 11435
+     opencode_url: http://127.0.0.1:4096
+     opencode_model: ""   # empty = use OpenCode's own configured default
 
 .. code-block:: bash
 
-   # Prefer secrets via environment variables over YAML.
-   export OPENROUTER_API_KEY=your_openrouter_key
+   # Equivalent environment variables (config file wins if both are set).
+   export OPENCODE_URL=http://127.0.0.1:4096
+   export OPENCODE_MODEL=openrouter/anthropic/claude-opus-4.6
 
 See :doc:`configuration` for the full list of agent environment variables, the
 ``agent_config.yaml`` lookup order, and every supported YAML key.
 
 .. note::
 
-   "Available" means the credentials were actually confirmed to work, not
-   just that a client object was constructed. A key configured via
-   ``agent_config.yaml``/environment variables (Option 3) is probed once at
-   backend startup exactly like the ``/init`` UI flow already does, and if a
-   live query ever gets rejected with 401, the connection is immediately
-   marked unavailable rather than continuing to report "ready" until the
-   next restart. If health checks and real requests ever disagree, that's a
-   bug — the two are kept in sync by design.
+   "Available" only means a client object was constructed against
+   ``OPENCODE_URL`` -- OpenCode's own constructor never eagerly connects, so
+   there is nothing to probe at backend startup the way a cloud API key
+   needed a connectivity check. Actual unreachability (server not running, or
+   later restarted) surfaces on the first real query instead, which is
+   reported through the normal "Internal Agent Error"/reconnect path.
 
 Using the agent effectively
 ----------------------------
@@ -645,6 +719,57 @@ expression it builds for you.
    treated as *not matching* (its ``signal_history`` value is ``NaN``, so
    comparisons are ``False``) — the query never errors, it just excludes those
    rows.
+
+``/loop`` reference
+----------------------
+
+``/loop``, typed into the **experiment agent bar**, is the other agent
+surface described at the top of this page: it starts a recurring check-in
+against a dedicated OpenCode session — the same kind of session the
+landing-page chat uses, with the same full toolset. It never touches the
+backend SDK agent directly.
+
+.. code-block:: text
+
+   /loop 30m Watch the training loss and loss_shape trends; if the run stalls or diverges, pause it and tell me why
+   /loop list
+   /loop stop <id>
+
+- **Syntax**: ``/loop <N>m|<N>h <prompt>`` to start (minimum interval: 60s),
+  ``/loop list`` to see running jobs, ``/loop stop <id>`` to cancel one.
+- **What it can do**: the loop's OpenCode session is told about the local
+  ``weightslab`` CLI, reachable over bash against the live training process:
+
+  - ``weightslab pause`` / ``weightslab resume`` — freeze/resume weight updates
+  - ``weightslab discard <sample_id>`` — discard a sample by id
+  - ``weightslab agent query "<natural language>"`` — hands the request to the
+    **backend SDK agent's** own intent pipeline, e.g. ``weightslab agent
+    query "discard samples where loss > 5 and tag them hard_examples"``. This
+    is how the loop reaches back into the database/history: it can't ask the
+    backend agent directly, but it can drive it through the CLI.
+  - ``weightslab status`` — a snapshot of hyperparameters/model/training state
+
+  These four are what the loop's system prompt explicitly calls out, but bash
+  access means any other ``weightslab`` CLI verb is reachable too — e.g.
+  ``weightslab report`` to generate a narrative report for the loop to read
+  and act on. It may also read/edit training code directly and attempt to
+  restart a crashed process via bash — this is best-effort (no supervisor or
+  PID handoff): it looks for the process, stops it if still running, and
+  re-launches from whatever it can determine (shell history, a run script,
+  logs). There is no dedicated restart command.
+- **Concurrency cap**: at most 3 loops at once, shared across both chat
+  surfaces (they hit the same registry). A 4th ``/loop start`` is rejected
+  with an error rather than silently stopping an older job — stop one first
+  with ``/loop stop <id>``.
+- **Managing running jobs**: a panel pinned at the top of the chat-history
+  window lists every running job with a live countdown to its next check-in,
+  and lets you edit a job's prompt/interval in place or stop it — no need to
+  remember ``/loop stop <id>`` if the panel is in view. ``/loop list``/``/loop
+  stop`` also work from the landing-page chat pre-experiment, hitting the
+  same registry.
+- **Persistence**: a loop is tied to the running ``weightslab start`` process,
+  not the browser tab — it survives a page reload or closed tab, but not a
+  full restart of the UI server.
 
 Workflow pattern
 ----------------

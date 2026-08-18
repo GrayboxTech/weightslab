@@ -1,0 +1,43 @@
+# Fashion-MNIST classification with per-step model signals.
+experiment_name: fashion_mnist_model_signals
+device: auto
+training_steps_to_do: 3000   # null = train until stopped from the UI
+# root_log_dir:              # defaults to $WEIGHTSLAB_ROOT_LOG_DIR, else a temp dir
+
+optimizer:
+  lr: 0.001
+
+# How often the gradient/weight/activation curves are sampled. 1 = every step.
+# The activation forward hooks are the only per-step cost worth thinking about:
+# on a large model set this to 10-50 and the overhead becomes negligible while
+# the curves stay just as readable.
+model_signals_every_n_steps: 1
+
+# Experiment cadence
+eval_full_to_train_steps_ratio: 250
+experiment_dump_to_train_steps_ratio: 500
+write_export_ratio: 250
+skip_checkpoint_load: false
+tqdm_display: true
+is_training: false
+compute_natural_sort: false
+
+# Global dataframe storage
+ledger_enable_flushing_threads: true
+ledger_enable_h5_persistence: true
+ledger_flush_max_rows: 15000
+ledger_flush_interval: 30.0
+
+serving_grpc: true
+
+# data_root: ./data          # auto-downloaded from the Fashion-MNIST mirror
+data:
+  train_loader:
+    shuffle: true
+    batch_size: 8
+    max_samples: 8192        # raise (or drop) for the full 60k
+  test_loader:
+    shuffle: false
+    batch_size: 8
+    max_samples: 2048
+    drop_last: false

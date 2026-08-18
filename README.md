@@ -321,6 +321,20 @@ Find our documentation [online](https://grayboxtech.github.io/weightslab/latest/
 
 </details>
 
+<details>
+<summary><b>Agent: chat with your training run (OpenCode)</b></summary>
+
+<br>
+
+WeightsLab ships two distinct agent surfaces — the backend SDK agent for data-manipulation
+queries, and a local [OpenCode](https://opencode.ai)-backed agent with a full bash/file
+toolset that can restart training, edit your code, and run recurring `/loop` monitoring
+jobs. See the [Agent docs](https://grayboxtech.github.io/weightslab/latest/agent.html) for
+how the two connect, how to point either one at a local model, and the full `/loop`
+reference.
+
+</details>
+
 </details>
 
 <details>

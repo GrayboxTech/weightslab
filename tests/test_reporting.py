@@ -11,6 +11,8 @@ Covers:
 - summarize_context_for_llm (plot-free, bounded LLM payload)
 - generate_report (the shared collect -> narrate -> render path behind the
   Studio button, wl.ai_report_generation and the CLI `report` command)
+- light/dark mode (theme toggle + CSS variables always present in the output)
+- distributions (opt-in histogram section: column resolution, stats, HTML)
 """
 
 import base64
@@ -264,6 +266,128 @@ class TestReportEndToEnd(unittest.TestCase):
             html = open(path, encoding="utf-8").read()
             self.assertIn("No narrative was generated", html)
 
+    def test_report_supports_light_and_dark_mode(self):
+        lg = _lg()
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = reporting.collect_report_context(tmp, lg, None)
+            path = reporting.render_report(ctx, reporting.default_report_path(tmp))
+            html = open(path, encoding="utf-8").read()
+            # A manual toggle button, persisted via localStorage...
+            self.assertIn('id="wl-theme-toggle"', html)
+            self.assertIn("wl-report-theme", html)
+            # ...and a system-preference fallback for readers who never touch it.
+            self.assertIn("prefers-color-scheme: dark", html)
+            self.assertIn("--wl-bg", html)
+
+
+# ---------------------------------------------------------------------------
+# Distributions (opt-in histogram section)
+# ---------------------------------------------------------------------------
+
+class TestResolveDistributionColumn(unittest.TestCase):
+
+    def test_exact_match(self):
+        df = pd.DataFrame({"train_loss": [1.0]})
+        self.assertEqual(reporting._resolve_distribution_column(df, "train_loss"), "train_loss")
+
+    def test_nested_suffix_match(self):
+        df = pd.DataFrame({"signals//train_loss": [1.0]})
+        self.assertEqual(
+            reporting._resolve_distribution_column(df, "train_loss"), "signals//train_loss",
+        )
+
+    def test_substring_fallback_match(self):
+        df = pd.DataFrame({"my_train_loss_v2": [1.0]})
+        self.assertEqual(
+            reporting._resolve_distribution_column(df, "train_loss"), "my_train_loss_v2",
+        )
+
+    def test_no_match_returns_none(self):
+        df = pd.DataFrame({"accuracy": [1.0]})
+        self.assertIsNone(reporting._resolve_distribution_column(df, "train_loss"))
+
+    def test_none_df_returns_none(self):
+        self.assertIsNone(reporting._resolve_distribution_column(None, "train_loss"))
+
+
+class TestComputeDistributionEntries(unittest.TestCase):
+
+    def test_empty_request_returns_empty_list(self):
+        df = pd.DataFrame({"train_loss": [1.0, 2.0]})
+        self.assertEqual(reporting.compute_distribution_entries(df, None), [])
+        self.assertEqual(reporting.compute_distribution_entries(df, []), [])
+
+    def test_none_df_returns_empty_list(self):
+        self.assertEqual(reporting.compute_distribution_entries(None, ["train_loss"]), [])
+
+    def test_unresolved_column_is_flagged_not_dropped(self):
+        df = pd.DataFrame({"accuracy": [1.0, 2.0]})
+        entries = reporting.compute_distribution_entries(df, ["train_loss"])
+        self.assertEqual(len(entries), 1)
+        self.assertFalse(entries[0]["resolved"])
+        self.assertEqual(entries[0]["name"], "train_loss")
+
+    def test_resolved_numeric_column_has_stats_and_no_plot_without_matplotlib(self):
+        df = pd.DataFrame({"train_loss": [1.0, 2.0, 3.0, 4.0]})
+        entries = reporting.compute_distribution_entries(df, ["train_loss"], plt=None)
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertTrue(entry["resolved"])
+        self.assertEqual(entry["n"], 4)
+        self.assertEqual(entry["mean"], 2.5)
+        self.assertIsNone(entry["plot_b64"])
+
+    def test_non_numeric_column_reports_zero_n(self):
+        df = pd.DataFrame({"origin": ["train", "val"]})
+        entries = reporting.compute_distribution_entries(df, ["origin"])
+        self.assertTrue(entries[0]["resolved"])
+        self.assertEqual(entries[0]["n"], 0)
+
+
+class TestDistributionsInReport(unittest.TestCase):
+
+    def test_omitted_when_not_requested(self):
+        lg = _lg()
+        df = pd.DataFrame({"sample_id": [1, 2], "train_loss": [0.5, 0.9]}).set_index("sample_id")
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = reporting.collect_report_context(tmp, lg, df)
+            self.assertEqual(ctx["distributions"], [])
+            path = reporting.render_report(ctx, reporting.default_report_path(tmp))
+            html = open(path, encoding="utf-8").read()
+            self.assertNotIn("Distributions", html)
+
+    def test_included_when_requested(self):
+        lg = _lg()
+        df = pd.DataFrame({"sample_id": [1, 2, 3], "train_loss": [0.5, 0.9, 0.1]}).set_index("sample_id")
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = reporting.collect_report_context(tmp, lg, df, distributions=["train_loss"])
+            self.assertEqual(len(ctx["distributions"]), 1)
+            path = reporting.render_report(ctx, reporting.default_report_path(tmp))
+            html = open(path, encoding="utf-8").read()
+            self.assertIn("Distributions", html)
+            self.assertIn("train_loss", html)
+
+    def test_generate_report_forwards_distributions(self):
+        lg = _lg()
+        _seed_signal(lg, "train_loss", [1.0, 0.8, 0.6])
+        df = pd.DataFrame({"sample_id": [1, 2], "train_loss": [0.5, 0.9]}).set_index("sample_id")
+        with tempfile.TemporaryDirectory() as tmp:
+            result = reporting.generate_report(tmp, lg, df, distributions=["train_loss"])
+            html = open(result["path"], encoding="utf-8").read()
+            self.assertIn("Distributions", html)
+
+    def test_summarize_context_for_llm_drops_distribution_plots(self):
+        context = {
+            "signals": [],
+            "distributions": [{"name": "train_loss", "n": 3, "mean": 0.5, "plot_b64": "AAAA" * 500}],
+            "loss_shape_tags": [],
+            "dataframe": {},
+        }
+        payload = reporting.summarize_context_for_llm(context)
+        self.assertNotIn("plot_b64", payload)
+        self.assertNotIn("AAAA", payload)
+        self.assertIn("train_loss", payload)
+
 
 # ---------------------------------------------------------------------------
 # summarize_context_for_llm / generate_report
@@ -364,6 +488,99 @@ class TestGenerateReport(unittest.TestCase):
             os.makedirs(clash)
             with self.assertRaises(Exception):
                 reporting.generate_report(tmp, lg, None, output_path=clash)
+
+
+# ---------------------------------------------------------------------------
+# list_reports / latest_report_path
+# ---------------------------------------------------------------------------
+
+class TestListReports(unittest.TestCase):
+
+    def test_no_reports_dir_returns_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(reporting.list_reports(tmp), [])
+            self.assertIsNone(reporting.latest_report_path(tmp))
+
+    def test_newest_first_by_mtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reports_dir = os.path.join(tmp, "reports")
+            os.makedirs(reports_dir)
+            older = os.path.join(reports_dir, "experiment_report_20260101_000000.html")
+            newer = os.path.join(reports_dir, "experiment_report_20260102_000000.html")
+            open(older, "w").close()
+            open(newer, "w").close()
+            os.utime(older, (1_000_000, 1_000_000))
+            os.utime(newer, (2_000_000, 2_000_000))
+
+            result = reporting.list_reports(tmp)
+            self.assertEqual([p.name for p in result], [os.path.basename(newer), os.path.basename(older)])
+            self.assertEqual(reporting.latest_report_path(tmp).name, os.path.basename(newer))
+
+    def test_non_html_files_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reports_dir = os.path.join(tmp, "reports")
+            os.makedirs(reports_dir)
+            open(os.path.join(reports_dir, "notes.txt"), "w").close()
+            self.assertEqual(reporting.list_reports(tmp), [])
+
+
+# ---------------------------------------------------------------------------
+# generate_report(update_existing=...)
+# ---------------------------------------------------------------------------
+
+class TestGenerateReportUpdateExisting(unittest.TestCase):
+
+    def _seeded_logger(self):
+        lg = _lg()
+        _seed_signal(lg, "train_loss", [1.0, 0.8, 0.6, 0.4])
+        return lg
+
+    def test_no_prior_report_falls_back_to_creating_one(self):
+        lg = self._seeded_logger()
+        with tempfile.TemporaryDirectory() as tmp:
+            result = reporting.generate_report(tmp, lg, None, update_existing=True)
+            self.assertFalse(result["updated_existing"])
+            self.assertTrue(os.path.isfile(result["path"]))
+
+    def test_overwrites_the_latest_report_in_place(self):
+        lg = self._seeded_logger()
+        df = pd.DataFrame({"sample_id": [1, 2], "train_loss": [0.5, 0.9]}).set_index("sample_id")
+        with tempfile.TemporaryDirectory() as tmp:
+            existing = os.path.join(tmp, "reports", "experiment_report_20260101_000000.html")
+            reporting.generate_report(tmp, lg, None, output_path=existing)
+
+            result = reporting.generate_report(tmp, lg, df, update_existing=True,
+                                                distributions=["train_loss"])
+
+            self.assertTrue(result["updated_existing"])
+            self.assertEqual(os.path.abspath(result["path"]), os.path.abspath(existing))
+            self.assertEqual(len(reporting.list_reports(tmp)), 1)
+            self.assertIn("Distributions", open(existing, encoding="utf-8").read())
+
+    def test_default_call_always_creates_a_separate_file(self):
+        lg = self._seeded_logger()
+        with tempfile.TemporaryDirectory() as tmp:
+            path_a = os.path.join(tmp, "reports", "a.html")
+            path_b = os.path.join(tmp, "reports", "b.html")
+            with mock.patch.object(reporting, "default_report_path", side_effect=[path_a, path_b]):
+                first = reporting.generate_report(tmp, lg, None)
+                second = reporting.generate_report(tmp, lg, None)
+
+            self.assertFalse(first["updated_existing"])
+            self.assertFalse(second["updated_existing"])
+            self.assertNotEqual(first["path"], second["path"])
+            self.assertEqual(len(reporting.list_reports(tmp)), 2)
+
+    def test_explicit_output_path_overrides_update_existing(self):
+        lg = self._seeded_logger()
+        with tempfile.TemporaryDirectory() as tmp:
+            reporting.generate_report(tmp, lg, None)  # an existing report to (not) update
+            chosen = os.path.join(tmp, "explicit.html")
+
+            result = reporting.generate_report(tmp, lg, None, update_existing=True, output_path=chosen)
+
+            self.assertFalse(result["updated_existing"])
+            self.assertEqual(os.path.abspath(result["path"]), os.path.abspath(chosen))
 
 
 if __name__ == "__main__":

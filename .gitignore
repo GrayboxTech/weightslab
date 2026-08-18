@@ -49,9 +49,10 @@ htmlcov-report
 experiment_service_pb2.py
 experiment_service_pb2_grpc.py
 settings.json
-laumch.json
+launch.json
 pkg_main.py
 _version.py
+.wl_opencode.json
 
 # Ignore extensions
 *.onnx

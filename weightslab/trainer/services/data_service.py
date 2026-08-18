@@ -988,7 +988,7 @@ class DataService:
 
     def _is_agent_available(self) -> bool:
         """
-        Check if the agent (Ollama) is available for natural language queries.
+        Check if the agent (OpenCode) is available for natural language queries.
 
         Returns:
             bool: True if agent is available, False otherwise
@@ -2933,7 +2933,8 @@ class DataService:
             text = text[:max_len] + "\n... (truncated; ask for a specific key, e.g. 'show the root log dir')"
         return f"Configuration ({hp_name}):\n{text}"
 
-    def _agent_generate_experiment_report(self, signals=None) -> str:
+    def _agent_generate_experiment_report(self, signals=None, distributions=None,
+                                           update_existing=False) -> str:
         """Agent action (READ-ONLY): build an HTML experiment report -- signal
         trajectory plots + health classification + dataset stats + a written
         analysis -- saved under the experiment's ``reports/`` directory.
@@ -2946,6 +2947,17 @@ class DataService:
         the collected numbers, never raw history, see report_prompt.py. A
         failed/unavailable LLM degrades to a report with no narrative rather
         than no report at all.
+
+        ``distributions`` (optional column/signal names) adds a Distributions
+        section of value-distribution histograms -- e.g. "generate a report
+        with a histogram of train_loss" -> ``distributions=["train_loss"]``.
+
+        ``update_existing`` (default ``False``) means "update the report" /
+        "add X to the report" -- overwrite the most recently generated report
+        for this experiment instead of writing a new timestamped one. A plain
+        "generate a report" (no reference to an existing one) should leave
+        this ``False`` and always get a fresh file; see intent_prompt.py's
+        `generate_experiment_report` guidance for when the LLM should set it.
         """
         from weightslab.backend import ledgers
         from weightslab import reporting
@@ -2971,12 +2983,14 @@ class DataService:
             result = reporting.generate_report(
                 root_log_dir, logger_q, df, signals=signals,
                 narrative_fn=self._agent.generate_report_narrative,
+                distributions=distributions, update_existing=bool(update_existing),
             )
         except Exception as e:
             return f"Action: failed to generate report: {e}"
 
         suffix = "" if result["narrative"] else " (no written analysis -- agent LLM unavailable)"
-        return (f"Action: generated experiment report ({result['n_signals']} signal(s)) "
+        verb = "updated" if result["updated_existing"] else "generated"
+        return (f"Action: {verb} experiment report ({result['n_signals']} signal(s)) "
                 f"at {result['path']}{suffix}")
 
     @staticmethod
@@ -3093,7 +3107,10 @@ class DataService:
             # classification + dataset stats + a written analysis).
             elif action_name in ("generate_experiment_report", "experiment_report",
                                  "create_report", "generate_report", "report"):
-                return self._agent_generate_experiment_report(signals=params.get("signals"))
+                return self._agent_generate_experiment_report(
+                    signals=params.get("signals"), distributions=params.get("distributions"),
+                    update_existing=bool(params.get("update_existing")),
+                )
 
             return f"Action triggered: {action_name} (Not implemented)"
 
@@ -5745,3 +5762,47 @@ class DataService:
                 success=False,
                 split_names=[]
             )
+
+    # Format enum value -> weightslab.export's string key.
+    _EXPORT_FORMAT_NAMES = {
+        pb2.EXPORT_FORMAT_CVAT: "cvat",
+        pb2.EXPORT_FORMAT_LABEL_STUDIO: "label_studio",
+        pb2.EXPORT_FORMAT_V7_DARWIN: "v7",
+    }
+
+    def ExportAnnotations(self, request, context):
+        """Export bounding-box/segmentation annotations to a relabeling-tool
+        format (CVAT XML, Label Studio JSON, or V7/Darwin JSON) and return the
+        encoded file as bytes for the caller (Weights Studio's Export button,
+        or the `weightslab export` CLI) to write/download.
+        """
+        fmt = self._EXPORT_FORMAT_NAMES.get(request.format)
+        if fmt is None:
+            return pb2.ExportAnnotationsResponse(
+                success=False,
+                message=f"Unknown export format value: {request.format}",
+            )
+
+        try:
+            from weightslab.export.exporter import export_annotations
+
+            payload, filename, mime_type, image_count = export_annotations(
+                fmt,
+                origin=request.origin or None,
+                use_predictions=request.include_predictions,
+                tags=list(request.tags) or None,
+            )
+            return pb2.ExportAnnotationsResponse(
+                success=True,
+                message=f"Exported {image_count} image(s) to {fmt} format.",
+                payload=payload,
+                filename=filename,
+                mime_type=mime_type,
+                image_count=image_count,
+            )
+        except ImportError as e:
+            logger.warning(f"ExportAnnotations missing optional dependency: {e}")
+            return pb2.ExportAnnotationsResponse(success=False, message=str(e))
+        except Exception as e:
+            logger.error(f"ExportAnnotations failed: {e}", exc_info=True)
+            return pb2.ExportAnnotationsResponse(success=False, message=f"Export failed: {e}")

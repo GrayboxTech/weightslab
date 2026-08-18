@@ -82,6 +82,13 @@
       tags: ['loss analysis', 'signal', 'categorical tag', 'per-sample', 'trajectory'],
       url: 'examples/usecases/loss_shape_classification.html',
       colab: COLAB + 'Usecases/wl-segmentation-loss-shapes-classification.ipynb'
+    },
+    {
+      badge: 'Usecase', color: 'usecase',
+      title: 'Model Signals — Fashion-MNIST',
+      desc: 'Per-step training dynamics: global and per-layer gradient norms, weight norms and activation statistics, from one argument on the model wrap.',
+      tags: ['model signals', 'gradient norm', 'activations', 'per-layer', 'training dynamics'],
+      url: 'examples/usecases/model_signals.html'
     }
   ];
 

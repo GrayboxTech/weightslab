@@ -109,6 +109,12 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       Ask the agent for a branded HTML report: signal health plots, dataset stats, and a written analysis.
 
+   .. grid-item-card:: Annotation Export
+      :link: export
+      :link-type: doc
+
+      Export bounding boxes and segmentation masks to CVAT, Label Studio, or V7 for relabeling.
+
    .. grid-item-card:: gRPC Communication
       :link: grpc/index
       :link-type: doc
@@ -123,7 +129,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
 .. toctree::
    :maxdepth: 2
-   :caption: Getting Started
+   :caption: GETTING STARTED
    :hidden:
 
    quickstart
@@ -131,7 +137,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
 .. toctree::
    :maxdepth: 2
-   :caption: Usage
+   :caption: USAGE
    :hidden:
 
    usage/good_practice
@@ -139,7 +145,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
 .. toctree::
    :maxdepth: 3
-   :caption: Examples
+   :caption: EXAMPLES
    :hidden:
 
    examples/index
@@ -147,7 +153,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
 .. toctree::
    :maxdepth: 2
-   :caption: Core Concepts
+   :caption: CORE CONCEPTS
    :hidden:
 
    four_way_approach
@@ -156,6 +162,8 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    agent
    hyperparameters
    logger
+   resource_monitoring
+   export
    checkpointing
    experiment_reports
    .. weights_studio
@@ -163,7 +171,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
 .. toctree::
    :maxdepth: 2
-   :caption: External Library Integration
+   :caption: INTEGRATIONS
    :hidden:
 
    pytorch_lightning
@@ -172,7 +180,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
 .. toctree::
    :maxdepth: 1
-   :caption: Configuration
+   :caption: CONFIGURATION
    :hidden:
 
    configuration
@@ -180,9 +188,20 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
 .. toctree::
    :maxdepth: 2
-   :caption: Reference
+   :caption: REFERENCE
    :hidden:
 
    user_functions
    user_commands
    grpc/index
+
+
+.. toctree::
+   :maxdepth: 2
+   :caption: MIGRATION
+   :hidden:
+
+   From Weights & Biases
+   From Voxel 51
+   From Tensorboard
+   
