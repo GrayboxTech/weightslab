@@ -2813,7 +2813,9 @@ def _encode_one_media(item, kind: str, fps: float, audio, sample_rate: int,
         data = text.encode("utf-8")
         return data, "text/plain", b"", {"length": len(text)}
 
-    arr = _to_numpy(item) if item is not None else None
+    if item is None:
+        return b"", "", b"", {}
+    arr = _to_numpy(item)
 
     if kind == _ms.KIND_AUDIO:
         data = _vu.encode_audio_wav(arr, sample_rate)
