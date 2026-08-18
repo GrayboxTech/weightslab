@@ -43,7 +43,7 @@ for _name in (
     "drain_signals", "clear_all", "run_pending_evaluation",
     "trigger_pending_evaluation_async", "query_signal_history",
     "query_sample_history", "query_instance_history", "write_history",
-    "write_dataframe", "classify_loss_shape", "trajectory_stats",
+    "write_dataframe", "export_annotations", "classify_loss_shape", "trajectory_stats",
     "write_loss_shapes", "write_signal_shapes", "enable_loss_shape_signal",
     "enable_loss_shape_autotag", "disable_loss_shape_autotag",
     "auto_loss_shape_signal_names",
@@ -220,6 +220,7 @@ __all__ = [
 
     "write_history",
     "write_dataframe",
+    "export_annotations",
     "ai_report_generation",
     "classify_loss_shape",
     "write_loss_shapes",
