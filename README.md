@@ -45,7 +45,7 @@ WeightsLab hooks into your existing PyTorch training loop and exposes a live UI 
 
 ## Weightslab in Motion
 <div align="center">
-  <img src="https://github.com/GrayboxTech/assets/blob/main/GIF/weightslab_demo_bdd.gif" width="1280" alt="WeightsLab Studio demo" />
+  <img width="960" height="540" alt="Image" src="https://github.com/user-attachments/assets/2e8f8846-efcd-4188-9d60-fee0674d1105" />
   <!-- <sub><a href="https://youtu.be/GBBDDaJQLWk">▶ Watch full demo</a></sub> -->
 </div>
 
