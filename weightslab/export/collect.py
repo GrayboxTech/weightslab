@@ -303,25 +303,12 @@ def collect_image_annotations(
         polygons: List[PolygonAnnotation] = []
         mask_arr: Optional[np.ndarray] = None
 
-        width, height = _resolve_image_dims(path, mask_arr, default_image_size)
         for cell in group[value_col]:
             if cell is None:
                 continue
-
-            # Det.
             for x1, y1, x2, y2, cls_id in _boxes_from_cell(cell):
-                x1, y1, x2, y2 = int(x1*width), int(y1*height), int(x2*width), int(y2*height)  # Converts coords to pixel space
-                boxes.append(
-                    BoxAnnotation(
-                        x1,
-                        y1,
-                        x2,
-                        y2,
-                        _label_for_class(cls_id, resolved_class_names)
-                    )
-                )
+                boxes.append(BoxAnnotation(x1, y1, x2, y2, _label_for_class(cls_id, resolved_class_names)))
 
-            # Seg.
             try:
                 arr = np.asanyarray(cell)
             except Exception:
