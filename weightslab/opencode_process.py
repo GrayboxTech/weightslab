@@ -54,6 +54,123 @@ OPENCODE_START_TIMEOUT = 45.0
 # directory cleans this up too, with nothing to remember to do separately.
 LOCK_FILENAME = ".wl_opencode.json"
 
+# Seeded into a workspace before any OpenCode server is pointed at it. Both
+# ship inside the package (pyproject.toml package-data) and are copied
+# verbatim:
+#
+#   AGENTS.md      the weightslab integration reference. OpenCode loads a
+#                  project-root AGENTS.md into the session context on its own
+#                  (opencode.ai/docs/rules), and every spawn below uses
+#                  cwd=workspace_dir, so this is what puts it in front of both
+#                  chat surfaces -- including the /loop agent, which never
+#                  fetches it over HTTP the way the landing chat can.
+#   opencode.json  project config, found in that same directory
+#                  (opencode.ai/docs/config: OpenCode "first looks for a
+#                  config file in the current directory"). It names AGENTS.md
+#                  in `instructions`, so the reference is declared explicitly
+#                  rather than left to an auto-load traversal that depends on
+#                  cwd and on locating a git root.
+#
+# Lives here rather than in ui/server.py because BOTH spawn paths need it and
+# only one of them goes through the UI server: the backend SDK agent reaches
+# resolve_or_spawn_opencode directly (OpenCodeChat._ensure_reachable), and a
+# workspace it warms up first must not be left without them.
+WORKSPACE_SEED_FILES = ("AGENTS.md", "opencode.json")
+
+
+def _packaged_file(filename: str) -> Optional[Path]:
+    """Locate a seed file shipped with the package.
+
+    The package directory is what a `pip install` actually ships; the repo
+    root is a checkout-only fallback for anything not (yet) moved inside.
+    """
+    here = Path(__file__).resolve()
+    for candidate in (here.parent / filename, here.parents[1] / filename):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _default_shell() -> Optional[str]:
+    """The shell OpenCode's exec tool should use in a seeded workspace, picked
+    from what this machine actually has -- not left to OpenCode's own
+    auto-discovery.
+
+    On Windows that auto-discovery has picked inconsistently between
+    cmd.exe, PowerShell and Git Bash depending on what happens to be on
+    PATH (OpenCode issue #16479: its bash-tool prompt doesn't tell the model
+    which shell it landed in), which is exactly what produced a live session
+    retrying `sleep`/`cat`/`ps aux`, then `type`, across several failed
+    turns before giving up on guessing. Every spawn in this module uses
+    cwd=workspace_dir on THIS host (see resolve_or_spawn_opencode), so
+    ``os.name`` here is authoritative for what the exec tool will run on --
+    pinning it via opencode.json's ``shell`` key turns that guess into a
+    stated fact the preamble can hand the model outright.
+
+    POSIX already gets a sensible default (zsh/bash) from OpenCode itself
+    with no observed mismatch, so only Windows needs pinning here.
+    """
+    if os.name != "nt":
+        return None
+    return "pwsh" if shutil.which("pwsh") else "powershell"
+
+
+def _seed_opencode_config(source: Path, target: Path) -> None:
+    """Copy opencode.json, pinning ``shell`` to _default_shell()'s answer.
+
+    Parsed and re-serialized rather than byte-copied like AGENTS.md: the
+    shipped template is deliberately platform-agnostic (checked into one
+    repo, built on any OS), and the ``shell`` value can only be decided on
+    the machine actually running this seed.
+    """
+    with open(source, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    shell = _default_shell()
+    if shell:
+        config["shell"] = shell
+    with open(target, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+
+
+def ensure_workspace_agent_files(workspace_dir: str) -> None:
+    """Copy WORKSPACE_SEED_FILES into ``workspace_dir`` if absent.
+
+    Never overwrites: an existing AGENTS.md or opencode.json may be the
+    user's OWN project instructions/config, which are not ours to replace.
+    Best-effort per file, so one missing from the install or one unwritable
+    target can't stop the other from being seeded.
+    """
+    for filename in WORKSPACE_SEED_FILES:
+        target = Path(workspace_dir) / filename
+        if target.exists():
+            continue
+        source = _packaged_file(filename)
+        if source is None:
+            continue
+        try:
+            if filename == "opencode.json":
+                _seed_opencode_config(source, target)
+            else:
+                shutil.copyfile(source, target)
+        except OSError:
+            _LOGGER.debug("Could not seed %s into %s", filename, workspace_dir)
+
+
+def shell_platform_note() -> dict:
+    """Describe the exec-tool shell pinned by ensure_workspace_agent_files(),
+    for server.py to hand to the browser (``/agent-server/start``'s response)
+    so the landing-chat preamble can state the fact outright instead of
+    hedging "if you're on Windows..." -- see _default_shell()'s docstring
+    for why that hedge produced retry-guessing in practice. ``{"platform":
+    "posix"}`` when nothing is pinned (this machine already gets a sensible
+    default from OpenCode itself).
+    """
+    shell = _default_shell()
+    if shell:
+        return {"platform": "windows", "shell": shell}
+    return {"platform": "posix"}
+
 # Applied whenever this module spawns a fresh server with no browser Origin
 # to base --cors on (the backend SDK agent has no such thing -- it never
 # talks to OpenCode from a browser). These are the same origins `npm run
@@ -180,6 +297,11 @@ def resolve_or_spawn_opencode(workspace_dir: str, origin: Optional[str] = None,
     the process it named exited -- is treated the same as no file at all).
     Only then does this spawn a new one.
     """
+    # Before resolving anything, not just before spawning: an ADOPTED server
+    # (env/lockfile) still creates its sessions in this workspace, and reads
+    # both files per session rather than once at startup.
+    ensure_workspace_agent_files(workspace_dir)
+
     external = os.environ.get("OPENCODE_URL", "").strip()
     if external and opencode_healthy(external):
         return {"ok": True, "url": external, "source": "env"}

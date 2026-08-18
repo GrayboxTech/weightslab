@@ -576,7 +576,7 @@ class _OpencodeSession:
         OPENCODE_URL set by anyone -- still adopts that same server instead
         of spawning a second one for the identical experiment directory.
         """
-        _ensure_workspace_agents_md(workspace_dir)
+        _ensure_workspace_agent_files(workspace_dir)
         with self._lock:
             if self._running_locked():
                 return {"ok": True, "url": self._url_locked(), "reused": True,
@@ -722,24 +722,11 @@ def _read_repo_doc(filename: str) -> Optional[str]:
         return None
 
 
-# Best-effort: drop AGENTS.md directly into a freshly-used OpenCode workspace
-# so the agent can just `read AGENTS.md` itself -- it has file tools rooted
-# right there -- rather than depending entirely on the landing chat happening
-# to attach it via /agent-server/docs (which the experiment-bar-driven
-# `/loop` agent never calls at all). Never overwrites an existing AGENTS.md
-# already in the workspace: that may be the user's OWN project instructions,
-# not ours to replace.
-def _ensure_workspace_agents_md(workspace_dir: str) -> None:
-    target = Path(workspace_dir) / "AGENTS.md"
-    if target.exists():
-        return
-    source = _repo_doc_path("AGENTS.md")
-    if source is None:
-        return
-    try:
-        shutil.copyfile(source, target)
-    except OSError:
-        pass
+# Seeding AGENTS.md + opencode.json into the workspace lives in
+# opencode_process, not here: the backend SDK agent reaches that module
+# directly without ever going through this server, and both spawn paths have
+# to leave a workspace in the same state. See its WORKSPACE_SEED_FILES.
+_ensure_workspace_agent_files = opencode_process.ensure_workspace_agent_files
 
 
 # The MNIST preset's counterpart to _read_repo_doc: a complete, working
@@ -827,6 +814,14 @@ _LOOP_SYSTEM_PREAMBLE = (
     "  status                    -- component NAMES + model age only, NO metric/hyperparam values\n"
     "  agent query \"<question>\"  -- plain-English read OR edit (e.g. \"what is the last train loss\", "
     "\"discard samples where loss > 5\") -- the right tool for any metric/signal question, status never has that\n"
+    "  agent query \"Generate an experiment report.\"  -- the SAME command also builds a complete, "
+    "styled HTML report (signal plots, health classification, dataset stats, written analysis) in "
+    "ONE call when the task asks for a report/summary of how the run is going -- never assemble a "
+    "report yourself from several separate 'agent query' answers plus your own write tool, that "
+    "skips the plots/styling the backend already produces. On a LATER tick, \"agent query \\\"Update "
+    "the report with a histogram of val_loss.\\\"\" overwrites that SAME report file instead of "
+    "creating another one each check-in -- use that phrasing (\"update\"/\"add X to it\") once a "
+    "report already exists for this run, plain \"generate\" only for the first one\n"
     "  pause / resume             -- freeze/resume weight updates\n"
     "  discard <sample_id>        -- discard one sample by id\n\n"
     "Be fast: for a simple question, pipe one command in and answer from its "
@@ -838,15 +833,42 @@ _LOOP_SYSTEM_PREAMBLE = (
     "-WindowStyle Hidden -PassThru`, never a bare `python train.py` in the "
     "foreground. A foreground launch blocks THIS tool call -- and therefore "
     "this whole check-in, and the next one after it -- until the entire run "
-    "finishes, since this session processes one turn at a time.\n\n"
+    "finishes, since this session processes one turn at a time. This applies "
+    "just as much once you've decided the run genuinely needs to happen (e.g. "
+    "relaunching a crashed one) as it does anywhere else -- that is exactly "
+    "the case this rule is for, not an exception to it. If a bash call you "
+    "already made hasn't finished, the fix is to switch that launch to "
+    "Start-Process, never to raise its timeout and wait longer -- a bigger "
+    "timeout still blocks the same way, only for longer, and leaves you with "
+    "no PID to act on if you're later asked to stop it.\n\n"
     "A DETACHED process like that is NOT automatically stopped when this "
     "workspace is (Ctrl+C on `weightslab start`, or the process otherwise "
     "exiting) -- it has no OS-level relationship to this workspace's own "
-    "process tree once launched this way. Register its PID right after "
-    "launching it, so it is: `Invoke-RestMethod -Method Post -Uri "
+    "process tree once launched this way. A script that calls `wl.serve()` "
+    "registers itself and needs nothing from you; for anything else, register "
+    "its PID right after launching it, so it is stopped too: "
+    "`Invoke-RestMethod -Method Post -Uri "
     "'{origin}/agent-server/track-process' -ContentType 'application/json' "
     "-Body (@{{pid=$p.Id}} | ConvertTo-Json)`. Do this for anything you "
-    "relaunch, not just the first run.\n\n"
+    "relaunch, not just the first run -- and keep that PID in mind for the "
+    "rest of this job's life: it's what makes a later stop/kill instant "
+    "(`Stop-Process -Id <pid> -Force`) instead of having to go rediscover "
+    "which process is the right one.\n\n"
+    "NEVER stop/kill a process you did not yourself start in this session (or "
+    "the one crashed run you were explicitly asked to relaunch) without "
+    "asking the user first and naming the exact PID/command. Finding an "
+    "unfamiliar, duplicate-looking, or seemingly-stale process via ps/"
+    "tasklist/Get-CimInstance is not authorization to end it -- describe what "
+    "you found and wait for a go-ahead instead of cleaning it up yourself.\n\n"
+    "An exec/bash call blocks THIS check-in until it returns, with no "
+    "per-call timeout -- a command that can hang (a broad WMI/"
+    "Get-CimInstance scan, Stop-Process on something with stuck threads, "
+    "anything that can wait on a lock or a confirmation prompt) stalls the "
+    "whole check-in indefinitely, not just that one command. Prefer the "
+    "narrowest command that answers the question (a specific known PID over "
+    "a broad process scan); if something doesn't return in a few seconds, "
+    "don't just retry the same broad query -- report what you know and ask "
+    "rather than keep guessing.\n\n"
     "Your reply renders Markdown and LaTeX ($...$/$$...$$ or \\(...\\)/\\[...\\]) "
     "-- use real formulas for anything math-shaped instead of describing them in prose.\n\n"
     # weights_studio/src/agent/loopChatPane.ts looks for this EXACT trailing
@@ -1716,6 +1738,11 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
             origin = f"{scheme}://{host}"
 
         result = _opencode_session.ensure(workspace, origin)
+        if result.get("ok"):
+            # Told outright rather than left for the model to discover by
+            # trial and error -- see opencode_process.shell_platform_note()
+            # and _default_shell()'s docstring for why guessing was the bug.
+            result.update(opencode_process.shell_platform_note())
         status = HTTPStatus.OK if result.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR
         self._send_json(status, result)
 
@@ -2337,6 +2364,16 @@ def serve_ui(
     ui_port = httpd.server_address[1]
     display_host = "localhost" if ui_host in ("0.0.0.0", "::", "") else ui_host
     url = f"{scheme}://{display_host}:{ui_port}"
+
+    # Where /agent-server/track-process lives, for anything launched from an
+    # environment descending from this process -- most importantly the
+    # OpenCode server (spawned by this server, so it inherits this) and
+    # therefore the agent's own shell, and therefore any training process the
+    # agent starts from it. weightslab.src.serve() reads this and registers
+    # ITSELF, so a run is tracked even when nobody POSTs its PID by hand; see
+    # _register_pid_with_ui_server there for why that mattered. Loopback
+    # rather than display_host because the endpoint only answers loopback.
+    os.environ["WEIGHTSLAB_UI_ORIGIN"] = f"{scheme}://127.0.0.1:{ui_port}"
 
     sys.stdout.write(
         "\n"

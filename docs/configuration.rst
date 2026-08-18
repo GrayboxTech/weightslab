@@ -709,10 +709,9 @@ know which server to talk to.
      - *(empty)*
      - Default model for the backend SDK agent, as an OpenCode
        ``providerID/modelID`` string (e.g.
-       ``openrouter/anthropic/claude-opus-4.6``). Empty falls back, in
-       order, to OpenCode's own last-picked model, then a configured
-       provider default, then the free-tier
-       ``opencode/deepseek-v4-flash-free``.
+       ``openrouter/anthropic/claude-opus-4.6``). Empty falls back to
+       OpenCode's own last-picked model, and otherwise the free-tier
+       ``opencode/deepseek-v4-flash-free`` automatically.
 
 
 Agent Configuration
@@ -773,9 +772,8 @@ Supported YAML keys
    * - ``agent.opencode_model``
      - ``openrouter/anthropic/claude-opus-4.6``
      - Default model, as an OpenCode ``providerID/modelID`` string. Empty
-       falls back, in order, to OpenCode's own last-picked model, then a
-       configured provider default, then the free-tier
-       ``opencode/deepseek-v4-flash-free``.
+       falls back to OpenCode's own last-picked model, and otherwise the
+       free-tier ``opencode/deepseek-v4-flash-free`` automatically.
 
 Example
 ^^^^^^^

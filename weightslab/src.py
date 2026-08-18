@@ -1525,6 +1525,57 @@ def start_training(timeout: int = None) -> None:
     pause_ctrl.resume() # Ensure we're not paused if start_training is called after serve
 
 
+def _register_pid_with_ui_server() -> None:
+    """Tell the ``weightslab start`` UI server that this training process
+    exists, so stopping that workspace (Ctrl+C, closing the terminal) stops
+    this process too.
+
+    The UI server already kills PIDs registered with it on every termination
+    path (``weightslab/ui/server.py``'s ``_TrackedProcesses``) -- but until
+    now the ONLY thing that ever registered one was the agent remembering to
+    POST it by hand right after launching something detached. That second
+    step is skipped often enough to matter: the turn gets interrupted between
+    launch and registration, the model forgets on a relaunch, or the run was
+    started by hand in a terminal that never involved an agent at all. Each
+    miss leaves an orphaned python process holding the GPU and the gRPC port
+    after the UI is long gone. Registering from inside ``serve()`` makes it
+    unskippable for anything that serves.
+
+    Entirely best-effort, and off the calling thread: a stale/unreachable
+    origin must never delay or break a training run. Only ever posts to
+    loopback (the endpoint refuses anything else anyway).
+    """
+    origin = os.environ.get("WEIGHTSLAB_UI_ORIGIN")
+    if not origin:
+        return
+
+    def _post() -> None:
+        try:
+            import json as _json
+            import ssl as _ssl
+            import urllib.request as _urlreq
+
+            payload = _json.dumps({"pid": os.getpid()}).encode("utf-8")
+            request = _urlreq.Request(
+                f"{origin.rstrip('/')}/agent-server/track-process",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            # `weightslab start --certs` serves the UI over HTTPS with its own
+            # self-signed material, which nothing in this process trusts. The
+            # payload is one integer going to loopback, so verification buys
+            # nothing here and would just turn tracking off whenever certs are on.
+            context = _ssl._create_unverified_context() if origin.startswith("https") else None
+            with _urlreq.urlopen(request, timeout=3.0, context=context):
+                pass
+            logger.debug(f"Registered PID {os.getpid()} with the WeightsLab UI at {origin}.")
+        except Exception as exc:
+            logger.debug(f"Could not register this process with the WeightsLab UI at {origin}: {exc}")
+
+    threading.Thread(target=_post, name="wl-track-process", daemon=True).start()
+
+
 def serve(serving_cli: bool = True, serving_grpc: bool = True,
           spawn_cli_client: bool = False, serving_bore: bool = False,
           bore_port: int = None, allow_unconfigured: bool = True, **kwargs):
@@ -1606,6 +1657,10 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
                 "to override."
             )
         logger.warning(base_msg)
+
+    # Before anything that can block: whatever happens next, this process
+    # should not outlive the workspace that owns it.
+    _register_pid_with_ui_server()
 
     # Embed a real Jupyter kernel (shares this process's live objects) so the
     # studio notebook panel — and any external Jupyter client — can attach to
@@ -4895,6 +4950,7 @@ def ai_report_generation(
     output_path: str | None = None,
     root_log_dir: str | None = None,
     use_agent: bool = True,
+    distributions: list | None = None,
 ) -> str:
     """Generate the experiment health report and return the path written.
 
@@ -4926,6 +4982,11 @@ def ai_report_generation(
         the same report minus the prose. With ``True`` but no agent available
         (none configured, or no experiment being served in this process), the
         report is still written — just without the analysis, never an error.
+    distributions : list of str, optional
+        Add a "Distributions" section with a value-distribution histogram for
+        each named column/signal (e.g. ``["train_loss"]``), computed over the
+        CURRENT per-sample dataframe rather than the aggregated training
+        curve. Omitted (default): no Distributions section at all.
 
     Raises
     ------
@@ -4940,10 +5001,12 @@ def ai_report_generation(
         wl.ai_report_generation()                          # everything, with analysis
         wl.ai_report_generation(signals=["train_loss"])    # one signal
         wl.ai_report_generation(use_agent=False)           # no LLM call
+        wl.ai_report_generation(distributions=["train_loss"])  # + a histogram section
     """
     return _ai_report_generation_result(
         signals=signals, output_path=output_path,
         root_log_dir=root_log_dir, use_agent=use_agent,
+        distributions=distributions,
     )["path"]
 
 
@@ -4952,6 +5015,7 @@ def _ai_report_generation_result(
     output_path: str | None = None,
     root_log_dir: str | None = None,
     use_agent: bool = True,
+    distributions: list | None = None,
 ) -> dict:
     """:func:`ai_report_generation`'s implementation, keeping the full
     ``reporting.generate_report`` result dict (path + signal count + narrative
@@ -5013,6 +5077,7 @@ def _ai_report_generation_result(
     result = reporting.generate_report(
         root_log_dir, logger_q, df, signals=signals,
         output_path=output_path, narrative_fn=narrative_fn,
+        distributions=distributions,
     )
     if result["narrative_error"]:
         logger.warning(

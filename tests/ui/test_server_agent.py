@@ -153,14 +153,15 @@ class TestOpencodeSessionUnit(unittest.TestCase):
         with open(own_path, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "this workspace's own instructions")
 
-    def test_ensure_copy_is_best_effort_when_no_source_agents_md_exists(self):
+    def test_ensure_copy_is_best_effort_when_no_source_seed_files_exist(self):
         # No source to copy from (e.g. a stripped-down install) must not
         # fail ensure() outright -- the agent server should still start.
-        with patch.object(ui_server, "_repo_doc_path", return_value=None):
+        with patch.object(ui_server.opencode_process, "_packaged_file", return_value=None):
             with patch.object(ui_server, "_resolve_opencode_argv", return_value=_FAKE_ARGV):
                 result = self.session.ensure(self.tmp, "http://localhost:5173")
         self.assertTrue(result["ok"], result)
-        self.assertFalse(os.path.isfile(os.path.join(self.tmp, "AGENTS.md")))
+        for filename in ui_server.opencode_process.WORKSPACE_SEED_FILES:
+            self.assertFalse(os.path.isfile(os.path.join(self.tmp, filename)))
 
     def test_successful_spawn_writes_a_lock_file_for_this_workspace(self):
         # The other half of the cross-process handoff: the backend SDK agent
@@ -207,32 +208,55 @@ class TestOpencodeSessionUnit(unittest.TestCase):
         self.assertEqual(ui_server.opencode_process.read_lock(self.tmp)["url"], result["url"])
 
 
-class TestEnsureWorkspaceAgentsMd(unittest.TestCase):
-    """_ensure_workspace_agents_md directly -- no OpenCode process involved."""
+class TestEnsureWorkspaceAgentFiles(unittest.TestCase):
+    """ensure_workspace_agent_files directly -- no OpenCode process involved.
+
+    Both seeded files matter for the same reason: OpenCode reads a project
+    AGENTS.md and a project opencode.json out of the directory it is started
+    in, which is this workspace. A workspace missing either one silently
+    downgrades what the agent knows.
+    """
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
 
-    def test_copies_from_the_installed_package_location(self):
-        ui_server._ensure_workspace_agents_md(self.tmp)
-        target = os.path.join(self.tmp, "AGENTS.md")
-        self.assertTrue(os.path.isfile(target))
-        with open(target, encoding="utf-8") as fh:
-            content = fh.read()
-        self.assertEqual(content, ui_server._read_repo_doc("AGENTS.md"))
+    def test_copies_both_seed_files_from_the_installed_package_location(self):
+        ui_server._ensure_workspace_agent_files(self.tmp)
+        for filename in ui_server.opencode_process.WORKSPACE_SEED_FILES:
+            target = os.path.join(self.tmp, filename)
+            self.assertTrue(os.path.isfile(target), f"{filename} was not seeded")
+            with open(target, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), ui_server._read_repo_doc(filename))
+
+    def test_the_seeded_config_points_opencode_at_agents_md(self):
+        """The whole reason opencode.json is seeded at all -- without the
+        `instructions` entry it would be an empty config doing nothing."""
+        ui_server._ensure_workspace_agent_files(self.tmp)
+        with open(os.path.join(self.tmp, "opencode.json"), encoding="utf-8") as fh:
+            config = json.load(fh)
+        self.assertIn("AGENTS.md", config["instructions"])
+        self.assertEqual(config["$schema"], "https://opencode.ai/config.json")
 
     def test_is_a_no_op_when_the_workspace_already_has_one(self):
-        target = os.path.join(self.tmp, "AGENTS.md")
-        with open(target, "w", encoding="utf-8") as fh:
+        for filename in ui_server.opencode_process.WORKSPACE_SEED_FILES:
+            with open(os.path.join(self.tmp, filename), "w", encoding="utf-8") as fh:
+                fh.write("mine")
+        ui_server._ensure_workspace_agent_files(self.tmp)
+        for filename in ui_server.opencode_process.WORKSPACE_SEED_FILES:
+            with open(os.path.join(self.tmp, filename), encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), "mine", f"{filename} was overwritten")
+
+    def test_seeds_the_other_file_when_one_is_already_present(self):
+        with open(os.path.join(self.tmp, "AGENTS.md"), "w", encoding="utf-8") as fh:
             fh.write("mine")
-        ui_server._ensure_workspace_agents_md(self.tmp)
-        with open(target, encoding="utf-8") as fh:
-            self.assertEqual(fh.read(), "mine")
+        ui_server._ensure_workspace_agent_files(self.tmp)
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, "opencode.json")))
 
     def test_does_nothing_when_no_source_is_found(self):
-        with patch.object(ui_server, "_repo_doc_path", return_value=None):
-            ui_server._ensure_workspace_agents_md(self.tmp)
-        self.assertFalse(os.path.isfile(os.path.join(self.tmp, "AGENTS.md")))
+        with patch.object(ui_server.opencode_process, "_packaged_file", return_value=None):
+            ui_server._ensure_workspace_agent_files(self.tmp)
+        for filename in ui_server.opencode_process.WORKSPACE_SEED_FILES:
+            self.assertFalse(os.path.isfile(os.path.join(self.tmp, filename)))
 
 
 class TestCorsOriginVariants(unittest.TestCase):

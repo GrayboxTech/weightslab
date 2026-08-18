@@ -155,10 +155,14 @@ weightslab = [
   # Logo used to brand generated experiment reports (weightslab/reporting.py).
   "assets/**/*",
   # weightslab-integration grounding for the landing chat's preset prompts
-  # and for agents dropped directly into a workspace (see server.py's
-  # _ensure_workspace_agents_md) -- lives inside the package, not just at the
+  # and for agents dropped directly into a workspace (see opencode_process's
+  # WORKSPACE_SEED_FILES) -- lives inside the package, not just at the
   # repo root, so a `pip install weightslab` ships it too.
   "AGENTS.md",
+  # Seeded next to AGENTS.md in every experiment workspace. OpenCode reads a
+  # project config from the directory it is started in, which is that same
+  # workspace; this one points `instructions` at AGENTS.md.
+  "opencode.json",
 ]
 
 [tool.setuptools.exclude-package-data]

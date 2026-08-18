@@ -807,8 +807,9 @@ def _handle_command(cmd: str) -> Any:
         # button / the agent's generate_experiment_report action)
         # ------------------------------------------------------------------
         if verb in ('report', 'reports'):
-            # Syntax: report [signal ...] [--signals a,b] [--output PATH] [--no-agent]
+            # Syntax: report [signal ...] [--signals a,b] [--distributions a,b] [--output PATH] [--no-agent]
             signals: list = []
+            distributions: list = []
             output_path = None
             use_agent = True
 
@@ -820,13 +821,16 @@ def _handle_command(cmd: str) -> Any:
                 elif token in ('--signals', '--signal') and i + 1 < len(parts):
                     signals += [s for s in parts[i + 1].split(',') if s]
                     i += 1
+                elif token in ('--distributions', '--distribution') and i + 1 < len(parts):
+                    distributions += [s for s in parts[i + 1].split(',') if s]
+                    i += 1
                 elif token in ('--output', '-o') and i + 1 < len(parts):
                     output_path = parts[i + 1]
                     i += 1
                 elif token.startswith('--'):
                     return {'ok': False, 'error': (
                         'usage: report [signal ...] [--signals a,b] '
-                        '[--output PATH] [--no-agent]')}
+                        '[--distributions a,b] [--output PATH] [--no-agent]')}
                 else:
                     signals.append(token)
                 i += 1
@@ -836,7 +840,7 @@ def _handle_command(cmd: str) -> Any:
 
                 result = _ai_report_generation_result(
                     signals=signals or None, output_path=output_path,
-                    use_agent=use_agent,
+                    use_agent=use_agent, distributions=distributions or None,
                 )
             except Exception as e:
                 return {'ok': False, 'error': str(e)}

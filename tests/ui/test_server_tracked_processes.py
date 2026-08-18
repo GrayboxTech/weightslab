@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 import urllib.error
 import urllib.request
 
@@ -153,6 +154,81 @@ class TestTrackProcessEndpoint(_ServerTestCase):
             self.fail("expected an HTTPError")
         except urllib.error.HTTPError as exc:
             self.assertEqual(exc.code, 400)
+
+
+class TestSelfRegistration(_ServerTestCase):
+    """The other half of the endpoint above: a training process registering
+    ITSELF from inside ``wl.serve()``.
+
+    Why this exists: the endpoint alone only helps when someone remembers to
+    POST to it, and the only thing that ever did was the agent, by hand,
+    right after a detached launch. That step gets skipped -- the turn is
+    interrupted between launching and registering, the model forgets on a
+    relaunch, or the run was started by hand in a terminal no agent was
+    involved in -- and every miss leaves an orphaned python process holding
+    the GPU and the gRPC port after the UI is gone. serve() registering
+    itself makes it unskippable for anything that serves.
+    """
+
+    def test_serve_ui_publishes_its_own_origin_for_children_to_find(self):
+        # The whole chain hangs off this: the OpenCode server is spawned by
+        # this server, the agent's shell descends from that, and a training
+        # process it launches inherits the variable from there.
+        self.assertEqual(
+            ui_server.os.environ.get("WEIGHTSLAB_UI_ORIGIN"),
+            f"http://127.0.0.1:{self.port}",
+        )
+
+    def test_registers_this_process_against_the_live_server(self):
+        from weightslab import src as wl_src
+
+        with unittest.mock.patch.dict(
+            ui_server.os.environ,
+            {"WEIGHTSLAB_UI_ORIGIN": f"http://127.0.0.1:{self.port}"},
+        ):
+            wl_src._register_pid_with_ui_server()
+
+            # Off the calling thread on purpose (a stale origin must never
+            # stall a training run), so give the daemon thread a moment.
+            deadline = time.monotonic() + 5
+            own_pid = ui_server.os.getpid()
+            while time.monotonic() < deadline:
+                if own_pid in ui_server._tracked_processes._pids:
+                    break
+                time.sleep(0.05)
+
+        # NOTE: deliberately never calls _tracked_processes.shutdown() here --
+        # the pid under test is this very test runner's. _ServerTestCase swaps
+        # in a throwaway registry and restores the real one in tearDown, so
+        # nothing else can act on it either.
+        self.assertIn(own_pid, ui_server._tracked_processes._pids)
+
+    def test_is_a_no_op_when_no_ui_server_owns_this_process(self):
+        from weightslab import src as wl_src
+
+        env = dict(ui_server.os.environ)
+        env.pop("WEIGHTSLAB_UI_ORIGIN", None)
+        with unittest.mock.patch.dict(ui_server.os.environ, env, clear=True):
+            wl_src._register_pid_with_ui_server()
+
+        time.sleep(0.2)
+        self.assertEqual(ui_server._tracked_processes._pids, set())
+
+    def test_an_unreachable_origin_never_raises(self):
+        """Best-effort is the whole contract: a stale WEIGHTSLAB_UI_ORIGIN
+        left over from a previous `weightslab start` must cost a training run
+        nothing at all, not even a raised exception on a background thread."""
+        from weightslab import src as wl_src
+
+        with unittest.mock.patch.dict(
+            ui_server.os.environ,
+            # Port 1 is reserved and never listening.
+            {"WEIGHTSLAB_UI_ORIGIN": "http://127.0.0.1:1"},
+        ):
+            wl_src._register_pid_with_ui_server()
+
+        time.sleep(0.3)
+        self.assertEqual(ui_server._tracked_processes._pids, set())
 
 
 if __name__ == "__main__":

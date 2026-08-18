@@ -130,6 +130,57 @@ Objects need a `__name__` — set `obj.__name__ = "..."` manually if missing
 Hyperparameter proxy supports both `hp.get("lr")` and `hp["lr"]`, and stays
 live (reflects later edits/re-registration).
 
+**Configuration discipline (REQUIRED).** Before writing any other code,
+collect every tunable value for the script — `batch_size`, `learning_rate`,
+`num_workers`, step budget, dataset paths, model dims, anything a user might
+reasonably want to change — into ONE plain dict (e.g. `CONFIG = {...}`, or a
+`parameters` dict loaded from YAML with `.setdefault(...)` calls, as in
+`PyTorch/wl-fraud-detection/main.py`). Wrap that dict **first**, via
+`hp = wl.watch_or_edit(CONFIG, flag="hyperparameters", defaults=CONFIG)`,
+**before** constructing the model, optimizer, or data loaders. Every
+downstream construction must then read its value from `hp`
+(`hp["batch_size"]`/`hp.get("batch_size", ...)`) — never as a hardcoded
+literal passed directly into a constructor, and never from a second, un-wrapped
+copy of the same value. A value that isn't sourced from the wrapped dict is
+invisible to the UI/agent's hyperparameter tuning (`set_hyperparam`, the HP
+panel) — it *looks* configurable but silently can't be changed, because
+nothing is reading back from the live proxy. Concretely: `DataLoader(...,
+batch_size=4)` with a literal `4` is wrong even if `CONFIG["batch_size"]`
+exists elsewhere in the file; it must be `DataLoader(..., batch_size=hp["batch_size"])`.
+
+**The dict must follow the WeightsLab config shape, not an invented one.**
+`set_hyperparam`/`show_config` resolve a handful of semantic names to fixed
+dotted paths (`_HP_ALIASES` in `trainer/services/data_service.py`) and try
+those paths **in order, using the first one that already exists** — they
+never invent a new key. A same-meaning value under a different name (e.g.
+`"epochs"` instead of `training_steps_to_do`, `"eval_every_epochs"` instead of
+`eval_full_to_train_steps_ratio`) silently falls outside that resolution and
+can't be tuned from the UI/agent at all, even though the dict has *a* key for
+it. Every generated or rewritten config — regardless of usecase — must use
+these exact top-level names and nesting, matching every shipped example
+(`PyTorch/wl-classification`, `PyTorch/wl-fraud-detection`, …):
+
+```python
+CONFIG = {
+    "experiment_name": "...",
+    "device": "auto",                          # resolved to cuda/cpu AFTER wrapping, never baked in as a literal
+    "root_log_dir": None,                       # or an explicit path; None -> a tempdir is created and logged
+    "training_steps_to_do": 1_000_000,          # WL counts training STEPS (model.get_age()), never "epochs"/an epoch loop
+    "eval_full_to_train_steps_ratio": 100,      # -> agent's "eval ratio" tuning; NOT "eval_every_epochs"/"eval_every_n"
+    "experiment_dump_to_train_steps_ratio": 100,# -> agent's "dump ratio" tuning; NOT "dump_every_epochs"/"checkpoint_every"
+    "optimizer": {"lr": 1e-3},                  # nested under "optimizer" -> agent's "learning rate" tuning
+    "data": {
+        "train_loader": {"batch_size": 64},     # nested under "data.<loader_name>" -> agent's "batch size" tuning
+        "test_loader": {"batch_size": 256},
+    },
+}
+```
+
+Anything with no semantic alias (`num_workers`, `grpc_port`, `start_timeout`,
+model width/depth, dataset paths, …) still belongs as a key in this same
+dict — never a bare literal in code — just without a required name; pick a
+short, descriptive one and stay consistent within the file.
+
 ### 3.3 Per-sample / per-instance / grouped logging
 
 Watched loss/metric objects call `save_signals` internally on every

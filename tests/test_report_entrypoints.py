@@ -146,6 +146,19 @@ class TestAiReportGeneration(_ReportEntryPointCase):
                 wl_src.ai_report_generation()
         self.assertIn("no experiment logger", str(ctx.exception))
 
+    def test_distributions_param_adds_the_section(self):
+        import pandas as pd
+
+        df = pd.DataFrame({"sample_id": [1, 2, 3], "train_loss": [0.5, 0.9, 0.1]}).set_index("sample_id")
+        manager = MagicMock()
+        manager.get_combined_df.return_value = df
+
+        with mock.patch.object(wl_src, "get_dataframe", return_value=manager):
+            path = wl_src.ai_report_generation(distributions=["train_loss"], use_agent=False)
+
+        html = open(path, encoding="utf-8").read()
+        self.assertIn("Distributions", html)
+
     def test_exported_on_the_package(self):
         import weightslab as wl
 
@@ -187,6 +200,20 @@ class TestCliReportCommand(_ReportEntryPointCase):
         self.assertIn("no written analysis", result["message"])
         self.agent.generate_report_narrative.assert_not_called()
 
+    def test_distributions_flag_adds_the_section(self):
+        import pandas as pd
+
+        df = pd.DataFrame({"sample_id": [1, 2, 3], "train_loss": [0.5, 0.9, 0.1]}).set_index("sample_id")
+        manager = MagicMock()
+        manager.get_combined_df.return_value = df
+
+        with mock.patch.object(wl_src, "get_dataframe", return_value=manager):
+            result = _handle_command("report --distributions train_loss")
+
+        self.assertTrue(result["ok"])
+        html = open(result["path"], encoding="utf-8").read()
+        self.assertIn("Distributions", html)
+
     def test_output_flag_selects_the_file(self):
         out = os.path.join(self.tmp.name, "cli_report.html")
         result = _handle_command(f"report --output {out}")
@@ -219,17 +246,20 @@ class TestAgentActionSharesTheSamePath(unittest.TestCase):
     the Python and CLI entry points — it is the same ``generate_report`` call,
     only with the live service's own logger/dataframe/agent."""
 
-    def _run_action(self, root_log_dir, logger_q, narrative_fn):
+    def _run_action(self, root_log_dir, logger_q, narrative_fn, df_manager=None,
+                     distributions=None, update_existing=False):
         from weightslab.trainer.services.data_service import DataService
 
         service = types.SimpleNamespace(
             _resolve_checkpoint_manager=lambda: None,
             _root_log_dir=root_log_dir,
-            _df_manager=None,
+            _df_manager=df_manager,
             _agent=types.SimpleNamespace(generate_report_narrative=narrative_fn),
         )
         with mock.patch("weightslab.backend.ledgers.get_logger", return_value=logger_q):
-            return DataService._agent_generate_experiment_report(service)
+            return DataService._agent_generate_experiment_report(
+                service, distributions=distributions, update_existing=update_existing,
+            )
 
     def test_action_writes_the_report_and_names_it_in_the_reply(self):
         logger_q = _lg_with("train_loss")
@@ -256,6 +286,43 @@ class TestAgentActionSharesTheSamePath(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             message = self._run_action(tmp, None, lambda _s: "unused")
         self.assertIn("no experiment logger available", message)
+
+    def test_update_existing_overwrites_the_prior_report_and_says_updated(self):
+        logger_q = _lg_with("train_loss")
+        with tempfile.TemporaryDirectory() as tmp:
+            first_message = self._run_action(tmp, logger_q, lambda _s: "Healthy run.")
+            self.assertTrue(first_message.startswith("Action: generated experiment report"))
+            first_path = first_message.split(" at ", 1)[1]
+
+            second_message = self._run_action(
+                tmp, logger_q, lambda _s: "Still healthy.", update_existing=True,
+            )
+            self.assertTrue(second_message.startswith("Action: updated experiment report"))
+            second_path = second_message.split(" at ", 1)[1]
+            self.assertEqual(first_path, second_path)
+            self.assertIn("Still healthy.", open(second_path, encoding="utf-8").read())
+
+    def test_update_existing_without_a_prior_report_still_generates_one(self):
+        logger_q = _lg_with("train_loss")
+        with tempfile.TemporaryDirectory() as tmp:
+            message = self._run_action(tmp, logger_q, lambda _s: "Healthy run.", update_existing=True)
+            self.assertTrue(message.startswith("Action: generated experiment report"))
+
+    def test_distributions_param_is_forwarded_to_the_report(self):
+        import pandas as pd
+
+        logger_q = _lg_with("train_loss")
+        df = pd.DataFrame({"sample_id": [1, 2, 3], "train_loss": [0.5, 0.9, 0.1]}).set_index("sample_id")
+        df_manager = MagicMock()
+        df_manager.get_combined_df.return_value = df
+
+        with tempfile.TemporaryDirectory() as tmp:
+            message = self._run_action(
+                tmp, logger_q, lambda _s: "Healthy run.",
+                df_manager=df_manager, distributions=["train_loss"],
+            )
+            path = message.split(" at ", 1)[1]
+            self.assertIn("Distributions", open(path, encoding="utf-8").read())
 
 
 if __name__ == "__main__":

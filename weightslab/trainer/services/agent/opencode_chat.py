@@ -317,20 +317,26 @@ class OpenCodeChat:
         this class's structured-JSON intent-parsing, since it isn't a
         text-reasoning model at all).
 
-        Resolution order mirrors weightslab/ui/server.py's own
-        _opencode_resolve_model (a /loop check-in hits the identical
-        problem, with no chat attached to inherit a model from):
+        Resolution order:
           1. `GET /config`'s own `model` field -- the one the model picker
              writes back to opencode.json on every pick (opencodeClient.ts's
              setDefaultModel), so it's "whatever the user last actually
              chose", and survives across the browser, the CLI, and other
-             machines.
-          2. `/config/providers`'s own `default` mapping -- what OpenCode
-             itself would otherwise have fallen back to for whichever
-             provider is configured.
-          3. `_DEFAULT_MODEL` -- a free-tier model, used only when both of the
-             above come back empty (a fresh OpenCode install with no
-             provider credentials configured at all).
+             machines. The ONLY thing that counts as an actual choice here.
+          2. `_DEFAULT_MODEL` -- a free-tier, always-available text/tool
+             model, used whenever step 1 comes back empty.
+
+        `/config/providers`'s own `default` mapping used to be tried in
+        between (what OpenCode itself would otherwise fall back to for
+        whichever provider happens to be configured) -- dropped after this
+        was confirmed live to still resolve to an arbitrary, sometimes
+        non-text-reasoning model (an image-generation preview, the same
+        failure mode this method exists to avoid) whenever ANY provider had
+        credentials configured, even with no real model chosen -- silently
+        pre-empting _DEFAULT_MODEL every time. "At UI init, with nothing
+        explicitly chosen, land on the known-good free model" now means
+        exactly that, with no provider-reported default able to override it.
+
         Resolved once and cached on self.model. An explicit model
         (model_is_explicit=True) is left alone -- deliberately chosen, not
         a placeholder to override.
@@ -344,17 +350,6 @@ class OpenCodeChat:
             if isinstance(model_id, str) and "/" in model_id:
                 self.model = model_id
                 return
-        except Exception:  # noqa: BLE001 - fall through to the next source
-            pass
-        try:
-            with self._request("/config/providers") as resp:
-                providers_data = json.loads(resp.read().decode("utf-8"))
-            defaults = (providers_data or {}).get("default") or {}
-            for provider in (providers_data or {}).get("providers") or []:
-                provider_id = provider.get("id")
-                if provider_id and defaults.get(provider_id):
-                    self.model = f"{provider_id}/{defaults[provider_id]}"
-                    return
         except Exception:  # noqa: BLE001 - fall through to the hardcoded default
             pass
         self.model = _DEFAULT_MODEL
