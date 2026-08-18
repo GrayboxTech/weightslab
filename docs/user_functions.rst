@@ -18,6 +18,8 @@ Public API surface
 - ``wl.save_signals``
 - ``wl.save_instance_signals``  *(per-instance / per-annotation signals)*
 - ``wl.save_group_signals``  *(group-level signals, e.g. pair/contrastive losses)*
+- ``wl.save_model_signals``  *(per-step model signals, e.g. gradient norms)*
+- ``wl.track_model_signals``  *(collects the above automatically via hooks)*
 - ``wl.tag_samples``
 - ``wl.register_categorical_tag``  *(multi-value tags)*
 - ``wl.set_categorical_tag``  *(multi-value tags)*
@@ -76,6 +78,23 @@ Register or wrap models, data loaders, optimizers, loggers, losses/metrics, and 
    model = wl.watch_or_edit(my_model, flag="model", device="cuda")
    optimizer = wl.watch_or_edit(optim.Adam(model.parameters(), lr=1e-3), flag="optimizer")
    train_loss = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"), flag="loss", signal_name="train-loss")
+
+**Model kwargs for training-dynamics signals**
+
+- ``track_model_signals`` — ``True`` for every model signal, or a list to
+  narrow the set (e.g. ``["grad_norm", "activation_std"]``). Installs the hooks
+  that plot gradient norms, weight norms and activation statistics per layer;
+  see :ref:`track_model_signals <model-signals>`.
+- ``model_signals_every_n_steps`` *(int, default 1)* — sample those signals
+  every Nth step.
+- ``model_signals_layer_ids`` *(iterable, optional)* — restrict them to
+  specific layer ids.
+
+.. code-block:: python
+
+   model = wl.watch_or_edit(my_model, flag="model", device="cuda",
+                            track_model_signals=True,
+                            model_signals_every_n_steps=10)
 
 Hyperparameters via YAML path
 -----------------------------
@@ -703,6 +722,175 @@ computed over an image pair, or any metric shared by every member of a group).
 If any member of a group is discarded, the group's signal update for that
 group is skipped for that call (per-sample signals are unaffected — only the
 group-level write is suppressed).
+
+.. _model-signals:
+
+save_model_signals
+-------------------
+
+**Signature**
+
+.. code-block:: python
+
+   wl.save_model_signals(signals, step=None)
+
+**Purpose**
+
+Persist **per-step** scalars that describe the *model*, not any sample — the
+step-keyed sibling of the three verbs above. ``save_signals`` (per sample),
+``save_instance_signals`` (per annotation) and ``save_group_signals`` (per
+group) all write onto dataframe rows, because every value they record belongs
+to something in the dataset. A gradient norm does not: it belongs to the
+optimization step that produced it, and the batch behind it is incidental.
+
+Nothing here touches the dataframe. Each value becomes one point on its own
+signal curve, plotted exactly like a watched loss.
+
+Use it for training-dynamics values: gradient norms, weight norms, activation
+statistics, learning rate, gradient-to-weight ratios. Reaching for
+``save_signals`` instead means broadcasting one number across a whole batch of
+``batch_ids``, which pollutes every one of those samples' history with a value
+that was never about them.
+
+**Arguments**
+
+- ``signals`` *(dict)* — ``{name: value}``. Values may be Python numbers, or
+  0-d / reducible tensors and arrays (mean-reduced to one scalar). Non-finite
+  values (NaN/inf) are dropped rather than plotted, so a diverging run breaks
+  the curve instead of rescaling the axis and hiding every healthy point
+  before it.
+- ``step`` *(int, optional)* — training step; defaults to the current model
+  age, same as every other ``save_*`` verb.
+
+**Naming**
+
+``/`` is a path separator in the plots board, so the name is what groups the
+curves. The convention the shipped examples use:
+
+.. code-block:: text
+
+   metrics/global/<name>              whole-model values
+   metrics/layer/<layer_id>/<name>    per-layer values
+
+``<layer_id>`` is the module id WeightsLab already assigns for architecture
+ops (``get_module_id()`` / ``NetworkWithOps.get_layer_by_id``), so a layer's
+curve and that same layer's freeze/reset controls name the same thing.
+
+**Typical usage**
+
+.. code-block:: python
+
+   # straight after backward(), before zero_grad()
+   total = sum(p.grad.pow(2).sum() for p in model.parameters() if p.grad is not None)
+   wl.save_model_signals({"metrics/global/grad_norm": total.sqrt()})
+
+In practice you rarely write that loop — see ``track_model_signals`` below.
+
+track_model_signals
+--------------------
+
+**Signature**
+
+.. code-block:: python
+
+   wl.track_model_signals(model=None, metrics=METRICS, every_n_steps=1,
+                          layer_ids=None, include_global=True)
+
+   # or, equivalently, on the wrap itself:
+   wl.watch_or_edit(net, flag="model", track_model_signals=True,
+                    model_signals_every_n_steps=1)
+
+**Purpose**
+
+Instrument a watched model so its training dynamics log themselves through
+``save_model_signals``. One argument, no hooks to write, and **no call anywhere
+in the training loop**.
+
+**Signals emitted**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 66
+
+   * - Signal
+     - Meaning
+   * - ``metrics/global/grad_norm``
+     - Whole-model gradient L2 norm.
+   * - ``metrics/global/weights_norm``
+     - Whole-model parameter L2 norm.
+   * - ``metrics/layer/<id>/grad_norm``
+     - That layer's parameter gradients, L2.
+   * - ``metrics/layer/<id>/weights_norm``
+     - That layer's parameters, L2.
+   * - ``metrics/layer/<id>/activation_mean``
+     - Mean of that layer's output.
+   * - ``metrics/layer/<id>/activation_std``
+     - Standard deviation of that layer's output.
+   * - ``metrics/layer/<id>/activation_max``
+     - Maximum of that layer's output.
+   * - ``metrics/layer/<id>/activation_min``
+     - Minimum of that layer's output.
+
+Global norms combine correctly across layers (an L2 over the whole parameter
+vector, not a sum of per-layer norms). Layers without parameters get
+activation curves only; containers and shape-only ops (``Sequential``,
+``Flatten``, ``Identity``, ``Dropout``) are skipped, since their output
+statistics just duplicate the layer before them.
+
+**Arguments**
+
+- ``model`` — the watched model (what ``watch_or_edit(..., flag="model")``
+  returned). Resolved from the ledger when omitted.
+- ``metrics`` *(iterable of str)* — which signals to emit; defaults to all of
+  them. Narrow it with e.g. ``["grad_norm", "activation_std"]``.
+- ``every_n_steps`` *(int, default 1)* — sample every Nth step. The activation
+  forward hooks are the only per-step cost worth thinking about; on a large
+  model raise this to 10–50 and the overhead becomes negligible while the
+  curves stay just as readable.
+- ``layer_ids`` *(iterable, optional)* — restrict to these layer ids.
+  ``None`` tracks every layer.
+- ``include_global`` *(bool, default ``True``)* — also emit the two
+  ``metrics/global/*`` curves.
+
+**Returns** a ``ModelSignalTracker``. Keep it if you want ``.flush()`` or
+``.remove()``; ignoring it is fine, the hooks are already installed.
+
+**When each value is collected**
+
+- **Weights** are read off ``p.data`` at flush time — they are always there.
+- **Gradients** come from ``Tensor.register_post_accumulate_grad_hook``
+  (torch ≥ 2.1), which fires the instant a parameter's ``.grad`` is final
+  during backward. They are deliberately *not* read at flush time: a training
+  loop is free to call ``optimizer.zero_grad()`` before anything WeightsLab
+  controls runs again.
+- **Activations** come from forward hooks, reduced on-device into 0-d tensors
+  and held there. The whole step costs **one** host↔device sync no matter how
+  many layers are tracked.
+- The flush itself piggybacks on ``optimizer.step()`` — the one point in a step
+  where gradients are guaranteed present and the step is guaranteed finished.
+  The optimizer is resolved from the ledger lazily, on the first forward, since
+  a script watches its model *before* building the optimizer from
+  ``model.parameters()``. A custom loop with no watched optimizer can call
+  ``tracker.flush()`` itself.
+
+Collection only happens inside ``guard_training_context``, so an evaluation
+pass can never contaminate a gradient or activation curve with values the
+optimizer never saw — this holds even for eval loops that skip
+``model.eval()`` or ``torch.no_grad()``.
+
+**Reading the curves**
+
+- ``grad_norm`` collapsing toward 0 in the *early* layers while late ones stay
+  healthy is a vanishing gradient: the run keeps "training" and stops learning.
+- ``grad_norm`` spiking by orders of magnitude is the exploding case — pair it
+  with the loss curve to see which moved first.
+- ``activation_std`` → 0 on a layer is that layer going constant (dead ReLUs,
+  saturated BatchNorm): still consuming compute, contributing nothing.
+- ``weights_norm`` climbing without bound while the loss flattens is the model
+  growing weights instead of learning structure — time to add decay.
+
+See ``examples/Usecases/wl-fashion-mnist-signals`` for a complete runnable
+example, including a startup legend that maps each layer id to its module.
 
 .. _per-instance-signals:
 

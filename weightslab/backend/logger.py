@@ -50,7 +50,8 @@ logger = logging.getLogger(__name__)
 _SIGNAL_COLS = [
     "metric_name", "experiment_hash", "step", "metric_value", "timestamp",
     "audit_mode", "is_evaluation_marker", "split_name", "evaluation_tags",
-    "point_note", "seq",
+    "point_note", "outliers", "outlier_count", "sample_count",
+    "trend_value", "trend_margin", "value_min", "value_max", "seq",
 ]
 _SAMPLE_COLS = ["metric_name", "experiment_hash", "sample_id", "step", "value", "seq"]
 _INSTANCE_COLS = [
@@ -69,11 +70,125 @@ def _default_flush_interval_seconds() -> float:
         return 2.0
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _outliers_enabled() -> bool:
+    return os.environ.get("WL_SIGNAL_OUTLIER_ENABLED", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+# Hard cap on how many (sample_id, value) pairs one buffered step retains for
+# outlier detection. Batches are small, but add_scalars can be called many times
+# per step; this bounds memory on pathological loggers.
+_MAX_BUFFERED_SAMPLES_PER_STEP = 4096
+
+
+class _TrendTracker:
+    """Rolling trend of one signal's averaged curve, for outlier detection.
+
+    Keeps an EMA of the per-step average plus an EMA of squared deviation (a
+    rolling variance). A sample is "off-trend" when it sits further from the EMA
+    than ``k`` rolling standard deviations.
+
+    Two guards keep this from firing constantly:
+
+    * ``min_steps`` — no flagging until the curve has enough history, so the
+      steep warm-up of a fresh loss curve isn't one long outlier run.
+    * ``rel_margin`` — the band never narrows below a fraction of |EMA|. On an
+      almost-flat curve the rolling std collapses toward zero, and without this
+      floor ordinary jitter would clear a 3-sigma test.
+
+    Deviation is measured two-sided (by magnitude) so this works for signals
+    where "bad" means low, e.g. accuracy, as well as loss-shaped ones.
+    """
+
+    __slots__ = ("ema", "ema_var", "steps", "alpha", "k", "min_steps", "rel_margin")
+
+    def __init__(self) -> None:
+        self.ema = None
+        self.ema_var = 0.0
+        self.steps = 0
+        self.alpha = _env_float("WL_SIGNAL_OUTLIER_EMA_ALPHA", 0.05)
+        self.k = _env_float("WL_SIGNAL_OUTLIER_K", 3.0)
+        self.min_steps = _env_int("WL_SIGNAL_OUTLIER_MIN_STEPS", 10)
+        self.rel_margin = _env_float("WL_SIGNAL_OUTLIER_REL_MARGIN", 0.5)
+
+    def margin(self):
+        """Half-width of the on-trend band, or ``None`` while still warming up."""
+        if self.ema is None or self.steps < self.min_steps:
+            return None
+        std = self.ema_var ** 0.5
+        return max(self.k * std, self.rel_margin * abs(self.ema))
+
+    def observe(self, average: float) -> None:
+        """Fold this step's average into the trend. Call once per emitted point."""
+        if self.ema is None:
+            self.ema = average
+            self.steps = 1
+            return
+        deviation = average - self.ema
+        self.ema += self.alpha * deviation
+        self.ema_var = (1.0 - self.alpha) * self.ema_var + self.alpha * (deviation ** 2)
+        self.steps += 1
+
+    def find_outliers(self, samples):
+        """Flag the off-trend members of one step's batch.
+
+        Args:
+            samples: Iterable of ``(sample_id, value)`` for this step.
+
+        Returns:
+            ``(top, total)`` where *top* is a list of ``{"sample_id", "value"}``
+            dicts sorted by deviation (strongest first) and truncated to
+            ``WL_SIGNAL_OUTLIER_TOP_N``, and *total* is how many samples were
+            flagged before truncation. ``([], 0)`` while warming up.
+        """
+        margin = self.margin()
+        if margin is None or not samples:
+            return [], 0
+
+        flagged = []
+        for sample_id, value in samples:
+            deviation = abs(value - self.ema)
+            if deviation > margin:
+                flagged.append((deviation, sample_id, value))
+
+        if not flagged:
+            return [], 0
+
+        flagged.sort(key=lambda row: row[0], reverse=True)
+        top_n = max(1, _env_int("WL_SIGNAL_OUTLIER_TOP_N", 5))
+        top = [
+            {"sample_id": str(sample_id), "value": float(value)}
+            for _, sample_id, value in flagged[:top_n]
+        ]
+        return top, len(flagged)
+
+
 class LoggerQueue:
     def __init__(self, register: bool = True, db_path: str = ":memory:") -> None:
         self.graph_names = set()
         self._current_step_buffer = {}
         self._last_step = None
+
+        # Rolling trend per (graph_name, exp_hash), used to flag the samples in a
+        # step's batch that sit off the curve (see _TrendTracker). In-memory only:
+        # a resumed run re-warms from its first min_steps points rather than
+        # inheriting a stale band.
+        self._trend_trackers: dict = defaultdict(_TrendTracker)
 
         # Live-streaming queue of new points waiting to be sent to WeightsStudio.
         self._pending_queue = []
@@ -293,6 +408,13 @@ class LoggerQueue:
                 split_name VARCHAR,
                 evaluation_tags VARCHAR,
                 point_note VARCHAR,
+                outliers VARCHAR,
+                outlier_count INTEGER,
+                sample_count INTEGER,
+                trend_value DOUBLE,
+                trend_margin DOUBLE,
+                value_min DOUBLE,
+                value_max DOUBLE,
                 seq BIGINT
             );
             CREATE TABLE IF NOT EXISTS {prefix}per_sample (
@@ -314,9 +436,52 @@ class LoggerQueue:
             );
         """
 
+    # Columns added to `signals` after the table's first release, as
+    # (name, DDL type, default). A DB file written by an older weightslab
+    # predates them, and CREATE TABLE IF NOT EXISTS won't retrofit them, so
+    # _ensure_tables ALTERs them in on open. Appended columns land at the end of
+    # the table, which is why every INSERT names its columns explicitly instead
+    # of relying on staging-buffer order (see _flush_stage).
+    _SIGNAL_MIGRATIONS = (
+        ("outliers", "VARCHAR", "''"),
+        ("outlier_count", "INTEGER", "0"),
+        ("sample_count", "INTEGER", "0"),
+        # NULL (not 0) so "no band recorded" stays distinguishable from a real
+        # band centred on zero.
+        ("trend_value", "DOUBLE", "NULL"),
+        ("trend_margin", "DOUBLE", "NULL"),
+        ("value_min", "DOUBLE", "NULL"),
+        ("value_max", "DOUBLE", "NULL"),
+    )
+
     def _ensure_tables(self) -> None:
         with self._lock:
             self._conn.execute(self._schema_ddl())
+            self._migrate_signal_columns()
+
+    def _migrate_signal_columns(self) -> None:
+        """Add any post-release `signals` columns missing from an older DB file."""
+        try:
+            existing = {
+                row[0] for row in self._conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'signals'"
+                ).fetchall()
+            }
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Could not introspect signals columns: %s", exc)
+            return
+
+        for name, ddl_type, default in self._SIGNAL_MIGRATIONS:
+            if name in existing:
+                continue
+            try:
+                self._conn.execute(
+                    f"ALTER TABLE signals ADD COLUMN {name} {ddl_type} DEFAULT {default}"
+                )
+                logger.info("Migrated signal history: added signals.%s", name)
+            except Exception as exc:
+                logger.warning("Failed to add signals.%s: %s", name, exc)
 
     _HISTORY_TABLES = ("signals", "per_sample", "per_instance")
 
@@ -492,7 +657,12 @@ class LoggerQueue:
             if self._stage_signals:
                 df = pd.DataFrame(self._stage_signals, columns=_SIGNAL_COLS)
                 self._conn.register("_stg_sig", df)
-                self._conn.execute("INSERT INTO signals SELECT * FROM _stg_sig")
+                # Column-explicit: migrated columns sit at the end of an older
+                # table, so positional INSERT ... SELECT * would misalign.
+                cols = ", ".join(_SIGNAL_COLS)
+                self._conn.execute(
+                    f"INSERT INTO signals ({cols}) SELECT {cols} FROM _stg_sig"
+                )
                 self._conn.unregister("_stg_sig")
                 self._stage_signals = []
             if self._stage_sample:
@@ -509,11 +679,21 @@ class LoggerQueue:
                 self._stage_instance = []
 
     def _stage_signal_row(self, graph_name, exp_hash, step, metric_value, timestamp,
-                          audit_mode, is_marker, split_name, eval_tags, point_note):
+                          audit_mode, is_marker, split_name, eval_tags, point_note,
+                          outliers=None, outlier_count=0, sample_count=0,
+                          trend_value=None, trend_margin=None,
+                          value_min=None, value_max=None):
         self._stage_signals.append((
             graph_name, exp_hash, int(step), float(metric_value), int(timestamp),
             bool(audit_mode), bool(is_marker), split_name or "",
-            json.dumps(list(eval_tags or [])), point_note or "", self._next_seq(),
+            json.dumps(list(eval_tags or [])), point_note or "",
+            json.dumps(list(outliers)) if outliers else "",
+            int(outlier_count), int(sample_count),
+            None if trend_value is None else float(trend_value),
+            None if trend_margin is None else float(trend_margin),
+            None if value_min is None else float(value_min),
+            None if value_max is None else float(value_max),
+            self._next_seq(),
         ))
         self._maybe_autoflush()
 
@@ -611,8 +791,14 @@ class LoggerQueue:
 
     def _append_history_entry(self, graph_name, exp_hash, global_step, metric_value,
                               audit_mode=None, is_marker=False, split_name="",
-                              evaluation_tags=None):
-        """Stage a signals row and return the live-queue entry dict."""
+                              evaluation_tags=None, batch_samples=None):
+        """Stage a signals row and return the live-queue entry dict.
+
+        *batch_samples*, when given, is the ``(sample_id, value)`` batch this
+        point's average came from. It is compared against the signal's rolling
+        trend to flag off-trend samples, which ride along on the point so the UI
+        can mark the spike and jump to the samples behind it.
+        """
         if audit_mode is None:
             audit_mode = self._get_audit_mode()
 
@@ -630,11 +816,51 @@ class LoggerQueue:
             signal_entry["split_name"] = split_name
             signal_entry["evaluation_tags"] = list(evaluation_tags or [])
 
+        outliers, outlier_count = [], 0
+        trend_value, trend_margin = None, None
+        value_min, value_max = None, None
+        sample_count = len(batch_samples) if batch_samples else 0
+
+        # Absolute extremes of the batch. These are the real lowest/highest
+        # sample values, so the band the UI draws from them spikes out to an
+        # outlier rather than averaging it down the way a std band would.
+        if batch_samples:
+            values = [value for _, value in batch_samples]
+            value_min, value_max = min(values), max(values)
+
+        if _outliers_enabled() and not is_marker:
+            tracker = self._trend_trackers[(graph_name, exp_hash)]
+            # Snapshot the band BEFORE folding this point in, so a spike is
+            # measured against clean history instead of partly against itself.
+            # This is the same band find_outliers uses, which is what lets the UI
+            # draw the region a flagged sample fell outside of.
+            margin = tracker.margin()
+            if margin is not None:
+                trend_value, trend_margin = tracker.ema, margin
+            if batch_samples:
+                outliers, outlier_count = tracker.find_outliers(batch_samples)
+            tracker.observe(metric_value)
+        if outliers:
+            signal_entry["outliers"] = outliers
+            signal_entry["outlier_count"] = outlier_count
+        if sample_count:
+            signal_entry["sample_count"] = sample_count
+        if trend_value is not None:
+            signal_entry["trend_value"] = trend_value
+            signal_entry["trend_margin"] = trend_margin
+        if value_min is not None:
+            signal_entry["value_min"] = value_min
+            signal_entry["value_max"] = value_max
+
         with self._lock:
             self._stage_signal_row(
                 graph_name, exp_hash, global_step, metric_value, timestamp,
                 bool(audit_mode), bool(is_marker), split_name,
                 list(evaluation_tags or []), "",
+                outliers=outliers, outlier_count=outlier_count,
+                sample_count=sample_count,
+                trend_value=trend_value, trend_margin=trend_margin,
+                value_min=value_min, value_max=value_max,
             )
         return signal_entry
 
@@ -651,6 +877,7 @@ class LoggerQueue:
                 exp_hash=exp_hash,
                 global_step=self._buffered_step,
                 metric_value=metric_value,
+                batch_samples=payload.get("samples"),
             )
             if add_to_queue:
                 self._pending_queue.append(signal_entry)
@@ -841,10 +1068,20 @@ class LoggerQueue:
                 for sid, value in signal_per_sample.items():
                     self._stage_sample_row(graph_name, exp_hash, sid, step_i, self._to_float(value))
 
+            # (sample_id, value) for this call's batch, so _append_history_entry
+            # can attribute an off-trend point to the samples responsible.
+            # Derived from signal_per_sample independently of which branch below
+            # supplies metric_values: in immediate mode the emitted value comes
+            # from `signal`, but the batch behind it is still signal_per_sample,
+            # and outliers are judged against the curve's trend either way.
+            batch_samples = [
+                (str(sid), self._to_float(value))
+                for sid, value in signal_per_sample.items()
+            ] if isinstance(signal_per_sample, dict) and len(signal_per_sample) else []
+
             metric_values = []
             if isinstance(signal_per_sample, dict) and aggregate_by_step and len(signal_per_sample):
-                for value in signal_per_sample.values():
-                    metric_values.append(self._to_float(value))
+                metric_values = [value for _, value in batch_samples]
             else:
                 for _, line_value in signal.items():
                     metric_values.append(self._to_float(line_value))
@@ -854,9 +1091,16 @@ class LoggerQueue:
                     self._buffered_step = global_step
                     buffer_key = (global_step, graph_name, exp_hash)
                     if buffer_key not in self._current_step_buffer:
-                        self._current_step_buffer[buffer_key] = {"sum": 0.0, "count": 0}
-                    self._current_step_buffer[buffer_key]["sum"] += sum(metric_values)
-                    self._current_step_buffer[buffer_key]["count"] += len(metric_values)
+                        self._current_step_buffer[buffer_key] = {
+                            "sum": 0.0, "count": 0, "samples": [],
+                        }
+                    payload = self._current_step_buffer[buffer_key]
+                    payload["sum"] += sum(metric_values)
+                    payload["count"] += len(metric_values)
+                    if batch_samples:
+                        headroom = _MAX_BUFFERED_SAMPLES_PER_STEP - len(payload["samples"])
+                        if headroom > 0:
+                            payload["samples"].extend(batch_samples[:headroom])
                 return
 
             # Update averaged signal history immediately. Only emit when we have at
@@ -869,6 +1113,7 @@ class LoggerQueue:
                     exp_hash=exp_hash,
                     global_step=global_step,
                     metric_value=sum(metric_values) / len(metric_values) if len(metric_values) > 1 else metric_values[0],
+                    batch_samples=batch_samples or None,
                 )
 
             if signal_entry is not None:
@@ -960,6 +1205,103 @@ class LoggerQueue:
             rows = self._conn.execute("SELECT DISTINCT metric_name FROM per_instance").fetchall()
         return [r[0] for r in rows]
 
+    @staticmethod
+    def _decode_outliers(raw):
+        """Parse a stored ``outliers`` JSON blob into a list of dicts.
+
+        Rows written before the column existed read back as NULL/'' and legacy
+        files could in principle hold junk, so a parse failure degrades to "no
+        outliers" rather than breaking the whole history read.
+        """
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(parsed, list):
+            return []
+        out = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            sample_id = str(item.get("sample_id", ""))
+            if not sample_id:
+                continue
+            try:
+                value = float(item.get("value", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            out.append({"sample_id": sample_id, "value": value})
+        return out
+
+    def get_step_outlier_sample_ids(self, metric_name: str, experiment_hash: str,
+                                    model_age: int) -> list:
+        """Sample ids flagged as off-trend for one point of one curve.
+
+        Backs the plot's "Highlight step samples" action: the UI hands back the
+        metric/hash/step it was right-clicked on and gets the ids to filter the
+        data grid down to.
+        """
+        with self._lock:
+            self._flush_stage()
+            params = [metric_name, int(model_age)]
+            sql = ("SELECT outliers FROM signals "
+                   "WHERE metric_name = ? AND step = ?")
+            if experiment_hash:
+                sql += " AND experiment_hash = ?"
+                params.append(experiment_hash)
+            sql += " ORDER BY seq"
+            rows = self._conn.execute(sql, params).fetchall()
+
+        seen, ids = set(), []
+        for (raw,) in rows:
+            for item in self._decode_outliers(raw):
+                sample_id = item["sample_id"]
+                if sample_id and sample_id not in seen:
+                    seen.add(sample_id)
+                    ids.append(sample_id)
+        return ids
+
+    def get_step_sample_ids(self, metric_name: str, experiment_hash: str,
+                            model_age: int, max_samples: int = 0) -> tuple:
+        """Every sample id that contributed to one step of one signal.
+
+        Backs the plot's "Highlight step samples" action, which shows the WHOLE
+        batch behind a point rather than only the off-trend members of it.
+
+        Args:
+            metric_name: Signal name.
+            experiment_hash: Restrict to one run; ``""``/``None`` means any.
+            model_age: The step.
+            max_samples: Cap on returned ids (0 = no cap).
+
+        Returns:
+            ``(ids, total_available)`` — *total_available* is the count before
+            the cap, so a caller can say "showing 200 of 4096".
+        """
+        with self._lock:
+            self._flush_stage()
+            params = [metric_name, int(model_age)]
+            sql = ("SELECT DISTINCT sample_id FROM per_sample "
+                   "WHERE metric_name = ? AND step = ?")
+            if experiment_hash:
+                sql += " AND experiment_hash = ?"
+                params.append(experiment_hash)
+            rows = self._conn.execute(sql, params).fetchall()
+
+        ids = [str(row[0]) for row in rows if row[0] is not None]
+        # Numeric-aware ordering so "9" precedes "10"; falls back to plain text
+        # for non-numeric ids.
+        try:
+            ids.sort(key=lambda value: (0, int(value)))
+        except ValueError:
+            ids.sort()
+        total = len(ids)
+        if max_samples and max_samples > 0:
+            ids = ids[:max_samples]
+        return ids, total
+
     def get_signal_history(self):
         """Reconstruct aggregated history as ``{metric: {hash: {step: [entry, ...]}}}``."""
         with self._lock:
@@ -967,13 +1309,17 @@ class LoggerQueue:
             rows = self._conn.execute(
                 """
                 SELECT metric_name, experiment_hash, step, metric_value, timestamp,
-                       audit_mode, is_evaluation_marker, split_name, evaluation_tags, point_note
+                       audit_mode, is_evaluation_marker, split_name, evaluation_tags, point_note,
+                       outliers, outlier_count, sample_count, trend_value, trend_margin,
+                       value_min, value_max
                 FROM signals ORDER BY seq
                 """
             ).fetchall()
 
         result: dict = {}
-        for (metric, h, step, val, ts, audit, marker, split, tags, note) in rows:
+        for (metric, h, step, val, ts, audit, marker, split, tags, note,
+             outliers, outlier_count, sample_count, trend_value, trend_margin,
+             value_min, value_max) in rows:
             entry = {
                 "model_age": step,
                 "metric_name": metric,
@@ -987,6 +1333,18 @@ class LoggerQueue:
             }
             if note:
                 entry["point_note"] = note
+            parsed_outliers = self._decode_outliers(outliers)
+            if parsed_outliers:
+                entry["outliers"] = parsed_outliers
+                entry["outlier_count"] = int(outlier_count or 0)
+            if sample_count:
+                entry["sample_count"] = int(sample_count)
+            if trend_value is not None and trend_margin is not None:
+                entry["trend_value"] = float(trend_value)
+                entry["trend_margin"] = float(trend_margin)
+            if value_min is not None and value_max is not None:
+                entry["value_min"] = float(value_min)
+                entry["value_max"] = float(value_max)
             result.setdefault(metric, {}).setdefault(h, {}).setdefault(step, []).append(entry)
         return result
 
@@ -1527,6 +1885,13 @@ class LoggerQueue:
                     entry.get("split_name", ""),
                     entry.get("evaluation_tags", []),
                     entry.get("point_note", "") or "",
+                    outliers=entry.get("outliers") or None,
+                    outlier_count=int(entry.get("outlier_count", 0) or 0),
+                    sample_count=int(entry.get("sample_count", 0) or 0),
+                    trend_value=entry.get("trend_value"),
+                    trend_margin=entry.get("trend_margin"),
+                    value_min=entry.get("value_min"),
+                    value_max=entry.get("value_max"),
                 )
 
         if isinstance(signals, dict):

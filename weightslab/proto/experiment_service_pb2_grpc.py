@@ -89,6 +89,11 @@ class ExperimentServiceStub(object):
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetSignalTrajectoryRequest.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetSignalTrajectoryResponse.FromString,
                 _registered_method=True)
+        self.GetStepSamples = channel.unary_unary(
+                '/ExperimentService/GetStepSamples',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesResponse.FromString,
+                _registered_method=True)
         self.GetPointCloud = channel.unary_stream(
                 '/ExperimentService/GetPointCloud',
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.PointCloudRequest.SerializeToString,
@@ -256,6 +261,15 @@ class ExperimentServiceServicer(object):
         signal trajectory"), never on the metadata poll. Each returned curve is
         downsampled to at most max_points and is only included when the sample has
         at least 3 recorded points.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetStepSamples(self, request, context):
+        """Every sample id that contributed to one step of one signal. Backs the plot's
+        right-click "Highlight step samples": the whole batch behind a point, not
+        just the samples that were flagged as off-trend.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -442,6 +456,11 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     servicer.GetSignalTrajectory,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetSignalTrajectoryRequest.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetSignalTrajectoryResponse.SerializeToString,
+            ),
+            'GetStepSamples': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetStepSamples,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesResponse.SerializeToString,
             ),
             'GetPointCloud': grpc.unary_stream_rpc_method_handler(
                     servicer.GetPointCloud,
@@ -831,6 +850,33 @@ class ExperimentService(object):
             '/ExperimentService/GetSignalTrajectory',
             weightslab_dot_proto_dot_experiment__service__pb2.GetSignalTrajectoryRequest.SerializeToString,
             weightslab_dot_proto_dot_experiment__service__pb2.GetSignalTrajectoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetStepSamples(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetStepSamples',
+            weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesResponse.FromString,
             options,
             channel_credentials,
             insecure,
