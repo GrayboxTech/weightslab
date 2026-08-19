@@ -429,19 +429,53 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
 
         # Original behavior for non-break_by_slices mode
         if request.request_full_history:
-            # Return full history
-            max_points = request.max_points or 10000
+            # NOTE: "full history" is a misnomer kept for wire compatibility --
+            # the history is NEVER read in full. It is reduced to max_points per
+            # curve inside DuckDB (see LoggerQueue.get_signal_history_downsampled),
+            # optionally scoped to the visible step range and to the signals the
+            # client actually has on screen. A hundred-million-row table must
+            # never become a hundred million Python dicts here.
+            max_points = request.max_points or 1000
+            metric_names = list(request.metric_names) or None
+            exp_hashes = list(request.experiment_hashes) or None
+            x_min = request.x_min if request.has_x_range else None
+            x_max = request.x_max if request.has_x_range else None
+
             # Cancellation guard before the potentially heavy history fetch
             if context and not context.is_active():
                 logger.debug("GetLatestLoggerData: client cancelled before get_signal_history")
                 return pb2.GetLatestLoggerDataResponse(points=[])
+
+            # Per-curve shape is cheap (one grouped aggregate) and lets the
+            # client show true extents/counts behind a decimated curve.
+            curve_index = signal_logger.get_signal_curve_index(
+                metric_names=metric_names, exp_hashes=exp_hashes)
+            curves = [
+                pb2.SignalCurveIndex(
+                    metric_name=m, experiment_hash=h,
+                    first_step=int(info["first_step"]),
+                    last_step=int(info["last_step"]),
+                    point_count=int(info["count"]),
+                )
+                for m, per_hash in curve_index.items()
+                for h, info in per_hash.items()
+            ]
+            if request.index_only:
+                return pb2.GetLatestLoggerDataResponse(
+                    points=[], curves=curves, applied_max_points=max_points)
+
             _th = time.monotonic()
-            history = signal_logger.get_signal_history()
+            history = signal_logger.get_signal_history_downsampled(
+                max_points=max_points, metric_names=metric_names,
+                exp_hashes=exp_hashes, x_min=x_min, x_max=x_max)
             _th_ms = (time.monotonic() - _th) * 1000
             if _th_ms > 500:
-                logger.warning("get_signal_history() took %.1fms (slow — possible lock contention)", _th_ms)
+                logger.warning(
+                    "get_signal_history_downsampled(max_points=%s, range=%s) took "
+                    "%.1fms (slow — possible lock contention)",
+                    max_points, (x_min, x_max), _th_ms)
             else:
-                logger.debug("get_signal_history() took %.1fms", _th_ms)
+                logger.debug("get_signal_history_downsampled() took %.1fms", _th_ms)
 
             # Normalize history to grouped list format:
             # - Legacy: List[signal_entry]
@@ -472,17 +506,19 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                         signal_groups[metric_name] = []
                     signal_groups[metric_name].append(s)
 
-            # Take last max_points_per_signal for each signal and downsample if needed
+            # No second downsample here. DuckDB already reduced to max_points
+            # PER CURVE; re-reducing this flattened per-metric list would cap
+            # all experiment hashes *together* — with 512 runs on one signal
+            # that left each curve roughly max_points/512 points, which is what
+            # made a many-run dashboard unreadable.
             for metric_name, signal_history in signal_groups.items():
-                # Keep deterministic order by model_age before sampling
-                signal_history = sorted(signal_history, key=lambda item: item.get("model_age", 0))
-
-                # Downsample if we have more than max_points, keeping every
-                # outlier-bearing step (see _downsample_preserving_outliers).
-                signal_history = _downsample_preserving_outliers(signal_history, max_points)
-
+                signal_history.sort(key=lambda item: (item.get("experiment_hash", ""),
+                                                      item.get("model_age", 0)))
                 for s in signal_history:
                     points.append(_logger_point_pb(metric_name, s))
+
+            return pb2.GetLatestLoggerDataResponse(
+                points=points, curves=curves, applied_max_points=max_points)
         else:
             # Return only queue (new data since last poll)
             if context and not context.is_active():

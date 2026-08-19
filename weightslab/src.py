@@ -4471,25 +4471,20 @@ def write_history(
     instance_rows: list = []
 
     if write_global:
-        for gn, hashes in _lg.get_signal_history().items():
-            if _gn_filter is not None and gn not in _gn_filter:
-                continue
-            for h, steps in hashes.items():
-                if experiment_hash is not None and h != experiment_hash:
-                    continue
-                for step, entries in steps.items():
-                    for entry in entries:
-                        val = (
-                            entry.get("metric_value")
-                            if isinstance(entry, dict)
-                            else float(entry)
-                        )
-                        global_rows.append({
-                            "graph_name": gn,
-                            "experiment_hash": h if h is not None else "",
-                            "step": step,
-                            "metric_value": val,
-                        })
+        # An export must be complete, so this is the uncapped path -- but it
+        # streams tuples instead of calling get_signal_history(max_points=None),
+        # which would first build a nested dict holding a ~9-key metadata dict
+        # per row. Filtering is pushed into SQL so excluded graphs/hashes are
+        # never read at all.
+        for gn, h, step, val in _lg.iter_signal_rows(
+                metric_names=list(_gn_filter) if _gn_filter is not None else None,
+                exp_hashes=[experiment_hash] if experiment_hash is not None else None):
+            global_rows.append({
+                "graph_name": gn,
+                "experiment_hash": h if h is not None else "",
+                "step": step,
+                "metric_value": val,
+            })
         logger.debug("write_history: collected %d global row(s).",
                      len(global_rows))
 

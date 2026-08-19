@@ -102,11 +102,40 @@ service ExperimentService {
 
 // --- Logger Data Sync ---
 message GetLatestLoggerDataRequest {
-  bool request_full_history = 1;  // true = full history, false = only queue (new data)
-  int32 max_points = 2;            // max points per signal (only used for full history)
+  bool request_full_history = 1;  // true = history, false = only queue (new data)
+  int32 max_points = 2;            // max points PER CURVE (metric x experiment hash)
   bool break_by_slices = 3;        // true = return per-sample data filtered by tags
   repeated string tags = 4;        // list of tags to filter samples (used when break_by_slices=true)
   string graph_name = 5;           // specific signal/graph name to filter (used when break_by_slices=true)
+
+  // --- Viewport scoping -----------------------------------------------------
+  // History is never returned in full: it is reduced to `max_points` per curve
+  // inside DuckDB. These fields narrow *what* gets reduced, so a zoom refetches
+  // real detail for one plot instead of re-reading the dashboard.
+  //
+  // Step range currently visible on the x axis. Buckets are laid out across
+  // this range, so zooming in resolves detail rather than restretching the same
+  // decimated points. Ignored unless has_x_range is set (0 is a valid step).
+  int64 x_min = 6;
+  int64 x_max = 7;
+  bool has_x_range = 8;
+  // Restrict to these signals / experiment hashes. Empty means "all". A zoom on
+  // one plot should send just that signal's name.
+  repeated string metric_names = 9;
+  repeated string experiment_hashes = 10;
+  // Return only per-curve bounds and counts (no data points at all), so the UI
+  // can lay out axes and list curves before fetching anything.
+  bool index_only = 11;
+}
+
+// Shape of one curve without any of its points: what GetLatestLoggerData
+// returns when index_only is set.
+message SignalCurveIndex {
+  string metric_name = 1;
+  string experiment_hash = 2;
+  int64 first_step = 3;
+  int64 last_step = 4;
+  int64 point_count = 5;           // rows in the DB behind this curve
 }
 
 // One sample whose signal value at a step sits far off the curve's own trend.
@@ -159,6 +188,14 @@ message LoggerDataPoint {
 message GetLatestLoggerDataResponse {
   repeated LoggerDataPoint points = 1;  // All points from all metrics
   string weightslab_version = 2;        // backend weightslab package version (shown in UI logo tooltip)
+  // Per-curve shape. Always populated for a history read (cheap grouped
+  // aggregate), so the client can tell "this curve was decimated from 4.2M
+  // points" from "this curve has 12 points", and knows the true step extent
+  // even though `points` only carries the decimated subset.
+  repeated SignalCurveIndex curves = 3;
+  // The reduction actually applied, echoed back so the client can decide
+  // whether a zoom needs a refetch.
+  int32 applied_max_points = 4;
 }
 
 message Empty {}
