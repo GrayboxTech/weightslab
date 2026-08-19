@@ -198,3 +198,8 @@ write_to = "weightslab/_version.py"
 # Optional: choose version/local schemes — defaults are usually fine
 version_scheme = "guess-next-dev"
 local_scheme = "no-local-version"
+
+[tool.pytest.ini_options]
+markers = [
+    "scale: large-history robustness tests (sweep-scale fixtures; deselect with -m 'not scale')",
+]

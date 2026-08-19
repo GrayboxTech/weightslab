@@ -82,6 +82,12 @@ service ExperimentService {
   // Checkpoint restore
   rpc RestoreCheckpoint (RestoreCheckpointRequest) returns (RestoreCheckpointResponse);
 
+  // Runs (experiment hashes) recorded under this root_log_dir: list them,
+  // and rename/annotate them independent of the hash itself.
+  rpc ListExperimentRuns (ListExperimentRunsRequest) returns (ListExperimentRunsResponse);
+  rpc RenameExperimentRun (RenameExperimentRunRequest) returns (RenameExperimentRunResponse);
+  rpc SetExperimentRunNotes (SetExperimentRunNotesRequest) returns (SetExperimentRunNotesResponse);
+
   // Evaluation mode
   rpc TriggerEvaluation (TriggerEvaluationRequest) returns (TriggerEvaluationResponse);
   rpc GetEvaluationStatus (GetEvaluationStatusRequest) returns (GetEvaluationStatusResponse);
@@ -96,11 +102,40 @@ service ExperimentService {
 
 // --- Logger Data Sync ---
 message GetLatestLoggerDataRequest {
-  bool request_full_history = 1;  // true = full history, false = only queue (new data)
-  int32 max_points = 2;            // max points per signal (only used for full history)
+  bool request_full_history = 1;  // true = history, false = only queue (new data)
+  int32 max_points = 2;            // max points PER CURVE (metric x experiment hash)
   bool break_by_slices = 3;        // true = return per-sample data filtered by tags
   repeated string tags = 4;        // list of tags to filter samples (used when break_by_slices=true)
   string graph_name = 5;           // specific signal/graph name to filter (used when break_by_slices=true)
+
+  // --- Viewport scoping -----------------------------------------------------
+  // History is never returned in full: it is reduced to `max_points` per curve
+  // inside DuckDB. These fields narrow *what* gets reduced, so a zoom refetches
+  // real detail for one plot instead of re-reading the dashboard.
+  //
+  // Step range currently visible on the x axis. Buckets are laid out across
+  // this range, so zooming in resolves detail rather than restretching the same
+  // decimated points. Ignored unless has_x_range is set (0 is a valid step).
+  int64 x_min = 6;
+  int64 x_max = 7;
+  bool has_x_range = 8;
+  // Restrict to these signals / experiment hashes. Empty means "all". A zoom on
+  // one plot should send just that signal's name.
+  repeated string metric_names = 9;
+  repeated string experiment_hashes = 10;
+  // Return only per-curve bounds and counts (no data points at all), so the UI
+  // can lay out axes and list curves before fetching anything.
+  bool index_only = 11;
+}
+
+// Shape of one curve without any of its points: what GetLatestLoggerData
+// returns when index_only is set.
+message SignalCurveIndex {
+  string metric_name = 1;
+  string experiment_hash = 2;
+  int64 first_step = 3;
+  int64 last_step = 4;
+  int64 point_count = 5;           // rows in the DB behind this curve
 }
 
 // One sample whose signal value at a step sits far off the curve's own trend.
@@ -153,6 +188,14 @@ message LoggerDataPoint {
 message GetLatestLoggerDataResponse {
   repeated LoggerDataPoint points = 1;  // All points from all metrics
   string weightslab_version = 2;        // backend weightslab package version (shown in UI logo tooltip)
+  // Per-curve shape. Always populated for a history read (cheap grouped
+  // aggregate), so the client can tell "this curve was decimated from 4.2M
+  // points" from "this curve has 12 points", and knows the true step extent
+  // even though `points` only carries the decimated subset.
+  repeated SignalCurveIndex curves = 3;
+  // The reduction actually applied, echoed back so the client can decide
+  // whether a zoom needs a refetch.
+  int32 applied_max_points = 4;
 }
 
 message Empty {}
@@ -566,6 +609,11 @@ message StepSamplesResponse {
   string message = 2;
   repeated string sample_ids = 3;
   int32 total_available = 4;    // count before max_samples truncation
+  // Parallel to sample_ids: that sample's own value of `metric_name` at
+  // `model_age`, or NaN where the per-sample table has no row for it (e.g. an
+  // id from an older/differently-sized batch). Lets the UI snapshot the exact
+  // per-sample values behind a plotted step instead of only its ids.
+  repeated float sample_values = 5;
 }
 
 message GetSignalTrajectoryRequest {
@@ -671,6 +719,17 @@ message DataEditsRequest {
   // EDIT_REMOVE with float_value == -1 still deletes the whole tag column.
   bool is_categorical = 8;
   repeated string categories = 9;
+
+  // --- Per-sample snapshot support (stat_name == "__save_step_signal_snapshot__") ---
+  // One value per entry of samples_ids, written into a new metadata column
+  // (unlike float_value, which EDIT_OVERRIDE applies uniformly to every id).
+  // string_value carries the source signal name and float_value the step;
+  // see build_step_snapshot_column_name for the resulting column name.
+  repeated float sample_values = 10;
+  // The run these values came from (the curve the user acted on), embedded in
+  // the snapshot's column name. Empty falls back to the currently active
+  // experiment, same as __copy_metadata__'s own hash.
+  string experiment_hash = 11;
 }
 
 message DataEditsResponse {
@@ -762,6 +821,43 @@ message RestoreCheckpointRequest {
 message RestoreCheckpointResponse {
   bool success = 1;            // Whether restore was successful
   string message = 2;          // Details/error message
+}
+
+// --- Experiment Runs (list / rename / notes) ---
+message ExperimentRunInfo {
+  string experiment_hash = 1;      // 24-char HP_MODEL_DATA hash
+  string experiment_name = 2;      // User-facing label, from config or auto-generated
+  string notes = 3;                // Free-text note, empty if unset
+  string created = 4;              // ISO-8601
+  string last_used = 5;            // ISO-8601
+  int32 latest_weight_step = 6;    // -1 if no weight checkpoint saved yet
+  bool is_current = 7;             // Whether this is the manager's currently loaded run
+}
+
+message ListExperimentRunsRequest {}
+
+message ListExperimentRunsResponse {
+  repeated ExperimentRunInfo runs = 1;
+}
+
+message RenameExperimentRunRequest {
+  string experiment_hash = 1;
+  string new_name = 2;
+}
+
+message RenameExperimentRunResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message SetExperimentRunNotesRequest {
+  string experiment_hash = 1;
+  string notes = 2;
+}
+
+message SetExperimentRunNotesResponse {
+  bool success = 1;
+  string message = 2;
 }
 
 // --- Evaluation Mode ---

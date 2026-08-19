@@ -24,6 +24,7 @@ import yaml
 
 from weightslab.security import CertAuthManager
 from weightslab.tunnel import DEFAULT_LISTEN_PORT
+from weightslab.components.experiment_naming import generate_experiment_name as _generate_experiment_name
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -710,26 +711,6 @@ def export_annotations_cli(args):
         f"Exported {response.image_count} image(s) to {os.path.abspath(output)} "
         f"({args.format} format)."
     )
-
-
-# Friendly two-word experiment names (adjective-noun), e.g. "wl-brisk-otter".
-# Readable and low-collision — nicer than a raw UUID for a directory the user
-# will `cd` into and share.
-_EXP_ADJECTIVES = (
-    "brisk", "calm", "clever", "bold", "bright", "keen", "lucid", "nimble",
-    "quiet", "swift", "warm", "zesty", "amber", "cobalt", "coral", "jade",
-)
-_EXP_NOUNS = (
-    "otter", "falcon", "maple", "cedar", "comet", "delta", "ember", "harbor",
-    "lark", "meadow", "pixel", "quartz", "ridge", "tide", "vertex", "willow",
-)
-
-
-def _generate_experiment_name() -> str:
-    """Return a fresh adjective-noun experiment directory name (no timestamp so
-    it stays short and human-friendly; collisions are retried by the caller)."""
-    import random
-    return f"wl-{random.choice(_EXP_ADJECTIVES)}-{random.choice(_EXP_NOUNS)}"
 
 
 def _resolve_experiment_dir(explicit: Optional[str]) -> Path:

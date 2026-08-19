@@ -30,6 +30,7 @@ Design notes
 """
 
 import functools
+import itertools
 import json
 import logging
 import os
@@ -120,6 +121,35 @@ def _outliers_enabled() -> bool:
 # outlier detection. Batches are small, but add_scalars can be called many times
 # per step; this bounds memory on pathological loggers.
 _MAX_BUFFERED_SAMPLES_PER_STEP = 4096
+
+# --- Signal-history read caps ---------------------------------------------
+# A plot is at most a few thousand pixels wide, so a curve drawn from more
+# points than this is decimated away in the browser anyway -- after having been
+# paid for in query time, wire bytes and JS heap. Reducing to this many points
+# *inside DuckDB* is what keeps a 100M-row table readable at all: the aggregate
+# streams, and only the reduced rows are ever turned into Python dicts.
+_DEFAULT_MAX_POINTS_PER_CURVE = _env_int("WL_SIGNAL_MAX_POINTS_PER_CURVE", 1000)
+# Never reduce a curve below first + last + one interior point, so a
+# downsampled curve still reads as a curve rather than a straight segment.
+_MIN_POINTS_PER_CURVE = 3
+# Rows that must survive downsampling regardless of which bucket they land in
+# (evaluation markers, annotated points, steps carrying outliers) are fetched by
+# a separate filtered scan. That scan is bounded too -- a pathological run where
+# every step carries an outlier would otherwise reintroduce the full-table read
+# this whole path exists to avoid. Truncation is logged, never silent.
+_MAX_SPECIAL_ROWS = _env_int("WL_SIGNAL_MAX_SPECIAL_ROWS", 20000)
+# Chunk size for the uncapped (export/snapshot) path, which streams instead of
+# calling fetchall() on the whole table.
+_HISTORY_STREAM_CHUNK = _env_int("WL_SIGNAL_STREAM_CHUNK", 500_000)
+
+# Column list shared by every signal-history read, in the order the row
+# unpackers below expect.
+_SIGNAL_READ_COLS = (
+    "metric_name", "experiment_hash", "step", "metric_value", "timestamp",
+    "audit_mode", "is_evaluation_marker", "split_name", "evaluation_tags",
+    "point_note", "outliers", "outlier_count", "sample_count",
+    "trend_value", "trend_margin", "value_min", "value_max",
+)
 
 
 class _TrendTracker:
@@ -497,10 +527,33 @@ class LoggerQueue:
         ("value_max", "DOUBLE", "NULL"),
     )
 
+    # Indexes for the read paths that filter rather than scan. DuckDB is
+    # columnar and leans on zone maps, so these matter less than on a row store
+    # -- but the signal-history reads all filter by metric_name/experiment_hash
+    # and range-scan `step`, and at hundreds of millions of rows an unindexed
+    # equality filter on a low-cardinality string column is the difference
+    # between a pruned read and a full scan.
+    _INDEX_DDL = (
+        ("idx_signals_curve", "signals", "(metric_name, experiment_hash, step)"),
+        ("idx_signals_step", "signals", "(step)"),
+        ("idx_per_sample_curve", "per_sample", "(metric_name, experiment_hash, step)"),
+        ("idx_per_instance_curve", "per_instance", "(metric_name, experiment_hash, step)"),
+    )
+
+    def _ensure_indexes(self) -> None:
+        """Best-effort: an index that fails to build must never stop logging."""
+        for name, table, cols in self._INDEX_DDL:
+            try:
+                self._conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {name} ON {table} {cols}")
+            except Exception as exc:  # older DuckDB, read-only db, ...
+                logger.debug("Index %s on %s not created: %s", name, table, exc)
+
     def _ensure_tables(self) -> None:
         with self._lock:
             self._conn.execute(self._schema_ddl())
             self._migrate_signal_columns()
+            self._ensure_indexes()
 
     def _migrate_signal_columns(self) -> None:
         """Add any post-release `signals` columns missing from an older DB file."""
@@ -1235,7 +1288,7 @@ class LoggerQueue:
     # Print helpers (debug)
     # ------------------------------------------------------------------
     def print_history(self):
-        history = self.get_signal_history()
+        history = self.get_signal_history(max_points=None)
         for metric_name, experiments in history.items():
             print(f"Metric: {metric_name}")
             for exp_hash, steps in experiments.items():
@@ -1379,50 +1432,292 @@ class LoggerQueue:
             ids = ids[:max_samples]
         return ids, total
 
-    def get_signal_history(self):
-        """Reconstruct aggregated history as ``{metric: {hash: {step: [entry, ...]}}}``."""
+    def _scope_filters(self, metric_names=None, exp_hashes=None,
+                       x_min=None, x_max=None, alias: str = ""):
+        """Build the shared WHERE fragment + params for a scoped history read."""
+        p = f"{alias}." if alias else ""
+        sql, params = "", []
+        if metric_names:
+            names = list(dict.fromkeys(metric_names))
+            sql += f" AND {p}metric_name IN ({','.join('?' * len(names))})"
+            params.extend(names)
+        if exp_hashes:
+            hashes = list(dict.fromkeys(exp_hashes))
+            sql += f" AND {p}experiment_hash IN ({','.join('?' * len(hashes))})"
+            params.extend(hashes)
+        if x_min is not None:
+            sql += f" AND {p}step >= ?"
+            params.append(int(x_min))
+        if x_max is not None:
+            sql += f" AND {p}step <= ?"
+            params.append(int(x_max))
+        return sql, params
+
+    def get_signal_curve_index(self, metric_names=None, exp_hashes=None) -> dict:
+        """Per-curve shape without any of its points.
+
+        Returns ``{metric: {hash: {"first_step", "last_step", "count"}}}``. This
+        is a single grouped aggregate -- it lets the UI lay out axes, decide how
+        many points to ask for, and show which curves exist, without reading a
+        single data point.
+        """
+        where, params = self._scope_filters(metric_names, exp_hashes)
         with self._lock:
             self._flush_stage()
             rows = self._conn.execute(
-                """
-                SELECT metric_name, experiment_hash, step, metric_value, timestamp,
-                       audit_mode, is_evaluation_marker, split_name, evaluation_tags, point_note,
-                       outliers, outlier_count, sample_count, trend_value, trend_margin,
-                       value_min, value_max
-                FROM signals ORDER BY seq
-                """
+                "SELECT metric_name, experiment_hash, MIN(step), MAX(step), COUNT(*) "
+                f"FROM signals WHERE 1=1{where} GROUP BY 1, 2", params
             ).fetchall()
-
-        result: dict = {}
-        for (metric, h, step, val, ts, audit, marker, split, tags, note,
-             outliers, outlier_count, sample_count, trend_value, trend_margin,
-             value_min, value_max) in rows:
-            entry = {
-                "model_age": step,
-                "metric_name": metric,
-                "metric_value": val,
-                "experiment_hash": h,
-                "timestamp": int(ts) if ts is not None else 0,
-                "audit_mode": bool(audit),
-                "is_evaluation_marker": bool(marker),
-                "split_name": split or "",
-                "evaluation_tags": json.loads(tags) if tags else [],
+        out: dict = {}
+        for metric, h, lo, hi, n in rows:
+            out.setdefault(metric, {})[h] = {
+                "first_step": int(lo), "last_step": int(hi), "count": int(n),
             }
-            if note:
-                entry["point_note"] = note
-            parsed_outliers = self._decode_outliers(outliers)
-            if parsed_outliers:
-                entry["outliers"] = parsed_outliers
-                entry["outlier_count"] = int(outlier_count or 0)
-            if sample_count:
-                entry["sample_count"] = int(sample_count)
-            if trend_value is not None and trend_margin is not None:
-                entry["trend_value"] = float(trend_value)
-                entry["trend_margin"] = float(trend_margin)
-            if value_min is not None and value_max is not None:
-                entry["value_min"] = float(value_min)
-                entry["value_max"] = float(value_max)
-            result.setdefault(metric, {}).setdefault(h, {}).setdefault(step, []).append(entry)
+        return out
+
+    def get_signal_history_downsampled(
+        self, max_points: int | None = None, metric_names=None, exp_hashes=None,
+        x_min=None, x_max=None, keep_special: bool = True,
+    ) -> dict:
+        """Aggregated history reduced to ~``max_points`` per curve *inside DuckDB*.
+
+        Same ``{metric: {hash: {step: [entry, ...]}}}`` shape as
+        :meth:`get_signal_history`, but the reduction happens in SQL, so the
+        number of rows crossing into Python is bounded by the number of points
+        actually drawable -- not by the table size. This is what makes a
+        hundred-million-row history openable.
+
+        The curve is split into ``max_points`` equal step-buckets and one
+        representative (the bucket's earliest step) is emitted per bucket, via a
+        streaming hash aggregate rather than a sort/window. Three further rules
+        keep the reduced curve faithful:
+
+        * the curve's true first and last steps are always emitted, so endpoints
+          and the x-extent never move under downsampling;
+        * evaluation markers, annotated points and steps carrying outliers are
+          never dropped (``keep_special``) -- those are exactly the points a
+          user zooms in to find;
+        * ``max_points`` is clamped to at least ``_MIN_POINTS_PER_CURVE``.
+
+        Args:
+            max_points: target points per curve. ``None`` uses
+                ``WL_SIGNAL_MAX_POINTS_PER_CURVE``.
+            metric_names / exp_hashes: restrict to these curves. Passing the one
+                signal being zoomed keeps a zoom refetch proportional to that
+                plot, not to the whole dashboard.
+            x_min / x_max: restrict to a step range -- the zoom path. Buckets
+                are laid out across the *visible* range, so zooming in resolves
+                real detail instead of restretching the same points.
+            keep_special: emit marker/annotated/outlier rows regardless of
+                bucketing.
+        """
+        n_buckets = max(int(max_points or _DEFAULT_MAX_POINTS_PER_CURVE),
+                        _MIN_POINTS_PER_CURVE)
+        where, params = self._scope_filters(metric_names, exp_hashes, x_min, x_max)
+        cols = ", ".join(_SIGNAL_READ_COLS)
+        # arg_min(col, step) picks each column from the bucket's earliest-step
+        # row, so a representative is one real row rather than a blend. Rows
+        # sharing a step within a bucket tie arbitrarily -- acceptable for a
+        # decimated view, and the zoom path resolves them.
+        picks = ", ".join(
+            f"arg_min({c}, step) AS {c}" for c in _SIGNAL_READ_COLS
+            if c not in ("metric_name", "experiment_hash", "step")
+        )
+        sql = f"""
+        WITH scoped AS (
+            SELECT {cols} FROM signals WHERE 1=1{where}
+        ),
+        bounds AS (
+            SELECT metric_name AS m, experiment_hash AS h,
+                   MIN(step) AS lo, MAX(step) AS hi
+            FROM scoped GROUP BY 1, 2
+        ),
+        tagged AS (
+            SELECT s.*,
+                   CASE WHEN b.hi <= b.lo THEN 0
+                        ELSE CAST(((s.step - b.lo) * {n_buckets}) / (b.hi - b.lo)
+                                  AS BIGINT)
+                   END AS bucket
+            FROM scoped s
+            JOIN bounds b
+              ON s.metric_name = b.m AND s.experiment_hash = b.h
+        ),
+        reps AS (
+            SELECT metric_name, experiment_hash, MIN(step) AS step, {picks}
+            FROM tagged GROUP BY metric_name, experiment_hash, bucket
+        ),
+        ends AS (
+            SELECT {cols} FROM scoped s
+            JOIN bounds b ON s.metric_name = b.m AND s.experiment_hash = b.h
+            WHERE s.step = b.lo OR s.step = b.hi
+        )
+        SELECT {cols} FROM reps
+        UNION ALL
+        SELECT {cols} FROM ends
+        """
+        special_sql = f"""
+        SELECT {cols} FROM signals
+        WHERE 1=1{where}
+          AND (is_evaluation_marker
+               OR (point_note IS NOT NULL AND point_note <> '')
+               OR COALESCE(outlier_count, 0) > 0)
+        LIMIT {_MAX_SPECIAL_ROWS + 1}
+        """
+        with self._lock:
+            self._flush_stage()
+            rows = self._conn.execute(sql, params).fetchall()
+            special = (self._conn.execute(special_sql, params).fetchall()
+                       if keep_special else [])
+        if len(special) > _MAX_SPECIAL_ROWS:
+            logger.warning(
+                "Signal history: more than %d marker/annotated/outlier points "
+                "matched; keeping the first %d. Narrow the step range or the "
+                "signal set to see the rest.",
+                _MAX_SPECIAL_ROWS, _MAX_SPECIAL_ROWS)
+            special = special[:_MAX_SPECIAL_ROWS]
+
+        # UNION ALL can repeat a row across the three branches; dedupe on the
+        # identity the UI keys on. Bounded by the reduced row count, not by the
+        # table size.
+        seen: set = set()
+        result: dict = {}
+        for row in itertools.chain(rows, special):
+            key = (row[0], row[1], row[2])
+            if key in seen:
+                continue
+            seen.add(key)
+            self._accumulate_history_row(result, row)
+        for metric in result.values():
+            for steps in metric.values():
+                for entries in steps.values():
+                    entries.sort(key=lambda e: e.get("timestamp", 0))
+        return result
+
+    def iter_signal_rows(self, metric_names=None, exp_hashes=None,
+                         x_min=None, x_max=None, batch_size: int | None = None):
+        """Stream raw ``signals`` rows as ``(graph_name, hash, step, value)``.
+
+        The complete-fidelity read that does NOT build the nested history dict.
+        ``get_signal_history(max_points=None)`` allocates a metadata dict per row
+        before the caller sees anything, so exporting a large table costs several
+        multiples of the table in RAM. This yields plain tuples in batches, so
+        peak memory is one batch plus whatever the consumer keeps.
+
+        Consumers that write incrementally (parquet row groups, CSV append) stay
+        bounded end to end; one that appends everything to a list is still
+        proportional to the table -- see :meth:`copy_signals_to_parquet` for the
+        path that never brings the rows into Python at all.
+        """
+        n = int(batch_size or _HISTORY_STREAM_CHUNK)
+        where, params = self._scope_filters(metric_names, exp_hashes, x_min, x_max)
+        with self._lock:
+            self._flush_stage()
+            cur = self._conn.execute(
+                "SELECT metric_name, experiment_hash, step, metric_value "
+                f"FROM signals WHERE 1=1{where} "
+                "ORDER BY metric_name, experiment_hash, step", params)
+            while True:
+                batch = cur.fetchmany(n)
+                if not batch:
+                    return
+                yield from batch
+
+    def copy_signals_to_parquet(self, path: str, metric_names=None,
+                                exp_hashes=None, x_min=None, x_max=None) -> str:
+        """Export the full signal history straight from DuckDB to parquet.
+
+        Bounded regardless of table size: DuckDB streams the result to the file
+        itself, so no row is ever a Python object. This is the only export path
+        that is safe on a hundred-million-row history.
+        """
+        where, params = self._scope_filters(metric_names, exp_hashes, x_min, x_max)
+        safe = str(path).replace("'", "''")
+        with self._lock:
+            self._flush_stage()
+            self._conn.execute(
+                "COPY (SELECT metric_name AS graph_name, experiment_hash, step, "
+                f"metric_value FROM signals WHERE 1=1{where} "
+                "ORDER BY metric_name, experiment_hash, step) "
+                f"TO '{safe}' (FORMAT PARQUET)", params)
+        return path
+
+    def _accumulate_history_row(self, result: dict, row) -> None:
+        """Turn one `signals` row into an entry dict under result[m][h][step]."""
+        (metric, h, step, val, ts, audit, marker, split, tags, note,
+         outliers, outlier_count, sample_count, trend_value, trend_margin,
+         value_min, value_max) = row
+        entry = {
+            "model_age": step,
+            "metric_name": metric,
+            "metric_value": val,
+            "experiment_hash": h,
+            "timestamp": int(ts) if ts is not None else 0,
+            "audit_mode": bool(audit),
+            "is_evaluation_marker": bool(marker),
+            "split_name": split or "",
+            "evaluation_tags": json.loads(tags) if tags else [],
+        }
+        if note:
+            entry["point_note"] = note
+        parsed_outliers = self._decode_outliers(outliers)
+        if parsed_outliers:
+            entry["outliers"] = parsed_outliers
+            entry["outlier_count"] = int(outlier_count or 0)
+        if sample_count:
+            entry["sample_count"] = int(sample_count)
+        if trend_value is not None and trend_margin is not None:
+            entry["trend_value"] = float(trend_value)
+            entry["trend_margin"] = float(trend_margin)
+        if value_min is not None and value_max is not None:
+            entry["value_min"] = float(value_min)
+            entry["value_max"] = float(value_max)
+        result.setdefault(metric, {}).setdefault(h, {}).setdefault(step, []).append(entry)
+
+    def get_signal_history(self, max_points: int | None = -1, metric_names=None,
+                           exp_hashes=None, x_min=None, x_max=None):
+        """Aggregated history as ``{metric: {hash: {step: [entry, ...]}}}``.
+
+        Downsampled by default. ``max_points`` semantics:
+
+        * omitted / ``-1`` -- reduce to ``WL_SIGNAL_MAX_POINTS_PER_CURVE`` per
+          curve. This is the UI path and the safe default: a full read of a
+          large history is what exhausts memory.
+        * an int -- reduce to that many points per curve.
+        * ``None`` -- **every** row. Only for export/snapshot paths that need
+          full fidelity. Streams in chunks rather than one ``fetchall()``, but
+          the assembled dict still holds one entry per row, so on a very large
+          table it is inherently proportional to the table.
+        """
+        if max_points is not None:
+            return self.get_signal_history_downsampled(
+                max_points=None if max_points == -1 else max_points,
+                metric_names=metric_names, exp_hashes=exp_hashes,
+                x_min=x_min, x_max=x_max)
+
+        where, params = self._scope_filters(metric_names, exp_hashes, x_min, x_max)
+        cols = ", ".join(_SIGNAL_READ_COLS)
+        result: dict = {}
+        with self._lock:
+            self._flush_stage()
+            n = self._conn.execute(
+                f"SELECT COUNT(*) FROM signals WHERE 1=1{where}", params
+            ).fetchone()[0]
+            if n > _HISTORY_STREAM_CHUNK:
+                logger.warning(
+                    "get_signal_history(max_points=None) is materialising %s rows; "
+                    "this is the uncapped export path. Pass max_points for the "
+                    "UI/read path so the reduction happens in DuckDB.", f"{n:,}")
+            # ORDER BY (metric, hash, step) rides the curve index; the previous
+            # ORDER BY seq forced a sort of the whole table on every read.
+            cur = self._conn.execute(
+                f"SELECT {cols} FROM signals WHERE 1=1{where} "
+                "ORDER BY metric_name, experiment_hash, step", params)
+            while True:
+                batch = cur.fetchmany(_HISTORY_STREAM_CHUNK)
+                if not batch:
+                    break
+                for row in batch:
+                    self._accumulate_history_row(result, row)
         return result
 
     def get_current_signaL_history(self, graph_name: str, meta: bool = False):
@@ -1865,7 +2160,9 @@ class LoggerQueue:
 
         return {
             "graph_names": sorted(self.graph_names),
-            "signal_history": self.get_signal_history(),
+            # Snapshots restore state; they must be lossless, so they take the
+            # uncapped path rather than the UI default.
+            "signal_history": self.get_signal_history(max_points=None),
             "signal_history_per_sample": per_sample_compact,
             "signal_history_per_instance": per_instance_compact,
         }

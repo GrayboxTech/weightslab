@@ -187,8 +187,8 @@ class ExperimentHashGenerator:
             arch_info = []
 
             # Model class name
-            arch_info.append(f"previously_loaded:{_last_time_loaded}") # Add a unique timestamp to ensure different hash for each load, even if architecture is the same
-            arch_info.append(f"class:{model.__class__.__name__}")
+            # arch_info.append(f"previously_loaded:{_last_time_loaded}") # Add a unique timestamp to ensure different hash for each load, even if architecture is the same - Update 20260819 not sure of the goal here anymore
+            arch_info.append(f"class:{model.__class__.__name__ if not hasattr(model, 'model') else model.model.__class__.__name__}")
             arch_info.append(f"init_step:{int(model_init_step)}")
 
             # Layer structure
@@ -236,6 +236,10 @@ class ExperimentHashGenerator:
         config_cp.pop('root_log_dir', None)
         config_cp.pop('is_training', None)
         config_cp.pop('pause_at_step', None)
+        # experiment_name is a user-facing label managed by WeightsLab (see
+        # CheckpointManager.rename_run) -- it must be renamable without ever
+        # flipping which experiment hash a run resolves to.
+        config_cp.pop('experiment_name', None)
         # config_cp.pop('auditor_mode', None) # Audit should be another state
         if 'auditor_mode' not in config_cp:
             config_cp['auditor_mode'] = False
