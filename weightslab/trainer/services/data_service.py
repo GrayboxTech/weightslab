@@ -2189,6 +2189,14 @@ class DataService:
                         tag_name = col[len(f"{SampleStatsEx.TAG.value}:"):]
                         if tag_name not in categorical:
                             tags.add(tag_name)
+            # Tags declared through the UI/SDK that no sample wears yet: they have
+            # no column to be discovered from, and dropping them here is what made
+            # a freshly created tag disappear on the next refresh.
+            declared = getattr(getattr(self, "_df_manager", None), "get_declared_boolean_tags", None)
+            if callable(declared):
+                for tag_name in declared():
+                    if tag_name not in categorical:
+                        tags.add(tag_name)
         except Exception as e:
             logger.warning(f"Error collecting unique tags: {e}")
         return sorted(list(tags))
@@ -5414,6 +5422,57 @@ class DataService:
             message="Data state saved to H5 (JSON snapshot not available).",
         )
 
+    def _register_tag(self, tag_name: str):
+        """Declare a boolean tag that no sample wears yet.
+
+        The painter lets a tag be created before it is painted onto anything. Left
+        to the data alone such a tag has nowhere to live -- ``_get_unique_tags``
+        reads the tag list back out of the dataframe's ``tag:<name>`` columns -- so
+        it would vanish on the next refresh. Registering it here makes the
+        experiment, not the browser, the place a created tag lives.
+        """
+        tag_name = str(tag_name or "").strip()
+        prefix = f"{SampleStatsEx.TAG.value}:"
+        if tag_name.startswith(prefix):
+            tag_name = tag_name[len(prefix):]
+        if not tag_name:
+            return pb2.DataEditsResponse(
+                success=False,
+                message="Missing tag name to register.",
+            )
+
+        if self._df_manager is None:
+            return pb2.DataEditsResponse(
+                success=False,
+                message="Dataframe manager is not available; cannot register tag.",
+            )
+
+        try:
+            registered = self._df_manager.register_boolean_tag(tag_name)
+        except Exception as e:
+            logger.error(f"[EditDataSample] Failed to register tag '{tag_name}': {e}", exc_info=True)
+            return pb2.DataEditsResponse(
+                success=False,
+                message=f"Failed to register tag: {e}",
+            )
+
+        if not registered:
+            return pb2.DataEditsResponse(
+                success=False,
+                message=f"Tag '{tag_name}' could not be registered (it may already exist as a categorical tag).",
+            )
+
+        # Pull the new column into the service's view so the tag is reported by
+        # the very next query rather than one refresh later.
+        self._slowUpdateInternals(force=True)
+
+        self._log_audit("tag_register", "success", {"tag_name": tag_name})
+
+        return pb2.DataEditsResponse(
+            success=True,
+            message=f"Tag '{tag_name}' registered",
+        )
+
     def EditDataSample(self, request, context):
         """
         Edit sample metadata (tags and discarded).
@@ -5428,6 +5487,11 @@ class DataService:
 
         self._ctx.ensure_components()
         components = self._ctx.components
+
+        # Declaring a tag touches no sample, so it must not pause the run --
+        # handled before the pause below.
+        if request.stat_name == "__register_tag__":
+            return self._register_tag(request.string_value)
 
         # Pause training if it's currently running
         trainer = components.get("trainer")
@@ -5637,7 +5701,7 @@ class DataService:
         if not request.stat_name or not request.stat_name.startswith(SampleStatsEx.TAG.value) and request.stat_name not in [SampleStatsEx.DISCARDED.value]:
             return pb2.DataEditsResponse(
                 success=False,
-                message="Only 'tags', 'discarded', '__copy_metadata__', '__delete_metadata__', '__save_data_state__', '__force_h5_write_and_save__', and '__discard_by_tag__' edits are supported.",
+                message="Only 'tags', 'discarded', '__copy_metadata__', '__delete_metadata__', '__save_data_state__', '__force_h5_write_and_save__', '__register_tag__', and '__discard_by_tag__' edits are supported.",
             )
 
         # =====================================================================
@@ -5742,6 +5806,12 @@ class DataService:
                             logger.info(f"[EditDataSample] Deleting tag column: {column_name}")
                             # Delete the column from storage
                             self._df_manager.drop_column(column_name)
+
+                            # ...and from the declared-tag registry, or the tag
+                            # would be reported again on the next query.
+                            unregister = getattr(self._df_manager, "unregister_boolean_tag", None)
+                            if callable(unregister):
+                                unregister(column_name)
 
                             # Remove from in-memory dataframe if it exists
                             if self._all_datasets_df is not None:

@@ -591,6 +591,91 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                 message=f"Error: {str(e)}"
             )
 
+    def _get_checkpoint_manager(self):
+        self._ctx.ensure_components()
+        checkpoint_manager = self._ctx.components.get("checkpoint_manager")
+        if checkpoint_manager is None:
+            checkpoint_manager = ledgers.get_checkpoint_manager()
+        return checkpoint_manager
+
+    def ListExperimentRuns(self, request, context):
+        """List every run (experiment hash) recorded under this root_log_dir,
+        each with its stable, renamable experiment_name and notes."""
+        try:
+            checkpoint_manager = self._get_checkpoint_manager()
+            if checkpoint_manager is None:
+                return pb2.ListExperimentRunsResponse(runs=[])
+
+            runs = [
+                pb2.ExperimentRunInfo(
+                    experiment_hash=run.get('hash', ''),
+                    experiment_name=run.get('experiment_name', '') or '',
+                    notes=run.get('notes', '') or '',
+                    created=run.get('created', '') or '',
+                    last_used=run.get('last_used', '') or '',
+                    latest_weight_step=(
+                        run.get('latest_weight_step')
+                        if run.get('latest_weight_step') is not None
+                        else -1
+                    ),
+                    is_current=bool(run.get('is_current', False)),
+                )
+                for run in checkpoint_manager.list_runs()
+            ]
+            return pb2.ListExperimentRunsResponse(runs=runs)
+        except Exception as e:
+            logger.error(f"Error listing experiment runs: {str(e)}")
+            return pb2.ListExperimentRunsResponse(runs=[])
+
+    def RenameExperimentRun(self, request, context):
+        """Rename a run's experiment_name (manifest-only; never changes its hash)."""
+        try:
+            checkpoint_manager = self._get_checkpoint_manager()
+            if checkpoint_manager is None:
+                return pb2.RenameExperimentRunResponse(
+                    success=False, message="Checkpoint manager not initialized"
+                )
+
+            success = checkpoint_manager.rename_run(request.experiment_hash, request.new_name)
+            self._log_audit(
+                "experiment_rename",
+                "success" if success else "failed",
+                {"experiment_hash": request.experiment_hash, "new_name": request.new_name},
+            )
+            return pb2.RenameExperimentRunResponse(
+                success=success,
+                message=(
+                    f"Renamed {request.experiment_hash} to '{request.new_name}'"
+                    if success
+                    else f"Failed to rename {request.experiment_hash}"
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Error renaming experiment run: {str(e)}")
+            return pb2.RenameExperimentRunResponse(success=False, message=f"Error: {str(e)}")
+
+    def SetExperimentRunNotes(self, request, context):
+        """Attach/replace a free-text note for a run (manifest-only)."""
+        try:
+            checkpoint_manager = self._get_checkpoint_manager()
+            if checkpoint_manager is None:
+                return pb2.SetExperimentRunNotesResponse(
+                    success=False, message="Checkpoint manager not initialized"
+                )
+
+            success = checkpoint_manager.set_run_notes(request.experiment_hash, request.notes)
+            return pb2.SetExperimentRunNotesResponse(
+                success=success,
+                message=(
+                    "Notes saved"
+                    if success
+                    else f"Failed to save notes for {request.experiment_hash}"
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Error setting experiment run notes: {str(e)}")
+            return pb2.SetExperimentRunNotesResponse(success=False, message=f"Error: {str(e)}")
+
     # -------------------------------------------------------------------------
     # Evaluation mode RPC handlers
     # -------------------------------------------------------------------------

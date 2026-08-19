@@ -106,6 +106,10 @@ class LedgeredDataFrameManager:
         # list of allowed category values. Distinguishes multi-value string tags
         # (e.g. weather -> [rainy, sunny]) from the legacy boolean tags.
         self._categorical_tags: Dict[str, List[str]] = {}
+        # Boolean tags declared explicitly (painter/SDK) rather than discovered
+        # from a "tag:<name>" column. Keeps a created-but-unused tag alive across
+        # refreshes, which read the tag list back out of the data.
+        self._declared_boolean_tags: set[str] = set()
         self._enable_flushing_threads = enable_flushing_threads
         self._enable_h5_persistence = enable_h5_persistence
         self.first_init = True
@@ -385,6 +389,76 @@ class LedgeredDataFrameManager:
     def get_array_store(self) -> H5ArrayStore | None:
         """Get the array store instance."""
         return self._array_store
+
+    # ------------------------------------------------------------------
+    # Boolean tag registry
+    # ------------------------------------------------------------------
+    def register_boolean_tag(self, name: str) -> bool:
+        """Declare a boolean tag so it exists before any sample wears it.
+
+        A tag typed into the UI's painter has no sample attached to it yet, so
+        nothing in the data would report it and the next refresh would drop it.
+        Declaring it here makes the tag part of the experiment's state: the
+        ``tag:<name>`` column is created (all False) and the name is remembered,
+        so every subsequent query reports it whether or not it is used.
+
+        The column is materialized through the normal dirty-row path so the H5
+        store learns about it on the next flush, exactly as a painted tag would.
+        Returns True when the tag is registered (or already was).
+        """
+        prefix = SampleStats.Ex.TAG.value + ":"
+        name = str(name).strip()
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+        if not name or name.lower() == "none":
+            return False
+        # A categorical tag is a different kind of column (string values, with a
+        # declared category set) -- never shadow one with a boolean.
+        if self.is_categorical_tag(name):
+            return False
+
+        column = prefix + name
+        first_sample_id = None
+        with self._lock:
+            self._declared_boolean_tags.add(name)
+            if not self._df.empty and column not in self._df.columns:
+                self._df[column] = False
+                index = self._df.index
+                first = index[0]
+                first_sample_id = first[0] if isinstance(index, pd.MultiIndex) else first
+
+        # One dirty row is enough for the store to learn the new column; marking
+        # every row would rewrite the whole dataset to record an unused tag.
+        if first_sample_id is not None:
+            try:
+                self.mark_dirty_batch([first_sample_id], force_flush=True)
+            except Exception as e:
+                logger.debug(f"[LedgeredDataFrameManager] Could not mark tag column dirty: {e}")
+        return True
+
+    def unregister_boolean_tag(self, name: str) -> None:
+        """Forget a declared boolean tag (its column is dropped separately).
+
+        Without this a deleted tag would be re-reported from the registry and the
+        chip would come straight back on the next refresh.
+        """
+        prefix = SampleStats.Ex.TAG.value + ":"
+        name = str(name).strip()
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+        if not name:
+            return
+        with self._lock:
+            self._declared_boolean_tags.discard(name)
+
+    def get_declared_boolean_tags(self) -> List[str]:
+        """Names (without the ``tag:`` prefix) of tags declared via the UI/SDK.
+
+        Includes tags no sample wears yet, which is the whole point: they have to
+        survive a refresh driven by what the data currently contains.
+        """
+        with self._lock:
+            return sorted(self._declared_boolean_tags)
 
     # ------------------------------------------------------------------
     # Categorical tag registry

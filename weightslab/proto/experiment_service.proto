@@ -82,6 +82,12 @@ service ExperimentService {
   // Checkpoint restore
   rpc RestoreCheckpoint (RestoreCheckpointRequest) returns (RestoreCheckpointResponse);
 
+  // Runs (experiment hashes) recorded under this root_log_dir: list them,
+  // and rename/annotate them independent of the hash itself.
+  rpc ListExperimentRuns (ListExperimentRunsRequest) returns (ListExperimentRunsResponse);
+  rpc RenameExperimentRun (RenameExperimentRunRequest) returns (RenameExperimentRunResponse);
+  rpc SetExperimentRunNotes (SetExperimentRunNotesRequest) returns (SetExperimentRunNotesResponse);
+
   // Evaluation mode
   rpc TriggerEvaluation (TriggerEvaluationRequest) returns (TriggerEvaluationResponse);
   rpc GetEvaluationStatus (GetEvaluationStatusRequest) returns (GetEvaluationStatusResponse);
@@ -762,6 +768,43 @@ message RestoreCheckpointRequest {
 message RestoreCheckpointResponse {
   bool success = 1;            // Whether restore was successful
   string message = 2;          // Details/error message
+}
+
+// --- Experiment Runs (list / rename / notes) ---
+message ExperimentRunInfo {
+  string experiment_hash = 1;      // 24-char HP_MODEL_DATA hash
+  string experiment_name = 2;      // User-facing label, from config or auto-generated
+  string notes = 3;                // Free-text note, empty if unset
+  string created = 4;              // ISO-8601
+  string last_used = 5;            // ISO-8601
+  int32 latest_weight_step = 6;    // -1 if no weight checkpoint saved yet
+  bool is_current = 7;             // Whether this is the manager's currently loaded run
+}
+
+message ListExperimentRunsRequest {}
+
+message ListExperimentRunsResponse {
+  repeated ExperimentRunInfo runs = 1;
+}
+
+message RenameExperimentRunRequest {
+  string experiment_hash = 1;
+  string new_name = 2;
+}
+
+message RenameExperimentRunResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message SetExperimentRunNotesRequest {
+  string experiment_hash = 1;
+  string notes = 2;
+}
+
+message SetExperimentRunNotesResponse {
+  bool success = 1;
+  string message = 2;
 }
 
 // --- Evaluation Mode ---

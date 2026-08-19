@@ -1772,6 +1772,9 @@ def keep_serving(timeout: int = None, release_gpu: bool = False) -> None:
         release_gpu: If ``True``, move tracked torch objects to CPU and release
             CUDA cached memory before entering the wait loop.
     """
+    # Ensure sync first
+    drain_signals()
+
     if release_gpu:
         _release_gpu_resources()
         logger.info("WeightsLab switched to CPU idle mode for serving.")
