@@ -419,6 +419,127 @@ class TestDataServiceHelpersUnit(unittest.TestCase):
         tags = service._get_unique_tags()
         self.assertEqual(tags, ["alpha", "zeta"])
 
+    def test_get_unique_tags_includes_declared_but_unused_tags(self):
+        """A tag created in the painter has no column until it is painted.
+
+        It still has to be reported, or it vanishes from the UI on the very next
+        refresh -- which is the bug the declared-tag registry exists to fix.
+        """
+        service = DataService.__new__(DataService)
+        service._all_datasets_df = pd.DataFrame(
+            {f"{SampleStatsEx.TAG.value}:painted": [True], "value": [1]}
+        )
+
+        class _Manager:
+            def get_declared_boolean_tags(self):
+                return ["declared", "painted"]
+
+            def get_categorical_tags(self):
+                return {}
+
+        service._df_manager = _Manager()
+
+        # Reported once each, whether the tag came from a column, the registry,
+        # or (like "painted") both.
+        self.assertEqual(service._get_unique_tags(), ["declared", "painted"])
+
+    def test_get_unique_tags_ignores_declared_tag_that_is_categorical(self):
+        service = DataService.__new__(DataService)
+        service._all_datasets_df = pd.DataFrame({"value": [1]})
+
+        class _Manager:
+            def get_declared_boolean_tags(self):
+                return ["weather"]
+
+            def get_categorical_tags(self):
+                return {"weather": ["rainy", "sunny"]}
+
+        service._df_manager = _Manager()
+
+        # Categorical tags are reported separately, as CategoricalTagDefs.
+        self.assertEqual(service._get_unique_tags(), [])
+
+    def test_get_unique_tags_survives_a_manager_without_the_registry(self):
+        service = DataService.__new__(DataService)
+        service._all_datasets_df = pd.DataFrame(
+            {f"{SampleStatsEx.TAG.value}:alpha": [True]}
+        )
+        service._df_manager = object()
+        self.assertEqual(service._get_unique_tags(), ["alpha"])
+
+    def test_register_tag_declares_it_on_the_dataframe_manager(self):
+        service = DataService.__new__(DataService)
+        service._all_datasets_df = pd.DataFrame({"value": [1]})
+        service._log_audit = lambda *args, **kwargs: None
+        service._slowUpdateInternals = lambda **kwargs: None
+
+        registered = []
+
+        class _Manager:
+            def register_boolean_tag(self, name):
+                registered.append(name)
+                return True
+
+        service._df_manager = _Manager()
+
+        response = service._register_tag("tag:fresh")
+        self.assertTrue(response.success)
+        # The "tag:" prefix is the column's, not the tag's.
+        self.assertEqual(registered, ["fresh"])
+
+    def test_register_tag_rejects_a_blank_name_and_a_missing_manager(self):
+        service = DataService.__new__(DataService)
+        service._all_datasets_df = pd.DataFrame({"value": [1]})
+        service._log_audit = lambda *args, **kwargs: None
+        service._slowUpdateInternals = lambda **kwargs: None
+        service._df_manager = None
+
+        self.assertFalse(service._register_tag("   ").success)
+        self.assertFalse(service._register_tag("fresh").success)
+
+    def test_edit_data_sample_registers_a_tag_without_pausing_training(self):
+        """Declaring a tag edits no sample, so it must not stop the run.
+
+        EditDataSample pauses training before applying an edit; registration is
+        handled ahead of that, and this pins it there.
+        """
+        service = DataService.__new__(DataService)
+        service._all_datasets_df = pd.DataFrame({"value": [1]})
+        service._log_audit = lambda *args, **kwargs: None
+        service._slowUpdateInternals = lambda **kwargs: None
+
+        class _Trainer:
+            paused = False
+
+            def pause(self):
+                self.paused = True
+
+        trainer = _Trainer()
+        hyperparams = {"is_training": True}
+
+        class _Ctx:
+            components = {"trainer": trainer, "hyperparams": hyperparams}
+
+            def ensure_components(self):
+                return None
+
+        service._ctx = _Ctx()
+
+        class _Manager:
+            def register_boolean_tag(self, name):
+                return True
+
+        service._df_manager = _Manager()
+
+        class _Request:
+            stat_name = "__register_tag__"
+            string_value = "fresh"
+
+        response = service.EditDataSample(_Request(), None)
+        self.assertTrue(response.success)
+        self.assertFalse(trainer.paused)
+        self.assertTrue(hyperparams["is_training"])
+
     def test_parse_tags_handles_mixed_separators(self):
         service = DataService.__new__(DataService)
         parsed = service._parse_tags(" hard , medium;easy ; ")
