@@ -1,3 +1,4 @@
+import math
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -97,6 +98,90 @@ class TestExperimentServiceUnit(unittest.TestCase):
         self.assertEqual(len(response.points), 1)
         self.assertEqual(response.points[0].metric_name, "train/acc")
         signal_logger.get_and_clear_queue.assert_called_once()
+
+    def test_get_step_samples_includes_per_sample_values(self):
+        # The "Highlight step samples" -> "snapshot this step" flow needs each
+        # id's own value at the step, not just the ids -- see query_per_sample_at_step.
+        signal_logger = MagicMock()
+        signal_logger.resolve_graph_name.return_value = "train/loss"
+        signal_logger.get_step_sample_ids.return_value = (["a", "b"], 2)
+        signal_logger.query_per_sample_at_step.return_value = [("a", 0.5), ("b", 1.25)]
+
+        ctx = _DummyCtx(components={"signal_logger": signal_logger})
+        with patch("weightslab.trainer.services.experiment_service.DataService"):
+            service = ExperimentService(ctx)
+
+        response = service.GetStepSamples(
+            pb2.StepSamplesRequest(metric_name="train/loss", experiment_hash="hash1", model_age=10),
+            None,
+        )
+
+        self.assertTrue(response.success)
+        self.assertEqual(list(response.sample_ids), ["a", "b"])
+        self.assertEqual(list(response.sample_values), [0.5, 1.25])
+        signal_logger.query_per_sample_at_step.assert_called_once_with(
+            "train/loss", ["a", "b"], 10, "hash1")
+
+    def test_get_step_samples_empty_hash_queries_any_run(self):
+        # experiment_hash="" means "any run" for get_step_sample_ids, but
+        # query_per_sample_at_step's "any" is None -- "" would filter to a
+        # literal empty-string hash and silently return nothing.
+        signal_logger = MagicMock()
+        signal_logger.resolve_graph_name.return_value = "train/loss"
+        signal_logger.get_step_sample_ids.return_value = (["a"], 1)
+        signal_logger.query_per_sample_at_step.return_value = [("a", 0.5)]
+
+        ctx = _DummyCtx(components={"signal_logger": signal_logger})
+        with patch("weightslab.trainer.services.experiment_service.DataService"):
+            service = ExperimentService(ctx)
+
+        service.GetStepSamples(
+            pb2.StepSamplesRequest(metric_name="train/loss", experiment_hash="", model_age=10),
+            None,
+        )
+
+        signal_logger.query_per_sample_at_step.assert_called_once_with(
+            "train/loss", ["a"], 10, None)
+
+    def test_get_step_samples_nan_for_a_sample_missing_its_value(self):
+        signal_logger = MagicMock()
+        signal_logger.resolve_graph_name.return_value = "train/loss"
+        signal_logger.get_step_sample_ids.return_value = (["a", "b"], 2)
+        # "b" has no per-sample row at this step (e.g. a differently-sized batch).
+        signal_logger.query_per_sample_at_step.return_value = [("a", 0.5)]
+
+        ctx = _DummyCtx(components={"signal_logger": signal_logger})
+        with patch("weightslab.trainer.services.experiment_service.DataService"):
+            service = ExperimentService(ctx)
+
+        response = service.GetStepSamples(
+            pb2.StepSamplesRequest(metric_name="train/loss", experiment_hash="hash1", model_age=10),
+            None,
+        )
+
+        self.assertEqual(response.sample_values[0], 0.5)
+        self.assertTrue(math.isnan(response.sample_values[1]))
+
+    def test_get_step_samples_value_lookup_failure_still_returns_ids(self):
+        # A value-lookup crash must not take down the ids the action actually
+        # needs to highlight the grid -- it degrades to "no snapshot values".
+        signal_logger = MagicMock()
+        signal_logger.resolve_graph_name.return_value = "train/loss"
+        signal_logger.get_step_sample_ids.return_value = (["a"], 1)
+        signal_logger.query_per_sample_at_step.side_effect = RuntimeError("duckdb boom")
+
+        ctx = _DummyCtx(components={"signal_logger": signal_logger})
+        with patch("weightslab.trainer.services.experiment_service.DataService"):
+            service = ExperimentService(ctx)
+
+        response = service.GetStepSamples(
+            pb2.StepSamplesRequest(metric_name="train/loss", experiment_hash="hash1", model_age=10),
+            None,
+        )
+
+        self.assertTrue(response.success)
+        self.assertEqual(list(response.sample_ids), ["a"])
+        self.assertTrue(math.isnan(response.sample_values[0]))
 
     @unittest.skip(
         "Skipped on dev: the break-by-slices aggregation (query_per_sample + "

@@ -290,6 +290,38 @@ def is_copy_metadata_column_name(column_name: str) -> bool:
     return bool(re.match(r".+_\d+@.+", name))
 
 
+def build_step_snapshot_column_name(signal_name: str, experiment_hash: str, step: int) -> str:
+    """Deterministic column name for a per-sample step snapshot: ``signal@hash@step``.
+
+    Unlike ``build_metadata_copy_column_names``, this never appends a counter
+    -- the (signal, hash, step) triple already identifies the snapshot
+    uniquely, so re-highlighting the same step overwrites the same column
+    instead of piling up copies.
+    """
+    name = str(signal_name or "").strip() or "signal"
+    name = name.replace("@", "_")
+    exp_hash = str(experiment_hash or "current_experiment_hash").strip() or "current_experiment_hash"
+    return f"{name}@{exp_hash}@{int(step)}"
+
+
+def apply_step_snapshot_to_dataframe(df: pd.DataFrame, column_name: str, values_by_sample_id: dict) -> pd.DataFrame:
+    """Write a new metadata column from a ``{sample_id: value}`` map.
+
+    A sample missing from the map (outside this step's batch, or its id
+    couldn't be matched) gets NaN, the same as any other metadata field a
+    sample simply doesn't have.
+    """
+    df[column_name] = df.index.astype(str).map(values_by_sample_id)
+    return df
+
+
+def is_step_snapshot_column_name(column_name: str) -> bool:
+    """True for a ``signal@hash@step`` column built by build_step_snapshot_column_name."""
+    name = str(column_name or "").strip()
+    parts = name.rsplit("@", 2)
+    return len(parts) == 3 and all(parts[:2]) and parts[2].isdigit()
+
+
 def detect_bbox_format(bboxes: np.ndarray) -> str:
     """Detect bounding box format: 'xyxy' (x1,y1,x2,y2) or 'xywh' (x,y,w,h).
 
@@ -3053,6 +3085,7 @@ class DataService:
                 root_log_dir, logger_q, df, signals=signals,
                 narrative_fn=self._agent.generate_report_narrative,
                 distributions=distributions, update_existing=bool(update_existing),
+                checkpoint_manager=cm,
             )
         except Exception as e:
             return f"Action: failed to generate report: {e}"
@@ -5581,6 +5614,103 @@ class DataService:
                         message=f"Failed to copy metadata column: {str(e)}",
                     )
 
+        if request.stat_name == "__save_step_signal_snapshot__":
+            # Backs the plot's "Highlight step samples" action: the per-sample
+            # value behind a plotted point lives only in the signal logger's
+            # per_sample table, which the next step overwrites the live
+            # metadata view of -- this freezes that step's values into their
+            # own column so they survive past it, the same way cloning does
+            # for an ordinary metadata field.
+            signal_name = str(request.string_value or "").strip()
+            sample_ids = [str(sid) for sid in request.samples_ids]
+            sample_values = list(request.sample_values)
+            if not signal_name:
+                return pb2.DataEditsResponse(
+                    success=False,
+                    message="Missing signal name for step snapshot.",
+                )
+            if not sample_ids or len(sample_ids) != len(sample_values):
+                return pb2.DataEditsResponse(
+                    success=False,
+                    message="Sample ids and values must be non-empty and equal in length.",
+                )
+
+            with self._watched_lock("_lock[EditDataSample/__save_step_signal_snapshot__]"):
+                try:
+                    self._slowUpdateInternals()
+                    if self._all_datasets_df is None or self._all_datasets_df.empty:
+                        return pb2.DataEditsResponse(
+                            success=False,
+                            message="No dataframe available to save the snapshot into.",
+                        )
+
+                    # The run these values came from -- the caller knows exactly
+                    # which curve was acted on, which the "currently training"
+                    # experiment isn't guaranteed to be (e.g. a board comparing
+                    # several finished runs). Only fall back when the caller
+                    # genuinely doesn't know it.
+                    experiment_hash = str(request.experiment_hash or "").strip()
+                    if not experiment_hash:
+                        checkpoint_manager = components.get("checkpoint_manager")
+                        if checkpoint_manager is not None and hasattr(checkpoint_manager, "get_current_experiment_hash"):
+                            experiment_hash = checkpoint_manager.get_current_experiment_hash()
+                    experiment_hash = str(experiment_hash or "current_experiment_hash")
+
+                    step = int(request.float_value)
+                    column_name = build_step_snapshot_column_name(signal_name, experiment_hash, step)
+                    # NaN entries (a sample id the caller couldn't resolve a
+                    # value for) are dropped rather than written as NaN, so a
+                    # partial batch doesn't clobber a previous, more complete
+                    # snapshot under the same deterministic name.
+                    values_by_id = {
+                        sid: val for sid, val in zip(sample_ids, sample_values)
+                        if val == val  # NaN != NaN
+                    }
+                    if not values_by_id:
+                        return pb2.DataEditsResponse(
+                            success=False,
+                            message="No finite per-sample values to snapshot.",
+                        )
+
+                    self._all_datasets_df = safe_reset_index(self._all_datasets_df)
+                    self._all_datasets_df = apply_step_snapshot_to_dataframe(
+                        self._all_datasets_df, column_name, values_by_id,
+                    )
+
+                    if SampleStatsEx.ORIGIN.value not in self._all_datasets_df.columns:
+                        return pb2.DataEditsResponse(
+                            success=False,
+                            message=f"Cannot save snapshot without '{SampleStatsEx.ORIGIN.value}' column in dataframe.",
+                        )
+
+                    for origin, origin_df in self._all_datasets_df.groupby(SampleStatsEx.ORIGIN.value, sort=False):
+                        update_df = pd.DataFrame(
+                            {
+                                "sample_id": origin_df.index.astype(str),
+                                SampleStatsEx.ORIGIN.value: origin,
+                                column_name: origin_df[column_name].values,
+                            }
+                        ).set_index("sample_id")
+                        self._df_manager.upsert_df(update_df, origin=str(origin), force_flush=True)
+
+                    try:
+                        self._df_manager.flush_if_needed_nonblocking(force=True)
+                    except Exception as flush_error:
+                        logger.warning(f"[EditDataSample] Flush after step snapshot failed: {flush_error}")
+
+                    self._slowUpdateInternals(force=True)
+
+                    return pb2.DataEditsResponse(
+                        success=True,
+                        message=f"Saved '{signal_name}' step {step} snapshot as '{column_name}'.",
+                    )
+                except Exception as e:
+                    logger.error(f"[EditDataSample] Failed to save step snapshot: {e}", exc_info=True)
+                    return pb2.DataEditsResponse(
+                        success=False,
+                        message=f"Failed to save step snapshot: {str(e)}",
+                    )
+
         if request.stat_name == "__delete_metadata__":
             target_column = str(request.string_value or "").strip()
             if not target_column:
@@ -5610,7 +5740,7 @@ class DataService:
                             message=f"Cannot delete protected metadata field: {target_column}",
                         )
 
-                    if not is_copy_metadata_column_name(target_column):
+                    if not is_copy_metadata_column_name(target_column) and not is_step_snapshot_column_name(target_column):
                         return pb2.DataEditsResponse(
                             success=False,
                             message=f"Only copied metadata can be deleted: {target_column}",

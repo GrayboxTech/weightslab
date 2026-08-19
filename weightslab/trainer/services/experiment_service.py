@@ -318,11 +318,29 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                 sample_ids=[], total_available=0,
             )
 
+        # Each id's own value at this exact step -- lets the "snapshot this
+        # step" action save real per-sample numbers rather than just the ids.
+        # `""` means "any run" for get_step_sample_ids above but query_per_sample_at_step
+        # takes None for that, hence the conversion.
+        exp_hash = str(request.experiment_hash or "") or None
+        values_by_id = {}
+        try:
+            values_by_id = {
+                str(sid): float(value)
+                for sid, value in signal_logger.query_per_sample_at_step(
+                    resolved, sample_ids, int(request.model_age), exp_hash)
+            }
+        except Exception:
+            logger.debug("GetStepSamples: could not fetch per-sample values for %s",
+                         metric_name, exc_info=True)
+        sample_values = [values_by_id.get(sid, float("nan")) for sid in sample_ids]
+
         return pb2.StepSamplesResponse(
             success=True,
             message=f"{len(sample_ids)} of {total} sample(s)",
             sample_ids=sample_ids,
             total_available=total,
+            sample_values=sample_values,
         )
 
     def _get_latest_logger_data_impl(self, request, context):

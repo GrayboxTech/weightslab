@@ -572,6 +572,11 @@ message StepSamplesResponse {
   string message = 2;
   repeated string sample_ids = 3;
   int32 total_available = 4;    // count before max_samples truncation
+  // Parallel to sample_ids: that sample's own value of `metric_name` at
+  // `model_age`, or NaN where the per-sample table has no row for it (e.g. an
+  // id from an older/differently-sized batch). Lets the UI snapshot the exact
+  // per-sample values behind a plotted step instead of only its ids.
+  repeated float sample_values = 5;
 }
 
 message GetSignalTrajectoryRequest {
@@ -677,6 +682,17 @@ message DataEditsRequest {
   // EDIT_REMOVE with float_value == -1 still deletes the whole tag column.
   bool is_categorical = 8;
   repeated string categories = 9;
+
+  // --- Per-sample snapshot support (stat_name == "__save_step_signal_snapshot__") ---
+  // One value per entry of samples_ids, written into a new metadata column
+  // (unlike float_value, which EDIT_OVERRIDE applies uniformly to every id).
+  // string_value carries the source signal name and float_value the step;
+  // see build_step_snapshot_column_name for the resulting column name.
+  repeated float sample_values = 10;
+  // The run these values came from (the curve the user acted on), embedded in
+  // the snapshot's column name. Empty falls back to the currently active
+  // experiment, same as __copy_metadata__'s own hash.
+  string experiment_hash = 11;
 }
 
 message DataEditsResponse {
