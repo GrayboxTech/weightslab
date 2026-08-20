@@ -4888,6 +4888,16 @@ def resolve_signal_classifier(signal_name):
     return _GLOBAL_CLASSIFIER or classify_loss_shape
 
 
+_SHAPE_LABELS: dict = {}
+
+
+def _label_counts(cache):
+    out = {}
+    for lab in cache.values():
+        out[lab] = out.get(lab, 0) + 1
+    return out
+
+
 def write_signal_shapes(signal_name, tag_name=None, classifier=None, exp_hash=None, sample_ids=None):
     """Reusable engine: classify each sample's own trajectory of *signal_name*
     into a categorical tag and return the ``{label: count}`` distribution.
@@ -4906,17 +4916,29 @@ def write_signal_shapes(signal_name, tag_name=None, classifier=None, exp_hash=No
     clf = classifier or resolve_signal_classifier(signal_name)
     if tag_name is None:
         tag_name = signal_name + "_shape" if signal_name.endswith('_loss') else signal_name + "_loss_shape"
+
+    # Labels for samples this pass does not reclassify are carried here, so an
+    # incremental call still returns a distribution over the WHOLE dataset, and
+    # a sample whose label is unchanged is not re-written to the ledger.
+    cache = _SHAPE_LABELS.setdefault(signal_name, {})
+    if sample_ids is not None and not list(sample_ids):
+        return _label_counts(cache)
+
     series = {}
     for sid, step, val, _ in query_signal_history(signal_name, exp_hash=exp_hash, sample_ids=sample_ids):
         series.setdefault(sid, []).append((step, val))
     by_label = {}
     for sid, pts in series.items():
         label = clf([v for _, v in sorted(pts)])
-        if label is not None:
-            by_label.setdefault(label, []).append(sid)
+        if label is None:
+            continue
+        if cache.get(sid) == label:
+            continue                      # unchanged -> no ledger write needed
+        cache[sid] = label
+        by_label.setdefault(label, []).append(sid)
     for label, sids in by_label.items():
         set_categorical_tag(sids, tag_name, label)
-    return {k: len(v) for k, v in by_label.items()}
+    return _label_counts(cache)
 
 
 def write_loss_shapes(loss_signal="loss_sample", classifier=None):
