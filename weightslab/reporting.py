@@ -29,6 +29,16 @@ logger = logging.getLogger(__name__)
 
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 _LOGO_PATH = _ASSETS_DIR / "logo.png"
+# Dark-mode variant of the GrayBx logo (same asset weights_studio's own
+# darkMode.ts swaps to for images/darkmode/logo.png) -- swapped in by the
+# report's theme-toggle script so the banner logo stays legible against the
+# dark background, exactly like the live Studio header.
+_LOGO_DARK_PATH = _ASSETS_DIR / "logo-dark.png"
+# The WeightsLab mark itself (the dot-grid icon used as weights_studio's
+# favicon) -- rendered next to the plain-text "WeightsLab" wordmark instead
+# of hand-coloring the W/L letters, so the report's branding is an actual
+# logo asset rather than styled text.
+_ICON_PATH = _ASSETS_DIR / "icon.png"
 
 # Brand colors (docs/_static/custom.css .wl-brand-w / .wl-brand-l) — reused
 # here to color-code signal health so it reads the same way across the docs
@@ -122,11 +132,11 @@ def _import_matplotlib():
         return None
 
 
-def _load_logo_base64() -> Optional[str]:
+def _load_asset_base64(path: Path) -> Optional[str]:
     try:
-        data = _LOGO_PATH.read_bytes()
+        data = path.read_bytes()
     except Exception as exc:
-        logger.debug("experiment report: logo not found at %s: %s", _LOGO_PATH, exc)
+        logger.debug("experiment report: asset not found at %s: %s", path, exc)
         return None
     return base64.b64encode(data).decode("ascii")
 
@@ -579,13 +589,17 @@ def _fmt_num(x) -> str:
 
 _BLOCK_TOOLBAR_HTML = (
     '<div class="wl-block-toolbar">'
+    '<button type="button" class="wl-block-btn wl-block-drag-handle" draggable="true" '
+    'title="Drag to reorder">&#10303;</button>'
     '<button type="button" class="wl-block-btn" data-action="move-up" title="Move up">&#8593;</button>'
     '<button type="button" class="wl-block-btn" data-action="move-down" title="Move down">&#8595;</button>'
     '{expand_btn}'
+    '{copy_btn}'
     '<button type="button" class="wl-block-btn wl-block-btn-danger" data-action="remove" title="Remove from report">&times;</button>'
     '</div>'
 )
 _EXPAND_BTN_HTML = '<button type="button" class="wl-block-btn" data-action="expand" title="Expand &amp; zoom">&#10530;</button>'
+_COPY_BTN_HTML = '<button type="button" class="wl-block-btn" data-action="copy" title="Copy plot image">&#10697;</button>'
 
 
 def _signal_card_html(entry: dict, block_id: str) -> str:
@@ -605,8 +619,12 @@ def _signal_card_html(entry: dict, block_id: str) -> str:
     color = entry["color"]
     series = entry.get("series") or []
     has_interactive = bool(series)
+    has_plot = has_interactive or bool(entry.get("plot_b64"))
 
-    toolbar = _BLOCK_TOOLBAR_HTML.format(expand_btn=_EXPAND_BTN_HTML if has_interactive else "")
+    toolbar = _BLOCK_TOOLBAR_HTML.format(
+        expand_btn=_EXPAND_BTN_HTML if has_interactive else "",
+        copy_btn=_COPY_BTN_HTML if has_plot else "",
+    )
     body = (
         f'<div class="wl-block wl-plot-block" data-block-id="{block_id}">'
         f'{toolbar}'
@@ -691,7 +709,10 @@ def _distribution_card_html(entry: dict, block_id: str) -> str:
     """
     name = html.escape(str(entry["name"]))
     has_image = bool(entry.get("resolved") and entry.get("n") and entry.get("plot_b64"))
-    toolbar = _BLOCK_TOOLBAR_HTML.format(expand_btn=_EXPAND_BTN_HTML if has_image else "")
+    toolbar = _BLOCK_TOOLBAR_HTML.format(
+        expand_btn=_EXPAND_BTN_HTML if has_image else "",
+        copy_btn=_COPY_BTN_HTML if has_image else "",
+    )
     head = (
         f'<div class="wl-block wl-plot-block" data-block-id="{block_id}">'
         f'{toolbar}'
@@ -843,6 +864,7 @@ def _runs_section_html(runs: list) -> str:
     rows_html = "".join(_row(r) for r in runs)
     return (
         '<div class="wl-block wl-runs-block" data-block-id="wl-runs">'
+        f'{_BLOCK_TOOLBAR_HTML.format(expand_btn="", copy_btn="")}'
         '<div class="wl-report-card">'
         '<table class="wl-report-runs-table">'
         '<thead><tr><th></th><th>Name</th><th>Hash</th><th>Notes</th><th>Created</th><th>Last used</th></tr></thead>'
@@ -885,17 +907,155 @@ _INTERACTIVE_JS = r"""
   }
 
   // ---- Generic block toolbar: move up/down, remove (any block type) ----
+  // Ranks blocks by DOCUMENT order rather than by DOM siblinghood -- the
+  // report has several independent block containers (the Signals grid, the
+  // optional per-column histogram grid, the lone Runs table, freeform
+  // title/text blocks), so
+  // a strict previousElementSibling/nextElementSibling check dead-ends the
+  // moment a block has no neighbor in its OWN container (e.g. the Runs
+  // block's neighbors are a <div id="wl-freeform-blocks"> and a
+  // <div class="wl-report-section"> -- neither has the "wl-block" class, so
+  // its move buttons silently did nothing). Walking the full list lets any
+  // block move past a section boundary into its neighboring container.
+  function allBlocks() {
+    return Array.prototype.slice.call(document.querySelectorAll(".wl-block"));
+  }
   function moveBlock(block, dir) {
-    var sibling = dir === "up" ? block.previousElementSibling : block.nextElementSibling;
-    if (!sibling || !sibling.classList || !sibling.classList.contains("wl-block")) return;
-    if (dir === "up") block.parentNode.insertBefore(block, sibling);
-    else block.parentNode.insertBefore(sibling, block);
+    var blocks = allBlocks();
+    var i = blocks.indexOf(block);
+    var j = dir === "up" ? i - 1 : i + 1;
+    if (i === -1 || j < 0 || j >= blocks.length) return;
+    var target = blocks[j];
+    // Re-parent `block` itself next to `target` (rather than swapping
+    // `target` into block's old spot) -- the two can live in different
+    // containers (e.g. the lone Runs block vs. the Signals grid), and
+    // `target`'s parent is only guaranteed to already contain `target`.
+    if (dir === "up") target.parentNode.insertBefore(block, target);
+    else target.parentNode.insertBefore(block, target.nextSibling);
+  }
+  // Disconnects a chart's ResizeObserver (if any) before destroying it --
+  // otherwise a pending observation can still fire into the now-dead chart
+  // (Chart.js's own teardown doesn't know about our observer) and throw.
+  function destroyChart(id) {
+    var chart = chartsById[id];
+    if (!chart) return;
+    if (chart.__wlResizeObserver) chart.__wlResizeObserver.disconnect();
+    chart.destroy();
+    delete chartsById[id];
   }
   function removeBlock(block) {
     if (!window.confirm("Remove this from the report?")) return;
     var canvas = block.querySelector("canvas");
-    if (canvas && chartsById[canvas.id]) { chartsById[canvas.id].destroy(); delete chartsById[canvas.id]; }
+    if (canvas) destroyChart(canvas.id);
     block.remove();
+  }
+
+  // ---- Copy a plot image to the clipboard (chart canvas or static
+  // distribution/fallback <img>), so a reader can paste it straight into a
+  // chat/doc/email without a separate screenshot step. ----
+  function flashCopyFeedback(btn, ok) {
+    var original = btn.innerHTML;
+    btn.innerHTML = ok ? "&#10003;" : "&#10007;";
+    setTimeout(function () { btn.innerHTML = original; }, 1200);
+  }
+  function writeImageBlobToClipboard(blob, btn) {
+    if (!blob || !navigator.clipboard || !window.ClipboardItem) { flashCopyFeedback(btn, false); return; }
+    navigator.clipboard.write([new ClipboardItem({ "image/png": blob })])
+      .then(function () { flashCopyFeedback(btn, true); })
+      .catch(function () { flashCopyFeedback(btn, false); });
+  }
+  function copyCanvasToClipboard(canvas, btn) {
+    canvas.toBlob(function (blob) { writeImageBlobToClipboard(blob, btn); });
+  }
+  function copyImageToClipboard(img, btn) {
+    // img.src is already a data: URL (base64 PNG) -- fetch() decodes it
+    // straight to a Blob, no canvas round-trip needed.
+    fetch(img.src).then(function (r) { return r.blob(); })
+      .then(function (blob) { writeImageBlobToClipboard(blob, btn); })
+      .catch(function () { flashCopyFeedback(btn, false); });
+  }
+  function copyBlockPlot(block, btn) {
+    var canvas = block.querySelector("canvas.wl-report-chart");
+    if (canvas) { copyCanvasToClipboard(canvas, btn); return; }
+    var img = block.querySelector("img.wl-report-plot");
+    if (img) copyImageToClipboard(img, btn);
+  }
+
+  // ---- Drag-and-drop reorder: dragging the toolbar's grab handle and
+  // dropping onto another block inserts before/after it depending on which
+  // half of that block the cursor is over -- same document-order-based move
+  // as the up/down buttons, so it also works across container boundaries. ----
+  var dragSrc = null;
+  function clearDropMarkers() {
+    document.querySelectorAll(".wl-block-drop-before, .wl-block-drop-after").forEach(function (el) {
+      el.classList.remove("wl-block-drop-before", "wl-block-drop-after");
+    });
+  }
+  function endDrag() {
+    if (dragSrc) dragSrc.classList.remove("wl-block-dragging");
+    clearDropMarkers();
+    dragSrc = null;
+  }
+  // ---- Manual resize (the CSS `resize: both` handle on .wl-plot-block) ----
+  // A plot card is a flex item (`.wl-report-grid` is flex-wrap, see the CSS)
+  // so it can share a row and grow to fill it by default; but that same
+  // flex-grow fights the resize handle on the main (horizontal) axis --
+  // every layout pass recomputes the item's width from flex-grow and
+  // silently overwrites whatever width the reader just dragged to, so only
+  // height ever stuck. Freezing the item to its own current pixel size
+  // right as a resize drag starts (detected by mousedown landing in the
+  // handle's ~20px corner) takes it out of flex redistribution first, so
+  // the native resize can then own both dimensions.
+  function initManualResize() {
+    document.querySelectorAll(".wl-plot-block").forEach(function (block) {
+      block.addEventListener("mousedown", function (e) {
+        var rect = block.getBoundingClientRect();
+        var nearCorner = (rect.right - e.clientX) < 20 && (rect.bottom - e.clientY) < 20;
+        if (!nearCorner) return;
+        block.style.flex = "0 0 auto";
+        block.style.width = rect.width + "px";
+        block.style.height = rect.height + "px";
+      });
+    });
+  }
+
+  function initDragReorder() {
+    document.addEventListener("dragstart", function (e) {
+      var handle = e.target.closest && e.target.closest(".wl-block-drag-handle");
+      if (!handle) return;
+      dragSrc = handle.closest(".wl-block");
+      if (!dragSrc) return;
+      e.dataTransfer.effectAllowed = "move";
+      try { e.dataTransfer.setData("text/plain", dragSrc.dataset.blockId || ""); } catch (err) {}
+      dragSrc.classList.add("wl-block-dragging");
+    });
+    document.addEventListener("dragover", function (e) {
+      if (!dragSrc) return;
+      var over = e.target.closest && e.target.closest(".wl-block");
+      if (!over || over === dragSrc) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      var rect = over.getBoundingClientRect();
+      var before = e.clientY < rect.top + rect.height / 2;
+      over.classList.toggle("wl-block-drop-before", before);
+      over.classList.toggle("wl-block-drop-after", !before);
+    });
+    document.addEventListener("dragleave", function (e) {
+      var left = e.target.closest && e.target.closest(".wl-block");
+      if (left) left.classList.remove("wl-block-drop-before", "wl-block-drop-after");
+    });
+    document.addEventListener("drop", function (e) {
+      if (!dragSrc) return;
+      var over = e.target.closest && e.target.closest(".wl-block");
+      if (over && over !== dragSrc) {
+        e.preventDefault();
+        var rect = over.getBoundingClientRect();
+        var before = e.clientY < rect.top + rect.height / 2;
+        over.parentNode.insertBefore(dragSrc, before ? over : over.nextSibling);
+      }
+      endDrag();
+    });
+    document.addEventListener("dragend", endDrag);
   }
 
   // ---- Chart.js rendering (one dataset per run -- real per-run color + legend) ----
@@ -933,14 +1093,46 @@ _INTERACTIVE_JS = r"""
       },
     });
     chartsById[canvas.id] = chart;
+    // Keep the canvas in sync when its card is manually resized (the
+    // `.wl-plot-block` CSS `resize: both` handle) -- Chart.js's own built-in
+    // resize handling covers window/layout changes, but a raw ResizeObserver
+    // here is the one behavior guaranteed to fire for a dragged native
+    // resize handle across engines. Stashed on the chart so destroyChart()
+    // can disconnect it -- an observer left running after `chart.destroy()`
+    // (e.g. closing the expand modal) fires into a dead chart and throws.
+    if (window.ResizeObserver && canvas.parentElement) {
+      chart.__wlResizeObserver = new ResizeObserver(function () { chart.resize(); });
+      chart.__wlResizeObserver.observe(canvas.parentElement);
+    }
     return chart;
+  }
+
+  // Sets (or, with min/max both undefined, clears) a chart's x-range and
+  // redraws -- shared by the drag-zoom, the double-click reset, and the
+  // expand-modal <-> inline sync below, so every path that changes a zoom
+  // range does it the same way.
+  function applyZoomRange(chart, min, max) {
+    if (min === undefined || max === undefined) {
+      delete chart.options.scales.x.min;
+      delete chart.options.scales.x.max;
+    } else {
+      chart.options.scales.x.min = min;
+      chart.options.scales.x.max = max;
+    }
+    chart.update();
   }
 
   // ---- Zoom: drag a rectangle over the canvas to zoom the step (x) range;
   // double-click resets. This is what "zoom in for the final PDF export"
   // means in this report -- the zoomed range is just the chart's current
-  // state, which is exactly what window.print() rasterizes. ----
-  function wireZoom(canvas, chart) {
+  // state, which is exactly what window.print() rasterizes.
+  //
+  // ``onZoomChange(min, max)``, when given, fires after every range change
+  // (drag-zoom or double-click reset) -- the expand modal uses it to mirror
+  // its zoom back onto the small inline chart the reader opened it from, so
+  // "zoom in the expanded view" and "zoom the plot div shown in the report"
+  // are the same action rather than two independent zoom states. ----
+  function wireZoom(canvas, chart, onZoomChange) {
     var dragging = false, startX = 0;
     var wrap = canvas.parentElement;
     var overlay = document.createElement("div");
@@ -970,16 +1162,15 @@ _INTERACTIVE_JS = r"""
       if (!xScale) return;
       var v1 = xScale.getValueForPixel(startX);
       var v2 = xScale.getValueForPixel(endX);
-      chart.options.scales.x.min = Math.min(v1, v2);
-      chart.options.scales.x.max = Math.max(v1, v2);
-      chart.update();
+      var lo = Math.min(v1, v2), hi = Math.max(v1, v2);
+      applyZoomRange(chart, lo, hi);
+      if (onZoomChange) onZoomChange(lo, hi);
     }
     canvas.addEventListener("mouseup", endDrag);
     canvas.addEventListener("mouseleave", function () { dragging = false; overlay.style.display = "none"; });
     canvas.addEventListener("dblclick", function () {
-      delete chart.options.scales.x.min;
-      delete chart.options.scales.x.max;
-      chart.update();
+      applyZoomRange(chart, undefined, undefined);
+      if (onZoomChange) onZoomChange(undefined, undefined);
     });
   }
 
@@ -989,7 +1180,7 @@ _INTERACTIVE_JS = r"""
   function closeExpand() {
     if (!expandOverlay) return;
     var canvas = expandOverlay.querySelector("canvas");
-    if (canvas && chartsById[canvas.id]) { chartsById[canvas.id].destroy(); delete chartsById[canvas.id]; }
+    if (canvas) destroyChart(canvas.id);
     expandOverlay.remove();
     expandOverlay = null;
   }
@@ -1002,6 +1193,7 @@ _INTERACTIVE_JS = r"""
     var head = document.createElement("div");
     head.className = "wl-expand-head";
     head.innerHTML = "<span>" + escapeHtml(title || "") + "</span>"
+      + '<button type="button" class="wl-block-btn" data-expand-copy title="Copy plot image">&#10697;</button>'
       + '<button type="button" class="wl-block-btn" data-expand-reset title="Reset zoom">&#8635;</button>'
       + '<button type="button" class="wl-block-btn" data-expand-close title="Close (Esc)">&times;</button>';
     var body = document.createElement("div");
@@ -1014,18 +1206,29 @@ _INTERACTIVE_JS = r"""
     expandOverlay.addEventListener("click", function (e) { if (e.target === expandOverlay) closeExpand(); });
     return { head: head, body: body };
   }
-  function expandChart(data) {
+  function expandChart(data, sourceId) {
     var shell = openExpandShell(data.name);
     var canvas = document.createElement("canvas");
     canvas.id = "wl-expand-canvas-" + Date.now();
     shell.body.appendChild(canvas);
     var chart = buildChart(canvas, data);
-    wireZoom(canvas, chart);
+    // Open already zoomed to whatever the inline card is currently showing --
+    // and mirror every zoom/reset made in here straight back onto it, so the
+    // modal and the small plot in the report are one shared zoom state.
+    var sourceChart = sourceId ? chartsById[sourceId] : null;
+    if (sourceChart && sourceChart.options.scales.x.min !== undefined) {
+      applyZoomRange(chart, sourceChart.options.scales.x.min, sourceChart.options.scales.x.max);
+    }
+    function syncToSource(min, max) {
+      if (sourceChart) applyZoomRange(sourceChart, min, max);
+    }
+    wireZoom(canvas, chart, syncToSource);
     shell.head.querySelector("[data-expand-reset]").addEventListener("click", function () {
-      delete chart.options.scales.x.min;
-      delete chart.options.scales.x.max;
-      chart.update();
+      applyZoomRange(chart, undefined, undefined);
+      syncToSource(undefined, undefined);
     });
+    var copyBtn = shell.head.querySelector("[data-expand-copy]");
+    if (copyBtn) copyBtn.addEventListener("click", function () { copyCanvasToClipboard(canvas, copyBtn); });
   }
   function expandImage(src, title) {
     var shell = openExpandShell(title);
@@ -1034,6 +1237,8 @@ _INTERACTIVE_JS = r"""
     img.src = src;
     img.alt = title || "";
     shell.body.appendChild(img);
+    var copyBtn = shell.head.querySelector("[data-expand-copy]");
+    if (copyBtn) copyBtn.addEventListener("click", function () { copyImageToClipboard(img, copyBtn); });
   }
   document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeExpand(); });
 
@@ -1049,7 +1254,7 @@ _INTERACTIVE_JS = r"""
       var chart = buildChart(canvas, data);
       wireZoom(canvas, chart);
       var expandBtn = block.querySelector('[data-action="expand"]');
-      if (expandBtn) expandBtn.addEventListener("click", function () { expandChart(data); });
+      if (expandBtn) expandBtn.addEventListener("click", function () { expandChart(data, canvas.id); });
     });
     // Distribution cards: static image, "expand" just opens it larger.
     document.querySelectorAll(".wl-plot-block [data-action=\"expand\"]").forEach(function (btn) {
@@ -1078,6 +1283,12 @@ _INTERACTIVE_JS = r"""
         if (rBlock) removeBlock(rBlock);
         return;
       }
+      var copyBtn = e.target.closest('.wl-block-btn[data-action="copy"]');
+      if (copyBtn) {
+        var cBlock = copyBtn.closest(".wl-block");
+        if (cBlock) copyBlockPlot(cBlock, copyBtn);
+        return;
+      }
       var rowBtn = e.target.closest('[data-action="remove-row"]');
       if (rowBtn) {
         var row = rowBtn.closest("tr");
@@ -1093,6 +1304,7 @@ _INTERACTIVE_JS = r"""
     block.className = "wl-block wl-text-block";
     block.innerHTML =
       '<div class="wl-block-toolbar">'
+      + '<button type="button" class="wl-block-btn wl-block-drag-handle" draggable="true" title="Drag to reorder">&#10303;</button>'
       + '<button type="button" class="wl-block-btn" data-action="move-up" title="Move up">&#8593;</button>'
       + '<button type="button" class="wl-block-btn" data-action="move-down" title="Move down">&#8595;</button>'
       + '<button type="button" class="wl-block-btn wl-block-btn-danger" data-action="remove" title="Remove">&times;</button>'
@@ -1135,6 +1347,8 @@ _INTERACTIVE_JS = r"""
   function boot() {
     initPlots();
     initToolbarDelegation();
+    initDragReorder();
+    initManualResize();
     initAddButtons();
     initPdfExport();
   }
@@ -1220,11 +1434,15 @@ _HTML_TEMPLATE = """<!doctype html>
     background: linear-gradient(135deg, var(--wl-banner-a) 0%, var(--wl-banner-b) 100%);
     border-bottom: 3px solid var(--wl-good);
   }}
-  .wl-report-banner img {{ height: 46px; }}
+  .wl-report-banner-graybx-logo {{ height: 46px; }}
+  .wl-report-banner-icon {{ height: 32px; width: 32px; }}
+  .wl-report-banner-brand {{ display: flex; align-items: center; gap: 10px; }}
   .wl-report-banner-text {{ display: flex; flex-direction: column; gap: 2px; }}
   .wl-report-banner-title {{ font-size: 1.6rem; font-weight: 800; letter-spacing: -0.01em; }}
-  .wl-report-banner-w {{ color: #d63333; }}
-  .wl-report-banner-l {{ color: var(--wl-good); }}
+  .branding-text {{ color: var(--primary-text-color); font-weight: 600; font-size: 0.9rem; }}
+  .branding-text-w {{ color: #16a34a; }}
+  .branding-text-l {{ color: #dc2626; }}
+
   .wl-report-banner-subtitle {{ font-size: 0.95rem; color: var(--wl-fg-muted); font-weight: 500; }}
   .wl-report-theme-toggle {{
     margin-left: auto; border: 1px solid var(--wl-border); background: var(--wl-card-bg);
@@ -1242,13 +1460,30 @@ _HTML_TEMPLATE = """<!doctype html>
     background: var(--wl-bg-elevated); border-left: 3px solid var(--wl-good);
     padding: 16px 20px; border-radius: 6px; font-size: 0.98rem;
   }}
+  /* flex-wrap rather than CSS grid columns -- a manually resized card (see
+     .wl-plot-block below) just widens its own flex item and the rest of the
+     row reflows around it; a `1fr` grid column can't accommodate that since
+     its track width is fixed by the column count, not by content. */
   .wl-report-grid {{
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    display: flex; flex-wrap: wrap;
     gap: 18px;
   }}
   .wl-report-card {{
     border: 1px solid var(--wl-border); border-radius: 10px; padding: 14px 16px;
     background: var(--wl-card-bg);
+  }}
+  /* Every plot card is independently resizable (drag the bottom-right
+     corner) -- the card fills the block via height:100% + flex column, and
+     the plot area (.wl-report-plot-wrap / .wl-chart-wrap, flex: 1 1 <default
+     size>) is the one part that grows to absorb the extra space. */
+  .wl-plot-block {{
+    flex: 1 1 340px; max-width: 100%;
+    resize: both; overflow: hidden;
+    min-width: 280px; min-height: 220px;
+  }}
+  .wl-plot-block > .wl-report-card {{
+    height: 100%; box-sizing: border-box;
+    display: flex; flex-direction: column;
   }}
   .wl-report-card-head {{
     display: flex; justify-content: space-between; align-items: center;
@@ -1263,8 +1498,14 @@ _HTML_TEMPLATE = """<!doctype html>
      render each one twice (light/dark figure), the image sits in an
      always-light thumbnail card so its own text/gridlines stay legible no
      matter which theme the surrounding page is in. */
-  .wl-report-plot-wrap {{ background: #ffffff; border-radius: 6px; padding: 6px; }}
-  .wl-report-plot {{ width: 100%; display: block; border-radius: 3px; }}
+  /* flex: 1 1 auto -- the resize handle lives on .wl-plot-block itself (it
+     resizes width too, which an inner-element handle can't do meaningfully);
+     this is the part of the card that actually absorbs the extra height. */
+  .wl-report-plot-wrap {{
+    background: #ffffff; border-radius: 6px; padding: 6px;
+    flex: 1 1 auto; overflow: hidden; min-height: 80px;
+  }}
+  .wl-report-plot {{ width: 100%; height: 100%; display: block; border-radius: 3px; object-fit: contain; }}
   .wl-report-noplot {{ color: var(--wl-fg-muted); font-size: 0.85rem; padding: 8px 0; }}
   .wl-report-outliers {{ margin-top: 10px; border-top: 1px dashed var(--wl-border); padding-top: 8px; }}
   .wl-report-shape-block {{ margin-bottom: 18px; }}
@@ -1299,7 +1540,12 @@ _HTML_TEMPLATE = """<!doctype html>
   }}
   .wl-block-btn:hover {{ background: var(--wl-bg-elevated); color: var(--wl-fg); }}
   .wl-block-btn-danger:hover {{ color: var(--wl-warn); }}
-  .wl-chart-wrap {{ position: relative; height: 200px; background: var(--wl-card-bg) !important; }}
+  .wl-block-drag-handle {{ cursor: grab; }}
+  .wl-block-drag-handle:active {{ cursor: grabbing; }}
+  .wl-block-dragging {{ opacity: 0.4; }}
+  .wl-block-drop-before {{ box-shadow: inset 0 3px 0 0 var(--wl-good); }}
+  .wl-block-drop-after {{ box-shadow: inset 0 -3px 0 0 var(--wl-good); }}
+  .wl-chart-wrap {{ position: relative; flex: 1 1 200px; min-height: 120px; background: var(--wl-card-bg) !important; }}
   .wl-chart-wrap canvas {{ cursor: crosshair; }}
   .wl-zoom-overlay {{
     display: none; position: absolute; top: 0; bottom: 0; pointer-events: none;
@@ -1351,11 +1597,13 @@ _HTML_TEMPLATE = """<!doctype html>
 </head>
 <body>
   <div class="wl-report-banner">
-    {logo_img}
-    <div class="wl-report-banner-text">
-      <span class="wl-report-banner-title"><span class="wl-report-banner-w">Weights</span><span class="wl-report-banner-l">Lab</span></span>
-      <span class="wl-report-banner-subtitle">Experiment Report</span>
+    <div class="wl-report-banner-brand">
+      <div class="wl-report-banner-text">
+        <span class="branding-text"><span class="branding-text-w">W</span>eights<span class="branding-text-l">L</span>ab by</span>
+        <span class="wl-report-banner-subtitle">Experiment Report</span>
+      </div>
     </div>
+    {graybx_logo_img}
     <button type="button" id="wl-theme-toggle" class="wl-report-theme-toggle" title="Toggle light/dark mode">&#9789;</button>
   </div>
 
@@ -1404,6 +1652,7 @@ _HTML_TEMPLATE = """<!doctype html>
     (function () {{
       var btn = document.getElementById("wl-theme-toggle");
       if (!btn) return;
+      var graybxLogo = document.getElementById("wl-report-graybx-logo");
       function isDark() {{
         var explicit = document.documentElement.getAttribute("data-theme");
         if (explicit === "light") return false;
@@ -1414,6 +1663,18 @@ _HTML_TEMPLATE = """<!doctype html>
         var dark = isDark();
         btn.textContent = dark ? "\\u2600" : "\\u263D";
         btn.setAttribute("aria-label", dark ? "Switch to light mode" : "Switch to dark mode");
+        if (graybxLogo) {{
+          var wanted = graybxLogo.getAttribute(dark ? "data-src-dark" : "data-src-light");
+          if (wanted && graybxLogo.src !== wanted) graybxLogo.src = wanted;
+        }}
+      }}
+      if (window.matchMedia) {{
+        var media = window.matchMedia("(prefers-color-scheme: dark)");
+        var onMediaChange = function () {{
+          if (!document.documentElement.getAttribute("data-theme")) sync();
+        }};
+        if (media.addEventListener) media.addEventListener("change", onMediaChange);
+        else if (media.addListener) media.addListener(onMediaChange);
       }}
       btn.addEventListener("click", function () {{
         var next = isDark() ? "light" : "dark";
@@ -1434,10 +1695,20 @@ def render_report(context: dict, output_path, narrative: Optional[str] = None) -
     """Render ``context`` (as returned by ``collect_report_context``) plus an
     optional ``narrative`` paragraph into a self-contained HTML file at
     ``output_path``. Returns the path written."""
-    logo_b64 = _load_logo_base64()
-    logo_img = (
-        f'<img src="data:image/png;base64,{logo_b64}" alt="WeightsLab logo" />'
-        if logo_b64 else ""
+    logo_light_b64 = _load_asset_base64(_LOGO_PATH)
+    logo_dark_b64 = _load_asset_base64(_LOGO_DARK_PATH) or logo_light_b64
+    icon_b64 = _load_asset_base64(_ICON_PATH)
+    graybx_logo_img = ""
+    if logo_light_b64:
+        light_src = f"data:image/png;base64,{logo_light_b64}"
+        dark_src = f"data:image/png;base64,{logo_dark_b64}" if logo_dark_b64 else light_src
+        graybx_logo_img = (
+            f'<img id="wl-report-graybx-logo" class="wl-report-banner-graybx-logo" src="{light_src}" '
+            f'data-src-light="{light_src}" data-src-dark="{dark_src}" alt="GrayBx logo" />'
+        )
+    icon_img = (
+        f'<img class="wl-report-banner-icon" src="data:image/png;base64,{icon_b64}" alt="WeightsLab icon" />'
+        if icon_b64 else ""
     )
 
     signals = context.get("signals") or []
@@ -1460,7 +1731,8 @@ def render_report(context: dict, output_path, narrative: Optional[str] = None) -
     rendered = _HTML_TEMPLATE.format(
         title="WeightsLab Experiment Report",
         color_good=_COLOR_GOOD, color_warn=_COLOR_WARN, color_neutral=_COLOR_NEUTRAL,
-        logo_img=logo_img,
+        graybx_logo_img=graybx_logo_img,
+        icon_img=icon_img,
         generated_at=html.escape(context.get("generated_at", "")),
         root_log_dir=html.escape(context.get("root_log_dir", "")),
         narrative=narrative_html,

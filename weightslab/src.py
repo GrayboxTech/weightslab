@@ -2892,9 +2892,7 @@ def _encode_one_media(item, kind: str, fps: float, audio, sample_rate: int,
     fetched when the user opens the sample.
     """
     import io as _io
-
     import numpy as _np
-    from PIL import Image as _Image
 
     from weightslab.data import media_store as _ms
     from weightslab.data import video_utils as _vu
