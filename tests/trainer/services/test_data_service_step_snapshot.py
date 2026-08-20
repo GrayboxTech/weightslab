@@ -56,6 +56,28 @@ class TestApplyStepSnapshotToDataframe(unittest.TestCase):
         result = apply_step_snapshot_to_dataframe(df, "loss@hash@10", {"1": 0.5})
         self.assertTrue(math.isnan(result.loc["2", "loss@hash@10"]))
 
+    def test_maps_by_sample_id_column_not_row_position(self):
+        # The real caller runs this after safe_reset_index, which promotes
+        # sample_id out of the (origin, sample_id) MultiIndex into a plain
+        # column and replaces the index with row position -- a frame where
+        # position != sample_id (here: origin-sorted, so "train" rows sort
+        # before "val" ones) must still land each value on its own sample_id,
+        # not on whichever row happens to sit at that position.
+        df = pd.DataFrame(
+            {
+                "origin": ["train", "train", "val", "val"],
+                "sample_id": ["10", "22", "1", "2"],
+            },
+        )
+        result = apply_step_snapshot_to_dataframe(
+            df, "loss@hash@10", {"22": 0.5, "2": 1.25},
+        )
+        by_sample_id = result.set_index("sample_id")["loss@hash@10"]
+        self.assertEqual(by_sample_id["22"], 0.5)
+        self.assertEqual(by_sample_id["2"], 1.25)
+        self.assertTrue(math.isnan(by_sample_id["10"]))
+        self.assertTrue(math.isnan(by_sample_id["1"]))
+
     def test_overwrites_an_existing_column_of_the_same_name(self):
         # Re-highlighting the same step should refresh the column in place.
         df = pd.DataFrame(

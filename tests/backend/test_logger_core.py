@@ -581,6 +581,122 @@ class TestGetSignalHistory(unittest.TestCase):
         self.assertIn("loss", hist)
         self.assertIn("acc", hist)
 
+    def _lg_with_hash(self, h):
+        lg = _lg()
+        mock_cm = MagicMock()
+        mock_cm.get_current_experiment_hash.return_value = h
+        lg.chkpt_manager = mock_cm
+        return lg
+
+    def test_filters_by_single_metric_name(self):
+        lg = _lg()
+        _add(lg, "loss", "s0", 1, 0.5)
+        _add(lg, "acc", "s0", 1, 0.9)
+        hist = lg.get_signal_history(metric_names=["loss"])
+        self.assertEqual(set(hist.keys()), {"loss"})
+
+    def test_filters_by_metric_name_iterable(self):
+        lg = _lg()
+        _add(lg, "loss", "s0", 1, 0.5)
+        _add(lg, "acc", "s0", 1, 0.9)
+        _add(lg, "f1", "s0", 1, 0.7)
+        hist = lg.get_signal_history(metric_names={"loss", "f1"})
+        self.assertEqual(set(hist.keys()), {"loss", "f1"})
+
+    def test_metric_name_filter_excludes_no_matching_rows(self):
+        lg = _lg()
+        _add(lg, "loss", "s0", 1, 0.5)
+        self.assertEqual(lg.get_signal_history(metric_names=["does_not_exist"]), {})
+
+    def test_null_experiment_hash_is_not_dropped(self):
+        """Regression: the downsampled read path joined `signals` to its own
+        per-curve step bounds on `experiment_hash = experiment_hash`, and SQL's
+        NULL = NULL is unknown (not true) -- so every run logged without an
+        active checkpoint hash (experiment_hash IS NULL, the common case for a
+        bare LoggerQueue) got silently joined out and vanished entirely."""
+        lg = _lg()
+        _add(lg, "loss", "s0", 1, 0.5)
+        hist = lg.get_signal_history()
+        self.assertIn("loss", hist)
+        self.assertIn(None, hist["loss"])
+        self.assertIn(1, hist["loss"][None])
+
+    def test_filters_by_exp_hash(self):
+        lg = self._lg_with_hash("h1")
+        _add(lg, "loss", "s0", 1, 0.5)
+        lg.chkpt_manager.get_current_experiment_hash.return_value = "h2"
+        _add(lg, "loss", "s0", 1, 0.9)
+
+        hist_h1 = lg.get_signal_history(exp_hashes=["h1"])
+        self.assertEqual(set(hist_h1["loss"].keys()), {"h1"})
+
+        hist_h2 = lg.get_signal_history(exp_hashes=["h2"])
+        self.assertEqual(set(hist_h2["loss"].keys()), {"h2"})
+
+        # Unfiltered call still sees both runs.
+        hist_all = lg.get_signal_history()
+        self.assertEqual(set(hist_all["loss"].keys()), {"h1", "h2"})
+
+    def test_combined_metric_and_hash_filters(self):
+        lg = self._lg_with_hash("h1")
+        _add(lg, "loss", "s0", 1, 0.5)
+        _add(lg, "acc", "s0", 1, 0.9)
+        lg.chkpt_manager.get_current_experiment_hash.return_value = "h2"
+        _add(lg, "loss", "s0", 1, 0.1)
+
+        hist = lg.get_signal_history(metric_names=["loss"], exp_hashes=["h1"])
+        self.assertEqual(list(hist.keys()), ["loss"])
+        self.assertEqual(list(hist["loss"].keys()), ["h1"])
+
+    def test_filters_scale_across_many_runs_and_metrics(self):
+        """Robustness for size: many (metric, run, step) combinations, each
+        filtered query should touch only its own slice — the property the
+        DB-side filters exist to guarantee once a history table holds many
+        runs' worth of rows."""
+        lg = _lg()
+        n_hashes = 20
+        n_metrics = 5
+        n_steps = 20
+        for hi in range(n_hashes):
+            h = f"run{hi}"
+            lg.chkpt_manager = MagicMock()
+            lg.chkpt_manager.get_current_experiment_hash.return_value = h
+            for mi in range(n_metrics):
+                metric = f"metric{mi}"
+                for step in range(n_steps):
+                    _add(lg, metric, "s0", step, float(step))
+
+        total_rows = n_hashes * n_metrics * n_steps
+        full = lg.get_signal_history()
+        self.assertEqual(
+            sum(len(entries) for hashes in full.values()
+                for steps in hashes.values()
+                for entries in steps.values()),
+            total_rows,
+        )
+
+        one_run = lg.get_signal_history(exp_hashes=["run7"])
+        self.assertEqual(set().union(*(set(h.keys()) for h in one_run.values())), {"run7"})
+        self.assertEqual(
+            sum(len(entries) for hashes in one_run.values()
+                for steps in hashes.values()
+                for entries in steps.values()),
+            n_metrics * n_steps,
+        )
+
+        one_metric = lg.get_signal_history(metric_names=["metric3"])
+        self.assertEqual(set(one_metric.keys()), {"metric3"})
+        self.assertEqual(
+            sum(len(entries) for steps in one_metric["metric3"].values()
+                for entries in steps.values()),
+            n_hashes * n_steps,
+        )
+
+        narrow = lg.get_signal_history(metric_names=["metric3"], exp_hashes=["run7"])
+        self.assertEqual(list(narrow.keys()), ["metric3"])
+        self.assertEqual(list(narrow["metric3"].keys()), ["run7"])
+        self.assertEqual(len(narrow["metric3"]["run7"]), n_steps)
+
 
 # ---------------------------------------------------------------------------
 # 11. get_signal_history_per_sample
@@ -968,6 +1084,7 @@ class TestBackgroundFlushAndLossShapeAutotag(unittest.TestCase):
     def test_auto_detected_signals_are_classified_with_no_setup_call(self):
         """The core ask: zero user-facing calls — just discovered and tagged."""
         lg = self._lg_no_autoflush()
+        _add(lg, "train-loss-CE", "s1", 1, 0.5)
         with patch("weightslab.src.auto_loss_shape_signal_names", return_value=["train-loss-CE"]), \
              patch("weightslab.src.write_signal_shapes") as mock_write_shapes:
             lg._autotag_loss_shapes()
@@ -976,6 +1093,7 @@ class TestBackgroundFlushAndLossShapeAutotag(unittest.TestCase):
         self.assertEqual(args[0], "train-loss-CE")
         self.assertIsNone(kwargs.get("tag_name"))  # default '<signal>_shape' naming
         self.assertIsNone(kwargs.get("classifier"))  # default loss classifier
+        self.assertEqual(kwargs.get("sample_ids"), ["s1"])  # only the touched sample
 
     def test_no_signals_means_no_classification_attempts(self):
         lg = self._lg_no_autoflush()
@@ -984,9 +1102,20 @@ class TestBackgroundFlushAndLossShapeAutotag(unittest.TestCase):
             lg._autotag_loss_shapes()
         self.assertFalse(mock_write_shapes.called)
 
+    def test_signal_with_no_data_yet_is_not_classified(self):
+        """A signal registered via flag="loss" but with zero per-sample writes
+        so far has nothing to classify — must not fire just because it was
+        discovered."""
+        lg = self._lg_no_autoflush()
+        with patch("weightslab.src.auto_loss_shape_signal_names", return_value=["train-loss-CE"]), \
+             patch("weightslab.src.write_signal_shapes") as mock_write_shapes:
+            lg._autotag_loss_shapes()
+        self.assertFalse(mock_write_shapes.called)
+
     def test_set_loss_shape_override_customizes_tag_and_classifier(self):
         lg = self._lg_no_autoflush()
         classifier = MagicMock()
+        _add(lg, "train-loss-CE", "s1", 1, 0.5)
         lg.set_loss_shape_override("train-loss-CE", tag_name="my_shape", classifier=classifier)
         with patch("weightslab.src.auto_loss_shape_signal_names", return_value=["train-loss-CE"]), \
              patch("weightslab.src.write_signal_shapes") as mock_write_shapes:
@@ -1001,6 +1130,7 @@ class TestBackgroundFlushAndLossShapeAutotag(unittest.TestCase):
         """A manually-logged signal (not registered via flag="loss") can still
         opt in by name — the override set is a superset, not a subset."""
         lg = self._lg_no_autoflush()
+        _add(lg, "custom_metric", "s1", 1, 0.5)
         lg.set_loss_shape_override("custom_metric")
         with patch("weightslab.src.auto_loss_shape_signal_names", return_value=[]), \
              patch("weightslab.src.write_signal_shapes") as mock_write_shapes:
@@ -1010,6 +1140,8 @@ class TestBackgroundFlushAndLossShapeAutotag(unittest.TestCase):
 
     def test_disable_loss_shape_autotag_for_one_signal(self):
         lg = self._lg_no_autoflush()
+        _add(lg, "train-loss-CE", "s1", 1, 0.5)
+        _add(lg, "val-loss-CE", "s1", 1, 0.5)
         lg.disable_loss_shape_autotag("train-loss-CE")
         with patch("weightslab.src.auto_loss_shape_signal_names",
                     return_value=["train-loss-CE", "val-loss-CE"]), \
@@ -1045,19 +1177,41 @@ class TestBackgroundFlushAndLossShapeAutotag(unittest.TestCase):
             lg._autotag_loss_shapes()
             self.assertEqual(mock_write_shapes.call_count, 1)
 
-            # New data arrives -> the signal's _qps_version moves -> re-tagged.
+            # New data arrives -> s1 is dirty again for this signal -> re-tagged.
             _add(lg, "train-loss-CE", "s1", 2, 0.4)
             lg._autotag_loss_shapes()
             self.assertEqual(mock_write_shapes.call_count, 2)
 
+    def test_autotag_only_reclassifies_the_samples_that_actually_changed(self):
+        """A sample's shape depends only on its own trajectory, so a pass
+        triggered by sample s2 getting new data must not re-touch s1 — even
+        though both share the same signal."""
+        lg = self._lg_no_autoflush()
+        _add(lg, "train-loss-CE", "s1", 1, 0.5)
+        _add(lg, "train-loss-CE", "s2", 1, 0.5)
+        with patch("weightslab.src.auto_loss_shape_signal_names", return_value=["train-loss-CE"]), \
+             patch("weightslab.src.write_signal_shapes") as mock_write_shapes:
+            lg._autotag_loss_shapes()
+            self.assertEqual(
+                sorted(mock_write_shapes.call_args.kwargs["sample_ids"]), ["s1", "s2"])
+            mock_write_shapes.reset_mock()
+
+            # Only s2 gets a new point, at a new global step — proving the
+            # coarser step-boundary query-cache invalidation (which used to
+            # also wipe the loss-shape skip-cache) no longer makes s1 look
+            # dirty just because the step advanced.
+            _add(lg, "train-loss-CE", "s2", 2, 0.4)
+            lg._autotag_loss_shapes()
+            self.assertEqual(mock_write_shapes.call_args.kwargs["sample_ids"], ["s2"])
+
     def test_autotag_skip_cache_is_per_signal(self):
         """One signal having no new data must not suppress another signal that
-        does — the version check is keyed per signal_name. Uses a second
-        sample at the SAME step (not a new global step) so only the touched
-        signal's own _qps_version bumps — a new global step drops the whole
-        query-cache/version table (see _stage_sample_row's "New step -> last
-        step's cache entries can't recur" comment), which is a separate,
-        coarser invalidation this test isn't about."""
+        does — the dirty-sample tracking is keyed per signal_name. Uses a
+        second sample at the SAME step (not a new global step) so only the
+        touched signal gets a dirty entry — a new global step drops the whole
+        query cache (see _stage_sample_row's "New step -> last step's cache
+        entries can't recur" comment), which is a separate, coarser
+        invalidation this test isn't about."""
         lg = self._lg_no_autoflush()
         _add(lg, "train-loss-CE", "s1", 1, 0.5)
         _add(lg, "val-loss-CE", "s1", 1, 0.7)

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "AGENTS.md"
+  ],
+  "shell": "pwsh",
+  "models": {
+    "default": "anthropic/claude-sonnet-latest"
+  }
+}

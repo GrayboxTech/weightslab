@@ -136,6 +136,8 @@ message SignalCurveIndex {
   int64 first_step = 3;
   int64 last_step = 4;
   int64 point_count = 5;           // rows in the DB behind this curve
+  double value_min = 6;            // MIN(value) over the curve, no points read
+  double value_max = 7;            // MAX(value) over the curve, no points read
 }
 
 // One sample whose signal value at a step sits far off the curve's own trend.

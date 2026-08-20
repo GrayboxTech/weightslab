@@ -508,6 +508,21 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         return self._exp_service.RestoreCheckpoint(request, context)
 
     # -------------------------------------------------------------------------
+    # Experiment runs (list / rename / notes)
+    # -------------------------------------------------------------------------
+    def ListExperimentRuns(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.ListExperimentRuns({request})")
+        return self._exp_service.ListExperimentRuns(request, context)
+
+    def RenameExperimentRun(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.RenameExperimentRun({request})")
+        return self._exp_service.RenameExperimentRun(request, context)
+
+    def SetExperimentRunNotes(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.SetExperimentRunNotes({request})")
+        return self._exp_service.SetExperimentRunNotes(request, context)
+
+    # -------------------------------------------------------------------------
     # Evaluation mode
     # -------------------------------------------------------------------------
     def TriggerEvaluation(self, request, context):
@@ -549,7 +564,21 @@ def grpc_serve(
     watchdog_exit_on_stuck = str(os.getenv("GRPC_WATCHDOG_EXIT_ON_STUCK", "0")).strip().lower() in {"1", "true", "yes", "on"}
     watchdog_restart_threshold = int(os.getenv("GRPC_WATCHDOG_RESTART_THRESHOLD", "3")) # Restart after 3 unhealthy checks
     watchdog_details_limit = int(os.getenv("GRPC_WATCHDOG_INFLIGHT_DETAILS_LIMIT", "10"))
-    watchdog_disabled = str(os.getenv("WEIGHTSLAB_DISABLE_WATCHDOGS", "1")).strip().lower() in {"1", "true", "yes", "on"} # Default state: disabled
+    # Default state: ENABLED. weightslab_rlock's own acquire timeout
+    # (_GRPC_LOCK_TIMEOUT_S in global_monitoring.py) is intentionally -1
+    # (infinite) so a legitimately slow RPC holding the lock is never aborted
+    # mid-work -- the watchdog is what's actually supposed to recover a
+    # GENUINELY stuck holder (one that's dead/looping, not just busy), by
+    # interrupting it after stuck_threshold_s (180s default) so the lock is
+    # released for whoever's waiting. With watchdogs disabled, nothing ever
+    # does that: a stuck holder keeps weightslab_rlock forever, every other
+    # RPC that needs it queues behind it permanently, and (once the small
+    # gRPC thread pool's workers are all parked on that queue) unrelated
+    # RPCs that don't even touch this lock start timing out too. Still
+    # opt-out via WEIGHTSLAB_DISABLE_WATCHDOGS=1 for a debugging session held
+    # on a breakpoint past the threshold, where an async interrupt would be
+    # unwelcome instead of a recovery.
+    watchdog_disabled = str(os.getenv("WEIGHTSLAB_DISABLE_WATCHDOGS", "0")).strip().lower() in {"1", "true", "yes", "on"}
     config = get_hyperparams()
     grpc_tls_enabled = _resolve_bool_setting(config, "grpc_tls_enabled", "GRPC_TLS_ENABLED", "0")
     grpc_tls_key_file = _resolve_grpc_tls_path(

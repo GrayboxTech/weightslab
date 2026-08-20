@@ -1023,27 +1023,13 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                              # batch and call the signal once. It returns a length-B
                              # array. Avoids B Python calls + B SignalContext allocs,
                              # and lets the signal do batched ledger reads.
-                             # inputs= must be populated here too: on the
-                             # subscribe_to path the context was built without it,
-                             # so b.inputs was {} and any signal declaring
-                             # inputs=[...] raised KeyError on every call. The
-                             # subscribed signal IS the declared input here, and
-                             # its per-sample values are already in val_vec.
-                             _decl = meta.get('inputs') or []
-                             _sub = meta.get('subscribe_to')
-                             _vals = [float(v) for v in val_vec]
-                             _bin = {}
-                             for _d in _decl:
-                                 if _sub is None or _d == _sub or _d == reg_name:
-                                     _bin[_d] = _vals
                              bctx = BatchSignalContext(
                                  sample_ids=[int(u) for u in ids_np],
-                                 subscribed_values=_vals,
+                                 subscribed_values=[float(v) for v in val_vec],
                                  logger=_lg,
                                  dataframe=df_proxy,
                                  origin=kwargs.get('origin', 'train'),
                                  step=step,
-                                 inputs=_bin,
                                  logits=preds_raw.detach() if hasattr(preds_raw, 'detach') else preds_raw,
                                  preds=preds.detach() if hasattr(preds, 'detach') else preds,
                                  targets=targets.detach() if hasattr(targets, 'detach') else targets,
@@ -2916,9 +2902,7 @@ def _encode_one_media(item, kind: str, fps: float, audio, sample_rate: int,
     fetched when the user opens the sample.
     """
     import io as _io
-
     import numpy as _np
-    from PIL import Image as _Image
 
     from weightslab.data import media_store as _ms
     from weightslab.data import video_utils as _vu
@@ -4155,11 +4139,13 @@ def get_current_experiment_hash() -> str | None:
 def query_signal_history(
     signal_name: str,
     exp_hash: str | None = None,
+    sample_ids: list | None = None,
 ) -> list:
-    """Return per-sample history for *signal_name* across all samples.
+    """Return per-sample history for *signal_name*.
 
     Returns a list of ``(sample_id, step, value, experiment_hash)`` tuples.
-    Pass *exp_hash* to restrict to a single experiment run.
+    Pass *exp_hash* to restrict to a single experiment run, and *sample_ids*
+    to restrict to specific samples (default ``None`` = every sample).
 
     Example::
 
@@ -4170,7 +4156,7 @@ def query_signal_history(
     _lg = get_logger()
     if _lg is None:
         return []
-    return _lg.query_per_sample(signal_name, sample_ids=None, exp_hash=exp_hash)
+    return _lg.query_per_sample(signal_name, sample_ids=sample_ids, exp_hash=exp_hash)
 
 
 def query_sample_history(
@@ -4902,62 +4888,35 @@ def resolve_signal_classifier(signal_name):
     return _GLOBAL_CLASSIFIER or classify_loss_shape
 
 
-_SHAPE_LABELS: dict = {}
-
-
-def write_signal_shapes(signal_name, tag_name=None, classifier=None,
-                        only_sample_ids=None):
-    """Reusable engine: classify every sample's trajectory of *signal_name* into
-    a categorical tag and return the ``{label: count}`` distribution. Works for
-    ANY per-sample signal — loss, accuracy, a second loss, any metric. Reads the
-    full history once (cheap end-of-report reduction). *classifier* (trajectory
-    -> label|None) defaults to whatever :func:`resolve_signal_classifier` returns
-    for *signal_name* — a user ``@signal_classifier``, else the built-in
-    loss-shaped one (for a decreasing metric). *tag_name* defaults to
-    ``'<signal>_shape'``."""
+def write_signal_shapes(signal_name, tag_name=None, classifier=None, exp_hash=None, sample_ids=None):
+    """Reusable engine: classify each sample's own trajectory of *signal_name*
+    into a categorical tag and return the ``{label: count}`` distribution.
+    Works for ANY per-sample signal — loss, accuracy, a second loss, any
+    metric. *classifier* (trajectory -> label|None) defaults to whatever
+    :func:`resolve_signal_classifier` returns for *signal_name* — a user
+    ``@signal_classifier``, else the built-in loss-shaped one (for a
+    decreasing metric). *tag_name* defaults to ``'<signal>_shape'``.
+    *exp_hash* restricts each sample's trajectory to a single experiment run
+    (default ``None`` = every hash merged together). *sample_ids* restricts
+    classification (and the tags written) to specific samples — used by the
+    background auto-tagger to reclassify only the samples that got new data,
+    since one sample's shape never depends on another's; default ``None``
+    classifies every sample logged for the signal (a full end-of-report
+    reduction)."""
     clf = classifier or resolve_signal_classifier(signal_name)
     if tag_name is None:
         tag_name = signal_name + "_shape" if signal_name.endswith('_loss') else signal_name + "_loss_shape"
-
-    # O(change): with only_sample_ids we read and classify just the trajectories
-    # that gained a point since the last pass. Labels for everything else are
-    # carried in _SHAPE_LABELS, so the returned distribution still describes the
-    # whole dataset. Passing None keeps the original whole-history behaviour
-    # (what a one-shot end-of-run report wants).
-    cache = _SHAPE_LABELS.setdefault(signal_name, {})
-    ids = None
-    if only_sample_ids is not None:
-        ids = [str(s) for s in only_sample_ids]
-        if not ids:
-            return {k: v for k, v in _label_counts(cache).items()}
-
-    _lg = get_logger()
-    rows = (_lg.query_per_sample(signal_name, sample_ids=ids)
-            if _lg is not None else [])
     series = {}
-    for sid, step, val, _ in rows:
+    for sid, step, val, _ in query_signal_history(signal_name, exp_hash=exp_hash, sample_ids=sample_ids):
         series.setdefault(sid, []).append((step, val))
-
     by_label = {}
     for sid, pts in series.items():
         label = clf([v for _, v in sorted(pts)])
-        if label is None:
-            continue
-        if cache.get(sid) == label:
-            continue                      # unchanged -> no ledger write needed
-        cache[sid] = label
-        by_label.setdefault(label, []).append(sid)
-
+        if label is not None:
+            by_label.setdefault(label, []).append(sid)
     for label, sids in by_label.items():
         set_categorical_tag(sids, tag_name, label)
-    return _label_counts(cache)
-
-
-def _label_counts(cache):
-    out = {}
-    for lab in cache.values():
-        out[lab] = out.get(lab, 0) + 1
-    return out
+    return {k: len(v) for k, v in by_label.items()}
 
 
 def write_loss_shapes(loss_signal="loss_sample", classifier=None):

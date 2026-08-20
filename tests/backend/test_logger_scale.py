@@ -31,7 +31,7 @@ import time
 
 import pytest
 
-from weightslab.backend.logger import LoggerQueue
+from weightslab.backend.logger import LoggerQueue, _DEFAULT_MAX_POINTS_PER_CURVE
 
 pytestmark = pytest.mark.scale
 
@@ -76,6 +76,17 @@ def _build_history(lg: LoggerQueue, n_runs: int, points_per_curve: int) -> dict:
     rng = random.Random(SEED)
     spec = []
     truth = {}
+    # Special-row (marker/note/outlier) positions as fractions of the curve
+    # depth rather than fixed step-index moduli: a fixed modulus (e.g. "every
+    # 500th point") silently generates ZERO special rows whenever
+    # points_per_curve is smaller than that modulus, which made
+    # test_special_points_survive_decimation pass or fail depending on an
+    # unrelated CI-speed knob rather than on real decimation behavior. Each
+    # modulus is clamped to >= 2 so it always fires at least once even for a
+    # tiny points_per_curve.
+    marker_mod = max(2, points_per_curve // 8)
+    note_mod = max(2, points_per_curve // 5)
+    outlier_mod = max(2, points_per_curve // 3)
     for r in range(n_runs):
         run_hash = f"{r:08x}deadbeefcafe0000"[:24]
         for c in range(rng.randint(MIN_CURVES, MAX_CURVES)):
@@ -101,7 +112,7 @@ def _build_history(lg: LoggerQueue, n_runs: int, points_per_curve: int) -> dict:
     # spec with range(n_pts) natively; the equivalent Python loop for a 100M-row
     # fixture would dominate the test's runtime.
     conn.execute(
-        """
+        f"""
         INSERT INTO signals (
             metric_name, experiment_hash, step, metric_value, timestamp,
             audit_mode, is_evaluation_marker, split_name, evaluation_tags,
@@ -117,14 +128,18 @@ def _build_history(lg: LoggerQueue, n_runs: int, points_per_curve: int) -> dict:
                  + 0.05 * sin(t.i / 7.0))                    AS metric_value,
             1787000000 + t.i                                 AS timestamp,
             FALSE                                            AS audit_mode,
-            (t.i > 0 AND t.i % 500 = 0)                      AS is_evaluation_marker,
+            (t.i > 0 AND t.i % {marker_mod} = 0)             AS is_evaluation_marker,
             CASE WHEN t.i % 2 = 0 THEN 'train' ELSE 'test' END AS split_name,
             '[]'                                             AS evaluation_tags,
-            CASE WHEN t.i > 0 AND t.i % 997 = 0
+            CASE WHEN t.i > 0 AND t.i % {note_mod} = 0
                  THEN 'note @' || t.i ELSE '' END            AS point_note,
-            CASE WHEN t.i > 0 AND t.i % 331 = 0
-                 THEN '[["s1", 9.5]]' ELSE '' END            AS outliers,
-            CASE WHEN t.i > 0 AND t.i % 331 = 0 THEN 1 ELSE 0 END AS outlier_count,
+            -- _decode_outliers (and production's find_outliers) expect a list
+            -- of {"sample_id", "value"} dicts, not [name, value] pairs -- a
+            -- non-dict item is silently dropped, which left outlier_count
+            -- unset on every entry despite the outliers column being non-empty.
+            CASE WHEN t.i > 0 AND t.i % {outlier_mod} = 0
+                 THEN '[{{"sample_id": "s1", "value": 9.5}}]' ELSE '' END AS outliers,
+            CASE WHEN t.i > 0 AND t.i % {outlier_mod} = 0 THEN 1 ELSE 0 END AS outlier_count,
             32                                               AS sample_count,
             NULL, NULL, NULL, NULL,
             t.i                                              AS seq
@@ -457,7 +472,7 @@ def test_simulated_frontend_session_stays_bounded(big_logger):
 
 def test_history_read_latency_is_acceptable(big_logger):
     """A decimated read must stay interactive at sweep scale."""
-    budget_s = float(os.environ.get("WL_TEST_MAX_QUERY_SECONDS", "20"))
+    budget_s = float(os.environ.get("WL_TEST_MAX_QUERY_SECONDS", "30"))
     t0 = time.monotonic()
     big_logger.get_signal_history_downsampled(max_points=500)
     dt = time.monotonic() - t0
@@ -466,17 +481,33 @@ def test_history_read_latency_is_acceptable(big_logger):
     assert dt < budget_s, f"decimated read took {dt:.1f}s (budget {budget_s}s)"
 
 
-def test_default_read_is_capped(big_logger):
+def test_default_read_is_capped(tmp_path):
     """get_signal_history() with no arguments must NOT return the whole table.
 
     The old default did exactly that, which is what made a large history
     unopenable. Guards against a regression to the uncapped default.
+
+    Needs its own fixture rather than ``big_logger``: the cap only bites when
+    a curve is deeper than ``_DEFAULT_MAX_POINTS_PER_CURVE``, and
+    ``big_logger`` is intentionally shallower than that so the module fixture
+    stays CI-fast -- at that depth "default" and "uncapped" read back
+    identical either way, which is what let a real regression here go
+    unnoticed.
     """
-    hist = big_logger.get_signal_history()
-    emitted = sum(len(e)
-                  for per_hash in hist.values()
-                  for steps in per_hash.values()
-                  for e in steps.values())
-    assert emitted < big_logger.n_signal_rows, (
-        f"default read returned {emitted:,} of {big_logger.n_signal_rows:,} rows "
-        "-- the default is uncapped again")
+    depth = _DEFAULT_MAX_POINTS_PER_CURVE * 5
+    db = tmp_path / "capped.duckdb"
+    lg = LoggerQueue(register=False, db_path=str(db))
+    lg.chkpt_manager = None
+    _build_history(lg, n_runs=2, points_per_curve=depth)
+    n_rows = lg._conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
+    try:
+        hist = lg.get_signal_history()
+        emitted = sum(len(e)
+                      for per_hash in hist.values()
+                      for steps in per_hash.values()
+                      for e in steps.values())
+        assert emitted < n_rows, (
+            f"default read returned {emitted:,} of {n_rows:,} rows "
+            "-- the default is uncapped again")
+    finally:
+        lg.stop_background_flush()

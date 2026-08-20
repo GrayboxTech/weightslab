@@ -33,8 +33,11 @@ class _DummyCtx:
 
 class TestExperimentServiceUnit(unittest.TestCase):
     def test_get_latest_logger_data_full_history_nested(self):
+        # The full-history path reads signal_logger.get_signal_history_downsampled
+        # (DuckDB does the reduction there now -- see its docstring), not the
+        # legacy get_signal_history.
         signal_logger = MagicMock()
-        signal_logger.get_signal_history.return_value = {
+        signal_logger.get_signal_history_downsampled.return_value = {
             "train/loss": {
                 "exp-hash": {
                     0: [{"metric_name": "train/loss", "model_age": 0, "metric_value": 1.0, "experiment_hash": "exp-hash"}],
@@ -55,21 +58,30 @@ class TestExperimentServiceUnit(unittest.TestCase):
         self.assertEqual(response.points[1].model_age, 1)
 
     def test_get_latest_logger_data_full_history_downsample_keeps_last_point(self):
-        # Regression test: a fixed-stride slice (signal_history[::step]) starts at
-        # index 0 and drops the tail of a fixed-length run. With 10000 points and
-        # max_points=1000, step=10 lands the last kept index at 9990, silently
-        # dropping steps 9991-9999. _downsample_uniform must be used instead so the
-        # most recent point is always present.
+        # Regression test: downsampling now happens inside DuckDB
+        # (get_signal_history_downsampled), which always keeps the curve's true
+        # first and last steps (see its docstring). The service layer must
+        # forward that curve as-is -- in particular it must not re-slice it with
+        # a fixed stride, which would start at index 0 and drop the tail of a
+        # fixed-length run (10000 points, max_points=1000, step=10 lands the
+        # last kept index at 9990, silently dropping steps 9991-9999).
+        from weightslab.trainer.services.experiment_service import _uniform_indices
+
+        kept_ages = _uniform_indices(10000, 1000)
         signal_logger = MagicMock()
-        signal_logger.get_signal_history.return_value = [
-            {
-                "metric_name": "train/loss_CE",
-                "model_age": age,
-                "metric_value": 1.0 / (age + 1),
-                "experiment_hash": "exp-hash",
+        signal_logger.get_signal_history_downsampled.return_value = {
+            "train/loss_CE": {
+                "exp-hash": {
+                    age: [{
+                        "metric_name": "train/loss_CE",
+                        "model_age": age,
+                        "metric_value": 1.0 / (age + 1),
+                        "experiment_hash": "exp-hash",
+                    }]
+                    for age in kept_ages
+                }
             }
-            for age in range(10000)
-        ]
+        }
         ctx = _DummyCtx(components={"signal_logger": signal_logger})
         with patch("weightslab.trainer.services.experiment_service.DataService"):
             service = ExperimentService(ctx)
@@ -196,9 +208,12 @@ class TestExperimentServiceUnit(unittest.TestCase):
         # GROUP BY step / AVG natively).
         _pts = [("11", 3, 0.3, "exp"), ("12", 3, 0.6, "exp")]
 
-        def _agg(graph_name, sample_ids=None, exp_hash=None):
+        def _agg(graph_name, sample_ids=None, exp_hash=None, exp_hashes=None):
             wanted = {str(s) for s in sample_ids} if sample_ids is not None else None
-            rows = [t for t in _pts if wanted is None or str(t[0]) in wanted]
+            allowed = set(exp_hashes) if exp_hashes else None
+            rows = [t for t in _pts
+                    if (wanted is None or str(t[0]) in wanted)
+                    and (allowed is None or t[3] in allowed)]
             by_hash: dict = {}
             for sid, step, val, h in rows:
                 by_hash.setdefault(h, {}).setdefault(step, []).append(val)

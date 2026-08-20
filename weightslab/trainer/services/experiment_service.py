@@ -400,9 +400,13 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
 
             # AGGREGATE: numpy-vectorized mean per (exp_hash, step) over matching samples.
             # aggregate_per_sample_by_step uses np.unique + np.bincount — ~100× faster
-            # than a Python loop for large sample counts.
+            # than a Python loop for large sample counts. Scoped to the requested
+            # hashes (usually just the one curve break-by-slices was asked for) so
+            # this doesn't aggregate every run in the table when one run's worth is
+            # all the client wants.
+            exp_hashes = list(request.experiment_hashes) or None
             per_hash = signal_logger.aggregate_per_sample_by_step(
-                graph_name, sample_ids=sample_ids
+                graph_name, sample_ids=sample_ids, exp_hashes=exp_hashes
             )
             # Normalise None keys that come from experiments with no hash
             per_hash = {(h if h is not None else "N.A."): v for h, v in per_hash.items()}
@@ -458,6 +462,8 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                     first_step=int(info["first_step"]),
                     last_step=int(info["last_step"]),
                     point_count=int(info["count"]),
+                    value_min=info["value_min"],
+                    value_max=info["value_max"],
                 )
                 for m, per_hash in curve_index.items()
                 for h, info in per_hash.items()

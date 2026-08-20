@@ -311,8 +311,19 @@ def apply_step_snapshot_to_dataframe(df: pd.DataFrame, column_name: str, values_
     A sample missing from the map (outside this step's batch, or its id
     couldn't be matched) gets NaN, the same as any other metadata field a
     sample simply doesn't have.
+
+    Maps by the ``sample_id`` column when present rather than ``df.index``:
+    the caller runs this after ``safe_reset_index``, which promotes
+    (origin, sample_id) out of the index into plain columns and replaces the
+    index with row position. Mapping by ``df.index`` there would silently
+    pair each value with whatever row happens to sit at that position instead
+    of the row that actually owns that sample_id -- correct only by
+    coincidence on a pristine, zero-based, contiguous frame, and wrong (wrong
+    row's value, or NaN) as soon as that alignment is disturbed.
     """
-    df[column_name] = df.index.astype(str).map(values_by_sample_id)
+    sample_id_col = SampleStatsEx.SAMPLE_ID.value
+    keys = df[sample_id_col] if sample_id_col in df.columns else df.index.to_series()
+    df[column_name] = keys.astype(str).map(values_by_sample_id)
     return df
 
 
@@ -4289,8 +4300,16 @@ class DataService:
         # insensitive -> unambiguous substring); the per-sample table keys on the
         # stored name, so a bare query wouldn't match "signals//train-loss".
         resolved = logger_q.resolve_graph_name(signal_name) or signal_name
+        cap = max_points if max_points and max_points > 0 else SIGNAL_TRAJ_MAX_POINTS
         try:
-            rows = logger_q.query_per_sample(resolved, sample_ids=sample_ids)
+            # The primary reduction happens in SQL now: query_per_sample buckets
+            # each sample's own series to ~cap points *inside DuckDB*, so a
+            # sample trained for millions of steps never dumps its whole history
+            # into Python just to be thrown away by _downsample_curve below. A
+            # run with hundreds of millions of per-sample rows would otherwise
+            # make this on-demand plot pull the whole per-sample table.
+            rows = logger_q.query_per_sample(resolved, sample_ids=sample_ids,
+                                             max_points=cap)
         except Exception:
             logger.debug("signal trajectory query skipped for %r", signal_name, exc_info=True)
             return resolved, {}
@@ -4299,11 +4318,15 @@ class DataService:
         for sid, step, val, _ in rows:
             by_sid.setdefault(str(sid), []).append((int(step), float(val)))
 
-        cap = max_points if max_points and max_points > 0 else SIGNAL_TRAJ_MAX_POINTS
         curves = {}
         for sid, pts in by_sid.items():
             if len(pts) < SIGNAL_TRAJ_MIN_POINTS:
                 continue  # not enough history to be worth plotting
+            # SQL bucketing targets ~cap points but (like
+            # get_signal_history_downsampled) can overshoot slightly -- endpoint
+            # rows and per-bucket ties add a few extra. This trims the already-
+            # small (~cap-sized) result to exactly cap via even index selection;
+            # it is a safety net over a bounded array, not a full-series scan.
             curves[sid] = self._downsample_curve(
                 [v for _, v in sorted(pts)], max_points=cap)
         if curves:
