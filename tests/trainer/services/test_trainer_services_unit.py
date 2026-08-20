@@ -196,9 +196,12 @@ class TestExperimentServiceUnit(unittest.TestCase):
         # GROUP BY step / AVG natively).
         _pts = [("11", 3, 0.3, "exp"), ("12", 3, 0.6, "exp")]
 
-        def _agg(graph_name, sample_ids=None, exp_hash=None):
+        def _agg(graph_name, sample_ids=None, exp_hash=None, exp_hashes=None):
             wanted = {str(s) for s in sample_ids} if sample_ids is not None else None
-            rows = [t for t in _pts if wanted is None or str(t[0]) in wanted]
+            allowed = set(exp_hashes) if exp_hashes else None
+            rows = [t for t in _pts
+                    if (wanted is None or str(t[0]) in wanted)
+                    and (allowed is None or t[3] in allowed)]
             by_hash: dict = {}
             for sid, step, val, h in rows:
                 by_hash.setdefault(h, {}).setdefault(step, []).append(val)

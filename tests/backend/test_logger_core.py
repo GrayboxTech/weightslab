@@ -592,7 +592,7 @@ class TestGetSignalHistory(unittest.TestCase):
         lg = _lg()
         _add(lg, "loss", "s0", 1, 0.5)
         _add(lg, "acc", "s0", 1, 0.9)
-        hist = lg.get_signal_history(metric_name="loss")
+        hist = lg.get_signal_history(metric_names=["loss"])
         self.assertEqual(set(hist.keys()), {"loss"})
 
     def test_filters_by_metric_name_iterable(self):
@@ -600,13 +600,26 @@ class TestGetSignalHistory(unittest.TestCase):
         _add(lg, "loss", "s0", 1, 0.5)
         _add(lg, "acc", "s0", 1, 0.9)
         _add(lg, "f1", "s0", 1, 0.7)
-        hist = lg.get_signal_history(metric_name={"loss", "f1"})
+        hist = lg.get_signal_history(metric_names={"loss", "f1"})
         self.assertEqual(set(hist.keys()), {"loss", "f1"})
 
     def test_metric_name_filter_excludes_no_matching_rows(self):
         lg = _lg()
         _add(lg, "loss", "s0", 1, 0.5)
-        self.assertEqual(lg.get_signal_history(metric_name="does_not_exist"), {})
+        self.assertEqual(lg.get_signal_history(metric_names=["does_not_exist"]), {})
+
+    def test_null_experiment_hash_is_not_dropped(self):
+        """Regression: the downsampled read path joined `signals` to its own
+        per-curve step bounds on `experiment_hash = experiment_hash`, and SQL's
+        NULL = NULL is unknown (not true) -- so every run logged without an
+        active checkpoint hash (experiment_hash IS NULL, the common case for a
+        bare LoggerQueue) got silently joined out and vanished entirely."""
+        lg = _lg()
+        _add(lg, "loss", "s0", 1, 0.5)
+        hist = lg.get_signal_history()
+        self.assertIn("loss", hist)
+        self.assertIn(None, hist["loss"])
+        self.assertIn(1, hist["loss"][None])
 
     def test_filters_by_exp_hash(self):
         lg = self._lg_with_hash("h1")
@@ -614,10 +627,10 @@ class TestGetSignalHistory(unittest.TestCase):
         lg.chkpt_manager.get_current_experiment_hash.return_value = "h2"
         _add(lg, "loss", "s0", 1, 0.9)
 
-        hist_h1 = lg.get_signal_history(exp_hash="h1")
+        hist_h1 = lg.get_signal_history(exp_hashes=["h1"])
         self.assertEqual(set(hist_h1["loss"].keys()), {"h1"})
 
-        hist_h2 = lg.get_signal_history(exp_hash="h2")
+        hist_h2 = lg.get_signal_history(exp_hashes=["h2"])
         self.assertEqual(set(hist_h2["loss"].keys()), {"h2"})
 
         # Unfiltered call still sees both runs.
@@ -631,7 +644,7 @@ class TestGetSignalHistory(unittest.TestCase):
         lg.chkpt_manager.get_current_experiment_hash.return_value = "h2"
         _add(lg, "loss", "s0", 1, 0.1)
 
-        hist = lg.get_signal_history(metric_name="loss", exp_hash="h1")
+        hist = lg.get_signal_history(metric_names=["loss"], exp_hashes=["h1"])
         self.assertEqual(list(hist.keys()), ["loss"])
         self.assertEqual(list(hist["loss"].keys()), ["h1"])
 
@@ -662,7 +675,7 @@ class TestGetSignalHistory(unittest.TestCase):
             total_rows,
         )
 
-        one_run = lg.get_signal_history(exp_hash="run7")
+        one_run = lg.get_signal_history(exp_hashes=["run7"])
         self.assertEqual(set().union(*(set(h.keys()) for h in one_run.values())), {"run7"})
         self.assertEqual(
             sum(len(entries) for hashes in one_run.values()
@@ -671,7 +684,7 @@ class TestGetSignalHistory(unittest.TestCase):
             n_metrics * n_steps,
         )
 
-        one_metric = lg.get_signal_history(metric_name="metric3")
+        one_metric = lg.get_signal_history(metric_names=["metric3"])
         self.assertEqual(set(one_metric.keys()), {"metric3"})
         self.assertEqual(
             sum(len(entries) for steps in one_metric["metric3"].values()
@@ -679,7 +692,7 @@ class TestGetSignalHistory(unittest.TestCase):
             n_hashes * n_steps,
         )
 
-        narrow = lg.get_signal_history(metric_name="metric3", exp_hash="run7")
+        narrow = lg.get_signal_history(metric_names=["metric3"], exp_hashes=["run7"])
         self.assertEqual(list(narrow.keys()), ["metric3"])
         self.assertEqual(list(narrow["metric3"].keys()), ["run7"])
         self.assertEqual(len(narrow["metric3"]["run7"]), n_steps)
