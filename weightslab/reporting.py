@@ -43,6 +43,70 @@ _COLOR_NEUTRAL = "#5f7393"
 _HEALTHY_SHAPES = {"monotonic", "plateaued"}
 _CONCERNING_SHAPES = {"Flat_high", "high_variance", "U_Shape", "Spiked", "Forgotten"}
 
+# Distinct per-run palette for the interactive multi-curve plots (see
+# _multi_run_series) -- unrelated to _COLOR_GOOD/_COLOR_WARN/_COLOR_NEUTRAL,
+# which classify a signal's *health*, not which run a curve belongs to.
+# Cycled by index over hashes sorted deterministically, so the same run gets
+# the same color across every signal card in one report, and regenerating
+# the report from the same data reproduces the same assignment.
+_RUN_PALETTE = (
+    "#2f6fed", "#e0562f", "#2d9e3f", "#a12d9e", "#0aa3a3",
+    "#c99a1e", "#d63333", "#5f7393", "#7a4fd6", "#3f8f6e",
+    "#c2528a", "#4f7ad6",
+)
+
+
+def _color_for_run_index(index: int) -> str:
+    return _RUN_PALETTE[index % len(_RUN_PALETTE)]
+
+
+def _multi_run_series(full_history: dict, name: str, runs_map: dict) -> list:
+    """Per-run breakdown of one signal, for the report's interactive
+    multi-curve chart -- distinct from the single already-aggregated
+    trajectory ``get_current_signaL_history`` returns (used for health
+    classification / summary stats, unchanged). Each entry is one run's own
+    curve: ``{hash, label, color, is_current, points: [[step, value], ...]}``.
+
+    ``full_history`` is ``LoggerQueue.get_signal_history()``'s
+    ``{metric: {hash: {step: [entry, ...]}}}`` shape -- fetched ONCE by the
+    caller (collect_report_context) and reused across every signal, rather
+    than one query per signal. ``runs_map`` (hash -> run info dict, from
+    ``CheckpointManager.list_runs()``) supplies the human-readable
+    experiment_name for the legend; a hash with no matching run (e.g.
+    ``checkpoint_manager`` wasn't available) falls back to a shortened hash.
+
+    A step with more than one logged entry (e.g. re-logged after a resume)
+    keeps only the LAST entry's value -- same "last write wins" behavior as
+    the rest of this module's step-keyed reads.
+    """
+    by_hash = full_history.get(name) if isinstance(full_history, dict) else None
+    if not by_hash:
+        return []
+
+    series = []
+    for index, h in enumerate(sorted(by_hash.keys(), key=str)):
+        steps_map = by_hash[h] or {}
+        points = sorted(
+            (
+                (step, entries[-1]["metric_value"])
+                for step, entries in steps_map.items()
+                if entries
+            ),
+            key=lambda pair: pair[0],
+        )
+        if not points:
+            continue
+        run_info = runs_map.get(h) or {}
+        label = run_info.get("experiment_name") or (str(h)[:12] if h else "unknown")
+        series.append({
+            "hash": str(h),
+            "label": str(label),
+            "color": _color_for_run_index(index),
+            "is_current": bool(run_info.get("is_current")),
+            "points": [[float(s), float(v)] for s, v in points],
+        })
+    return series
+
 
 def _import_matplotlib():
     """Soft import, mirroring notebook_service.py's ``_try_import_matplotlib`` —
@@ -409,6 +473,19 @@ def find_signal_outliers(logger_q, signal_name: str, top_k: int = 5) -> dict:
     return out
 
 
+def _resolve_runs_map(checkpoint_manager) -> dict:
+    """``{hash: run_info}`` from ``CheckpointManager.list_runs()`` (see
+    checkpoint_manager.py), or ``{}`` when unavailable/erroring -- the report
+    degrades to hash-only labels rather than failing to generate."""
+    if checkpoint_manager is None or not hasattr(checkpoint_manager, "list_runs"):
+        return {}
+    try:
+        return {r["hash"]: r for r in checkpoint_manager.list_runs() if r.get("hash")}
+    except Exception as exc:
+        logger.debug("experiment report: could not list runs: %s", exc)
+        return {}
+
+
 def collect_report_context(
     root_log_dir,
     logger_q,
@@ -416,6 +493,7 @@ def collect_report_context(
     signals: Optional[list] = None,
     max_signals: Optional[int] = None,
     distributions: Optional[list] = None,
+    checkpoint_manager=None,
 ) -> dict:
     """Gather everything a report needs EXCEPT the narrative: per-signal
     trajectories + health classification + plots, dataframe-level stats, and
@@ -436,6 +514,13 @@ def collect_report_context(
     plt = _import_matplotlib()
     resolved_signals = signals or select_important_signals(logger_q, max_signals=max_signals)
 
+    runs_map = _resolve_runs_map(checkpoint_manager)
+    try:
+        full_history = logger_q.get_signal_history()
+    except Exception as exc:
+        logger.warning("experiment report: could not read multi-run history: %s", exc)
+        full_history = {}
+
     signal_entries = []
     for name in resolved_signals:
         try:
@@ -453,6 +538,12 @@ def collect_report_context(
         # this is what lets the report speak to per-sample trends without its
         # size (or an LLM prompt built from it) scaling with dataset size.
         outliers = find_signal_outliers(logger_q, name, top_k=5)
+        # Per-run breakdown for the report's interactive multi-curve chart --
+        # additive alongside the aggregate stats above (first/last/min/max,
+        # health classification, plot_b64), which stay computed from the
+        # SAME aggregate they always were so nothing downstream (narrative
+        # summary, existing tests) sees a behavior change.
+        series = _multi_run_series(full_history, name, runs_map)
         signal_entries.append({
             "name": name,
             "label": label,
@@ -464,6 +555,7 @@ def collect_report_context(
             "max_value": max(values),
             "plot_b64": plot_b64,
             "outliers": outliers,
+            "series": series,
         })
 
     return {
@@ -474,6 +566,7 @@ def collect_report_context(
         "dataframe": compute_dataframe_stats(df),
         "loss_shape_tags": summarize_loss_shape_tags(df),
         "plotting_available": plt is not None,
+        "runs": list(runs_map.values()),
     }
 
 
@@ -484,19 +577,61 @@ def _fmt_num(x) -> str:
         return str(x)
 
 
-def _signal_card_html(entry: dict) -> str:
+_BLOCK_TOOLBAR_HTML = (
+    '<div class="wl-block-toolbar">'
+    '<button type="button" class="wl-block-btn" data-action="move-up" title="Move up">&#8593;</button>'
+    '<button type="button" class="wl-block-btn" data-action="move-down" title="Move down">&#8595;</button>'
+    '{expand_btn}'
+    '<button type="button" class="wl-block-btn wl-block-btn-danger" data-action="remove" title="Remove from report">&times;</button>'
+    '</div>'
+)
+_EXPAND_BTN_HTML = '<button type="button" class="wl-block-btn" data-action="expand" title="Expand &amp; zoom">&#10530;</button>'
+
+
+def _signal_card_html(entry: dict, block_id: str) -> str:
+    """One Signals card as an editable/reorderable/removable ``.wl-block``.
+
+    When ``entry["series"]`` has data (see ``_multi_run_series``), the card
+    embeds that per-run series as JSON for the page's script to render as an
+    interactive, multi-curve, legend-carrying Chart.js line chart (one color
+    per run, matching the live Studio app's per-run color scheme) -- the
+    ``plot_b64`` matplotlib image still renders too, but only as the
+    ``<noscript>`` fallback for a reader with JavaScript disabled or a report
+    opened somewhere Chart.js failed to load. No JS/no data -> the old static
+    image (or the textual summary) is what actually shows.
+    """
     name = html.escape(str(entry["name"]))
     label = html.escape(str(entry["label"]))
     color = entry["color"]
+    series = entry.get("series") or []
+    has_interactive = bool(series)
+
+    toolbar = _BLOCK_TOOLBAR_HTML.format(expand_btn=_EXPAND_BTN_HTML if has_interactive else "")
     body = (
+        f'<div class="wl-block wl-plot-block" data-block-id="{block_id}">'
+        f'{toolbar}'
         f'<div class="wl-report-card">'
         f'  <div class="wl-report-card-head">'
-        f'    <span class="wl-report-signal-name">{name}</span>'
+        f'    <span class="wl-report-signal-name" contenteditable="true" spellcheck="false">{name}</span>'
         f'    <span class="wl-report-badge" style="background:{color}22;color:{color};'
         f'border:1px solid {color}55;">{label}</span>'
         f'  </div>'
     )
-    if entry.get("plot_b64"):
+    if has_interactive:
+        canvas_id = f"{block_id}-canvas"
+        noscript_img = (
+            f'<img class="wl-report-plot" src="data:image/png;base64,{entry["plot_b64"]}" alt="{name} trajectory" />'
+            if entry.get("plot_b64") else ""
+        )
+        chart_payload = json.dumps({"name": str(entry["name"]), "series": series})
+        body += (
+            f'  <div class="wl-report-plot-wrap wl-chart-wrap">'
+            f'<canvas class="wl-report-chart" id="{canvas_id}"></canvas>'
+            f'<noscript>{noscript_img}</noscript>'
+            f'</div>'
+            f'<script type="application/json" class="wl-plot-data">{chart_payload}</script>'
+        )
+    elif entry.get("plot_b64"):
         body += (
             f'  <div class="wl-report-plot-wrap">'
             f'<img class="wl-report-plot" src="data:image/png;base64,{entry["plot_b64"]}" alt="{name} trajectory" />'
@@ -511,7 +646,7 @@ def _signal_card_html(entry: dict) -> str:
             '</div>'
         )
     body += _outliers_html(entry.get("outliers") or {})
-    body += "</div>"
+    body += "</div></div>"
     return body
 
 
@@ -542,40 +677,52 @@ def _outliers_html(outliers: dict) -> str:
     )
 
 
-def _distribution_card_html(entry: dict) -> str:
+def _distribution_card_html(entry: dict, block_id: str) -> str:
     """One Distributions card: a histogram + n/mean/std/range, or an
     explanatory note in place of the plot when the requested name couldn't be
     resolved to a column or the column had no numeric values -- so an
     unresolvable request still shows up in the report saying so, instead of
-    the whole Distributions section silently rendering one card short."""
+    the whole Distributions section silently rendering one card short.
+
+    A static image (no per-run breakdown makes sense for a value
+    distribution), so "expand" here just opens it larger in the same modal
+    the plot cards use (via ``data-expand-image``, not ``data-expand`` --
+    see the report's embedded script), rather than a Chart.js re-render.
+    """
     name = html.escape(str(entry["name"]))
+    has_image = bool(entry.get("resolved") and entry.get("n") and entry.get("plot_b64"))
+    toolbar = _BLOCK_TOOLBAR_HTML.format(expand_btn=_EXPAND_BTN_HTML if has_image else "")
     head = (
+        f'<div class="wl-block wl-plot-block" data-block-id="{block_id}">'
+        f'{toolbar}'
         '<div class="wl-report-card">'
         '  <div class="wl-report-card-head">'
-        f'    <span class="wl-report-signal-name">{name}</span>'
+        f'    <span class="wl-report-signal-name" contenteditable="true" spellcheck="false">{name}</span>'
         '  </div>'
     )
     if not entry.get("resolved"):
         return head + (
             f'  <div class="wl-report-noplot">No column matching &quot;{name}&quot; '
-            'was found in the dataset.</div></div>'
+            'was found in the dataset.</div></div></div>'
         )
     if not entry.get("n"):
         return head + (
-            '  <div class="wl-report-noplot">No numeric values logged for this column yet.</div></div>'
+            '  <div class="wl-report-noplot">No numeric values logged for this column yet.</div></div></div>'
         )
     body = head
     if entry.get("plot_b64"):
+        img_data_url = f'data:image/png;base64,{entry["plot_b64"]}'
         body += (
             f'  <div class="wl-report-plot-wrap">'
-            f'<img class="wl-report-plot" src="data:image/png;base64,{entry["plot_b64"]}" alt="{name} distribution" />'
+            f'<img class="wl-report-plot" data-expand-image="{img_data_url}" '
+            f'data-expand-title="{name}" src="{img_data_url}" alt="{name} distribution" />'
             f'</div>'
         )
     body += (
         f'  <div class="wl-report-noplot">n={entry["n"]:,} &middot; mean {_fmt_num(entry["mean"])} '
         f'&middot; std {_fmt_num(entry["std"])} &middot; range [{_fmt_num(entry["min"])}, {_fmt_num(entry["max"])}]</div>'
     )
-    body += "</div>"
+    body += "</div></div>"
     return body
 
 
@@ -587,7 +734,9 @@ def _distributions_section_html(distributions: list) -> str:
     this feature existed."""
     if not distributions:
         return ""
-    cards = "".join(_distribution_card_html(e) for e in distributions)
+    cards = "".join(
+        _distribution_card_html(e, f"wl-dist-{i}") for i, e in enumerate(distributions)
+    )
     return (
         '<div class="wl-report-section">'
         '<h2>Distributions</h2>'
@@ -656,6 +805,344 @@ def _dataframe_section_html(stats: dict) -> str:
             tag_rows.append(f"<li><b>{html.escape(tag_name)}</b> — {parts}</li>")
         html_out += "<p class=\"wl-report-subhead\">Tags</p><ul class=\"wl-report-list\">" + "".join(tag_rows) + "</ul>"
     return html_out
+
+
+def _runs_section_html(runs: list) -> str:
+    """Runs table: every run this experiment's manifest knows about (see
+    ``CheckpointManager.list_runs``), each removable from the report via its
+    own row ``&times;`` (client-side only, like every other block edit here).
+    Omitted entirely when no ``checkpoint_manager`` was available to
+    ``collect_report_context`` -- same "don't render a feature nobody asked
+    for/nothing to show" convention as the Distributions section."""
+    if not runs:
+        return ""
+
+    def _row(run: dict) -> str:
+        run_hash = html.escape(str(run.get("hash", "")))
+        name = html.escape(str(run.get("experiment_name") or run_hash[:12] or "unknown"))
+        notes = html.escape(str(run.get("notes") or ""))
+        created = html.escape(str(run.get("created") or ""))
+        last_used = html.escape(str(run.get("last_used") or ""))
+        current_badge = (
+            f'<span class="wl-report-badge" style="background:{_COLOR_GOOD}22;color:{_COLOR_GOOD};'
+            f'border:1px solid {_COLOR_GOOD}55;">current</span>'
+            if run.get("is_current") else ""
+        )
+        return (
+            f'<tr data-run-hash="{run_hash}">'
+            f'<td><button type="button" class="wl-block-btn wl-block-btn-danger" '
+            f'data-action="remove-row" title="Remove this run from the report">&times;</button></td>'
+            f'<td>{name} {current_badge}</td>'
+            f'<td class="wl-mono">{run_hash}</td>'
+            f'<td>{notes}</td>'
+            f'<td>{created}</td>'
+            f'<td>{last_used}</td>'
+            f'</tr>'
+        )
+
+    rows_html = "".join(_row(r) for r in runs)
+    return (
+        '<div class="wl-block wl-runs-block" data-block-id="wl-runs">'
+        '<div class="wl-report-card">'
+        '<table class="wl-report-runs-table">'
+        '<thead><tr><th></th><th>Name</th><th>Hash</th><th>Notes</th><th>Created</th><th>Last used</th></tr></thead>'
+        f'<tbody>{rows_html}</tbody>'
+        '</table>'
+        '</div>'
+        '</div>'
+    )
+
+
+_CHARTJS_PATH = _ASSETS_DIR / "chart.umd.min.js"
+
+
+def _chartjs_script_tag() -> str:
+    """Inline ``<script>`` for the vendored Chart.js UMD build (MIT-licensed,
+    same version weights_studio itself uses) -- embedded rather than loaded
+    from a CDN so the report stays a genuinely self-contained file, openable
+    offline exactly like its base64-embedded images. Empty string (report
+    falls back to the ``<noscript>`` static images) if the asset is missing
+    from this install for some reason."""
+    try:
+        source = _CHARTJS_PATH.read_text(encoding="utf-8")
+    except Exception as exc:
+        logger.info("experiment report: Chart.js asset unavailable, falling back to static plots: %s", exc)
+        return ""
+    return f"<script>{source}</script>"
+
+
+# Not passed through _HTML_TEMPLATE.format() as part of the template itself --
+# inserted as one substituted VALUE (see render_report), so its own liberal
+# use of { and } needs no doubling the way the template's other <script>
+# blocks do.
+_INTERACTIVE_JS = r"""
+<script>
+(function () {
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c];
+    });
+  }
+
+  // ---- Generic block toolbar: move up/down, remove (any block type) ----
+  function moveBlock(block, dir) {
+    var sibling = dir === "up" ? block.previousElementSibling : block.nextElementSibling;
+    if (!sibling || !sibling.classList || !sibling.classList.contains("wl-block")) return;
+    if (dir === "up") block.parentNode.insertBefore(block, sibling);
+    else block.parentNode.insertBefore(sibling, block);
+  }
+  function removeBlock(block) {
+    if (!window.confirm("Remove this from the report?")) return;
+    var canvas = block.querySelector("canvas");
+    if (canvas && chartsById[canvas.id]) { chartsById[canvas.id].destroy(); delete chartsById[canvas.id]; }
+    block.remove();
+  }
+
+  // ---- Chart.js rendering (one dataset per run -- real per-run color + legend) ----
+  var chartsById = {};
+
+  function buildChart(canvas, data) {
+    var datasets = (data.series || []).map(function (s) {
+      return {
+        label: s.label,
+        borderColor: s.color,
+        backgroundColor: s.color,
+        pointRadius: 0,
+        pointHoverRadius: 3,
+        borderWidth: s.is_current ? 2.4 : 1.4,
+        data: (s.points || []).map(function (p) { return { x: p[0], y: p[1] }; }),
+        parsing: false,
+      };
+    });
+    var chart = new Chart(canvas.getContext("2d"), {
+      type: "line",
+      data: { datasets: datasets },
+      options: {
+        animation: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "nearest", axis: "x", intersect: false },
+        plugins: {
+          legend: { display: datasets.length > 1, position: "bottom", labels: { boxWidth: 10, font: { size: 10 } } },
+          tooltip: { enabled: true },
+        },
+        scales: {
+          x: { type: "linear", title: { display: true, text: "step", font: { size: 10 } }, ticks: { font: { size: 9 } } },
+          y: { title: { display: true, text: "value", font: { size: 10 } }, ticks: { font: { size: 9 } } },
+        },
+      },
+    });
+    chartsById[canvas.id] = chart;
+    return chart;
+  }
+
+  // ---- Zoom: drag a rectangle over the canvas to zoom the step (x) range;
+  // double-click resets. This is what "zoom in for the final PDF export"
+  // means in this report -- the zoomed range is just the chart's current
+  // state, which is exactly what window.print() rasterizes. ----
+  function wireZoom(canvas, chart) {
+    var dragging = false, startX = 0;
+    var wrap = canvas.parentElement;
+    var overlay = document.createElement("div");
+    overlay.className = "wl-zoom-overlay";
+    wrap.appendChild(overlay);
+
+    canvas.addEventListener("mousedown", function (e) {
+      dragging = true;
+      startX = e.offsetX;
+      overlay.style.display = "block";
+      overlay.style.left = startX + "px";
+      overlay.style.width = "0px";
+    });
+    canvas.addEventListener("mousemove", function (e) {
+      if (!dragging) return;
+      var x = e.offsetX;
+      overlay.style.left = Math.min(startX, x) + "px";
+      overlay.style.width = Math.abs(x - startX) + "px";
+    });
+    function endDrag(e) {
+      if (!dragging) return;
+      dragging = false;
+      overlay.style.display = "none";
+      var endX = e.offsetX;
+      if (Math.abs(endX - startX) < 6) return; // a click, not a drag -- don't zoom
+      var xScale = chart.scales.x;
+      if (!xScale) return;
+      var v1 = xScale.getValueForPixel(startX);
+      var v2 = xScale.getValueForPixel(endX);
+      chart.options.scales.x.min = Math.min(v1, v2);
+      chart.options.scales.x.max = Math.max(v1, v2);
+      chart.update();
+    }
+    canvas.addEventListener("mouseup", endDrag);
+    canvas.addEventListener("mouseleave", function () { dragging = false; overlay.style.display = "none"; });
+    canvas.addEventListener("dblclick", function () {
+      delete chart.options.scales.x.min;
+      delete chart.options.scales.x.max;
+      chart.update();
+    });
+  }
+
+  // ---- Expand modal: chart re-rendered bigger, same zoom interaction; or a
+  // plain enlarged <img> for the static distribution histograms. ----
+  var expandOverlay = null;
+  function closeExpand() {
+    if (!expandOverlay) return;
+    var canvas = expandOverlay.querySelector("canvas");
+    if (canvas && chartsById[canvas.id]) { chartsById[canvas.id].destroy(); delete chartsById[canvas.id]; }
+    expandOverlay.remove();
+    expandOverlay = null;
+  }
+  function openExpandShell(title) {
+    closeExpand();
+    expandOverlay = document.createElement("div");
+    expandOverlay.className = "wl-expand-overlay";
+    var panel = document.createElement("div");
+    panel.className = "wl-expand-panel";
+    var head = document.createElement("div");
+    head.className = "wl-expand-head";
+    head.innerHTML = "<span>" + escapeHtml(title || "") + "</span>"
+      + '<button type="button" class="wl-block-btn" data-expand-reset title="Reset zoom">&#8635;</button>'
+      + '<button type="button" class="wl-block-btn" data-expand-close title="Close (Esc)">&times;</button>';
+    var body = document.createElement("div");
+    body.className = "wl-expand-body";
+    panel.appendChild(head);
+    panel.appendChild(body);
+    expandOverlay.appendChild(panel);
+    document.body.appendChild(expandOverlay);
+    head.querySelector("[data-expand-close]").addEventListener("click", closeExpand);
+    expandOverlay.addEventListener("click", function (e) { if (e.target === expandOverlay) closeExpand(); });
+    return { head: head, body: body };
+  }
+  function expandChart(data) {
+    var shell = openExpandShell(data.name);
+    var canvas = document.createElement("canvas");
+    canvas.id = "wl-expand-canvas-" + Date.now();
+    shell.body.appendChild(canvas);
+    var chart = buildChart(canvas, data);
+    wireZoom(canvas, chart);
+    shell.head.querySelector("[data-expand-reset]").addEventListener("click", function () {
+      delete chart.options.scales.x.min;
+      delete chart.options.scales.x.max;
+      chart.update();
+    });
+  }
+  function expandImage(src, title) {
+    var shell = openExpandShell(title);
+    shell.head.querySelector("[data-expand-reset]").style.display = "none";
+    var img = document.createElement("img");
+    img.src = src;
+    img.alt = title || "";
+    shell.body.appendChild(img);
+  }
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeExpand(); });
+
+  // ---- Wire every embedded plot block ----
+  function initPlots() {
+    var hasChart = typeof Chart !== "undefined";
+    document.querySelectorAll(".wl-plot-block").forEach(function (block) {
+      var dataEl = block.querySelector(".wl-plot-data");
+      var canvas = block.querySelector("canvas.wl-report-chart");
+      if (!dataEl || !canvas || !hasChart) return;
+      var data;
+      try { data = JSON.parse(dataEl.textContent); } catch (e) { return; }
+      var chart = buildChart(canvas, data);
+      wireZoom(canvas, chart);
+      var expandBtn = block.querySelector('[data-action="expand"]');
+      if (expandBtn) expandBtn.addEventListener("click", function () { expandChart(data); });
+    });
+    // Distribution cards: static image, "expand" just opens it larger.
+    document.querySelectorAll(".wl-plot-block [data-action=\"expand\"]").forEach(function (btn) {
+      var block = btn.closest(".wl-plot-block");
+      if (block.querySelector(".wl-plot-data")) return; // already handled above (chart block)
+      var img = block.querySelector("img[data-expand-image]");
+      if (!img) return;
+      btn.addEventListener("click", function () {
+        expandImage(img.getAttribute("data-expand-image"), img.getAttribute("data-expand-title"));
+      });
+    });
+  }
+
+  // ---- Delegated toolbar clicks: move/remove (every block), remove-row (runs table) ----
+  function initToolbarDelegation() {
+    document.addEventListener("click", function (e) {
+      var moveBtn = e.target.closest('.wl-block-btn[data-action="move-up"], .wl-block-btn[data-action="move-down"]');
+      if (moveBtn) {
+        var block = moveBtn.closest(".wl-block");
+        if (block) moveBlock(block, moveBtn.dataset.action === "move-up" ? "up" : "down");
+        return;
+      }
+      var removeBtn = e.target.closest('.wl-block-btn[data-action="remove"]');
+      if (removeBtn) {
+        var rBlock = removeBtn.closest(".wl-block");
+        if (rBlock) removeBlock(rBlock);
+        return;
+      }
+      var rowBtn = e.target.closest('[data-action="remove-row"]');
+      if (rowBtn) {
+        var row = rowBtn.closest("tr");
+        if (row && window.confirm("Remove this run from the report?")) row.remove();
+      }
+    });
+  }
+
+  // ---- "+ Title" / "+ Text" -- freeform, reorderable/removable blocks the
+  // user can add anywhere in the #wl-freeform-blocks area. ----
+  function makeTextBlock(kind, placeholder) {
+    var block = document.createElement("div");
+    block.className = "wl-block wl-text-block";
+    block.innerHTML =
+      '<div class="wl-block-toolbar">'
+      + '<button type="button" class="wl-block-btn" data-action="move-up" title="Move up">&#8593;</button>'
+      + '<button type="button" class="wl-block-btn" data-action="move-down" title="Move down">&#8595;</button>'
+      + '<button type="button" class="wl-block-btn wl-block-btn-danger" data-action="remove" title="Remove">&times;</button>'
+      + "</div>";
+    var content = document.createElement(kind === "title" ? "h2" : "p");
+    content.className = kind === "title" ? "wl-report-user-title" : "wl-report-user-text";
+    content.contentEditable = "true";
+    content.spellcheck = false;
+    content.textContent = placeholder;
+    content.addEventListener("focus", function onFocus() {
+      if (content.textContent === placeholder) content.textContent = "";
+      content.removeEventListener("focus", onFocus);
+    });
+    block.appendChild(content);
+    return block;
+  }
+  function initAddButtons() {
+    var host = document.getElementById("wl-freeform-blocks");
+    var addTitleBtn = document.getElementById("wl-add-title-btn");
+    var addTextBtn = document.getElementById("wl-add-text-btn");
+    if (addTitleBtn) addTitleBtn.addEventListener("click", function () {
+      var block = makeTextBlock("title", "New section title");
+      host.appendChild(block);
+      block.scrollIntoView({ behavior: "smooth", block: "center" });
+      block.querySelector("[contenteditable]").focus();
+    });
+    if (addTextBtn) addTextBtn.addEventListener("click", function () {
+      var block = makeTextBlock("text", "Click to write a note…");
+      host.appendChild(block);
+      block.scrollIntoView({ behavior: "smooth", block: "center" });
+      block.querySelector("[contenteditable]").focus();
+    });
+  }
+
+  function initPdfExport() {
+    var btn = document.getElementById("wl-export-pdf-btn");
+    if (btn) btn.addEventListener("click", function () { window.print(); });
+  }
+
+  function boot() {
+    initPlots();
+    initToolbarDelegation();
+    initAddButtons();
+    initPdfExport();
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
+})();
+</script>
+"""
 
 
 _HTML_TEMPLATE = """<!doctype html>
@@ -785,7 +1272,82 @@ _HTML_TEMPLATE = """<!doctype html>
   .wl-report-subhead {{ font-weight: 600; margin: 12px 0 4px; font-size: 0.88rem; color: var(--wl-fg-muted); display: block; }}
   .wl-report-muted {{ color: var(--wl-fg-subtle); font-style: italic; }}
   .wl-report-footer {{ margin-top: 48px; color: var(--wl-fg-subtle); font-size: 0.78rem; text-align: center; }}
+
+  /* --- Report editor: toolbar, blocks, charts, zoom, expand modal, runs table --- */
+  .wl-editor-toolbar {{
+    position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 8px clamp(16px, 5vw, 64px); margin-bottom: 24px;
+    background: var(--wl-bg); border-bottom: 1px solid var(--wl-border);
+  }}
+  .wl-editor-toolbar-btn {{
+    border: 1px solid var(--wl-border); background: var(--wl-card-bg); color: var(--wl-fg);
+    border-radius: 6px; padding: 6px 12px; font-size: 0.82rem; cursor: pointer;
+  }}
+  .wl-editor-toolbar-btn:hover {{ border-color: var(--wl-good); }}
+  .wl-editor-toolbar-hint {{ margin-left: auto; font-size: 0.76rem; color: var(--wl-fg-subtle); }}
+  .wl-block {{ position: relative; }}
+  .wl-block-toolbar {{
+    position: absolute; top: 6px; right: 6px; z-index: 5;
+    display: flex; gap: 2px; opacity: 0; transition: opacity 0.12s ease;
+    background: var(--wl-card-bg); border: 1px solid var(--wl-border); border-radius: 6px; padding: 2px;
+  }}
+  .wl-block:hover > .wl-block-toolbar, .wl-block-toolbar:focus-within {{ opacity: 1; }}
+  .wl-block-btn {{
+    border: none; background: transparent; color: var(--wl-fg-muted); cursor: pointer;
+    font-size: 0.85rem; line-height: 1; width: 24px; height: 24px; border-radius: 4px;
+  }}
+  .wl-block-btn:hover {{ background: var(--wl-bg-elevated); color: var(--wl-fg); }}
+  .wl-block-btn-danger:hover {{ color: var(--wl-warn); }}
+  .wl-chart-wrap {{ position: relative; height: 200px; background: var(--wl-card-bg) !important; }}
+  .wl-chart-wrap canvas {{ cursor: crosshair; }}
+  .wl-zoom-overlay {{
+    display: none; position: absolute; top: 0; bottom: 0; pointer-events: none;
+    background: color-mix(in srgb, var(--wl-good) 18%, transparent);
+    border-left: 1px solid var(--wl-good); border-right: 1px solid var(--wl-good);
+  }}
+  .wl-report-runs-table {{ width: 100%; border-collapse: collapse; font-size: 0.86rem; }}
+  .wl-report-runs-table th, .wl-report-runs-table td {{
+    padding: 6px 10px; border-bottom: 1px solid var(--wl-border); text-align: left;
+  }}
+  .wl-report-runs-table th {{
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--wl-fg-muted);
+  }}
+  .wl-mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.78rem; }}
+  .wl-report-user-title, .wl-report-user-text {{
+    border: 1px dashed transparent; border-radius: 6px; padding: 6px 8px; margin: 0 0 12px;
+    outline: none;
+  }}
+  .wl-report-user-title {{ font-size: 1.2rem; font-weight: 700; }}
+  .wl-report-user-text {{ font-size: 0.95rem; }}
+  .wl-report-user-title:focus, .wl-report-user-text:focus {{ border-color: var(--wl-border); background: var(--wl-bg-elevated); }}
+  #wl-freeform-blocks:empty {{ display: none; }}
+  .wl-expand-overlay {{
+    position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center;
+    background: rgba(15, 23, 42, 0.55); padding: 24px;
+  }}
+  .wl-expand-panel {{
+    width: min(1100px, 100%); height: min(680px, 90vh); display: flex; flex-direction: column;
+    background: var(--wl-card-bg); border: 1px solid var(--wl-border); border-radius: 10px;
+    box-shadow: 0 24px 60px rgba(15, 23, 42, 0.4); overflow: hidden;
+  }}
+  .wl-expand-head {{
+    flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+    border-bottom: 1px solid var(--wl-border); font-weight: 600;
+  }}
+  .wl-expand-head span {{ flex: 1 1 auto; }}
+  .wl-expand-body {{ flex: 1 1 auto; min-height: 0; position: relative; padding: 12px; }}
+  .wl-expand-body canvas {{ cursor: crosshair; }}
+  .wl-expand-body img {{ max-width: 100%; max-height: 100%; display: block; margin: 0 auto; }}
+
+  @media print {{
+    .wl-editor-toolbar, .wl-block-toolbar, .wl-report-theme-toggle, .wl-expand-overlay {{ display: none !important; }}
+    .wl-block {{ break-inside: avoid; }}
+    .wl-report-user-title, .wl-report-user-text {{ border: none; }}
+    body {{ background: #ffffff; color: #1a1a1a; }}
+  }}
 </style>
+{chartjs_script}
 </head>
 <body>
   <div class="wl-report-banner">
@@ -797,6 +1359,13 @@ _HTML_TEMPLATE = """<!doctype html>
     <button type="button" id="wl-theme-toggle" class="wl-report-theme-toggle" title="Toggle light/dark mode">&#9789;</button>
   </div>
 
+  <div class="wl-editor-toolbar">
+    <button type="button" class="wl-editor-toolbar-btn" id="wl-add-title-btn">+ Title</button>
+    <button type="button" class="wl-editor-toolbar-btn" id="wl-add-text-btn">+ Text</button>
+    <button type="button" class="wl-editor-toolbar-btn" id="wl-export-pdf-btn">Export to PDF</button>
+    <span class="wl-editor-toolbar-hint">Hover a card for move / expand / remove &middot; edits stay in this browser tab until you export</span>
+  </div>
+
   <div class="wl-report-content">
     <div class="wl-report-meta">
       Generated {generated_at} &middot; {root_log_dir}
@@ -806,6 +1375,10 @@ _HTML_TEMPLATE = """<!doctype html>
       <h2>Analysis</h2>
       <div class="wl-report-narrative">{narrative}</div>
     </div>
+
+    <div id="wl-freeform-blocks"></div>
+
+    {runs_section_html}
 
     <div class="wl-report-section">
       <h2>Signals</h2>
@@ -851,6 +1424,7 @@ _HTML_TEMPLATE = """<!doctype html>
       sync();
     }})();
   </script>
+{interactive_js}
 </body>
 </html>
 """
@@ -869,7 +1443,7 @@ def render_report(context: dict, output_path, narrative: Optional[str] = None) -
     signals = context.get("signals") or []
     if signals:
         signals_html = '<div class="wl-report-grid">' + "".join(
-            _signal_card_html(e) for e in signals
+            _signal_card_html(e, f"wl-signal-{i}") for i, e in enumerate(signals)
         ) + "</div>"
     else:
         msg = (
@@ -894,6 +1468,9 @@ def render_report(context: dict, output_path, narrative: Optional[str] = None) -
         distributions_section_html=_distributions_section_html(context.get("distributions") or []),
         loss_shape_html=_loss_shape_section_html(context.get("loss_shape_tags") or []),
         dataframe_html=_dataframe_section_html(context.get("dataframe") or {}),
+        runs_section_html=_runs_section_html(context.get("runs") or []),
+        chartjs_script=_chartjs_script_tag(),
+        interactive_js=_INTERACTIVE_JS,
     )
 
     output_path = Path(output_path)
@@ -941,7 +1518,7 @@ def summarize_context_for_llm(context: dict) -> str:
     """
     return json.dumps({
         "signals": [
-            {k: v for k, v in entry.items() if k != "plot_b64"}
+            {k: v for k, v in entry.items() if k not in ("plot_b64", "series")}
             for entry in context.get("signals", [])
         ],
         "distributions": [
@@ -962,6 +1539,7 @@ def generate_report(
     narrative_fn: Optional[Callable[[str], str]] = None,
     distributions: Optional[list] = None,
     update_existing: bool = False,
+    checkpoint_manager=None,
 ) -> dict:
     """Collect → narrate → render, in one call. The single implementation
     behind every user-facing entry point (the Studio report button and the
@@ -991,6 +1569,11 @@ def generate_report(
     to creating a new report exactly as if ``update_existing`` were ``False``
     — there is nothing wrong with "update" on a first-ever report.
 
+    ``checkpoint_manager`` (optional) supplies run metadata (experiment_name,
+    notes, current-run flag — see ``CheckpointManager.list_runs``) for the
+    report's Runs section and per-curve legend labels; omitted, curves and
+    runs fall back to showing their raw hash.
+
     Returns ``{"path", "n_signals", "narrative", "narrative_error",
     "updated_existing"}`` — the last key tells the caller whether an existing
     file was overwritten (``True``) or a new one was created (``False``), so
@@ -998,7 +1581,10 @@ def generate_report(
     file are NOT swallowed: they raise, because there is no report to hand
     back.
     """
-    context = collect_report_context(root_log_dir, logger_q, df, signals=signals, distributions=distributions)
+    context = collect_report_context(
+        root_log_dir, logger_q, df, signals=signals, distributions=distributions,
+        checkpoint_manager=checkpoint_manager,
+    )
 
     narrative = None
     narrative_error = None

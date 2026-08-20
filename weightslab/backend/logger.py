@@ -237,10 +237,18 @@ class LoggerQueue:
         self._loss_shape_overrides: dict = {}  # {signal_name: (tag_name, classifier)}
         self._loss_shape_disabled: set = set()
         self._loss_shape_all_disabled: bool = False
-        # {signal_name: _qps_version at the last successful tag pass} — lets
-        # _autotag_loss_shapes() skip a signal entirely when no new per-sample
-        # data has been staged for it since last time (see _autotag_loss_shapes).
-        self._loss_shape_last_version: dict = {}
+        # {(signal_name, exp_hash): {sample_id, ...}} — sample_ids with a new
+        # per-sample write for that signal + hash since the last successful
+        # tag pass (populated only by _stage_sample_row on an actual new
+        # write). Lets _autotag_loss_shapes() reclassify just the samples
+        # that actually changed instead of every sample ever logged under
+        # that signal, and skip the pair entirely when nothing changed.
+        # Deliberately separate from _qps_version: that one is also reset
+        # wholesale by _invalidate_qps_cache() on every step boundary (it's a
+        # read-cache key), which would otherwise make every signal look
+        # "changed" on every step regardless of whether it actually got new
+        # data (see _autotag_loss_shapes).
+        self._loss_shape_dirty_samples: dict = defaultdict(set)
         self._flush_stop = threading.Event()
         self._flush_thread: threading.Thread | None = None
 
@@ -353,23 +361,37 @@ class LoggerQueue:
                 self._loss_shape_overrides.pop(loss_signal, None)
 
     def _autotag_loss_shapes(self) -> None:
-        """Re-classify every auto-detected ``flag="loss"`` signal that has NEW
-        per-sample data since its last tag pass.
+        """Re-classify, per sample, every auto-detected ``flag="loss"`` signal
+        sample that got NEW per-sample data for the *current* experiment hash
+        since its last tag pass.
 
-        Each signal is skipped when its ``_qps_version`` (bumped only by
-        ``_stage_sample_row`` on an actual new per-sample write, and already
-        the cache-invalidation key for ``query_per_sample``/
-        ``query_signal_history``) hasn't moved since the last time this
-        signal was classified — no new points means the classification result
-        (and thus every categorical tag written from it) would come out
-        identical, so re-running the full read + classify + tag-write cycle
-        on a bare 2s timer regardless of whether training even produced
+        Scoped to ``chkpt_manager.get_current_experiment_hash()`` — a sample's
+        shape is classified on its trajectory within the run that's actually
+        active, not merged across every hash ever logged for that sample id
+        (e.g. sibling roots merged in via merge_from_disk, or a resumed run
+        under a new hash). Without a checkpoint manager (e.g. a standalone
+        LoggerQueue in tests/notebooks) the hash resolves to ``None``, which
+        ``write_signal_shapes`` treats as "no hash filter" — the only
+        sensible behavior when there's no run boundary to scope to.
+
+        A (signal, hash) pair is skipped entirely when ``_loss_shape_dirty_
+        samples`` (populated only by ``_stage_sample_row`` on an actual new
+        per-sample write for that signal + hash) has no sample_ids recorded
+        for it since the last pass — no new points means the classification
+        result (and thus every categorical tag written from it) would come
+        out identical, so re-running the full read + classify + tag-write
+        cycle on a bare 2s timer regardless of whether training even produced
         anything new was pure waste, and contended ``self._lock`` against
         unrelated reads (e.g. ``get_signal_history()`` for
         ``GetLatestLoggerData``) the whole time training was paused/idle too.
-        Failures are per-signal and never propagate — one bad
-        classifier/signal can't stop the others.
+        And when it does run, only the dirty sample_ids are reclassified —
+        each sample's shape is a function of its own trajectory alone, so a
+        new point on sample A can't change sample B's label; re-running B's
+        classifier every time some other sample in the same signal moves
+        would be pure waste too. Failures are per-signal and never
+        propagate — one bad classifier/signal can't stop the others.
         """
+        exp_hash = self.chkpt_manager.get_current_experiment_hash() if self.chkpt_manager else None
         with self._lock:
             if self._loss_shape_all_disabled:
                 return
@@ -389,14 +411,29 @@ class LoggerQueue:
         for signal_name in signal_names:
             if signal_name in disabled:
                 continue
+            dirty_key = (signal_name, exp_hash)
             with self._lock:
-                current_version = self._qps_version[signal_name]
-            if self._loss_shape_last_version.get(signal_name) == current_version:
+                dirty = self._loss_shape_dirty_samples.get(dirty_key)
+                sample_ids = list(dirty) if dirty else None
+            if not sample_ids:
                 continue  # no new per-sample data logged since the last pass
             tag_name, classifier = overrides.get(signal_name, (None, None))
             try:
-                write_signal_shapes(signal_name, tag_name=tag_name, classifier=classifier)
-                self._loss_shape_last_version[signal_name] = current_version
+                write_signal_shapes(
+                    signal_name, tag_name=tag_name, classifier=classifier,
+                    exp_hash=exp_hash, sample_ids=sample_ids)
+                with self._lock:
+                    # Only drop the sample_ids snapshotted above — a write
+                    # staged for this signal+hash *during* the call above
+                    # (from a concurrent training thread) added a sample_id
+                    # that was never read by write_signal_shapes, so it must
+                    # stay dirty for the next pass rather than being dropped
+                    # here as if it had already been classified.
+                    still_dirty = self._loss_shape_dirty_samples.get(dirty_key)
+                    if still_dirty is not None:
+                        still_dirty.difference_update(sample_ids)
+                        if not still_dirty:
+                            self._loss_shape_dirty_samples.pop(dirty_key, None)
             except Exception as exc:
                 logger.debug(
                     f"[LoggerQueue] loss-shape autotag failed for {signal_name!r}: {exc}")
@@ -498,19 +535,43 @@ class LoggerQueue:
     )
 
     def _ensure_indexes(self) -> None:
-        """Best-effort: an index that fails to build must never stop logging."""
-        for name, table, cols in self._INDEX_DDL:
+        """Kick off index creation in the background.
+
+        On a fresh/small DB this is instant either way, but on an existing
+        file with many runs' worth of history (the resume path, via
+        ``set_db_path``) building 4 indexes over the full tables can take a
+        long time -- and this used to run synchronously inside
+        ``_ensure_tables()`` while holding ``self._lock``, which every read
+        (including the one behind ``GetLatestLoggerData``) also needs. That
+        made a large resume look like the server had hung: every RPC queued
+        on the lock for the whole build instead of erroring or completing.
+
+        Building on a dedicated cursor lets the main connection keep serving
+        reads/writes (unindexed, same as before this feature existed) while
+        the indexes come up in the background. An index that fails to build
+        (older DuckDB, read-only db, a transient conflict with a concurrent
+        write) must never stop logging, so failures here are swallowed.
+        """
+        def _build() -> None:
             try:
-                self._conn.execute(
-                    f"CREATE INDEX IF NOT EXISTS {name} ON {table} {cols}")
-            except Exception as exc:  # older DuckDB, read-only db, ...
-                logger.debug("Index %s on %s not created: %s", name, table, exc)
+                cur = self._conn.cursor()
+            except Exception as exc:
+                logger.debug("Could not open index-build cursor: %s", exc)
+                return
+            for name, table, cols in self._INDEX_DDL:
+                try:
+                    cur.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {table} {cols}")
+                except Exception as exc:  # older DuckDB, read-only db, conflict, ...
+                    logger.debug("Index %s on %s not created: %s", name, table, exc)
+
+        threading.Thread(target=_build, daemon=True, name="wl-index-build").start()
 
     def _ensure_tables(self) -> None:
         with self._lock:
             self._conn.execute(self._schema_ddl())
             self._migrate_signal_columns()
-            self._ensure_indexes()
+        # Deliberately outside the lock -- see _ensure_indexes.
+        self._ensure_indexes()
 
     def _migrate_signal_columns(self) -> None:
         """Add any post-release `signals` columns missing from an older DB file."""
@@ -761,14 +822,20 @@ class LoggerQueue:
             )
         )
         self._qps_version[graph_name] += 1   # invalidate this signal's cached reads
+        self._loss_shape_dirty_samples[(graph_name, exp_hash)].add(str(sample_id))
         self._maybe_autoflush()
 
     def _invalidate_qps_cache(self) -> None:
-        """Drop both query caches + versions (step advance; bulk delete/clear)."""
+        """Drop both query caches + versions (step advance; bulk delete/clear).
+
+        Deliberately leaves _loss_shape_dirty_samples alone: it tracks actual
+        new per-sample writes per (signal, hash, sample_id), not the
+        read-cache's step-scoped keys, so a step boundary elsewhere must not
+        make _autotag_loss_shapes() think every sample of every signal changed.
+        """
         self._qps_cache.cache_clear()
         self._qps_step_cache.cache_clear()
         self._qps_version.clear()
-        self._loss_shape_last_version.clear()
 
     def _stage_instance_row(self, graph_name, exp_hash, sample_id, annotation_id, step, value):
         self._stage_instance.append((
@@ -1379,22 +1446,32 @@ class LoggerQueue:
     def get_signal_curve_index(self, metric_names=None, exp_hashes=None) -> dict:
         """Per-curve shape without any of its points.
 
-        Returns ``{metric: {hash: {"first_step", "last_step", "count"}}}``. This
-        is a single grouped aggregate -- it lets the UI lay out axes, decide how
-        many points to ask for, and show which curves exist, without reading a
-        single data point.
+        Returns ``{metric: {hash: {"first_step", "last_step", "count",
+        "value_min", "value_max"}}}``. This is a single grouped aggregate --
+        it lets the UI lay out axes, decide how many points to ask for, show
+        which curves exist, and now also show each curve's own value range,
+        all without reading a single data point.
+
+        A hash-less signal (e.g. a global/resource metric logged with no
+        experiment_hash) groups under a ``NULL`` key -- normalised to "N.A."
+        here (the same sentinel the break-by-slices path already uses for
+        this), since the caller assigns this straight into a protobuf string
+        field and a bare ``None`` would raise there instead of just being an
+        odd-looking curve.
         """
         where, params = self._scope_filters(metric_names, exp_hashes)
         with self._lock:
             self._flush_stage()
             rows = self._conn.execute(
-                "SELECT metric_name, experiment_hash, MIN(step), MAX(step), COUNT(*) "
+                "SELECT metric_name, experiment_hash, MIN(step), MAX(step), COUNT(*), "
+                "MIN(metric_value), MAX(metric_value) "
                 f"FROM signals WHERE 1=1{where} GROUP BY 1, 2", params
             ).fetchall()
         out: dict = {}
-        for metric, h, lo, hi, n in rows:
-            out.setdefault(metric, {})[h] = {
+        for metric, h, lo, hi, n, val_lo, val_hi in rows:
+            out.setdefault(metric, {})[h if h is not None else "N.A."] = {
                 "first_step": int(lo), "last_step": int(hi), "count": int(n),
+                "value_min": float(val_lo), "value_max": float(val_hi),
             }
         return out
 
@@ -1446,6 +1523,10 @@ class LoggerQueue:
             f"arg_min({c}, step) AS {c}" for c in _SIGNAL_READ_COLS
             if c not in ("metric_name", "experiment_hash", "step")
         )
+        picks_max = ", ".join(
+            f"arg_max({c}, step) AS {c}" for c in _SIGNAL_READ_COLS
+            if c not in ("metric_name", "experiment_hash", "step")
+        )
         sql = f"""
         WITH scoped AS (
             SELECT {cols} FROM signals WHERE 1=1{where}
@@ -1458,21 +1539,43 @@ class LoggerQueue:
         tagged AS (
             SELECT s.*,
                    CASE WHEN b.hi <= b.lo THEN 0
-                        ELSE CAST(((s.step - b.lo) * {n_buckets}) / (b.hi - b.lo)
-                                  AS BIGINT)
+                        -- step/lo/hi are all INTEGER (INT32) columns; the
+                        -- subtraction fits fine, but multiplying that by
+                        -- n_buckets can overflow INT32 on a long-running
+                        -- experiment (e.g. step ~538k * a few thousand
+                        -- buckets already exceeds it) well before the
+                        -- outer CAST ever gets a chance to widen it. Cast
+                        -- BEFORE the multiplication so DuckDB does the
+                        -- whole computation in BIGINT instead.
+                        -- DuckDB's `/` is float division even between two
+                        -- integer operands (unlike Postgres/MySQL) -- it would
+                        -- leave `bucket` a near-unique float per row instead of
+                        -- an integer 0..n_buckets, so GROUP BY bucket below
+                        -- would barely deduplicate anything. `//` is DuckDB's
+                        -- floor-division operator; that's the one we need here.
+                        ELSE (CAST(s.step - b.lo AS BIGINT) * {n_buckets}) // (b.hi - b.lo)
                    END AS bucket
             FROM scoped s
             JOIN bounds b
-              ON s.metric_name = b.m AND s.experiment_hash = b.h
+              ON s.metric_name = b.m AND s.experiment_hash IS NOT DISTINCT FROM b.h
         ),
         reps AS (
             SELECT metric_name, experiment_hash, MIN(step) AS step, {picks}
             FROM tagged GROUP BY metric_name, experiment_hash, bucket
         ),
         ends AS (
-            SELECT {cols} FROM scoped s
-            JOIN bounds b ON s.metric_name = b.m AND s.experiment_hash = b.h
-            WHERE s.step = b.lo OR s.step = b.hi
+            -- One representative row per endpoint, not every raw row that
+            -- happens to sit at the min/max step: a metric can log many rows
+            -- at the same step (e.g. a per-step outlier snapshot), and a bare
+            -- ``step = lo OR step = hi`` filter would pull all of them,
+            -- silently defeating the downsampling above (in the extreme
+            -- hi == lo case, every row matches and the "capped" query
+            -- degenerates into a full-table read).
+            SELECT metric_name, experiment_hash, MIN(step) AS step, {picks}
+            FROM scoped GROUP BY metric_name, experiment_hash
+            UNION ALL
+            SELECT metric_name, experiment_hash, MAX(step) AS step, {picks_max}
+            FROM scoped GROUP BY metric_name, experiment_hash
         )
         SELECT {cols} FROM reps
         UNION ALL
@@ -1696,31 +1799,115 @@ class LoggerQueue:
         exp_hash = self.chkpt_manager.get_current_experiment_hash() if self.chkpt_manager and exp_hash is None else exp_hash
         return self.query_per_sample(graph_name, sample_ids=sample_ids, exp_hash=exp_hash)
 
-    def query_per_sample(self, graph_name: str, sample_ids=None, exp_hash=None):
+    def query_per_sample(self, graph_name: str, sample_ids=None, exp_hash=None,
+                         max_points: int | None = None):
         """Query per-sample history.
 
         Returns a list of ``(sample_id, step, value, experiment_hash)`` tuples,
         filtered by *sample_ids* and optionally *exp_hash* (``None`` = all hashes).
 
+        *sample_ids* already bounds this read to a handful of ids, but each id's
+        own series can still be arbitrarily deep (one row per training step) --
+        on a long run that is easily hundreds of millions of rows for a single
+        sample. When *max_points* is given, each sample's series is reduced to
+        ~*max_points* points *inside DuckDB* (same bucket-per-series decimation
+        as :meth:`get_signal_history_downsampled`, just partitioned by
+        ``sample_id`` instead of ``(metric_name, experiment_hash)``), so the
+        number of rows crossing into Python is bounded by what a per-sample
+        trajectory plot can draw, not by how long the run has trained.
+        ``max_points=None`` (the default) returns every row, unchanged from
+        before -- callers that already scope to a handful of steps rely on
+        getting everything back.
+
         Cached (memoized until *graph_name* is next staged). Returns a fresh list.
         """
         ids_key = tuple(str(s) for s in sample_ids) if sample_ids is not None else None
-        cached = self._qps_cache(graph_name, ids_key, exp_hash, self._qps_version[graph_name])
+        cached = self._qps_cache(graph_name, ids_key, exp_hash, max_points,
+                                 self._qps_version[graph_name])
         return list(cached)
 
-    def _query_per_sample_uncached(self, graph_name, ids_key, exp_hash, _version):
+    def _query_per_sample_uncached(self, graph_name, ids_key, exp_hash, max_points,
+                                   _version):
         """DuckDB read behind :meth:`query_per_sample`. ``_version`` is a cache
         key only (bumped on write -> recompute). Returns an immutable tuple."""
         with self._lock:
             self._flush_stage()
             params = [graph_name]
-            sql = "SELECT sample_id, step, value, experiment_hash FROM per_sample WHERE metric_name = ?"
-            sql += self._hash_filter(exp_hash, params)
+            where = " WHERE metric_name = ?"
+            where += self._hash_filter(exp_hash, params)
             if ids_key is not None:
-                sql += " AND sample_id IN (SELECT UNNEST(?))"
+                where += " AND sample_id IN (SELECT UNNEST(?))"
                 params.append(list(ids_key))
-            sql += " ORDER BY seq"
-            rows = self._conn.execute(sql, params).fetchall()
+
+            if max_points is None:
+                sql = ("SELECT sample_id, step, value, experiment_hash "
+                       f"FROM per_sample{where} ORDER BY seq")
+                rows = self._conn.execute(sql, params).fetchall()
+            else:
+                # Bucket each sample_id's own series independently -- a sample
+                # trained for 10 steps and one trained for 10M steps both come
+                # back around `n_buckets` points, instead of the deep one
+                # dominating an overall LIMIT. arg_min(..., step) picks a real
+                # row per bucket (first-by-step), and the endpoints union keeps
+                # each series' true first/last step regardless of bucketing --
+                # same shape of guarantee as get_signal_history_downsampled.
+                n_buckets = max(int(max_points), _MIN_POINTS_PER_CURVE)
+                sql = f"""
+                WITH scoped AS (
+                    SELECT sample_id, step, value, experiment_hash
+                    FROM per_sample{where}
+                ),
+                bounds AS (
+                    SELECT sample_id, MIN(step) AS lo, MAX(step) AS hi
+                    FROM scoped GROUP BY sample_id
+                ),
+                tagged AS (
+                    SELECT s.*,
+                           -- Cast BEFORE multiplying, not after -- step/lo/hi
+                           -- are INTEGER (INT32) columns, and (step - lo) *
+                           -- n_buckets can overflow INT32 on a long run well
+                           -- before an outer CAST would get a chance to widen
+                           -- it (see get_signal_history_downsampled's own
+                           -- version of this exact fix).
+                           -- `/` is float division in DuckDB even for two
+                           -- integer operands -- see the identical fix note in
+                           -- get_signal_history_downsampled. `//` floor-divides.
+                           CASE WHEN b.hi <= b.lo THEN 0
+                                ELSE (CAST(s.step - b.lo AS BIGINT) * {n_buckets})
+                                     // (b.hi - b.lo)
+                           END AS bucket
+                    FROM scoped s JOIN bounds b ON s.sample_id = b.sample_id
+                ),
+                reps AS (
+                    SELECT sample_id,
+                           arg_min(step, step) AS step,
+                           arg_min(value, step) AS value,
+                           arg_min(experiment_hash, step) AS experiment_hash
+                    FROM tagged GROUP BY sample_id, bucket
+                ),
+                ends AS (
+                    -- One representative row per endpoint, not every raw row
+                    -- at the min/max step -- see get_signal_history_downsampled's
+                    -- own version of this exact fix for why a bare
+                    -- ``step = lo OR step = hi`` filter can blow up.
+                    SELECT sample_id, arg_min(step, step) AS step,
+                           arg_min(value, step) AS value,
+                           arg_min(experiment_hash, step) AS experiment_hash
+                    FROM scoped GROUP BY sample_id
+                    UNION ALL
+                    SELECT sample_id, arg_max(step, step) AS step,
+                           arg_max(value, step) AS value,
+                           arg_max(experiment_hash, step) AS experiment_hash
+                    FROM scoped GROUP BY sample_id
+                )
+                SELECT DISTINCT sample_id, step, value, experiment_hash FROM (
+                    SELECT sample_id, step, value, experiment_hash FROM reps
+                    UNION ALL
+                    SELECT sample_id, step, value, experiment_hash FROM ends
+                )
+                ORDER BY sample_id, step
+                """
+                rows = self._conn.execute(sql, params).fetchall()
 
         return tuple((sid, int(step), float(val), h) for (sid, step, val, h) in rows)
 
@@ -1769,7 +1956,11 @@ class LoggerQueue:
                 params.append(list(ids_key))
             rows = self._conn.execute(sql, params).fetchall()
 
-        return tuple((sid, float(val)) for (sid, val) in rows)
+        # register()'s pandas->DuckDB bulk insert (see _flush_stage) silently turns a
+        # staged float('nan') into SQL NULL; float(None) raising here would bubble up
+        # through GetStepSamples' broad except and blank out every OTHER sample's
+        # value in the same batch, not just this row's.
+        return tuple((sid, float(val) if val is not None else float("nan")) for (sid, val) in rows)
 
     def query_per_instance(
         self,
@@ -1807,12 +1998,18 @@ class LoggerQueue:
         graph_name: str,
         sample_ids=None,
         exp_hash: str | None = None,
+        exp_hashes=None,
     ) -> dict:
         """Return mean signal value per step, aggregated over matching samples.
 
         DuckDB performs the ``GROUP BY step`` average natively, which scales to
         millions of rows far better than a Python loop — this is the path used
         by break-by-slices.
+
+        ``exp_hashes`` (plural) scopes the aggregate to specific runs -- e.g.
+        break-by-slices for one curve only needs that curve's own hash, not
+        every run's. Left ``None`` (the default), every hash in the table is
+        aggregated and returned, same as before this parameter existed.
 
         Returns:
             ``{exp_hash: [(step, mean_value), ...]}`` — one step-sorted series
@@ -1824,6 +2021,9 @@ class LoggerQueue:
             sql = ("SELECT experiment_hash, step, avg(value) AS mean_value "
                    "FROM per_sample WHERE metric_name = ?")
             sql += self._hash_filter(exp_hash, params)
+            hashes_sql, hashes_params = self._scope_filters(exp_hashes=exp_hashes)
+            sql += hashes_sql
+            params.extend(hashes_params)
             if sample_ids is not None:
                 sql += " AND sample_id IN (SELECT UNNEST(?))"
                 params.append([str(s) for s in sample_ids])

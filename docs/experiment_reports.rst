@@ -137,10 +137,13 @@ What's in the report
   by the agent's own LLM. It is grounded *only* in the numbers described
   below (never raw per-step history), so it can comment on the data but
   cannot invent a signal, trend, or number that isn't actually there.
-- **Signals** — one card per plotted signal: its trajectory (aggregated over
-  training, from the experiment logger — see :doc:`logger`), and a health
-  badge from the same :ref:`loss-shape classification <custom-signal-classifier>`
-  vocabulary used elsewhere in WeightsLab:
+- **Signals** — one card per plotted signal, rendered as an interactive
+  chart (see `Interactive report editing`_): one colored curve per run that
+  logged this signal, with a legend naming each run — not a single flattened
+  average — plus a health badge from the same
+  :ref:`loss-shape classification <custom-signal-classifier>` vocabulary used
+  elsewhere in WeightsLab (computed from the current run's aggregated
+  trajectory):
 
   ==============  =========  ====================================================
   Label           Badge      Meaning
@@ -187,6 +190,39 @@ plots are rendered once by matplotlib on a fixed white canvas, so they sit in
 a small always-light thumbnail card in either theme — this keeps their own
 text and gridlines legible instead of rendering (and shipping) two copies of
 every plot.
+
+Interactive report editing
+-----------------------------
+
+The report is still one self-contained HTML file (works offline, nothing to
+install), but it isn't a static snapshot — every Signals/Distributions card
+and the Runs table below can be adjusted in the browser before you share or
+print it:
+
+- **Hover a card** to reveal its toolbar: move it up/down within its section,
+  remove it from the report, or (Signals cards, and Distributions cards with
+  a plot) expand it into a larger modal.
+- **Zoom** — drag a rectangle across a Signals chart to zoom into that step
+  range; double-click to reset. This is what "zoom in for the PDF" means
+  here: the zoomed range is just the chart's current state, and that's
+  exactly what gets captured when you print/export.
+- **Runs** — a table of every run recorded for this experiment (name, hash,
+  notes, timestamps — the same data the Studio runs popup shows, see
+  :doc:`checkpointing`), each removable from the report via its row's ``×``.
+  Only present when the report was generated with a checkpoint manager
+  available (every normal generation path has one).
+- **``+ Title`` / ``+ Text``** (top toolbar) — add your own heading or free
+  text anywhere in that toolbar's notes area, then move/remove it like any
+  other block.
+- **Export to PDF** (top toolbar) — calls the browser's own print dialog
+  with print-specific styling (editing controls hidden, cards kept from
+  splitting across pages); "Save as PDF" in that dialog captures the report
+  exactly as you've arranged/zoomed it.
+
+All of this is local to that browser tab — nothing is written back to the
+``.html`` file on disk. Reopening the file (or generating a new report)
+starts from the original layout again; export to PDF (or your browser's
+"Save Page As") to keep a copy of a specific arrangement.
 
 Why per-sample data doesn't blow up the report
 --------------------------------------------------

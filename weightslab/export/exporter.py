@@ -54,7 +54,7 @@ def export_annotations(
     )
     encoder, filename, mime_type = _ENCODERS[fmt]
     payload = encoder(images)
-    logger.info("[export] Encoded %d image(s) to %s format (%d bytes)", len(images), fmt, len(payload))
+    logger.info("[export] Encoded %d image(s) to %s format (%d bytes) at %s", len(images), fmt, len(payload), filename)
     return payload, filename, mime_type, len(images)
 
 

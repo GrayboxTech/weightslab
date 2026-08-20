@@ -4131,11 +4131,13 @@ def get_current_experiment_hash() -> str | None:
 def query_signal_history(
     signal_name: str,
     exp_hash: str | None = None,
+    sample_ids: list | None = None,
 ) -> list:
-    """Return per-sample history for *signal_name* across all samples.
+    """Return per-sample history for *signal_name*.
 
     Returns a list of ``(sample_id, step, value, experiment_hash)`` tuples.
-    Pass *exp_hash* to restrict to a single experiment run.
+    Pass *exp_hash* to restrict to a single experiment run, and *sample_ids*
+    to restrict to specific samples (default ``None`` = every sample).
 
     Example::
 
@@ -4146,7 +4148,7 @@ def query_signal_history(
     _lg = get_logger()
     if _lg is None:
         return []
-    return _lg.query_per_sample(signal_name, sample_ids=None, exp_hash=exp_hash)
+    return _lg.query_per_sample(signal_name, sample_ids=sample_ids, exp_hash=exp_hash)
 
 
 def query_sample_history(
@@ -4878,20 +4880,26 @@ def resolve_signal_classifier(signal_name):
     return _GLOBAL_CLASSIFIER or classify_loss_shape
 
 
-def write_signal_shapes(signal_name, tag_name=None, classifier=None):
-    """Reusable engine: classify every sample's trajectory of *signal_name* into
-    a categorical tag and return the ``{label: count}`` distribution. Works for
-    ANY per-sample signal — loss, accuracy, a second loss, any metric. Reads the
-    full history once (cheap end-of-report reduction). *classifier* (trajectory
-    -> label|None) defaults to whatever :func:`resolve_signal_classifier` returns
-    for *signal_name* — a user ``@signal_classifier``, else the built-in
-    loss-shaped one (for a decreasing metric). *tag_name* defaults to
-    ``'<signal>_shape'``."""
+def write_signal_shapes(signal_name, tag_name=None, classifier=None, exp_hash=None, sample_ids=None):
+    """Reusable engine: classify each sample's own trajectory of *signal_name*
+    into a categorical tag and return the ``{label: count}`` distribution.
+    Works for ANY per-sample signal — loss, accuracy, a second loss, any
+    metric. *classifier* (trajectory -> label|None) defaults to whatever
+    :func:`resolve_signal_classifier` returns for *signal_name* — a user
+    ``@signal_classifier``, else the built-in loss-shaped one (for a
+    decreasing metric). *tag_name* defaults to ``'<signal>_shape'``.
+    *exp_hash* restricts each sample's trajectory to a single experiment run
+    (default ``None`` = every hash merged together). *sample_ids* restricts
+    classification (and the tags written) to specific samples — used by the
+    background auto-tagger to reclassify only the samples that got new data,
+    since one sample's shape never depends on another's; default ``None``
+    classifies every sample logged for the signal (a full end-of-report
+    reduction)."""
     clf = classifier or resolve_signal_classifier(signal_name)
     if tag_name is None:
         tag_name = signal_name + "_shape" if signal_name.endswith('_loss') else signal_name + "_loss_shape"
     series = {}
-    for sid, step, val, _ in query_signal_history(signal_name):
+    for sid, step, val, _ in query_signal_history(signal_name, exp_hash=exp_hash, sample_ids=sample_ids):
         series.setdefault(sid, []).append((step, val))
     by_label = {}
     for sid, pts in series.items():
