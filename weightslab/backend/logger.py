@@ -36,7 +36,7 @@ import logging
 import os
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import duckdb
 import pandas as pd
