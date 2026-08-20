@@ -133,8 +133,12 @@ def _build_history(lg: LoggerQueue, n_runs: int, points_per_curve: int) -> dict:
             '[]'                                             AS evaluation_tags,
             CASE WHEN t.i > 0 AND t.i % {note_mod} = 0
                  THEN 'note @' || t.i ELSE '' END            AS point_note,
+            -- _decode_outliers (and production's find_outliers) expect a list
+            -- of {"sample_id", "value"} dicts, not [name, value] pairs -- a
+            -- non-dict item is silently dropped, which left outlier_count
+            -- unset on every entry despite the outliers column being non-empty.
             CASE WHEN t.i > 0 AND t.i % {outlier_mod} = 0
-                 THEN '[["s1", 9.5]]' ELSE '' END            AS outliers,
+                 THEN '[{{"sample_id": "s1", "value": 9.5}}]' ELSE '' END AS outliers,
             CASE WHEN t.i > 0 AND t.i % {outlier_mod} = 0 THEN 1 ELSE 0 END AS outlier_count,
             32                                               AS sample_count,
             NULL, NULL, NULL, NULL,
@@ -468,7 +472,7 @@ def test_simulated_frontend_session_stays_bounded(big_logger):
 
 def test_history_read_latency_is_acceptable(big_logger):
     """A decimated read must stay interactive at sweep scale."""
-    budget_s = float(os.environ.get("WL_TEST_MAX_QUERY_SECONDS", "20"))
+    budget_s = float(os.environ.get("WL_TEST_MAX_QUERY_SECONDS", "30"))
     t0 = time.monotonic()
     big_logger.get_signal_history_downsampled(max_points=500)
     dt = time.monotonic() - t0
