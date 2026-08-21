@@ -597,6 +597,11 @@ schema, and category-level toggles.
    * - ``WL_RESOURCE_MONITOR_DISK_PATH``
      - OS root
      - Filesystem path reported by the ``disk`` category's usage metrics.
+   * - ``WL_RESOURCE_MONITOR_STEP_SOURCE``
+     - ``model_age``
+     - What samples are plotted against. ``model_age`` shares the x axis of
+       your loss/metric curves and restarts with training; ``seconds`` uses
+       elapsed seconds since the monitor started.
    * - ``WL_RESOURCE_MONITOR_CONFIG_PATH``
      - *(empty)*
      - Optional directory override for ``resource_monitoring.yaml``.
@@ -784,6 +789,39 @@ Example
    # WeightsLab will look for:
    # /opt/weightslab/config/agent_config.yaml
 
+
+Agent server (OpenCode) ports
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The agent is backed by a local ``opencode serve`` process that both the UI
+server and the backend SDK agent share. These control where it lives.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Variable
+     - Default
+     - Description
+   * - ``WEIGHTSLAB_OPENCODE_PORT``
+     - ``4096``
+     - Port a freshly spawned agent server is asked for. If it is already in
+       use, a free port is chosen instead and the one actually used is logged
+       at ``INFO``. Set this when ``4096`` is permanently taken on the machine,
+       or when a specific port is the one you have forwarded or published.
+   * - ``OPENCODE_URL``
+     - *(unset)*
+     - Adopt an already-running agent server at this URL instead of spawning
+       one. Takes precedence over everything else, and configures **both** the
+       UI server and the SDK agent — set it once and the two converge on a
+       single process.
+
+.. note::
+
+   The browser talks to the agent server **directly**, not through the UI
+   server's proxy. When the studio runs on a different machine from the
+   browser, this port has to be reachable from the browser's side — see
+   :ref:`studio-bridging`.
 
 Agent Provider Setup
 ~~~~~~~~~~~~~~~~~~~~

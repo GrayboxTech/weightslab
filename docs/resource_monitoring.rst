@@ -58,9 +58,20 @@ per-device — multi-GPU machines get one full set of ``gpu`` signals per
 device index. On a machine with no NVIDIA driver, the ``gpu`` category
 degrades silently to a no-op; every other category is unaffected.
 
-Because sampling is wall-clock driven rather than step-driven, the logged
-"step" for every resource signal is **elapsed seconds since the monitor
-started** — so these curves plot against time, not batch count.
+Sampling is wall-clock driven, but the x value each sample is logged against
+is the **watched model's age** — the same axis your loss and metric curves
+use. That is what lets a resource curve be read directly against a training
+signal (or merged onto one chart with it), and it means resource curves
+restart at 0 when training does instead of carrying on from wherever process
+uptime had reached. One sample is kept per step, so a paused run — whose age
+does not move — leaves the curve waiting rather than stacking points at the
+same x. Before any model is registered, samples land at step 0.
+
+Set ``WL_RESOURCE_MONITOR_STEP_SOURCE=seconds`` (or ``step_source: seconds``
+in the YAML) for the older behaviour: elapsed seconds since the monitor
+started, which counts process uptime and shares its axis with nothing else.
+Worth it when you care about wall-clock behaviour, such as a leak developing
+over hours.
 
 Disabling monitoring
 ---------------------

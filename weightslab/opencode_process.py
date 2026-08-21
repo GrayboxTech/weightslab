@@ -48,6 +48,26 @@ _LOGGER = logging.getLogger(__name__)
 # Generous: a cold `npx` run downloads the package before the server binds.
 OPENCODE_START_TIMEOUT = 45.0
 
+# The port a fresh spawn asks for BEFORE falling back to an OS-assigned one.
+# 4096 is OpenCode's own documented default, which makes it the one port worth
+# preferring: it is what `opencode serve` with no --port binds, and what
+# weights_studio's opencodeClient.ts already falls back to when nothing tells
+# the page otherwise (DEFAULT_BASE_URL there).
+#
+# Preferring a FIXED port rather than always taking a random one is what makes
+# the browser side reachable in the setups where it isn't automatic -- a remote
+# machine reached over SSH, a container, a VS Code Remote workspace. The page
+# does not proxy through this server; it fetches the agent server directly at
+# `http://127.0.0.1:<port>`, so that port has to be forwarded/published on its
+# own, and a port that changes on every restart can never be forwarded once and
+# left alone. Random is still the fallback, so a second experiment on the same
+# machine (or anything else already holding 4096) keeps working untouched.
+DEFAULT_OPENCODE_PORT = 4096
+
+# Escape hatch for a machine where 4096 is spoken for by something permanent,
+# or where a specific port is the one that happens to be forwarded/published.
+PORT_ENV_VAR = "WEIGHTSLAB_OPENCODE_PORT"
+
 # Dropped directly in the workspace directory, next to (and alongside) the
 # AGENTS.md the landing-page agent already seeds there -- same "lives with
 # the experiment" reasoning, and it means deleting/moving the experiment
@@ -214,11 +234,71 @@ def write_lock(workspace_dir: str, url: str, pid: Optional[int] = None) -> None:
         _LOGGER.warning("Could not write OpenCode lock file under %s", workspace_dir)
 
 
-def free_port() -> int:
-    """Reserve an unused loopback port by binding and releasing it."""
+def default_opencode_port() -> int:
+    """The port a fresh spawn asks for first -- DEFAULT_OPENCODE_PORT unless
+    WEIGHTSLAB_OPENCODE_PORT overrides it. A malformed or out-of-range value is
+    reported and ignored rather than raising: it should not be able to stop a
+    server from starting at all, and silently swallowing it would leave the
+    operator wondering why the port they set is not the one in use."""
+    raw = os.environ.get(PORT_ENV_VAR, "").strip()
+    if not raw:
+        return DEFAULT_OPENCODE_PORT
+    try:
+        value = int(raw)
+    except ValueError:
+        _LOGGER.warning("Ignoring %s=%r: not a port number.", PORT_ENV_VAR, raw)
+        return DEFAULT_OPENCODE_PORT
+    if not 0 <= value <= 65535:
+        _LOGGER.warning("Ignoring %s=%d: outside 0-65535.", PORT_ENV_VAR, value)
+        return DEFAULT_OPENCODE_PORT
+    return value
+
+
+def free_port(preferred: int = 0) -> int:
+    """Reserve an unused loopback port by binding and releasing it, taking
+    ``preferred`` when it is free and an OS-assigned one when it is not.
+
+    SO_REUSEADDR on the preferred bind so a port merely sitting in TIME_WAIT
+    (the usual state right after a restart) still counts as available -- a
+    server that was just stopped and started again should land back on the
+    same port, not get bounced onto a random one. A port another process is
+    actively LISTENing on still fails the bind, which is the case that
+    genuinely needs the fallback.
+    """
+    if preferred > 0:
+        try:
+            with socket.socket() as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("127.0.0.1", preferred))
+                return preferred
+        except OSError:
+            pass
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def pick_opencode_port() -> int:
+    """Choose the port for a server about to be spawned, and say which one it
+    is at INFO.
+
+    Logged rather than left implicit because this is the one number the
+    operator may have to act on -- it is what an SSH tunnel or a `docker run
+    -p` has to name for the browser to reach the agent at all, and until now
+    the only way to find it was `ps`. Reported on the way IN (before the spawn)
+    so a server that then fails to come up still says which port it tried.
+    """
+    preferred = default_opencode_port()
+    port = free_port(preferred)
+    if port == preferred:
+        _LOGGER.info("OpenCode: starting agent server on port %d.", port)
+    else:
+        _LOGGER.info(
+            "OpenCode: port %d is in use; starting agent server on free port %d "
+            "instead. Set %s to pin a different one.",
+            preferred, port, PORT_ENV_VAR,
+        )
+    return port
 
 
 def resolve_opencode_argv() -> Optional[list]:
@@ -304,10 +384,15 @@ def resolve_or_spawn_opencode(workspace_dir: str, origin: Optional[str] = None,
 
     external = os.environ.get("OPENCODE_URL", "").strip()
     if external and opencode_healthy(external):
+        _LOGGER.info("OpenCode: using the server at %s (OPENCODE_URL).", external)
         return {"ok": True, "url": external, "source": "env"}
 
     lock = read_lock(workspace_dir)
     if lock and opencode_healthy(lock["url"]):
+        _LOGGER.info(
+            "OpenCode: reusing the running server at %s for workspace %s.",
+            lock["url"], workspace_dir,
+        )
         return {"ok": True, "url": lock["url"], "source": "lockfile"}
 
     argv = resolve_opencode_argv()
@@ -318,7 +403,7 @@ def resolve_or_spawn_opencode(workspace_dir: str, origin: Optional[str] = None,
                      "(which provides npx), or `npm i -g opencode-ai`.",
         }
 
-    port = free_port()
+    port = pick_opencode_port()
     cors = list(_cors_origin_variants(origin))
     for value in DEFAULT_CORS_ORIGINS:
         if value not in cors:
@@ -355,8 +440,17 @@ def resolve_or_spawn_opencode(workspace_dir: str, origin: Optional[str] = None,
             raced = read_lock(workspace_dir)
             if raced and raced["url"] != base_url and opencode_healthy(raced["url"]):
                 _kill_quietly(process)
+                _LOGGER.info(
+                    "OpenCode: another server for %s appeared at %s while ours was "
+                    "starting; using it and stopping our own.",
+                    workspace_dir, raced["url"],
+                )
                 return {"ok": True, "url": raced["url"], "source": "lockfile"}
             write_lock(workspace_dir, base_url, process.pid)
+            _LOGGER.info(
+                "OpenCode: agent server ready at %s (pid %d, workspace %s).",
+                base_url, process.pid, workspace_dir,
+            )
             return {"ok": True, "url": base_url, "source": "spawned", "pid": process.pid}
         time.sleep(0.4)
 

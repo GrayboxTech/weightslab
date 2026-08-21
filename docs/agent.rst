@@ -7,8 +7,30 @@ operations on your live experiment.
 Where you can use it
 --------------------
 
+<<<<<<< Updated upstream
 From Weights Studio (UI)
 ~~~~~~~~~~~~~~~~~~~~~~~~
+=======
+.. warning:: Unstable — in active development
+
+   The agent as a whole is **experimental**. Its behaviour, the actions it
+   exposes, the prompts it responds well to, and the shape of its replies are
+   all still changing between releases, and results vary with the model
+   provider you connect. It can misread a request, act on the wrong subset, or
+   fail outright on an experiment whose data or signals are unusual.
+
+   Use it where a wrong answer is cheap to notice and undo — exploring the
+   grid, deriving a column, asking what a signal did. **Check what it did
+   before relying on it**, especially for anything that changes data or the
+   model. Everything it can do is also reachable by hand: quick filters, the
+   grid's own selection and context menu, the left panel, the CLI console, and
+   the SDK. Prefer those when the result has to be right the first time.
+
+   Feedback on what breaks is what stabilises it — please report it.
+
+.. admonition:: The agent in one sentence
+   :class: note
+>>>>>>> Stashed changes
 
 - Use the chat bar in the Studio header
 - Initialize provider with ``/init``

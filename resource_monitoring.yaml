@@ -20,6 +20,14 @@ resource_monitoring:
   # Defaults to the OS root ("/" on Linux/macOS, "C:\" on Windows).
   # disk_path: "/"
 
+  # What sampled values are plotted against:
+  #   model_age (default) - the watched model's age, so resource curves share
+  #                         the x axis of the loss/metric curves beside them
+  #                         and restart at 0 when training does.
+  #   seconds             - elapsed seconds since the monitor started; counts
+  #                         process uptime and shares its axis with nothing else.
+  # step_source: model_age
+
   # Per-category toggles. Set any of these to false to stop collecting (and
   # logging) that category, without touching the others.
   categories:

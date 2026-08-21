@@ -36,7 +36,12 @@
 
     nav.innerHTML =
       '<div class="wl-topnav-inner">' +
-        '<div class="wl-topnav-left"></div>' +
+        '<div class="wl-topnav-left">' +
+          '<a class="wl-topnav-btn wl-topnav-whatsnew" href="' + root + '/whats_new.html">' +
+            '<span class="wl-topnav-dot" aria-hidden="true"></span>' +
+            "What's New" +
+          '</a>' +
+        '</div>' +
         '<div class="wl-topnav-center">' +
           '<span class="wl-topnav-tip-icon" aria-hidden="true">' +
             '<svg width="11" height="11" viewBox="0 0 20 20" fill="currentColor">' +

@@ -612,6 +612,7 @@ body[data-theme="dark"]  .wl-topnav-theme .wl-ti-dark  { display: inline-flex; }
   margin: 0.3rem 0 1.4rem;
 }
 
+<<<<<<< Updated upstream
 /* Diff code blocks: highlight removed/added lines clearly. */
 .highlight-diff .gd {
   display: inline-block;
@@ -703,4 +704,50 @@ div.highlight {
 
 .wl-copy-btn:hover {
   background: var(--color-background-hover, rgba(100, 100, 100, 0.12));
+=======
+
+/* ── "What's New" nav shortcut ──────────────────────────────────────────── */
+.wl-topnav-whatsnew {
+  gap: 0.42rem;
+}
+
+/* Small live dot, so the shortcut reads as "there is something to see" without
+   needing a word like "NEW" that would go stale the moment nobody updates it. */
+.wl-topnav-dot {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 50%;
+  background: var(--color-brand-primary, #5f7393);
+  box-shadow: 0 0 0 0.16rem rgba(95, 115, 147, 0.18);
+  flex: none;
+}
+
+/* ── Release cards on the What's New page ───────────────────────────────── */
+.wl-release-card {
+  margin-bottom: 1.15rem;
+  border: 1px solid var(--color-background-border);
+  border-left: 3px solid var(--color-brand-primary, #5f7393);
+}
+
+.wl-release-card .wl-release-date {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--color-foreground-muted);
+}
+
+.wl-release-card .wl-release-version {
+  margin: 0.15rem 0 0.7rem;
+  font-size: 1.45rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  color: var(--color-foreground-primary);
+}
+
+.wl-release-card ul {
+  margin-bottom: 0;
+>>>>>>> Stashed changes
 }

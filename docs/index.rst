@@ -24,7 +24,18 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       Install and run WeightsLab in minutes.
 
+<<<<<<< Updated upstream
    .. grid-item-card:: Core Concepts
+=======
+   .. grid-item-card:: What's New
+      :link: whats_new
+      :link-type: doc
+
+      The last ten stable releases, newest first — what changed in each, with a
+      link to its full release notes.
+
+   .. grid-item-card:: Four-Way Approach
+>>>>>>> Stashed changes
       :link: four_way_approach
       :link-type: doc
 
@@ -82,6 +93,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    :hidden:
 
    quickstart
+   whats_new
 
 
 .. toctree::
@@ -144,12 +156,15 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    grpc/index
 
 
-.. toctree::
-   :maxdepth: 2
-   :caption: MIGRATION
-   :hidden:
+.. Migration guides — written, but deliberately not published yet. The pages
+   live in docs/migration/ and are reachable by direct link; migration/index.rst
+   carries :orphan: so this stays warning-free while commented out. Uncomment
+   the toctree below to put them in the sidebar.
+..
+   .. toctree::
+      :maxdepth: 2
+      :caption: MIGRATION
+      :hidden:
 
-   From Weights & Biases
-   From Voxel 51
-   From Tensorboard
+      migration/index
    

@@ -13,13 +13,44 @@ else here is exercised via that real subprocess + real lock-file I/O in a
 temp directory, not mocked away.
 """
 
+import json
 import os
+import signal
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from weightslab import opencode_process
+
+
+def stop_workspace_server(workspace_dir):
+    """Kill the server recorded in ``workspace_dir``'s lock file, if any.
+
+    resolve_or_spawn_opencode detaches what it spawns ON PURPOSE -- the server
+    is meant to outlive whichever side started it, so nothing in the product
+    code tears one down at exit (see the module docstring and _kill_quietly's).
+    That leaves it to whoever drives a real spawn in a test, and until spawns
+    preferred a fixed port the omission was invisible: a leaked stand-in server
+    sat on a random port nothing would ever ask for again. Now a leaked one
+    sits on DEFAULT_OPENCODE_PORT, where the next run of these very tests -- or
+    a real `weightslab start` on the same machine -- resolves to it and quietly
+    behaves differently than it would on a clean box.
+
+    Shared with tests/test_opencode_shared_server_integration.py, which drives
+    the same real-spawn path from the other side of the handshake.
+    """
+    try:
+        with open(opencode_process.lock_path(workspace_dir), encoding="utf-8") as f:
+            pid = json.load(f).get("pid")
+    except (OSError, ValueError):
+        return
+    if not pid:
+        return
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except OSError:
+        pass
 
 
 _FAKE_OPENCODE_SRC = r"""
@@ -141,6 +172,7 @@ class TestResolveOrSpawnRealSubprocess(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         os.environ.pop("OPENCODE_URL", None)
+        self.addCleanup(stop_workspace_server, self.tmp)
         self._timeout_patch = patch.object(opencode_process, "OPENCODE_START_TIMEOUT", 5.0)
         self._timeout_patch.start()
 

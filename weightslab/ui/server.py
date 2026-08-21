@@ -25,6 +25,7 @@ import atexit
 import base64
 import importlib.util
 import json
+import logging
 import os
 import posixpath
 import re
@@ -47,6 +48,8 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 import grpc
 
 from weightslab import opencode_process
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -454,16 +457,16 @@ atexit.register(_jupyter_session.shutdown)
 _OPENCODE_START_TIMEOUT = 45.0
 
 
-def _free_port() -> int:
-    """Reserve an unused loopback port by binding and releasing it.
-
-    We pick the port ourselves rather than parsing it out of the child's stdout:
-    that gives us a URL to health-poll immediately, and avoids depending on the
-    exact wording of a startup log line we do not control.
-    """
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+# We pick the port ourselves rather than parsing it out of the child's stdout:
+# that gives us a URL to health-poll immediately, and avoids depending on the
+# exact wording of a startup log line we do not control. Shared with the backend
+# SDK agent's spawn path (opencode_process.resolve_or_spawn_opencode) rather
+# than duplicated here, so both prefer the same DEFAULT_OPENCODE_PORT, honour
+# the same WEIGHTSLAB_OPENCODE_PORT override, and report the chosen port the
+# same way -- a default that only one of the two spawn paths applied would be
+# no more predictable than the random port it replaced.
+_free_port = opencode_process.free_port
+_pick_opencode_port = opencode_process.pick_opencode_port
 
 
 def _resolve_opencode_argv() -> Optional[list]:
@@ -588,6 +591,7 @@ class _OpencodeSession:
                 self._external_url = external_url
                 self._workspace = workspace_dir
                 self._error = None
+            logger.info("OpenCode: using the server at %s (OPENCODE_URL).", external_url)
             return {"ok": True, "url": external_url, "reused": False, "workspace": workspace_dir}
 
         lock = opencode_process.read_lock(workspace_dir)
@@ -596,6 +600,10 @@ class _OpencodeSession:
                 self._external_url = lock["url"]
                 self._workspace = workspace_dir
                 self._error = None
+            logger.info(
+                "OpenCode: reusing the running server at %s for workspace %s.",
+                lock["url"], workspace_dir,
+            )
             return {"ok": True, "url": lock["url"], "reused": False,
                      "workspace": workspace_dir, "adopted": "lockfile"}
 
@@ -608,7 +616,7 @@ class _OpencodeSession:
                 )
                 return {"ok": False, "error": self._error}
 
-            port = _free_port()
+            port = _pick_opencode_port()
             cmd = argv + ["serve", "--hostname", "127.0.0.1", "--port", str(port)]
             for value in _cors_origin_variants(origin):
                 cmd += ["--cors", value]
@@ -650,6 +658,14 @@ class _OpencodeSession:
                 # server via the lock file instead of spawning its own --
                 # symmetric with the read above, which covers order (a).
                 opencode_process.write_lock(workspace_dir, base_url, process.pid)
+                # The browser talks to this URL DIRECTLY -- it is not proxied
+                # through this server -- so on any host the page is not served
+                # from (SSH, a container, VS Code Remote) this is the port that
+                # also has to be forwarded. Worth a line of its own for that.
+                logger.info(
+                    "OpenCode: agent server ready at %s (pid %d, workspace %s).",
+                    base_url, process.pid, workspace_dir,
+                )
                 return {"ok": True, "url": base_url, "reused": False,
                         "workspace": workspace_dir}
             time.sleep(0.4)
@@ -659,6 +675,7 @@ class _OpencodeSession:
             f"The agent server did not come up within {int(_OPENCODE_START_TIMEOUT)}s. "
             f"Last output: {tail}"
         )
+        logger.error("OpenCode: %s", self._error)
         _kill_process_tree(process)
         with self._lock:
             self._port = None

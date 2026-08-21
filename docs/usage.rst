@@ -14,5 +14,5 @@ Usage
       :link: usage/good_practice
       :link-type: doc
 
-      Performance tips, dataset design patterns, and signal storage modes for
-      efficient heavy experimentation.
+      Performance tips, dataset design patterns, open-ended training loops, and
+      signal storage modes for efficient heavy experimentation.
