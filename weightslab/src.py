@@ -1023,9 +1023,23 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                              # batch and call the signal once. It returns a length-B
                              # array. Avoids B Python calls + B SignalContext allocs,
                              # and lets the signal do batched ledger reads.
+                             # inputs= must be populated here too: on the
+                             # subscribe_to path the context was built without it,
+                             # so b.inputs was {} and any signal declaring
+                             # inputs=[...] raised KeyError on every call. The
+                             # subscribed signal IS the declared input here, and
+                             # its per-sample values are already in val_vec.
+                             _decl = meta.get('inputs') or []
+                             _sub = meta.get('subscribe_to')
+                             _vals = [float(v) for v in val_vec]
+                             _bin = {}
+                             for _d in _decl:
+                                 if _sub is None or _d == _sub or _d == reg_name:
+                                     _bin[_d] = _vals
                              bctx = BatchSignalContext(
                                  sample_ids=[int(u) for u in ids_np],
-                                 subscribed_values=[float(v) for v in val_vec],
+                                 subscribed_values=_vals,
+                                 inputs=_bin,
                                  logger=_lg,
                                  dataframe=df_proxy,
                                  origin=kwargs.get('origin', 'train'),
