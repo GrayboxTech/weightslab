@@ -210,6 +210,11 @@ commands:
                              --gen      generation example
                              --3d_det   3D LiDAR point-cloud detection example
                              --2d_det   2D LiDAR point-cloud detection example
+                           One-level-at-a-time MNIST demos (four-way SDK approach):
+                             --model    model interaction only
+                             --data     data exploration only
+                             --config   config management only
+                             --logger   logger and signals only
 
   cli                      Open an interactive terminal connected to a
                            currently-running experiment (pause/resume, status,
@@ -245,7 +250,7 @@ commands:
 examples:
   weightslab se                       # one-time secure setup (then export WEIGHTSLAB_CERTS_DIR)
   weightslab se --force-certs         # regenerate the certs
-  weightslab start                    # launch the UI (unsecured HTTP, default) at :50051
+  weightslab start                    # launch the UI (unsecured HTTP, default) at :8080
                                       # (creates a fresh ./wl-<name> experiment dir)
   weightslab start ./exp/mnist_opt/   # use (or create) this experiment directory
   weightslab start --certs            # launch the UI over HTTPS (needs `weightslab se` first)
@@ -255,6 +260,7 @@ examples:
   weightslab start example --seg      # run the segmentation demo
   weightslab start example --det      # run the detection demo
   weightslab start example --3d_det   # run the 3D LiDAR detection demo
+  weightslab start example --data      # run the data-exploration-only demo
   weightslab cli                      # connect a terminal to the running experiment
   weightslab cli --port 60000         # connect to a specific CLI port
   weightslab tunnel bore.pub:12345    # expose a remote (Colab) backend at localhost:50051
@@ -533,6 +539,11 @@ _EXAMPLES = {
     "gen": ("wl-generation", "generation", "PyTorch"),
     "3d_det": ("wl-3d-lidar-detection", "3D LiDAR detection", "Usecases"),
     "2d_det": ("wl-2d-lidar-detection", "2D LiDAR detection", "Usecases"),
+    # One-level-at-a-time MNIST demos behind the four-way SDK approach docs.
+    "model": ("wl-standalone-model", "standalone model-interaction", "PyTorch"),
+    "data": ("wl-standalone-data", "standalone data-exploration", "PyTorch"),
+    "config": ("wl-standalone-config", "standalone config-management", "PyTorch"),
+    "logger": ("wl-standalone-logger", "standalone logger-and-signals", "PyTorch"),
 }
 _DEFAULT_EXAMPLE = "cls"
 
@@ -905,6 +916,14 @@ def _add_example_kind_flags(p: argparse.ArgumentParser) -> None:
                        help="Run the 3D LiDAR point-cloud detection example")
     group.add_argument("--2d_det", action="store_const", dest="example_kind", const="2d_det",
                        help="Run the 2D LiDAR point-cloud detection example")
+    group.add_argument("--model", action="store_const", dest="example_kind", const="model",
+                       help="Run the standalone model-interaction example (MNIST)")
+    group.add_argument("--data", action="store_const", dest="example_kind", const="data",
+                       help="Run the standalone data-exploration example (MNIST)")
+    group.add_argument("--config", action="store_const", dest="example_kind", const="config",
+                       help="Run the standalone config-management example")
+    group.add_argument("--logger", action="store_const", dest="example_kind", const="logger",
+                       help="Run the standalone logger-and-signals example (MNIST)")
     p.set_defaults(example_kind=_DEFAULT_EXAMPLE)
 
 

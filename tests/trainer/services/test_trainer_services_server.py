@@ -301,5 +301,95 @@ class TestGrpcServe(_TimeoutMixin, unittest.TestCase):
         fake_server.add_insecure_port.assert_called_once_with("127.0.0.1:50099")
         fake_server.start.assert_called_once()
         fake_server.stop.assert_called_once()
+
+    def _run_grpc_serve_capturing_bind(self, bound_port, **serve_kwargs):
+        """Run grpc_serve with the same scaffolding as the tests above and return
+        the fake server, so a caller can assert which address was bound."""
+        fake_server = MagicMock()
+        fake_server.add_insecure_port.return_value = bound_port
+
+        fake_stop_event = MagicMock()
+        fake_stop_event.wait.return_value = True
+        fake_server.stop.return_value = fake_stop_event
+
+        class _StopOuter(Exception):
+            pass
+
+        fake_server_manager = MagicMock()
+        fake_server_manager.should_restart = MagicMock(return_value=True)
+        fake_server_manager.clear_restart_request = MagicMock()
+        fake_server_manager.set_server = MagicMock()
+
+        def _sleep_stop(_duration):
+            if _duration == 2:
+                raise _StopOuter("stop outer restart loop")
+
+        fake_watchdog = MagicMock()
+        fake_watchdog.server_manager = fake_server_manager
+        fake_watchdog.rpc_state = MagicMock()
+
+        class _InstantThread:
+            def __init__(self, target=None, daemon=None, name=None):
+                self._target = target
+                self.daemon = daemon
+                self.name = name
+                self.ident = 12345
+
+            def start(self):
+                if self._target is not None and self.name == "WL-gRPC_Server":
+                    self._target()
+
+        # Watchdogs are disabled by default, so the restart loop builds a
+        # GrpcServerManager directly; with them enabled it uses
+        # watchdog.server_manager. Patch both so this helper terminates either way.
+        with patch("weightslab.trainer.trainer_services.grpc.server", return_value=fake_server), \
+             patch("weightslab.trainer.trainer_services.pb2_grpc.add_ExperimentServiceServicer_to_server"), \
+             patch("weightslab.trainer.trainer_services.Thread", _InstantThread), \
+             patch("weightslab.trainer.trainer_services.GrpcServerManager", return_value=fake_server_manager), \
+             patch("weightslab.trainer.trainer_services.WeighlabsWatchdog", return_value=fake_watchdog), \
+             patch("weightslab.trainer.trainer_services.time.sleep", side_effect=_sleep_stop), \
+             patch("weightslab.trainer.trainer_services.ExperimentServiceServicer"), \
+             patch("weightslab.trainer.trainer_services.get_hyperparams", return_value={}):
+            trainer_services.grpc_serve(**serve_kwargs)
+
+        return fake_server
+
+    def _with_grpc_env(self, host, port, fn):
+        saved = {k: os.environ.get(k) for k in ("GRPC_BACKEND_HOST", "GRPC_BACKEND_PORT")}
+        os.environ["GRPC_BACKEND_HOST"] = host
+        os.environ["GRPC_BACKEND_PORT"] = port
+        try:
+            return fn()
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_grpc_serve_honors_explicit_port_without_force_parameters(self):
+        """``wl.serve(grpc_port=...)`` must bind that port.
+
+        The old resolution read `env if not force_parameters or arg is None else arg`,
+        which parses as `(not force_parameters) or (arg is None)` — so with the
+        default force_parameters=False the argument was silently dropped and every
+        run fought over 50051.
+        """
+        fake_server = self._with_grpc_env(
+            "0.0.0.0", "50051",
+            lambda: self._run_grpc_serve_capturing_bind(
+                50071, grpc_host="127.0.0.1", grpc_port=50071),
+        )
+        fake_server.add_insecure_port.assert_called_once_with("127.0.0.1:50071")
+
+    def test_grpc_serve_falls_back_to_env_port(self):
+        """With no explicit port, ``$GRPC_BACKEND_PORT`` still wins over the default."""
+        fake_server = self._with_grpc_env(
+            "127.0.0.1", "50123",
+            lambda: self._run_grpc_serve_capturing_bind(50123),
+        )
+        fake_server.add_insecure_port.assert_called_once_with("127.0.0.1:50123")
+
+
 if __name__ == "__main__":
     unittest.main()

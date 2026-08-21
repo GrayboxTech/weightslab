@@ -611,3 +611,96 @@ body[data-theme="dark"]  .wl-topnav-theme .wl-ti-dark  { display: inline-flex; }
   gap: 0.4rem;
   margin: 0.3rem 0 1.4rem;
 }
+
+/* Diff code blocks: highlight removed/added lines clearly. */
+.highlight-diff .gd {
+  display: inline-block;
+  width: calc(100% - 3.5em);
+  vertical-align: top;
+  background: rgba(220, 38, 38, 0.16);
+  color: inherit !important;
+}
+
+.highlight-diff .gi {
+  display: inline-block;
+  width: calc(100% - 3.5em);
+  vertical-align: top;
+  background: rgba(22, 163, 74, 0.18);
+  color: inherit !important;
+}
+
+.highlight-diff .gd *,
+.highlight-diff .gi * {
+  color: inherit !important;
+}
+
+/* Color the row-number cell to match added/removed diff lines. */
+.highlight-diff .linenos:has(+ .gd) {
+  background: rgba(220, 38, 38, 0.16);
+}
+
+.highlight-diff .linenos:has(+ .gi) {
+  background: rgba(22, 163, 74, 0.18);
+}
+
+/* Python/Bash code blocks with explicit + / - row prefixes. */
+.wl-line-segment.wl-line-removed {
+  background: rgba(220, 38, 38, 0.16);
+  color: inherit !important;
+}
+
+.wl-line-segment.wl-line-added {
+  background: rgba(22, 163, 74, 0.18);
+  color: inherit !important;
+}
+
+.wl-line-segment.wl-line-removed *,
+.wl-line-segment.wl-line-added * {
+  color: inherit !important;
+}
+
+.highlight .linenos.wl-line-removed {
+  background: rgba(220, 38, 38, 0.16);
+}
+
+.highlight .linenos.wl-line-added {
+  background: rgba(22, 163, 74, 0.18);
+}
+
+/* Added (kept) lines in wl-diff-lines are emphasized without '+' prefix. */
+.wl-diff-lines .hll {
+  background: rgba(22, 163, 74, 0.18);
+  color: inherit !important;
+}
+
+.wl-diff-lines .hll * {
+  color: inherit !important;
+}
+
+.wl-diff-lines .linenos:has(+ .hll) {
+  background: rgba(22, 163, 74, 0.18);
+}
+
+/* Copy button for code blocks. */
+div.highlight {
+  position: relative;
+}
+
+.wl-copy-btn {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.45rem;
+  z-index: 5;
+  border: 1px solid var(--color-background-border);
+  border-radius: 0.35rem;
+  background: var(--color-background-secondary);
+  color: var(--color-foreground-primary);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.2rem 0.45rem;
+  cursor: pointer;
+}
+
+.wl-copy-btn:hover {
+  background: var(--color-background-hover, rgba(100, 100, 100, 0.12));
+}

@@ -342,6 +342,7 @@ def ensure_embedded_kernel(data_service, root_log_dir: Path) -> None:
             return
         _EMBED_STATE["started"] = True  # attempted once; never retry
         if not _ipykernel_available():
+            _EMBED_STATE["failed"] = True
             logger.warning(
                 "Embedded notebook kernel requested but `ipykernel`/"
                 "`jupyter_client` are not installed; the studio notebook "

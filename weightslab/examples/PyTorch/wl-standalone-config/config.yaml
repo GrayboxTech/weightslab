@@ -1,0 +1,21 @@
+# Live configuration for the standalone config-management example.
+# Edit any value while main.py runs: the watcher reloads the file and the loop
+# prints what changed. The same values are editable from `weightslab cli`
+# (`set_hp optimizer.lr 0.0005`) and from the Weights Studio hyperparameters panel.
+experiment_name: standalone_config
+
+# root_log_dir is intentionally left out: it resolves from WEIGHTSLAB_ROOT_LOG_DIR
+# (exported by `weightslab start [DIR]`) and falls back to a temporary directory,
+# so running the bundled example never writes inside the installed package.
+# root_log_dir: ./logs/standalone_config
+
+is_training: true
+training_steps_to_do: 300
+
+optimizer:
+  lr: 0.001
+
+data:
+  train_loader:
+    batch_size: 16
+    shuffle: true

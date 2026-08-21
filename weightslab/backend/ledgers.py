@@ -93,6 +93,16 @@ class Proxy:
         """Return True when obj is a Proxy instance."""
         return isinstance(obj, Proxy)
 
+    def is_set(self) -> bool:
+        """True when this proxy wraps an object.
+
+        Reading ``get_model()`` / ``get_dataloader()`` / ... inserts an *empty*
+        placeholder proxy into the registry, so a name appearing in
+        ``list_models()`` does not mean the level was registered. Callers that
+        need "was this actually wrapped?" must ask this.
+        """
+        return self._obj is not None
+
     @property
     def __class__(self):
         """Report the class of the wrapped object to make isinstance checks work.
@@ -1392,7 +1402,8 @@ def set_hyperparam(key_path: str, value: Any, name: str = DEFAULT_NAME) -> None:
         logger.error(f'no hyperparams registered under {name}')
 
 def watch_hyperparams_file(path: str, poll_interval: float = 1.0, name: str = DEFAULT_NAME) -> None:
-    return GLOBAL_LEDGER.watch_hyperparams_file(name, path, poll_interval=poll_interval)
+    return GLOBAL_LEDGER.watch_hyperparams_file(
+        path, poll_interval=poll_interval, name=name)
 
 def unwatch_hyperparams_file(name: str = DEFAULT_NAME) -> None:
     return GLOBAL_LEDGER.unwatch_hyperparams_file(name)
