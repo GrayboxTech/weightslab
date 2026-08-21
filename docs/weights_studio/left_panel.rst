@@ -8,7 +8,7 @@ individually with the button in its header, and the panel itself can be
 resized by dragging its inner edge — useful when a metadata list gets long.
 
 Training card
-=============
+-------------
 
 .. figure:: ../_static/screenshots/left-panel-training.png
    :alt: Left panel training card with state pill and live metrics
@@ -20,7 +20,7 @@ gives the run's name, its configuration hash, and its age — the fastest way to
 confirm the tab you're looking at is the run you think it is.
 
 Hyperparameters
-===============
+---------------
 
 .. figure:: ../_static/screenshots/left-panel-hyperparameters.png
    :alt: Hyperparameters card
@@ -35,7 +35,7 @@ Edits take effect on the running experiment. Set
 ``ENABLE_HYPERPARAMETERS_OPTIMIZATION=0`` to render them read-only.
 
 Tags and painter mode
-=====================
+---------------------
 
 .. figure:: ../_static/screenshots/left-panel-tags-painter.png
    :alt: Tags card with painter mode enabled
@@ -52,7 +52,7 @@ Painter mode is what makes labelling a few hundred samples by eye tolerable:
 no modal, no round trip, just drag.
 
 Details, overlays and metadata
-==============================
+------------------------------
 
 .. figure:: ../_static/screenshots/left-panel-details.png
    :alt: Details card with grid settings, overlays, and metadata toggles
@@ -70,7 +70,7 @@ Details, overlays and metadata
   the list view. Each field can also be turned into a histogram.
 
 Data actions
-============
+------------
 
 - **Manual save** — writes the current data state (tags, discards) to disk
   immediately rather than waiting for the next automatic save.

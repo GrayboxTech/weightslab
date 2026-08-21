@@ -16,7 +16,7 @@ Opened by clicking a grid cell or a list row.
   and the pane divider can be dragged to give either side more room.
 
 Overlays
-========
+--------
 
 .. figure:: ../_static/screenshots/modal-overlays.png
    :alt: Modal overlay toggles for raw, ground truth, prediction, diff and split
@@ -33,7 +33,7 @@ number of boxes rendered is capped by ``BB_MODAL_RENDER`` (and
 ``BB_THUMB_RENDER`` for thumbnails).
 
 Point clouds, video and text
-============================
+----------------------------
 
 The modal adapts to the sample's modality.
 

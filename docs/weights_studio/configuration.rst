@@ -2,7 +2,7 @@ Configuration reference
 =======================
 
 Backend environment variables (set before starting ``wl.serve()``)
-===================================================================
+-------------------------------------------------------------------
 
 +----------------------------------+-------------------------+----------------------------------------------------+
 | Variable                         | Default                 | Description                                        |
@@ -27,7 +27,7 @@ Backend environment variables (set before starting ``wl.serve()``)
 +----------------------------------+-------------------------+----------------------------------------------------+
 
 UI server environment variables (set before ``weightslab start``)
-=================================================================
+-----------------------------------------------------------------
 
 +---------------------------+-------------------------+--------------------------------------------------+
 | Variable                  | Default                 | Description                                      |
@@ -50,7 +50,7 @@ UI server environment variables (set before ``weightslab start``)
 +---------------------------+-------------------------+--------------------------------------------------+
 
 Frontend runtime feature toggles
-=================================
+---------------------------------
 
 These are injected as ``window.*`` globals when the UI is served.
 Set them as environment variables before ``weightslab start``.

@@ -4,7 +4,7 @@ Data exploration board
 ======================
 
 Grid view
-=========
+---------
 
 .. figure:: ../_static/screenshots/data-grid.png
    :alt: Data exploration board in grid view
@@ -15,7 +15,7 @@ metadata fields you selected, and a per-sample loss trajectory sparkline.
 Click a cell to open the :ref:`studio-detail-modal`.
 
 List view
-=========
+---------
 
 .. figure:: ../_static/screenshots/list-exploration.png
    :alt: Data exploration board in list view
@@ -34,7 +34,7 @@ Sort state is shared with the grid, so switching views never reshuffles what
 you were looking at.
 
 Quick filters
-=============
+-------------
 
 .. figure:: ../_static/screenshots/quick-filters.png
    :alt: Quick filters bar
@@ -50,14 +50,14 @@ Use quick filters for the mechanical slices you already know you want
 struggle to express as a predicate.
 
 Subviews and reset
-==================
+------------------
 
 When a filter or an agent query narrows the grid, a banner reports how many
 samples matched and the query behind them. **Reset** on that banner (or typing
 ``@reset`` in the agent bar) puts the grid back to the full dataset.
 
 Selection and the context menu
-==============================
+------------------------------
 
 .. figure:: ../_static/screenshots/selection-context-menu.png
    :alt: Grid selection with the right-click context menu open
@@ -73,7 +73,7 @@ anything — the counter in the bottom bar shows *total* against *active*, and
 a discard is always reversible.
 
 Tagging modal
-=============
+-------------
 
 .. figure:: ../_static/screenshots/tagging-modal.png
    :alt: Tagging modal
@@ -84,7 +84,7 @@ selection, quick-tag chips, and clear/cancel/apply. Use this when applying
 several tags at once; use painter mode when applying one tag to many samples.
 
 Bottom bar
-==========
+----------
 
 .. figure:: ../_static/screenshots/bottom-bar.png
    :alt: Bottom bar with the batch slider and sample counters

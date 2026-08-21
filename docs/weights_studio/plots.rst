@@ -14,7 +14,7 @@ colour, **load weights at this step**, hide/show a curve, break by slices, and
 copy or save the chart as an image.
 
 Error band and per-step actions
-===============================
+-------------------------------
 
 .. figure:: ../_static/screenshots/plot-error-band.png
    :alt: Signal plot showing the error band around the mean curve
@@ -35,7 +35,7 @@ From a point on the curve:
   unrecoverable by the time you notice it. Snapshot it before you move on.
 
 Merged comparison plots
-=======================
+-----------------------
 
 .. figure:: ../_static/screenshots/plot-merge.png
    :alt: A merged comparison plot drawing two signals on one chart
@@ -50,7 +50,7 @@ nothing is persisted server-side, and removing one leaves the source signals
 untouched.
 
 Searching the board
-===================
+-------------------
 
 .. figure:: ../_static/screenshots/plot-search.png
    :alt: Plot name search with live preview

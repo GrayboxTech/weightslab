@@ -28,7 +28,7 @@ The default is plain HTTP (no cert files required, easiest for local dev). Do th
      export WEIGHTSLAB_CERTS_DIR=~/.weightslab-certs
 
 Certificate files (all in ``$WEIGHTSLAB_CERTS_DIR``)
-=====================================================
+-----------------------------------------------------
 
 +----------------------------+--------------------------------------------+
 | File                       | Purpose                                    |
