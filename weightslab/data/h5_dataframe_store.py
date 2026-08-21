@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Iterable, Optional, Union
 
 from weightslab.data.sample_stats import SampleStats
-from weightslab.backend.optrace import traced, hit
 
 
 logger = logging.getLogger(__name__) # Initialize logger
@@ -197,7 +196,6 @@ class H5DataFrameStore:
     # ------------------------------------------------------------------
     # Categorical tag registry persistence
     # ------------------------------------------------------------------
-    @traced("dataframe", "h5store.save_tag_registry")
     def save_tag_registry(self, registry: dict) -> None:
         """Persist the categorical tag registry ({tag_name: [categories]}) to H5.
 
@@ -231,7 +229,6 @@ class H5DataFrameStore:
                 else:
                     time.sleep(self._poll_interval * attempt)
 
-    @traced("dataframe", "h5store.load_tag_registry")
     def load_tag_registry(self) -> dict:
         """Load the categorical tag registry from H5 into memory and return it."""
         if not self._path.exists():
@@ -545,7 +542,6 @@ class H5DataFrameStore:
             logger.warning(f"[H5DataFrameStore] Failed to verify checksum: {e}")
             return False
 
-    @traced("dataframe", "h5store._create_backup")
     def _create_backup(self) -> Optional[Path]:
         """Create backup of H5 file before write. Returns backup path on success."""
         if not self._path.exists():
@@ -560,7 +556,6 @@ class H5DataFrameStore:
             logger.warning(f"[H5DataFrameStore] Failed to create backup: {e}")
             return None
 
-    @traced("dataframe", "h5store._restore_backup")
     def _restore_backup(self, backup_path: Path):
         """Restore H5 file from backup on write failure."""
         try:
@@ -575,7 +570,6 @@ class H5DataFrameStore:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    @traced("dataframe", "h5store.load")
     def load(self, origin: str, columns: Optional[Iterable[str]] = None, start: Optional[int] = None, stop: Optional[int] = None, non_blocking: bool = False) -> pd.DataFrame:
         """Load data from H5 store.
 
@@ -608,7 +602,6 @@ class H5DataFrameStore:
 
         return self._normalize_for_read(df, origin)
 
-    @traced("dataframe", "h5store.load_all")
     def load_all(self, origins: Iterable[str] = None, columns: Optional[Iterable[str]] = None, non_blocking: bool = False) -> pd.DataFrame:
         """Load all origins in a single H5 transaction.
 
@@ -687,7 +680,6 @@ class H5DataFrameStore:
                     return pd.DataFrame()
                 raise
 
-    @traced("dataframe", "h5store.ensure_index")
     def ensure_index(self, origin: str, columns=("sample_id",)) -> bool:
         """Build the on-disk column index deliberately (checkpoint / first query).
 
@@ -802,7 +794,6 @@ class H5DataFrameStore:
             logger.debug(f"[H5DataFrameStore] in-place update fell back: {exc}")
             return False
 
-    @traced("dataframe", "h5store.upsert")
     def upsert(self, origin: str, df: pd.DataFrame) -> int:
         """Atomic upsert with corruption prevention via backup and checksum verification."""
         df_norm = self._normalize_for_write(df)
@@ -825,12 +816,10 @@ class H5DataFrameStore:
                         # O(change): if every row already exists and the schema is
                         # unchanged, overwrite values in place (0.1ms vs 42s).
                         if key in store and self._try_inplace(store, key, df_norm):
-                            hit("dataframe", "h5store.upsert", path="inplace", rows=len(df_norm))
                             return len(df_norm)
 
                         # Nothing has been written yet in this call; flush so the
                         # copy below captures a consistent on-disk file.
-                        hit("dataframe", "h5store.upsert", path="backup_and_rewrite", rows=len(df_norm))
                         store.flush()
                         backup_path = self._create_backup()
 
@@ -968,7 +957,6 @@ class H5DataFrameStore:
     def exists(self) -> bool:
         return self._path.exists()
 
-    @traced("dataframe", "h5store.delete_column")
     def delete_column(self, column_name: str, origins: Optional[Iterable[str]] = None) -> bool:
         """Delete a column from all specified origins (or all origins if None).
 

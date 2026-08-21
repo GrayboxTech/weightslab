@@ -20,7 +20,6 @@ from collections import OrderedDict
 import h5py
 import numpy as np
 
-from weightslab.backend.optrace import traced
 
 # Config global logger
 logger = logging.getLogger(__name__)
@@ -383,7 +382,6 @@ class H5ArrayStore:
             logger.warning(f"[H5ArrayStore] Failed to compute checksum: {e}")
             return ""
 
-    @traced("arraystore", "arraystore._create_backup")
     def _create_backup(self) -> Optional[Path]:
         """Create backup of array file before write."""
         if not self._path.exists():
@@ -397,7 +395,6 @@ class H5ArrayStore:
             logger.warning(f"[H5ArrayStore] Failed to create backup: {e}")
             return None
 
-    @traced("arraystore", "arraystore._restore_backup")
     def _restore_backup(self, backup_path: Path) -> bool:
         """Restore array file from backup on write failure."""
         try:
@@ -428,7 +425,6 @@ class H5ArrayStore:
         key_name = parts[1]
         return sample_id, key_name
 
-    @traced("arraystore", "arraystore.save_array")
     def save_array(
         self,
         sample_id: str,
@@ -564,7 +560,6 @@ class H5ArrayStore:
             finally:
                 self._rw_lock.release_write()
 
-    @traced("arraystore", "arraystore.save_arrays_batch")
     def save_arrays_batch(
         self,
         arrays_dict: Dict[int, Dict[str, np.ndarray]],
@@ -710,7 +705,6 @@ class H5ArrayStore:
             finally:
                 self._rw_lock.release_write()
 
-    @traced("arraystore", "arraystore.recover")
     def recover(self) -> None:
         """
         Recover from a crash during save_arrays_batch.
@@ -734,7 +728,6 @@ class H5ArrayStore:
             if self._restore_backup(backup_path):
                 backup_path.unlink(missing_ok=True)
 
-    @traced("arraystore", "arraystore.load_array")
     def load_array(self, path_ref: str) -> Optional[np.ndarray]:
         """
         Load array from path reference with LRU cache.
@@ -803,7 +796,6 @@ class H5ArrayStore:
         finally:
             self._rw_lock.release_read()
 
-    @traced("arraystore", "arraystore.load_arrays_batch")
     def load_arrays_batch(self, path_refs: Dict[int, Dict[str, str]]) -> Dict[int, Dict[str, np.ndarray]]:
         """
         Load multiple arrays in batch.
@@ -868,7 +860,6 @@ class H5ArrayStore:
         finally:
             self._rw_lock.release_read()
 
-    @traced("arraystore", "arraystore.delete_sample")
     def delete_sample(self, sample_id: int) -> bool:
         """
         Delete all arrays for a given sample_id.

@@ -44,7 +44,6 @@ from weightslab.data.video_utils import (
 from weightslab.data import media_store
 from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview, encode_image_to_raw_bytes
 from weightslab.data.data_utils import load_raw_image_array
-from weightslab.backend.optrace import traced, hit
 # Image encoding / mask compression / proto helpers (extracted)
 
 from weightslab.trainer.services.data_image_utils import (
@@ -2372,7 +2371,6 @@ class DataService:
             logger.debug(f"Error building categorical tag defs: {e}")
         return defs
 
-    @traced("dataservice", "sort.build_response")
     def _build_success_response(
         self,
         df,
@@ -2421,7 +2419,6 @@ class DataService:
             analysis_result=analysis_result
         )
 
-    @traced("dataservice", "sort.parse_query")
     def _parse_direct_query(self, query: str) -> list:
         """
         Parse a simple direct query string into operations list.
@@ -2550,7 +2547,6 @@ class DataService:
         by_list = [by] if isinstance(by, str) else list(by or [])
         return SampleStatsEx.SAMPLE_ID.value in by_list
 
-    @traced("dataservice", "sort.numeric_coerce")
     def _sample_id_sortable_series(self, values):
         """Return numeric values for sorting when all sample_ids are integer-like, else string values."""
         numeric = pd.to_numeric(values, errors="coerce")
@@ -2563,7 +2559,6 @@ class DataService:
             return numeric
         return values.astype(str)
 
-    @traced("dataservice", "sort.detect_numeric_cols")
     def _numeric_like_sort_cols(self, df: pd.DataFrame, by) -> set:
         """Sort columns whose values are strings but mean numbers.
 
@@ -2595,7 +2590,6 @@ class DataService:
                 continue
         return out
 
-    @traced("dataservice", "sort.sort_values")
     def _sort_values_numeric_aware(self, df: pd.DataFrame, sort_params: dict) -> None:
         """Sort dataframe, ordering numeric-valued string columns numerically."""
         params = dict(sort_params)
@@ -3300,7 +3294,6 @@ class DataService:
             return None
         return np.asarray(mask, dtype=bool)
 
-    @traced("dataservice", "sort.apply_operation")
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -3968,7 +3961,6 @@ class DataService:
 
 
 
-    @traced("dataservice", "dsvc._fastUpdateInternals")
     def _fastUpdateInternals(self, max_dirty: int = 250_000) -> bool:
         """O(change) view refresh. True if applied, False -> caller must rebuild.
 
@@ -3977,12 +3969,10 @@ class DataService:
         enough that a rebuild is cheaper.
         """
         if not _fast_view_enabled():
-            hit("dataservice", "dsvc._fastUpdateInternals", outcome="fallback", reason="opt_out")
             return False            # opt-out: behave exactly as before
         view = self._all_datasets_df
         dfm = self._df_manager
         if view is None or getattr(view, "empty", True) or dfm is None:
-            hit("dataservice", "dsvc._fastUpdateInternals", outcome="fallback", reason="no_view")
             return False
         # A column the ledger has but the view lacks can only arrive via a full
         # rebuild -- the differential write below addresses existing columns
@@ -3996,18 +3986,14 @@ class DataService:
                             if str(c).startswith(self._FAST_SYNC_PREFIXES)
                             and c not in _have]
                 if _missing:
-                    hit("dataservice", "dsvc._fastUpdateInternals",
-                        outcome="fallback", reason="schema_gain", n_missing=len(_missing))
                     return False
         except Exception:
             pass
 
         dirty = dfm.take_view_dirty(limit=max_dirty)
         if dirty is None:
-            hit("dataservice", "dsvc._fastUpdateInternals", outcome="fallback", reason="backlog_too_large")
             return False            # backlog too large; rebuild is cheaper
         if not dirty:
-            hit("dataservice", "dsvc._fastUpdateInternals", outcome="applied", reason="no_change")
             return True             # nothing changed since last sync
 
         sids = [str(s) for s in dirty]
@@ -4019,12 +4005,9 @@ class DataService:
 
         cols = self._fast_sync_columns(view)
         if not cols:
-            hit("dataservice", "dsvc._fastUpdateInternals", outcome="applied", reason="no_sync_cols")
             return True
         sub = dfm.get_source_rows(keep, columns=[c for c in cols if c in view.columns])
         if sub is None or sub.empty:
-            hit("dataservice", "dsvc._fastUpdateInternals", outcome="applied", reason="empty_source_rows",
-                n_dirty=len(sids))
             return True
         if isinstance(sub.index, pd.MultiIndex):
             sub = sub.droplevel(-1)
@@ -4042,22 +4025,14 @@ class DataService:
         _pos = pd.Index(view_keys.astype(str)).get_indexer(sub.index.astype(str))
         _ok = _pos >= 0
         if not _ok.any():
-            hit("dataservice", "dsvc._fastUpdateInternals", outcome="applied", reason="no_row_match",
-                n_dirty=len(sids), n_sub=len(sub.index))
             return True
         if not _ok.all():
-            hit("dataservice", "dsvc._fastUpdateInternals", outcome="fallback",
-                reason="unknown_row", n_dirty=len(sids))
             return False
         for c in sub.columns:
             _ci = view.columns.get_loc(c)
             view.iloc[_pos, _ci] = sub[c].to_numpy()
-        hit("dataservice", "dsvc._fastUpdateInternals", outcome="applied", reason="patched",
-            n_dirty=len(sids), n_sub=len(sub.index), n_pos=int(_ok.sum()),
-            n_rows=int(_ok.sum()), n_cols=len(sub.columns))
         return True
 
-    @traced("dataservice", "dsvc._slowUpdateInternals")
     def _slowUpdateInternals(self, force: bool = False, reset_view: bool = False) -> None:
         """Update the internal dataframe view with the latest data from the manager.
 
@@ -4334,7 +4309,6 @@ class DataService:
                         resolved, len(sample_ids), len(curves))
         return resolved, curves
 
-    @traced("dataservice", "dsvc._build_metadata_only_response")
     def _build_metadata_only_response(self, df_slice: pd.DataFrame, requested_cols=None):
         """Build a DataSamplesResponse of metadata DataRecords from dataframe columns only.
 
@@ -4527,7 +4501,6 @@ class DataService:
             logger.warning("Error enumerating metadata column names: %s", e)
             return []
 
-    @traced("dataservice", "dsvc.GetMetaData")
     def GetMetaData(self, request, context):
         """Metadata-only retrieval, separated from GetDataSamples.
 
@@ -4607,7 +4580,6 @@ class DataService:
                 grid_records=[],
             )
 
-    @traced("dataservice", "dsvc.GetSignalTrajectory")
     def GetSignalTrajectory(self, request, context):
         """On-demand per-sample trajectory of one signal, for the samples shown.
 
@@ -4716,7 +4688,6 @@ class DataService:
         merged_df = pd.DataFrame(merged_rows).reset_index(drop=True)
         return merged_df, signal_dict_mapping
 
-    @traced("dataservice", "dsvc._process_get_data_samples")
     def _process_get_data_samples(self, request, context):
         """
         Actual implementation of GetDataSamples.
@@ -5029,7 +5000,6 @@ class DataService:
     # RPC Implementations
     # ===================
 
-    @traced("dataservice", "dsvc.ApplyDataQuery")
     def ApplyDataQuery(self, request, context):
         """
         Apply a query on the in-memory dataframe.
@@ -5264,7 +5234,6 @@ class DataService:
                 message=f"Failed to apply query: {str(e)}",
             )
 
-    @traced("dataservice", "dsvc.GetDataSamples")
     def GetDataSamples(self, request, context):
         """
         Retrieve samples from the dataframe with their data statistics.
@@ -5283,7 +5252,6 @@ class DataService:
                 data_records=[]
             )
 
-    @traced("dataservice", "dsvc.GetHistogram")
     def GetHistogram(self, request, context):
         """Server-side histogram binning of one column (typed RPC).
 
@@ -5661,7 +5629,6 @@ class DataService:
             while len(self._media_cache) > self._MEDIA_CACHE_ENTRIES:
                 self._media_cache.pop(next(iter(self._media_cache)))
 
-    @traced("dataservice", "dsvc.GetPointCloud")
     def GetPointCloud(self, request, context):
         """Stream one sample's raw point cloud as binary float32 chunks.
 
@@ -5888,7 +5855,6 @@ class DataService:
             message=f"Tag '{tag_name}' registered",
         )
 
-    @traced("dataservice", "dsvc.EditDataSample")
     def EditDataSample(self, request, context):
         """
         Edit sample metadata (tags and discarded).
@@ -6380,7 +6346,6 @@ class DataService:
                     message=f"Failed to edit samples: {str(e)}",
                 )
 
-    @traced("dataservice", "dsvc.GetDataSplits")
     def GetDataSplits(self, request, context):
         """
         Return the list of available dataset splits (train, test, val, etc.)

@@ -25,7 +25,6 @@ from weightslab.data.sample_stats import (
     SAMPLES_STATS_TO_SAVE_TO_H5,
 )
 from weightslab.backend.ledgers import get_hyperparams
-from weightslab.backend.optrace import traced, hit
 
 
 pd.set_option('future.no_silent_downcasting', True)
@@ -579,7 +578,6 @@ class LedgeredDataFrameManager:
         self._categorical_tags[name] = list(dict.fromkeys([*existing, *cats]))
         return list(self._categorical_tags[name])
 
-    @traced("dataframe", "dfm.register_categorical_tag")
     def register_categorical_tag(self, name: str, categories=None, replace: bool = False) -> List[str]:
         """Declare (or extend) a categorical tag and its allowed category values.
 
@@ -669,7 +667,6 @@ class LedgeredDataFrameManager:
         except Exception as e:
             logger.debug(f"[LedgeredDataFrameManager] Failed to load tag registry: {e}")
 
-    @traced("dataframe", "dfm.register_split")
     def register_split(self, origin: str, df: List | pd.DataFrame, store: H5DataFrameStore | None = None, autoload_arrays: bool | list | set = False, return_proxies: bool = True, use_cache: bool = True):
         # Build the annotation-expanded (sample_id, annotation_id) frame.
         # Fast path: when given a list of record dicts, construct the EXPANDED frame
@@ -703,7 +700,6 @@ class LedgeredDataFrameManager:
         # Start flush thread if not already running
         self._ensure_flush_thread()
 
-    @traced("dataframe", "dfm._load_existing_data")
     def _load_existing_data(self, origin: str = None, autoload_arrays: bool | list | set = False, return_proxies: bool = True, use_cache: bool = True):
         # Restore the categorical tag registry so loaded string-valued tag columns
         # get their full allowed category set (not just the values present on disk).
@@ -779,7 +775,6 @@ class LedgeredDataFrameManager:
             else:
                 logger.warning(f"[LedgeredDataFrameManager] Loaded data missing 'sample_id' column for origin={origin}. Skipping load.")
 
-    @traced("dataframe", "dfm.upsert_df")
     def upsert_df(self, df_local: List | pd.DataFrame, origin: str = None, force_flush: bool = False):
         if df_local is None or (isinstance(df_local, pd.DataFrame) and df_local.empty) or len(df_local) == 0:
             return
@@ -934,7 +929,6 @@ class LedgeredDataFrameManager:
             if SampleStats.Ex.DISCARDED.value in set(df_norm.columns):
                 self._bump_discard_revisions(affected_origins)
 
-    @traced("dataframe", "dfm.mark_dirty")
     def mark_dirty(self, sample_id: int):
         """Mark sample as dirty for H5 flush.
 
@@ -945,14 +939,12 @@ class LedgeredDataFrameManager:
             self._pending.add(normalized_id)
             self._view_pending.add(normalized_id)
 
-    @traced("dataframe", "dfm.drop_column")
     def drop_column(self, column: str):
         with self._lock:
             if column in self._df.columns:
                 return self._df.pop(column)
             return None
 
-    @traced("dataframe", "dfm.mark_dirty_batch")
     def mark_dirty_batch(self, sample_ids: List[int], force_flush: bool = False):
         with self._lock:
             self._pending.update(set(sample_ids))
@@ -1127,7 +1119,6 @@ class LedgeredDataFrameManager:
         except Exception:
             return preds_raw
 
-    @traced("dataframe", "dfm.enqueue_batch")
     def enqueue_batch(
         self,
         sample_ids: Sequence[int],
@@ -1246,7 +1237,6 @@ class LedgeredDataFrameManager:
             self.first_init = False
             self.flush_async()
 
-    @traced("dataframe", "dfm.enqueue_instance_batch")
     def enqueue_instance_batch(
         self,
         sample_ids: Sequence[Any],
@@ -1393,7 +1383,6 @@ class LedgeredDataFrameManager:
             self.first_init = False
             self.flush_async()
 
-    @traced("dataframe", "dfm.update_values")
     def update_values(self, origin: str, sample_id: int, updates: Dict[str, Any], annotation_id: int = 0):
         """Update values for a sample (or specific annotation if multi-index).
 
@@ -1464,7 +1453,6 @@ class LedgeredDataFrameManager:
                     self._df = pd.concat([self._df, df_local])
             self._bump_origin_revisions([origin])
 
-    @traced("dataframe", "dfm.take_view_dirty")
     def take_view_dirty(self, limit: int | None = None):
         """Drain and return the sample_ids changed since the last view sync.
 
@@ -1487,7 +1475,6 @@ class LedgeredDataFrameManager:
         with self._lock:
             self._view_pending.clear()
 
-    @traced("dataframe", "dfm.get_source_rows")
     def get_source_rows(self, sample_ids, columns=None):
         """Rows for *sample_ids* straight from the source frame. O(len(ids))."""
         with self._lock:
@@ -1516,7 +1503,6 @@ class LedgeredDataFrameManager:
         """
         return int(self._discard_revisions.get(str(origin), 0))
 
-    @traced("dataframe", "dfm.update_by_groups_bulk")
     def update_by_groups_bulk(self, origin: str, group_ids: List[Any], updates_list: List[Dict[str, Any]]):
         """Broadcast updates to multiple groups in one pass."""
         if not group_ids or not updates_list:
@@ -1570,7 +1556,6 @@ class LedgeredDataFrameManager:
             if affected_ids:
                 self.mark_dirty_batch(affected_ids)
 
-    @traced("dataframe", "dfm.get_tainted_group_ids")
     def get_tainted_group_ids(self, group_ids: List[Any], origin: str) -> set:
         """Return the subset of group_ids where at least one member is discarded.
 
@@ -1640,7 +1625,6 @@ class LedgeredDataFrameManager:
 
         return values
 
-    @traced("dataframe", "dfm.get_discarded_sample_ids")
     def get_discarded_sample_ids(self, sample_ids: List[Any], origin: str) -> set:
         """Return the subset of sample_ids that are marked as discarded.
 
@@ -1752,7 +1736,6 @@ class LedgeredDataFrameManager:
 
         return values
 
-    @traced("dataframe", "dfm.get_row")
     def get_row(self, origin: str, sample_id: int, annotation_id: int = None) -> pd.Series | pd.DataFrame | None:
         """Get row(s) by sample_id and optional annotation_id.
 
@@ -1792,14 +1775,12 @@ class LedgeredDataFrameManager:
             except (KeyError, TypeError):
                 return None
 
-    @traced("dataframe", "dfm.get_value")
     def get_value(self, origin: str, sample_id: int, column: str):
         row = self.get_row(origin, sample_id)
         if row is None or column not in row:
             return None
         return row[column]
 
-    @traced("dataframe", "dfm.get_df_view")
     def get_df_view(self, column: str = None, limit: int = -1, copy: bool = False, value: str = None) -> pd.DataFrame:
         with self._lock:
             if self._df.empty:
@@ -1815,12 +1796,10 @@ class LedgeredDataFrameManager:
             subset = subset.head(limit)
         return subset.copy() if copy else subset
 
-    @traced("dataframe", "dfm.set_dense")
     def set_dense(self, key: str, sample_id: int, value: np.ndarray):
         with self._lock:
             self._dense_store.setdefault(key, {})[str(sample_id)] = value
 
-    @traced("dataframe", "dfm.get_dense_map")
     def get_dense_map(self, origin: str) -> Dict[str, Dict[int, np.ndarray]]:
         with self._lock:
             origin_store = self._dense_store.get(origin, {})
@@ -2249,7 +2228,6 @@ class LedgeredDataFrameManager:
             return []
         return list(hits)
 
-    @traced("dataframe", "dfm._flush_snapshot_to_h5")
     def _flush_snapshot_to_h5(self, data_snapshot: pd.DataFrame, work: List[int]):
         """Flush data snapshot to H5 - runs completely outside locks.
 
@@ -2380,8 +2358,6 @@ class LedgeredDataFrameManager:
         # O(rows) of pure waste on every flush.
         _scan_cols = (list(df.columns) if columns is None
                       else [c for c in df.columns if c in columns])
-        hit("dataframe", "dfm._optimize_dataframe_memory",
-            scoped=columns is not None, n_scan=len(_scan_cols), n_total=len(df.columns))
 
         # === 0) Repair signal columns that were upcast to object ===
         # A single None written into a float column converts it permanently, and
@@ -2573,7 +2549,6 @@ class LedgeredDataFrameManager:
         if self._flush_thread:
             self._flush_thread.join(timeout=2.0)
 
-    @traced("dataframe", "dfm.get_combined_df")
     def get_combined_df(
         self,
         autoload_arrays: bool | list | set = False,
@@ -2609,7 +2584,6 @@ class LedgeredDataFrameManager:
 
         return df
 
-    @traced("dataframe", "dfm.get_collapse_annotations_to_samples_df")
     def get_collapse_annotations_to_samples_df(self, df: pd.DataFrame | None = None) -> pd.DataFrame:
         """Collapse a (sample_id, annotation_id) multi-index df to one row per sample.
 
@@ -2858,7 +2832,6 @@ class LedgeredDataFrameManager:
         with self._lock:
             return len(self._pending) >= self._flush_max_rows or self._force_flush
 
-    @traced("dataframe", "dfm.flush_async")
     def flush_async(self):
         """Signal flush thread. Returns once buffer has been drained (not after H5 write).
 
@@ -2883,7 +2856,6 @@ class LedgeredDataFrameManager:
             time.sleep(0.1)
         logger.warning("[LedgeredDataFrameManager] flush_async timed out waiting for buffer drain after 60s")
 
-    @traced("dataframe", "dfm.flush_if_needed_nonblocking")
     def flush_if_needed_nonblocking(self, force: bool = False):
         """Non-blocking flush - if can't acquire lock immediately, defer to next cycle."""
         # Drain buffer quickly, then release lock before any DF/H5 work.
@@ -2901,7 +2873,6 @@ class LedgeredDataFrameManager:
         self._flush_to_h5_if_needed(force=force)
         logger.debug(f"Completed non-blocking flush check. Pending count after flush: {len(self._pending)}.")
 
-    @traced("dataframe", "dfm.flush")
     def flush(self):
         """Blocking flush: buffer → DF → H5.
 
