@@ -24,18 +24,17 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       Install and run WeightsLab in minutes.
 
-   .. grid-item-card:: What's New
-      :link: whats_new
-      :link-type: doc
-
-      The last ten stable releases, newest first — what changed in each, with a
-      link to its full release notes.
-
    .. grid-item-card:: Core Concepts
       :link: four_way_approach
       :link-type: doc
 
       Understand the 4-level workflow and each part independently.
+
+   .. grid-item-card:: Weights Studio
+      :link: weights_studio/index
+      :link-type: doc
+
+      Web-based UI to inspect, edit, and optimize training behavior in real time.
 
    .. grid-item-card:: Examples
       :link: examples/index
@@ -44,7 +43,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
       End-to-end runnable integrations.
 
    .. grid-item-card:: Notebooks
-      :link: external_integrations
+      :link: notebooks
       :link-type: doc
 
       Colab, local notebooks, and in-training notebook workflows.
@@ -75,7 +74,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
    .. grid-item-card:: gRPC Communication
       :link: grpc/index
-      
+
    .. grid-item-card:: Reference
       :link: user_functions
       :link-type: doc
@@ -89,7 +88,6 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    :hidden:
 
    quickstart
-   whats_new
 
 
 .. toctree::
@@ -101,13 +99,19 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
 
 .. toctree::
+   :maxdepth: 0
+   :caption: WEIGHTS STUDIO
+   :hidden:
+
+   weights_studio/index
+
+
+.. toctree::
    :maxdepth: 3
    :caption: EXAMPLES
    :hidden:
 
    examples/index
-   pytorch_lightning
-   ultralytics
 
 
 .. toctree::
@@ -116,14 +120,21 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    :hidden:
 
    four_way_approach
+   ...
    agent
    hyperparameters
    logger
+   checkpointing
+
+
+.. toctree::
+   :maxdepth: 2
+   :caption: TOOLS
+   :hidden:
+
+   experiment_reports
    resource_monitoring
    export
-   checkpointing
-   experiment_reports
-   weights_studio/index
 
 
 .. toctree::
@@ -131,9 +142,9 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    :caption: INTEGRATIONS
    :hidden:
 
-   Notebooks
-   Ultralytics
-   Pytorch Lightning
+   notebooks
+   pytorch_lightning
+   ultralytics
 
 
 .. toctree::
@@ -152,17 +163,17 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    user_functions
    user_commands
    grpc/index
+   whats_new
 
 
 .. Migration guides — written, but deliberately not published yet. The pages
-   live in docs/migration/ and are reachable by direct link; migration/index.rst
-   carries :orphan: so this stays warning-free while commented out. Uncomment
-   the toctree below to put them in the sidebar.
-..
-   .. toctree::
-      :maxdepth: 2
-      :caption: MIGRATION
-      :hidden:
+..    live in docs/migration/ and are reachable by direct link; migration/index.rst
+..    carries :orphan: so this stays warning-free while commented out. Uncomment
+..    the toctree below to put them in the sidebar.
 
-      migration/index
-   
+.. .. toctree::
+..    :maxdepth: 2
+..    :caption: MIGRATION
+..    :hidden:
+
+..    migration/index

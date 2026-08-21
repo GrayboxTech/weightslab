@@ -86,7 +86,7 @@ From CLI
 
 Use ``weightslab cli`` and run:
 
-.. code-block:: text
+.. code-block:: bash
 
    agent status
    agent init --api-key sk-or-... --model google/gemini-flash-latest
@@ -95,7 +95,7 @@ Use ``weightslab cli`` and run:
 
 Initialization and configuration
 --------------------------------
-
+.. code-block:: bash
    # Requires a local OpenCode server already running and authenticated
    # (opencode has no API-key env var of its own -- see "Initializing the
    # agent" below).
@@ -301,7 +301,7 @@ samples with train loss greater than 1.5"*) and press Enter.
 
 Or initialize at runtime, without restarting the experiment:
 
-.. code-block:: text
+.. code-block:: bash
 
    agent status                        # Is the agent available?
    agent init [--model openrouter/anthropic/claude-opus-4.6]
@@ -493,7 +493,7 @@ against a dedicated OpenCode session — the same kind of session the
 landing-page chat uses, with the same full toolset. It never touches the
 backend SDK agent directly.
 
-.. code-block:: text
+.. code-block:: .. code-block:: bash
 
    /loop 30m Watch the training loss and loss_shape trends; if the run stalls or diverges, pause it and tell me why
    /loop list

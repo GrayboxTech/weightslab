@@ -8,7 +8,7 @@ weightslab command
 
 Installed as a console script via pyproject.toml:
 
-.. code-block:: text
+.. code-block:: bash
 
    weightslab {se,start,cli,tunnel,export,help} ...
 
@@ -443,7 +443,7 @@ all-loaders-fallback behavior as ``discard``.
 
 **Examples**
 
-.. code-block:: text
+.. code-block:: bash
 
    list_uids
    list_uids train_loader --discarded
@@ -465,7 +465,7 @@ Hyperparameter operations
 
 **Examples**
 
-.. code-block:: text
+.. code-block:: bash
 
    hp
    hp fashion_mnist
@@ -487,7 +487,7 @@ Evaluation
 
 **Examples**
 
-.. code-block:: text
+.. code-block:: bash
 
    evaluate                                  # default split, full set
    evaluate val_loader
@@ -511,7 +511,7 @@ prints the current state.
 
 **Examples**
 
-.. code-block:: text
+.. code-block:: bash
 
    audit on
    audit off
@@ -529,7 +529,7 @@ sub-verb reference, examples, and setup: see :doc:`agent`.
 
 **Examples**
 
-.. code-block:: text
+.. code-block:: bash
 
    agent status
    agent init --model openrouter/anthropic/claude-opus-4.6
@@ -559,7 +559,7 @@ analysis (``"analysis": false`` in the reply).
 
 **Examples**
 
-.. code-block:: text
+.. code-block:: bash
 
    report
    report train_loss val_loss

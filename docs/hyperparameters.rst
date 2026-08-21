@@ -112,7 +112,7 @@ can be edited — the YAML file, ``set_hp`` in the CLI, or the studio panel.
 
 Then, from the attached CLI:
 
-.. code-block:: text
+.. code-block:: bash
 
    hp                                     # -> ['main']
    hp main                                # the whole config

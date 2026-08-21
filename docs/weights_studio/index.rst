@@ -61,7 +61,7 @@ Setup and access
 ~~~~~~~~~~~~~~~~
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 0
 
    ports
    security
@@ -74,7 +74,7 @@ Feature reference
 Everything the studio puts on screen, what it is for, and how to drive it.
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 0
 
    landing_page
    header_bar
@@ -91,7 +91,7 @@ Operating it
 ~~~~~~~~~~~~
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 0
 
    cli_console
    troubleshooting

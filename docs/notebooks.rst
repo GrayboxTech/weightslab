@@ -45,7 +45,7 @@ Local machine flow:
    # Terminal 2: bridge to Colab endpoint printed by the notebook
    weightslab tunnel bore.pub:12345
 
-See :doc:`weights_studio/index` and :doc:`user_commands` for tunnel details.
+See :doc:`weights_studio` and :doc:`user_commands` for tunnel details.
 
 Local Jupyter Notebook
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -97,4 +97,4 @@ Agent query cells (``>`` prompts):
 The assistant writes the code into the cell; then you run that generated code as
 a normal Python cell.
 
-See :doc:`weights_studio/notebook`.
+See the "Embedded Experiment Notebook" section in :doc:`weights_studio`.
