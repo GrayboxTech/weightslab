@@ -61,10 +61,9 @@ logger = logging.getLogger(__name__)
 def _resolve_live_credentials() -> "tuple[str, str | None]":
     """Resolve the OpenRouter (key, model) for the live suite.
 
-    Mirrors the agent's own config loading: pull in any repo ``.env`` first,
-    then prefer the dedicated UTEST_* opt-in vars, falling back to the standard
-    OPENROUTER_* vars so the same credentials the agent runs on also drive this
-    suite without duplicating them.
+    Load any repo .env files, then require the dedicated UTEST_* opt-in vars.
+    This prevents accidental execution of the live LLM suite in CI when a
+    generic OPENROUTER_* key may be present for unrelated tasks.
     """
     if load_dotenv is not None:
         # weightslab/tests/trainer/services/<file> -> parents[4] = repo root,
@@ -75,15 +74,9 @@ def _resolve_live_credentials() -> "tuple[str, str | None]":
                 load_dotenv(dotenv_path=candidate, override=False)
         load_dotenv(override=False)
 
-    key = (
-        os.environ.get("UTEST_AGENT_PROMPT_EVALUATION", "").strip()
-        or os.environ.get("OPENROUTER_API_KEY", "").strip()
-    )
-    model = (
-        os.environ.get("UTEST_AGENT_PROMPT_EVALUATION_MODEL", "").strip()
-        or os.environ.get("OPENROUTER_MODEL", "").strip()
-        or None
-    )
+    # Only use the dedicated UTEST_* opt-in variables for these live tests.
+    key = os.environ.get("UTEST_AGENT_PROMPT_EVALUATION", "").strip()
+    model = os.environ.get("UTEST_AGENT_PROMPT_EVALUATION_MODEL", "").strip() or None
     return key, model
 
 
