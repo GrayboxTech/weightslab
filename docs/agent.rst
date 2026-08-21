@@ -493,7 +493,7 @@ against a dedicated OpenCode session — the same kind of session the
 landing-page chat uses, with the same full toolset. It never touches the
 backend SDK agent directly.
 
-.. code-block:: .. code-block:: bash
+.. code-block:: bash
 
    /loop 30m Watch the training loss and loss_shape trends; if the run stalls or diverges, pause it and tell me why
    /loop list

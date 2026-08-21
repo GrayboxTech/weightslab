@@ -30,12 +30,6 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       Understand the 4-level workflow and each part independently.
 
-   .. grid-item-card:: Weights Studio
-      :link: weights_studio/index
-      :link-type: doc
-
-      Web-based UI to inspect, edit, and optimize training behavior in real time.
-
    .. grid-item-card:: Examples
       :link: examples/index
       :link-type: doc
@@ -82,6 +76,13 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
       Complete SDK, CLI, and gRPC documentation.
 
 
+   .. .. grid-item-card:: Weights Studio
+   ..    :link: weights_studio/index
+   ..    :link-type: doc
+
+   ..    Web-based UI to inspect, edit, and optimize training behavior in real time.
+
+
 .. toctree::
    :maxdepth: 2
    :caption: GETTING STARTED
@@ -98,12 +99,12 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    usage/good_practice/index
 
 
-.. toctree::
-   :maxdepth: 0
-   :caption: WEIGHTS STUDIO
-   :hidden:
+.. .. toctree::
+..    :maxdepth: 3
+..    :caption: WEIGHTS STUDIO
+..    :hidden:
 
-   weights_studio/index
+..    weights_studio/index
 
 
 .. toctree::
@@ -135,19 +136,6 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    experiment_reports
    resource_monitoring
    export
-<<<<<<< HEAD
-=======
-   checkpointing
-   experiment_reports
-
-
-.. toctree::
-   :maxdepth: 2
-   :caption: WEIGHTS STUDIO
-   :hidden:
-
-   weights_studio/index
->>>>>>> 0336068fcc73207bd3a3688c5c8f32faff619c9d
 
 
 .. toctree::
