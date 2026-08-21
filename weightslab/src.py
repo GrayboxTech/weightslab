@@ -2131,7 +2131,7 @@ def set_categorical_tag(sample_ids: list[int], name: str, value: str) -> bool:
         df_update["annotation_id"] = 0
         df_update = df_update.set_index(["sample_id", "annotation_id"])
         df_manager.upsert_df(df_update, force_flush=True)
-        logger.info(f"Set categorical tag '{tag_name}'={cleaned!r} on {len(sample_ids)} samples")
+        logger.debug(f"Set categorical tag '{tag_name}'={cleaned!r} on {len(sample_ids)} samples")
         return True
     except Exception as e:
         logger.error(f"Failed to set categorical tag '{name}': {e}", exc_info=True)
