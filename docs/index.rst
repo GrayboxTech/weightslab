@@ -121,7 +121,6 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    :hidden:
 
    four_way_approach
-   ...
    agent
    hyperparameters
    logger
