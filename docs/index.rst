@@ -24,9 +24,6 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       Install and run WeightsLab in minutes.
 
-<<<<<<< Updated upstream
-   .. grid-item-card:: Core Concepts
-=======
    .. grid-item-card:: What's New
       :link: whats_new
       :link-type: doc
@@ -34,8 +31,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
       The last ten stable releases, newest first — what changed in each, with a
       link to its full release notes.
 
-   .. grid-item-card:: Four-Way Approach
->>>>>>> Stashed changes
+   .. grid-item-card:: Core Concepts
       :link: four_way_approach
       :link-type: doc
 
@@ -47,7 +43,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       End-to-end runnable integrations.
 
-   .. grid-item-card:: External Integrations
+   .. grid-item-card:: Notebooks
       :link: external_integrations
       :link-type: doc
 
@@ -135,7 +131,9 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    :caption: INTEGRATIONS
    :hidden:
 
-   external_integrations
+   Notebooks
+   Ultralytics
+   Pytorch Lightning
 
 
 .. toctree::

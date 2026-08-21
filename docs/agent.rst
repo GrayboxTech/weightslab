@@ -4,13 +4,6 @@ Experiment Agent Assistant
 The WeightsLab agent translates natural-language requests into safe data/model
 operations on your live experiment.
 
-Where you can use it
---------------------
-
-<<<<<<< Updated upstream
-From Weights Studio (UI)
-~~~~~~~~~~~~~~~~~~~~~~~~
-=======
 .. warning:: Unstable — in active development
 
    The agent as a whole is **experimental**. Its behaviour, the actions it
@@ -28,9 +21,12 @@ From Weights Studio (UI)
 
    Feedback on what breaks is what stabilises it — please report it.
 
-.. admonition:: The agent in one sentence
-   :class: note
->>>>>>> Stashed changes
+
+Where you can use it
+--------------------
+
+From Weights Studio (UI)
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 - Use the chat bar in the Studio header
 - Initialize provider with ``/init``
