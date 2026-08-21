@@ -97,7 +97,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    :caption: USAGE
    :hidden:
 
-   usage/good_practice
+   usage/good_practice/index
 
 
 .. toctree::
@@ -123,7 +123,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    export
    checkpointing
    experiment_reports
-   weights_studio
+   weights_studio/index
 
 
 .. toctree::
