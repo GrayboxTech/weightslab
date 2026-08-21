@@ -46,6 +46,7 @@ from datetime import datetime
 
 from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
 from weightslab.components.experiment_hash import ExperimentHashGenerator
+from weightslab.components.experiment_naming import generate_experiment_name
 from weightslab.backend.ledgers import (
     get_model,
     get_optimizer,
@@ -518,6 +519,12 @@ class CheckpointManager:
         logger.debug(f"Created checkpoint directories for {exp_hash}: hp_dir={hp_hash_dir}, model_dir={model_hash_dir}, data_dir={data_hash_dir}")
         self._update_manifest(exp_hash)
 
+    def _write_manifest(self, manifest: Dict[str, Any]) -> None:
+        """Persist a manifest dict to disk (shared by the run-metadata setters below)."""
+        self.manifest_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.manifest_file, 'w') as f:
+            yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
+
     def _update_manifest(self, exp_hash: str):
         """Update manifest file with new or updated hash."""
         try:
@@ -525,6 +532,15 @@ class CheckpointManager:
             component_hashes = self.hash_generator.get_component_hashes()
 
             if exp_hash not in manifest['experiments']:
+                existing_names = {
+                    info.get('experiment_name')
+                    for info in manifest['experiments'].values()
+                    if info.get('experiment_name')
+                }
+                configured_name = (self.get_HP_snapshot() or {}).get('experiment_name')
+                experiment_name = configured_name or generate_experiment_name(
+                    is_taken=lambda n: n in existing_names
+                )
                 manifest['experiments'][exp_hash] = {
                     'hp_hash': component_hashes.get('hp', exp_hash[0:8]),
                     'model_hash': component_hashes.get('model', exp_hash[8:16]),
@@ -532,7 +548,9 @@ class CheckpointManager:
                     'created': datetime.now().isoformat(),
                     'last_used': datetime.now().isoformat(),
                     'latest_weight_checkpoint': None,
-                    'latest_weight_step': None
+                    'latest_weight_step': None,
+                    'experiment_name': experiment_name,
+                    'notes': '',
                 }
             else:
                 manifest['experiments'][exp_hash]['last_used'] = datetime.now().isoformat()
@@ -728,6 +746,99 @@ class CheckpointManager:
         if sort_by in ['created', 'last_used']:
             hash_list.sort(key=lambda x: x.get(sort_by, ''), reverse=True)
         return hash_list
+
+    def list_runs(self) -> List[Dict[str, Any]]:
+        """List every run recorded in this root_log_dir's manifest.
+
+        Each entry carries a stable ``experiment_name`` and ``notes``,
+        backfilling (and persisting) both for legacy manifest entries that
+        predate these fields, plus ``is_current`` for the run this manager
+        currently has loaded. This backs the UI's runs popup.
+        """
+        manifest = self._load_manifest()
+        experiments = manifest.get('experiments', {})
+        existing_names = {
+            info.get('experiment_name') for info in experiments.values()
+            if info.get('experiment_name')
+        }
+
+        dirty = False
+        for info in experiments.values():
+            if not info.get('experiment_name'):
+                name = generate_experiment_name(is_taken=lambda n: n in existing_names)
+                info['experiment_name'] = name
+                existing_names.add(name)
+                dirty = True
+            if 'notes' not in info:
+                info['notes'] = ''
+                dirty = True
+
+        if dirty:
+            self._write_manifest(manifest)
+
+        runs = [
+            {'hash': h, **info, 'is_current': h == self.current_exp_hash}
+            for h, info in experiments.items()
+        ]
+        runs.sort(key=lambda x: x.get('last_used') or x.get('created') or '', reverse=True)
+        return runs
+
+    def rename_run(self, exp_hash: str, new_name: str) -> bool:
+        """Rename a run's ``experiment_name`` in the manifest.
+
+        Safe for any run recorded in the manifest, current or historical:
+        ``experiment_name`` is excluded from the experiment hash (see
+        ``ExperimentHashGenerator._hash_config``), so renaming never changes
+        which hash a run resolves to.
+
+        For the *current* run, also pushes the new name into the live
+        hyperparameters ledger and immediately re-dumps the HP config to
+        disk, so the change is reflected there without waiting for the next
+        periodic checkpoint dump. A historical (non-current) run's on-disk HP
+        config file is intentionally left untouched -- it is keyed by the
+        8-byte hp_hash alone and may be shared by several full run hashes
+        (different model/data, same hyperparameters), so patching it here
+        would silently rename every run sharing that HP bucket.
+        """
+        new_name = (new_name or '').strip()
+        if not new_name:
+            return False
+
+        manifest = self._load_manifest()
+        experiments = manifest.get('experiments', {})
+        if exp_hash not in experiments:
+            return False
+
+        experiments[exp_hash]['experiment_name'] = new_name
+        self._write_manifest(manifest)
+
+        if exp_hash == self.current_exp_hash:
+            try:
+                hp_name = ledgers.resolve_hp_name()
+                ledgers.set_hyperparam('experiment_name', new_name, name=hp_name)
+                updated_hp = self.get_HP_snapshot()
+                if updated_hp:
+                    self.save_config(updated_hp)
+            except Exception as e:
+                logger.warning(
+                    f"Renamed run {exp_hash} in manifest, but failed to update live config: {e}"
+                )
+
+        return True
+
+    def set_run_notes(self, exp_hash: str, notes: str) -> bool:
+        """Attach/replace a free-text note for a run.
+
+        Manifest-only (not part of the experiment hash or the HP config
+        snapshot); works identically for the current or a historical run.
+        """
+        manifest = self._load_manifest()
+        experiments = manifest.get('experiments', {})
+        if exp_hash not in experiments:
+            return False
+        experiments[exp_hash]['notes'] = notes or ''
+        self._write_manifest(manifest)
+        return True
 
     def get_hashes_by_component(self, hp_hash: Optional[str] = None,
                                 model_hash: Optional[str] = None,

@@ -132,6 +132,37 @@ Conventions that matter for correctness:
   supports both `hp.get("lr")` and `hp["lr"]` (subscript == `.get`), and stays
   live — reads reflect in-place updates and re-registration.
 
+Recording values (pick by what the value is *about*, not by convenience):
+
+| Value describes | Verb | Example |
+|---|---|---|
+| one sample | `wl.save_signals(signals={...}, batch_ids=ids, ...)` | an image's loss |
+| one annotation | `wl.save_instance_signals(...)` | one box's IoU |
+| a group of samples | `wl.save_group_signals(signals={...}, group_ids=[...])` | a pair's contrastive loss |
+| one training **step** | `wl.save_model_signals(signals={...})` | a gradient norm |
+
+The first three write dataframe rows (sortable/filterable in the grid); the
+fourth only plots a curve. Never fake a step-level value by broadcasting it
+across `batch_ids` — that writes a number onto samples it was never about.
+
+- **Training-dynamics signals** come free with
+  `wl.watch_or_edit(model, flag="model", track_model_signals=True,
+  model_signals_every_n_steps=N)`. That emits, per step and with no call in the
+  training loop: `metrics/global/{grad_norm,weights_norm}` and
+  `metrics/layer/<layer_id>/{grad_norm,weights_norm,activation_mean,
+  activation_std,activation_max,activation_min}`. `<layer_id>` is the same id
+  architecture ops (freeze/reset) address, so a bad curve names the layer to act
+  on. Only collects inside `guard_training_context`, so eval never contaminates
+  it. Implementation: `weightslab/weightslab/components/model_signals.py`;
+  example: `examples/Usecases/wl-fashion-mnist-signals`.
+  - Diagnosing from these: early-layer `grad_norm` → 0 with healthy late layers
+    = vanishing gradient; `grad_norm` spiking orders of magnitude = exploding;
+    `activation_std` → 0 on a layer = that layer went constant (dead
+    ReLU/saturated BN); `weights_norm` growing while loss flattens = needs decay.
+  - Per-layer curves need per-layer modules: an `nn.Sequential` block resolves
+    to ONE layer id, so a model built out of Sequentials gets one curve for the
+    whole block.
+
 ---
 
 ## 4. Configuration (environment variables)

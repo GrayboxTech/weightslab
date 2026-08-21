@@ -294,11 +294,12 @@ def build_notebook_namespace(data_service, root_log_dir, plt=None) -> dict:
 
 _EMBED_ENABLED = False
 _EMBED_LOCK = threading.Lock()
-# "started" only means "the decision was taken and we won't retry"; "failed" is
-# the terminal negative outcome. Waiters must distinguish the two, otherwise a
-# kernel that is still booting looks identical to one that will never come up.
-_EMBED_STATE = {"started": False, "failed": False, "connection_file": None,
-                "kernel_thread_id": None}
+# "started" means an attempt has BEGUN; "done" is set once that attempt has
+# CONCLUDED (kernel up, ipykernel missing, or timed out). Waiters must key off
+# "done" -- keying off "started" makes them give up the instant the attempt is
+# launched, before the kernel has had any chance to write its connection file.
+_EMBED_STATE = {"started": False, "connection_file": None, "kernel_thread_id": None,
+                "done": threading.Event()}
 # Rebound on every NotebookService construction (i.e. every watchdog restart)
 # so the one long-lived embedded kernel thread always refreshes df/root_log_dir
 # against whichever data_service/root_log_dir is currently live.
@@ -339,7 +340,7 @@ def ensure_embedded_kernel(data_service, root_log_dir: Path) -> None:
     with _EMBED_LOCK:
         if _EMBED_STATE["started"]:
             return
-        _EMBED_STATE["started"] = True  # decided either way; never retry
+        _EMBED_STATE["started"] = True  # attempted once; never retry
         if not _ipykernel_available():
             _EMBED_STATE["failed"] = True
             logger.warning(
@@ -348,20 +349,26 @@ def ensure_embedded_kernel(data_service, root_log_dir: Path) -> None:
                 "panel will use the built-in executor. Install with "
                 "`pip install weightslab[notebook-kernel]`."
             )
+            _EMBED_STATE["done"].set()
             return
         connection_file = _ACTIVE_BINDING["root_log_dir"] / "notebook_kernel.json"
         threading.Thread(
             target=_run_embedded_kernel, args=(connection_file,),
             name="WL-Embedded-Jupyter-Kernel", daemon=True,
         ).start()
-        if _wait_for_connection_file(connection_file, timeout=15.0):
-            _EMBED_STATE["connection_file"] = connection_file
-        else:
-            _EMBED_STATE["failed"] = True
-            logger.warning(
-                "Embedded kernel did not write its connection file within "
-                "15s (%s); RunNotebookCell will fall back to the built-in "
-                "executor.", connection_file)
+        try:
+            if _wait_for_connection_file(connection_file, timeout=15.0):
+                _EMBED_STATE["connection_file"] = connection_file
+            else:
+                logger.warning(
+                    "Embedded kernel did not write its connection file within "
+                    "15s (%s); RunNotebookCell will fall back to the built-in "
+                    "executor.", connection_file)
+        finally:
+            # Publish the outcome even on an unexpected error, so waiters in
+            # get_embedded_kernel_connection_file() are never left hanging
+            # until their own timeout expires.
+            _EMBED_STATE["done"].set()
 
 
 def get_embedded_kernel_connection_file(wait_timeout: float = 8.0):
@@ -373,13 +380,15 @@ def get_embedded_kernel_connection_file(wait_timeout: float = 8.0):
     while time.monotonic() < deadline:
         if _EMBED_STATE["connection_file"] is not None:
             return _EMBED_STATE["connection_file"]
-        if _EMBED_STATE["failed"]:
-            return None  # definitively failed (ipykernel missing / no file) -- stop
-        # NOTE: do NOT stop on "started". ensure_embedded_kernel() flips it before
-        # the kernel writes its connection file, so bailing there reported "did not
-        # come up in time" for a kernel that was still a fraction of a second away.
+        # Only stop polling once the attempt has CONCLUDED. Checking "started"
+        # here returned None the moment the kernel thread was launched -- so a
+        # kernel that came up perfectly well a fraction of a second later was
+        # still reported as "did not come up in time", and the studio panel
+        # dropped to the built-in executor for the rest of the session.
+        if _EMBED_STATE["done"].is_set():
+            return _EMBED_STATE["connection_file"]
         time.sleep(0.05)
-    return None
+    return _EMBED_STATE["connection_file"]
 
 
 def _run_embedded_kernel(connection_file: Path) -> None:
@@ -398,18 +407,14 @@ def _run_embedded_kernel(connection_file: Path) -> None:
         _ACTIVE_BINDING["data_service"], _ACTIVE_BINDING["root_log_dir"])
 
     app = IPKernelApp.instance(connection_file=str(connection_file), matplotlib="inline")
-
-    # initialize() installs a SIGINT handler, and signal.signal() only works on
-    # the main thread — off-thread (which is always the case here) ipykernel logs
-    # a full "Unable to initialize signal" ERROR traceback and carries on. We
-    # never use signal-based interrupts anyway (see EmbeddedKernelBridge.interrupt,
-    # which targets this thread directly), so skip that step instead of printing a
-    # scary traceback on every `wl.serve()`.
-    try:
-        app.init_signal = lambda: None
-    except Exception:
-        logger.debug("Could not disable ipykernel signal setup", exc_info=True)
-
+    # IPKernelApp.initialize() installs a SIGINT handler, and signal handlers
+    # can only be installed on the main thread -- which an embedded kernel is
+    # never on. ipykernel catches the resulting ValueError but logs it as
+    # "ERROR | Unable to initialize signal:" plus a full traceback, which reads
+    # like a real failure. The handler would be dead weight anyway: runaway
+    # cells are stopped via _async_raise() (see above), not SIGINT. Skip it so
+    # the logs only carry problems that are actually actionable.
+    app.init_signal = lambda: None
     try:
         app.initialize([])
         app.shell.colors = "NoColor"

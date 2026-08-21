@@ -47,6 +47,15 @@
           '<span id="wl-topnav-tip" class="wl-topnav-tip-text"></span>' +
         '</div>' +
         '<div class="wl-topnav-menu">' +
+          '<a class="wl-topnav-btn wl-topnav-whatsnew" href="' + root + '/whats_new.html">' +
+            '<span class="wl-topnav-dot" aria-hidden="true"></span>' +
+            "What's New" +
+          '</a>' +
+          // version-switcher.js appends the <select> here once versions.json
+          // resolves; the placeholder keeps its position in the menu stable
+          // rather than having the control appear at a different index
+          // depending on how fast that fetch came back.
+          '<div class="wl-topnav-version"></div>' +
           '<a class="wl-topnav-btn" href="' + root + '/examples/index.html">Examples</a>' +
           '<a class="wl-topnav-btn" href="' + root + '/quickstart.html">Quickstart</a>' +
           '<a class="wl-topnav-btn wl-topnav-btn--outline" href="https://www.graybx.com/"' +

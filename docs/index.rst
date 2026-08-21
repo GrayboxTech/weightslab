@@ -36,8 +36,8 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       End-to-end runnable integrations.
 
-   .. grid-item-card:: External Integrations
-      :link: external_integrations
+   .. grid-item-card:: Notebooks
+      :link: notebooks
       :link-type: doc
 
       Colab, local notebooks, and in-training notebook workflows.
@@ -48,6 +48,27 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       Environment variables and runtime toggles.
 
+   .. grid-item-card:: AI Agent
+      :link: agent
+      :link-type: doc
+
+      Drive UI actions (sort, dump, load), data analysis, tagging/discarding, and model freeze/reset with natural language.
+
+   .. grid-item-card:: Experiment Reports
+      :link: experiment_reports
+      :link-type: doc
+
+      Ask the agent for a branded HTML report: signal health plots, dataset stats, and a written analysis.
+
+   .. grid-item-card:: Annotation Export
+      :link: export
+      :link-type: doc
+
+      Export bounding boxes and segmentation masks to CVAT, Label Studio, or V7 for relabeling.
+
+   .. grid-item-card:: gRPC Communication
+      :link: grpc/index
+
    .. grid-item-card:: Reference
       :link: user_functions
       :link-type: doc
@@ -55,9 +76,16 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
       Complete SDK, CLI, and gRPC documentation.
 
 
+   .. .. grid-item-card:: Weights Studio
+   ..    :link: weights_studio/index
+   ..    :link-type: doc
+
+   ..    Web-based UI to inspect, edit, and optimize training behavior in real time.
+
+
 .. toctree::
    :maxdepth: 2
-   :caption: Getting Started
+   :caption: GETTING STARTED
    :hidden:
 
    quickstart
@@ -65,45 +93,63 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
 .. toctree::
    :maxdepth: 2
-   :caption: Usage
+   :caption: USAGE
    :hidden:
 
-   usage/good_practice
+   usage/good_practice/index
+
+
+.. .. toctree::
+..    :maxdepth: 3
+..    :caption: WEIGHTS STUDIO
+..    :hidden:
+
+..    weights_studio/index
 
 
 .. toctree::
    :maxdepth: 3
-   :caption: Examples
+   :caption: EXAMPLES
    :hidden:
 
    examples/index
+
+
+.. toctree::
+   :maxdepth: 2
+   :caption: CORE CONCEPTS
+   :hidden:
+
+   four_way_approach
+   agent
+   hyperparameters
+   logger
+   checkpointing
+
+
+.. toctree::
+   :maxdepth: 2
+   :caption: TOOLS
+   :hidden:
+
+   experiment_reports
+   resource_monitoring
+   export
+
+
+.. toctree::
+   :maxdepth: 2
+   :caption: INTEGRATIONS
+   :hidden:
+
+   notebooks
    pytorch_lightning
    ultralytics
 
 
 .. toctree::
-   :maxdepth: 3
-   :caption: Core Concepts
-   :hidden:
-
-   four_way_approach
-   agent
-   checkpointing
-   experiment_reports
-   weights_studio
-
-
-.. toctree::
-   :maxdepth: 2
-   :caption: External Integrations
-   :hidden:
-
-   external_integrations
-
-
-.. toctree::
    :maxdepth: 1
-   :caption: Configuration
+   :caption: CONFIGURATION
    :hidden:
 
    configuration
@@ -111,9 +157,23 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
 .. toctree::
    :maxdepth: 2
-   :caption: Reference
+   :caption: REFERENCE
    :hidden:
 
    user_functions
    user_commands
    grpc/index
+   whats_new
+
+
+.. Migration guides — written, but deliberately not published yet. The pages
+..    live in docs/migration/ and are reachable by direct link; migration/index.rst
+..    carries :orphan: so this stays warning-free while commented out. Uncomment
+..    the toctree below to put them in the sidebar.
+
+.. .. toctree::
+..    :maxdepth: 2
+..    :caption: MIGRATION
+..    :hidden:
+
+..    migration/index

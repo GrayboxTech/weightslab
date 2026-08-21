@@ -727,5 +727,5 @@ See Also
 ========
 
 - :doc:`/grpc/audit_logger`: Audit logging for all gRPC operations
-- :doc:`/weights_studio`: gRPC client implementation (UI)
+- :doc:`/weights_studio/index`: gRPC client implementation (UI)
 - :doc:`/configuration`: gRPC configuration options

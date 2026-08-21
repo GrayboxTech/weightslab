@@ -551,6 +551,115 @@ class TestAggregatePerSampleByStep(unittest.TestCase):
         steps = [s for s, _ in result[h]]
         self.assertEqual(steps, sorted(steps))
 
+    def test_exp_hashes_scopes_to_one_run(self):
+        # add_scalars has no exp_hash param (it reads chkpt_manager's current
+        # hash, which _fresh_logger leaves unset) -- stage rows directly under
+        # distinct hashes instead, the same way break-by-slices' real data does.
+        lg = _fresh_logger()
+        lg._stage_sample_row("loss", "h1", "s0", 1, 0.2)
+        lg._stage_sample_row("loss", "h2", "s0", 1, 0.8)
+        result = lg.aggregate_per_sample_by_step("loss", exp_hashes=["h1"])
+        self.assertEqual(list(result.keys()), ["h1"])
+        self.assertAlmostEqual(result["h1"][0][1], 0.2, places=4)
+
+    def test_exp_hashes_scopes_to_several_runs(self):
+        lg = _fresh_logger()
+        lg._stage_sample_row("loss", "h1", "s0", 1, 0.2)
+        lg._stage_sample_row("loss", "h2", "s0", 1, 0.4)
+        lg._stage_sample_row("loss", "h3", "s0", 1, 0.6)
+        result = lg.aggregate_per_sample_by_step("loss", exp_hashes=["h1", "h3"])
+        self.assertEqual(sorted(result.keys()), ["h1", "h3"])
+
+    def test_exp_hashes_none_returns_every_run(self):
+        lg = _fresh_logger()
+        lg._stage_sample_row("loss", "h1", "s0", 1, 0.2)
+        lg._stage_sample_row("loss", "h2", "s0", 1, 0.8)
+        result = lg.aggregate_per_sample_by_step("loss")
+        self.assertEqual(sorted(result.keys()), ["h1", "h2"])
+
+    def test_exp_hashes_matching_nothing_returns_empty(self):
+        lg = _fresh_logger()
+        lg._stage_sample_row("loss", "h1", "s0", 1, 0.2)
+        result = lg.aggregate_per_sample_by_step("loss", exp_hashes=["ghost"])
+        self.assertEqual(result, {})
+
+
+# ---------------------------------------------------------------------------
+# 7b. get_signal_curve_index -- NULL experiment_hash must not leak through
+# ---------------------------------------------------------------------------
+
+class TestGetSignalCurveIndexNullHash(unittest.TestCase):
+    """A hash-less signal (e.g. a global/resource metric, or any row logged
+    with no chkpt_manager bound) groups under a NULL experiment_hash in SQL.
+    The caller (experiment_service.py's index_only path) assigns this
+    straight into a protobuf string field -- a bare None there raises,
+    crashing the whole GetLatestLoggerData(index_only=True) discovery request
+    even though only ONE hash-less signal among many was responsible.
+    """
+
+    def test_null_hash_normalized_to_sentinel(self):
+        lg = _fresh_logger()
+        # _fresh_logger has no chkpt_manager, so add_scalars' own experiment_hash
+        # lookup resolves to None -- exactly the hash-less case in production.
+        lg.add_scalars("resource/cpu", {"resource/cpu": 0.5}, 1,
+                        signal_per_sample=None, aggregate_by_step=False)
+        index = lg.get_signal_curve_index()
+        self.assertIn("resource/cpu", index)
+        self.assertNotIn(None, index["resource/cpu"])
+        self.assertIn("N.A.", index["resource/cpu"])
+        self.assertEqual(index["resource/cpu"]["N.A."]["count"], 1)
+
+    def test_mixed_hashed_and_hashless_signals_both_present(self):
+        lg = _fresh_logger()
+        lg.add_scalars("resource/cpu", {"resource/cpu": 0.5}, 1,
+                        signal_per_sample=None, aggregate_by_step=False)
+        lg._stage_signal_row(
+            "train-loss-CE", "h1", 1, 0.4, 0,
+            audit_mode=False, is_marker=False, split_name="", eval_tags=[], point_note="",
+        )
+        index = lg.get_signal_curve_index()
+        self.assertEqual(set(index["resource/cpu"].keys()), {"N.A."})
+        # A hashed signal in a DIFFERENT metric is unaffected by the
+        # hash-less one -- confirms the None -> "N.A." normalization doesn't
+        # accidentally merge or clobber other curves.
+        self.assertEqual(set(index["train-loss-CE"].keys()), {"h1"})
+
+
+# ---------------------------------------------------------------------------
+# 7c. Downsampling bucket math -- INT32 overflow on a long run
+# ---------------------------------------------------------------------------
+
+class TestDownsampleBucketOverflow(unittest.TestCase):
+    """`step` is a DuckDB INTEGER (INT32) column. The bucket formula is
+    `(step - lo) * n_buckets / (hi - lo)` -- multiplying a large step gap by a
+    generous max_points/n_buckets overflows INT32 (~2.147e9) well before
+    reaching a curve anyone would call huge. A real repro: step ~538,010 and
+    max_points ~3,992 hit this in production (538010 * 3992 ~= 2.1477e9,
+    just over INT32_MAX). Only 2 rows are needed to reproduce it -- the
+    overflow depends on the step GAP and n_buckets, not on row count.
+    """
+
+    def test_get_signal_history_downsampled_survives_a_large_step_gap(self):
+        lg = _fresh_logger()
+        lg.add_scalars("loss", {"loss": 0.1}, 0,
+                        signal_per_sample=None, aggregate_by_step=False)
+        lg.add_scalars("loss", {"loss": 0.9}, 600_000,
+                        signal_per_sample=None, aggregate_by_step=False)
+        # Does not raise _duckdb.OutOfRangeException.
+        history = lg.get_signal_history_downsampled(max_points=4000, metric_names=["loss"])
+        h = list(history["loss"].keys())[0]
+        steps = sorted(history["loss"][h].keys())
+        self.assertEqual(steps, [0, 600_000]) # both endpoints survive bucketing
+
+    def test_query_per_sample_bucketing_survives_a_large_step_gap(self):
+        lg = _fresh_logger()
+        lg._stage_sample_row("loss", "h1", "s0", 0, 0.1)
+        lg._stage_sample_row("loss", "h1", "s0", 600_000, 0.9)
+        # Does not raise _duckdb.OutOfRangeException.
+        rows = lg.query_per_sample("loss", max_points=4000)
+        steps = sorted(r[1] for r in rows)
+        self.assertEqual(steps, [0, 600_000])
+
 
 # ---------------------------------------------------------------------------
 # 8. break_by_slices — basic correctness (using real logger + numpy path)

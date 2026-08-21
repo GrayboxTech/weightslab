@@ -567,6 +567,46 @@ subclass) that unwinds the stack and releases the lock via ``finally`` /
        detected.  Useful when running under a process supervisor (e.g. systemd) that handles the restart externally.
 
 
+Resource Monitoring
+~~~~~~~~~~~~~~~~~~~~
+
+Enabled by default: a background thread samples CPU, memory, disk, network,
+GPU (NVML), and process-level usage and logs each value as a signal, visible
+in Weights Studio like any other loss/metric curve. See
+:doc:`resource_monitoring` for the full metric list, the ``resource_monitoring.yaml``
+schema, and category-level toggles.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Variable
+     - Default
+     - Description
+   * - ``WEIGHTSLAB_DISABLE_RESOURCE_MONITORING``
+     - ``0``
+     - If set to ``1`` / ``true`` / ``yes`` / ``on``, disables resource
+       monitoring entirely.
+   * - ``WL_RESOURCE_MONITOR_INTERVAL_SECONDS``
+     - ``15``
+     - How often (seconds) the monitor samples and logs a new batch of metrics.
+   * - ``WL_RESOURCE_MONITOR_CATEGORIES``
+     - *(unset — all on)*
+     - Comma-separated category allowlist (``cpu``, ``memory``, ``disk``,
+       ``network``, ``process``, ``gpu``). Anything not listed is disabled.
+   * - ``WL_RESOURCE_MONITOR_DISK_PATH``
+     - OS root
+     - Filesystem path reported by the ``disk`` category's usage metrics.
+   * - ``WL_RESOURCE_MONITOR_STEP_SOURCE``
+     - ``model_age``
+     - What samples are plotted against. ``model_age`` shares the x axis of
+       your loss/metric curves and restarts with training; ``seconds`` uses
+       elapsed seconds since the monitor started.
+   * - ``WL_RESOURCE_MONITOR_CONFIG_PATH``
+     - *(empty)*
+     - Optional directory override for ``resource_monitoring.yaml``.
+
+
 Data and Cache
 ~~~~~~~~~~~~~~
 
@@ -683,10 +723,15 @@ Evaluation Mode
        ``0`` disables the absolute override and uses the dynamic formula only.
 
 
-AI / LLM API Keys
-~~~~~~~~~~~~~~~~~
+AI / LLM Configuration
+~~~~~~~~~~~~~~~~~~~~~~
 
-These keys are required only when using the agentic data-query features.
+OpenCode (`opencode.ai <https://opencode.ai>`_) is the agent's only supported
+backend -- there is no API key to set here. The credential lives in
+OpenCode's own config (``opencode auth login``, or the Weights Studio landing
+page's login modal), which can point at OpenRouter, Anthropic, a local Ollama
+endpoint, or anything else OpenCode supports; WeightsLab itself only needs to
+know which server to talk to.
 
 .. list-table::
    :header-rows: 1
@@ -695,19 +740,24 @@ These keys are required only when using the agentic data-query features.
    * - Variable
      - Default
      - Description
-   * - ``OPENROUTER_API_KEY``
+   * - ``OPENCODE_URL``
+     - ``http://127.0.0.1:4096``
+     - URL of the local OpenCode server. Shared with the frontend (Weights
+       Studio's landing-page chat and ``/loop``) via the same variable, so
+       set it once and both sides talk to the one server.
+   * - ``OPENCODE_MODEL``
      - *(empty)*
-     - OpenRouter API key ? required for cloud agent setup in Weights Studio.
+     - Default model for the backend SDK agent, as an OpenCode
+       ``providerID/modelID`` string (e.g.
+       ``openrouter/anthropic/claude-opus-4.6``). Empty falls back to
+       OpenCode's own last-picked model, and otherwise the free-tier
+       ``opencode/deepseek-v4-flash-free`` automatically.
 
 
 Agent Configuration
 ~~~~~~~~~~~~~~~~~~~
 
 These variables control how the data-query agent finds its YAML configuration.
-The agent supports two provider families:
-
-- ``ollama`` for local inference
-- ``openrouter`` for cloud-hosted models
 
 .. list-table::
    :header-rows: 1
@@ -740,11 +790,44 @@ Example
    # /opt/weightslab/config/agent_config.yaml
 
 
+Agent server (OpenCode) ports
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The agent is backed by a local ``opencode serve`` process that both the UI
+server and the backend SDK agent share. These control where it lives.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Variable
+     - Default
+     - Description
+   * - ``WEIGHTSLAB_OPENCODE_PORT``
+     - ``4096``
+     - Port a freshly spawned agent server is asked for. If it is already in
+       use, a free port is chosen instead and the one actually used is logged
+       at ``INFO``. Set this when ``4096`` is permanently taken on the machine,
+       or when a specific port is the one you have forwarded or published.
+   * - ``OPENCODE_URL``
+     - *(unset)*
+     - Adopt an already-running agent server at this URL instead of spawning
+       one. Takes precedence over everything else, and configures **both** the
+       UI server and the SDK agent — set it once and the two converge on a
+       single process.
+
+.. note::
+
+   The browser talks to the agent server **directly**, not through the UI
+   server's proxy. When the studio runs on a different machine from the
+   browser, this port has to be reachable from the browser's side — see
+   :ref:`studio-bridging`.
+
 Agent Provider Setup
 ~~~~~~~~~~~~~~~~~~~~
 
 The runtime agent is configured from ``agent_config.yaml`` plus optional
-environment variables such as ``OPENROUTER_API_KEY``.
+environment variables such as ``OPENCODE_URL``.
 
 Supported YAML keys
 ^^^^^^^^^^^^^^^^^^^
@@ -756,73 +839,34 @@ Supported YAML keys
    * - Key
      - Example
      - Description
-   * - ``agent.provider``
-     - ``ollama``
-     - Active provider. Common values: ``ollama`` or ``openrouter``.
-   * - ``agent.ollama_model``
-     - ``llama3.2:3b``
-     - Local Ollama model name.
-   * - ``agent.ollama_host``
-     - ``localhost``
-     - Ollama host.
-   * - ``agent.ollama_port``
-     - ``11435``
-     - Ollama HTTP port used by WeightsLab.
-   * - ``agent.openrouter_model``
-     - ``~google/gemini-flash-latest``
-     - Default OpenRouter model.
-   * - ``agent.openrouter_base_url``
-     - ``https://openrouter.ai/api/v1``
-     - OpenRouter-compatible base URL.
-   * - ``agent.openrouter_request_timeout``
-     - ``15.0``
-     - Request timeout in seconds for OpenRouter calls.
-   * - ``agent.openrouter_api_key``
-     - *(secret)*
-     - Optional API key in YAML. Prefer environment variables or UI init when possible.
-   * - ``agent.fallback_to_local``
-     - ``false``
-     - If enabled, WeightsLab also tries the local Ollama provider as fallback.
+   * - ``agent.opencode_url``
+     - ``http://127.0.0.1:4096``
+     - URL of the local OpenCode server.
+   * - ``agent.opencode_model``
+     - ``openrouter/anthropic/claude-opus-4.6``
+     - Default model, as an OpenCode ``providerID/modelID`` string. Empty
+       falls back to OpenCode's own last-picked model, and otherwise the
+       free-tier ``opencode/deepseek-v4-flash-free`` automatically.
 
-Local Ollama example
-^^^^^^^^^^^^^^^^^^^^
-
-Use this mode when you want the agent available immediately at backend startup.
+Example
+^^^^^^^
 
 .. code-block:: yaml
 
    agent:
-     provider: ollama
-     ollama_model: llama3.2:3b
-     ollama_host: localhost
-     ollama_port: 11435
-     fallback_to_local: false
+     opencode_url: http://127.0.0.1:4096
+     opencode_model: ""   # empty = self-heal to OpenCode's own default, or "opencode/deepseek-v4-flash-free"
 
-Operational steps:
+Setup steps:
 
-1. Install Ollama.
-2. Pull a model, for example ``ollama pull llama3.2:3b``.
-3. Start the Ollama server.
-4. Start WeightsLab.
-5. Open Weights Studio and query the agent directly.
-
-Cloud OpenRouter example
-^^^^^^^^^^^^^^^^^^^^^^^^
-
-Use this mode when you want hosted models and interactive setup from Weights Studio.
-
-.. code-block:: yaml
-
-   agent:
-     provider: openrouter
-     openrouter_model: ~google/gemini-flash-latest
-     fallback_to_local: false
-
-Recommended secret handling:
-
-.. code-block:: bash
-
-   export OPENROUTER_API_KEY=your_openrouter_key
+1. Have a local OpenCode server running (WeightsLab starts one for you on
+   first use; see :doc:`agent`), or point ``OPENCODE_URL`` at your own.
+2. Authenticate it once: ``opencode auth login`` (or the login modal from
+   Weights Studio's landing page) -- OpenRouter, Anthropic, a local Ollama
+   endpoint, anything OpenCode supports.
+3. Start WeightsLab.
+4. Open Weights Studio and query the agent directly, or type ``/init`` first
+   to pick a specific model.
 
 Weights Studio commands
 ^^^^^^^^^^^^^^^^^^^^^^^
@@ -830,11 +874,10 @@ Weights Studio commands
 When using Weights Studio, the agent bar supports these runtime commands:
 
 1. ``/init``
-   Opens the OpenRouter onboarding flow.
-   Users can enter an API key manually or use the OAuth flow, then select a model.
+   Connects to the OpenCode server and lets you pick a model.
 2. ``/model``
-   Opens the model browser and switches the active OpenRouter model without
-   requiring a full reinitialization.
+   Opens the model browser and switches the active OpenCode model without
+   reconnecting.
 3. ``/reset``
    Clears the current runtime connection state and returns the agent to the
    uninitialized status.
@@ -842,13 +885,13 @@ When using Weights Studio, the agent bar supports these runtime commands:
 Notes
 ^^^^^
 
-- The default OpenRouter model is ``~google/gemini-flash-latest``.
-- The model browser fetches the available models from OpenRouter using the
-  configured API key.
+- The model browser fetches the available models from the OpenCode server's
+  own provider catalog.
 - Connection and model-change actions are recorded in the agent history as
   log-style entries.
-- ``/reset`` clears the current runtime agent state. If your startup config is
-  local-only and you want that provider back immediately, restart the backend.
+- ``/reset`` clears the current runtime agent state. If your startup config
+  points at a server that's still running, ``/init`` reconnects immediately;
+  otherwise restart the backend once the server is back.
 
 
 Testing

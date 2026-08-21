@@ -24,6 +24,7 @@ import yaml
 
 from weightslab.security import CertAuthManager
 from weightslab.tunnel import DEFAULT_LISTEN_PORT
+from weightslab.components.experiment_naming import generate_experiment_name as _generate_experiment_name
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -233,6 +234,19 @@ commands:
                              --listen-host H   interface to bind (default: auto)
                              --remote-port N   remote port, if not in ENDPOINT
 
+  export                   Export bounding-box/segmentation annotations from
+                           a running experiment (connects over gRPC, like
+                           `cli`) to a relabeling-tool format, ready to hand
+                           off to an outsourced relabeling pass.
+                             --format, -f      cvat | label_studio | v7  (required)
+                             OUTPUT            file path or directory (default: ".")
+                             --origin O        restrict to one split/loader (default: all)
+                             --predictions     export model predictions, not ground truth
+                             --tag TAG         restrict to samples with this tag; repeat for
+                                               multiple (matches ANY), default: all samples
+                             --host H          backend host (default: 127.0.0.1)
+                             --port N          backend gRPC port (default: 50051)
+
 examples:
   weightslab se                       # one-time secure setup (then export WEIGHTSLAB_CERTS_DIR)
   weightslab se --force-certs         # regenerate the certs
@@ -250,6 +264,9 @@ examples:
   weightslab cli                      # connect a terminal to the running experiment
   weightslab cli --port 60000         # connect to a specific CLI port
   weightslab tunnel bore.pub:12345    # expose a remote (Colab) backend at localhost:50051
+  weightslab export --format cvat     # export all annotations to CVAT XML in "."
+  weightslab export -f v7 out/ --origin val_loader   # V7/Darwin, val split only, into out/
+  weightslab export -f cvat --tag ToReview            # only samples tagged ToReview, for relabeling
 """
 
 
@@ -626,24 +643,85 @@ def cli_connect(args):
     sys.exit(exit_code)
 
 
-# Friendly two-word experiment names (adjective-noun), e.g. "wl-brisk-otter".
-# Readable and low-collision — nicer than a raw UUID for a directory the user
-# will `cd` into and share.
-_EXP_ADJECTIVES = (
-    "brisk", "calm", "clever", "bold", "bright", "keen", "lucid", "nimble",
-    "quiet", "swift", "warm", "zesty", "amber", "cobalt", "coral", "jade",
-)
-_EXP_NOUNS = (
-    "otter", "falcon", "maple", "cedar", "comet", "delta", "ember", "harbor",
-    "lark", "meadow", "pixel", "quartz", "ridge", "tide", "vertex", "willow",
-)
+_EXPORT_FORMAT_VALUES = {
+    "cvat": "EXPORT_FORMAT_CVAT",
+    "label_studio": "EXPORT_FORMAT_LABEL_STUDIO",
+    "v7": "EXPORT_FORMAT_V7_DARWIN",
+}
 
 
-def _generate_experiment_name() -> str:
-    """Return a fresh adjective-noun experiment directory name (no timestamp so
-    it stays short and human-friendly; collisions are retried by the caller)."""
-    import random
-    return f"wl-{random.choice(_EXP_ADJECTIVES)}-{random.choice(_EXP_NOUNS)}"
+def export_annotations_cli(args):
+    """`weightslab export --format FMT [OUTPUT]`: export bounding-box/
+    segmentation annotations from a running experiment to a relabeling-tool
+    format (CVAT, Label Studio, or V7/Darwin), over the same gRPC connection
+    the Weights Studio "Export" button uses.
+    """
+    try:
+        import grpc
+        from weightslab.proto import experiment_service_pb2 as pb2
+        from weightslab.proto import experiment_service_pb2_grpc as pb2_grpc
+    except Exception as exc:
+        logger.error(f"Could not load the WeightsLab gRPC client: {exc}")
+        sys.exit(1)
+
+    host = args.host or "127.0.0.1"
+    port = args.port or int(os.getenv("GRPC_BACKEND_PORT", "50051"))
+
+    _max_msg = int(os.getenv("GRPC_MAX_MESSAGE_BYTES", 256 * 1024 * 1024))
+    try:
+        channel = grpc.insecure_channel(
+            f"{host}:{port}",
+            options=[
+                ("grpc.max_send_message_length", _max_msg),
+                ("grpc.max_receive_message_length", _max_msg),
+            ],
+        )
+        grpc.channel_ready_future(channel).result(timeout=10)
+    except Exception as exc:
+        logger.error(
+            f"Could not connect to a running WeightsLab backend at {host}:{port}: {exc}\n"
+            f"Is training running with wl.serve(serving_grpc=True)?"
+        )
+        sys.exit(1)
+
+    stub = pb2_grpc.ExperimentServiceStub(channel)
+    request = pb2.ExportAnnotationsRequest(
+        format=getattr(pb2, _EXPORT_FORMAT_VALUES[args.format]),
+        origin=args.origin or "",
+        include_predictions=bool(args.predictions),
+        tags=args.tags or [],
+    )
+    try:
+        metadata = []
+        token = os.getenv("GRPC_AUTH_TOKEN", "").strip()
+        if token:
+            metadata.append(("authorization", f"Bearer {token}"))
+        response = stub.ExportAnnotations(request, timeout=120, metadata=metadata or None)
+    except grpc.RpcError as exc:
+        logger.error(f"Export RPC failed: {exc}")
+        sys.exit(1)
+
+    if not response.success:
+        logger.error(f"Export failed: {response.message}")
+        sys.exit(1)
+
+    output = args.output
+    if not output or os.path.isdir(output) or str(output).endswith(("/", "\\")):
+        directory = output or "."
+        os.makedirs(directory, exist_ok=True)
+        output = os.path.join(directory, response.filename)
+    else:
+        parent = os.path.dirname(output)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
+    with open(output, "wb") as f:
+        f.write(response.payload)
+
+    logger.info(
+        f"Exported {response.image_count} image(s) to {os.path.abspath(output)} "
+        f"({args.format} format)."
+    )
 
 
 def _resolve_experiment_dir(explicit: Optional[str]) -> Path:
@@ -859,6 +937,7 @@ def _build_parser() -> argparse.ArgumentParser:
         weightslab start example [--cls|--seg|--det|--clus|--gen|--3d_det|--2d_det]
         weightslab cli [--port PORT] [--host HOST]
         weightslab tunnel ENDPOINT
+        weightslab export --format {cvat,label_studio,v7} [OUTPUT]
     """
     parser = argparse.ArgumentParser(
         prog="weightslab",
@@ -866,7 +945,7 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    sub = parser.add_subparsers(dest="command", metavar="{se,start,cli,tunnel,help}")
+    sub = parser.add_subparsers(dest="command", metavar="{se,start,cli,tunnel,export,help}")
 
     # weightslab se [--force-certs] [certs_dir]
     se_parser = sub.add_parser("se", help="Set up the secure environment (TLS certs + gRPC auth token)")
@@ -900,6 +979,35 @@ def _build_parser() -> argparse.ArgumentParser:
     tunnel_parser.add_argument(
         '--remote-port', type=int, default=None,
         help="Remote port, if not included in ENDPOINT")
+
+    # weightslab export --format FMT [OUTPUT] [--origin O] [--predictions] [--host H] [--port N]
+    export_parser = sub.add_parser(
+        "export",
+        help="Export bounding-box/segmentation annotations from a running "
+             "experiment to a relabeling-tool format (CVAT, Label Studio, or V7/Darwin)")
+    export_parser.add_argument(
+        '--format', '-f', required=True, choices=['cvat', 'label_studio', 'v7'],
+        help="Target format: 'cvat' (XML), 'label_studio' (JSON), or 'v7' (Darwin JSON, zipped)")
+    export_parser.add_argument(
+        'output', nargs='?', default=None,
+        help="Output file path or directory (default: current directory, using "
+             "the format's default filename)")
+    export_parser.add_argument(
+        '--origin', default=None,
+        help="Restrict to one registered split/loader (e.g. train_loader). Default: all splits.")
+    export_parser.add_argument(
+        '--predictions', action='store_true',
+        help="Export model predictions instead of ground-truth targets.")
+    export_parser.add_argument(
+        '--tag', dest='tags', action='append', default=None,
+        help="Restrict to samples carrying this tag (e.g. ToReview). Repeat "
+             "for multiple tags -- a sample matching ANY of them is included. "
+             "Default: all samples.")
+    export_parser.add_argument(
+        '--host', default=None, help="Backend host to connect to (default: 127.0.0.1)")
+    export_parser.add_argument(
+        '--port', type=int, default=None,
+        help="Backend gRPC port to connect to (default: $GRPC_BACKEND_PORT or 50051)")
 
     # weightslab start [DIR] [--port N ...]  -> native UI server for an experiment dir
     # weightslab start example [--cls|...]   -> bundled example (rewritten in main()
@@ -951,6 +1059,8 @@ def main():
     elif args.command == "tunnel":
         from weightslab.tunnel import tunnel_connect
         tunnel_connect(args)
+    elif args.command == "export":
+        export_annotations_cli(args)
     elif args.command == "se":
         ui_secure_environment(args)
     elif args.command == "start":

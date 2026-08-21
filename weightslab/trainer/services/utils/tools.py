@@ -22,9 +22,14 @@ logger = logging.getLogger(__name__)
 
 # Maps the AgentProviderType proto enum integer values to the internal
 # provider names understood by DataManipulationAgent.initialize_with_cloud_key.
-# Cloud onboarding is currently limited to OpenRouter.
+# OpenCode (1) is the only agent backend weightslab actually supports;
+# PROVIDER_OPENROUTER (0) is kept here (rather than removed) purely for wire
+# compatibility with older frontends, so a client that still sends it gets a
+# clean "not supported" rejection from AgentService.InitializeAgent instead of
+# an unrecognized-enum-value decode failure.
 AGENT_PROVIDER_MAP: dict[int, str] = {
     0: "openrouter",
+    1: "opencode",
 }
 
 

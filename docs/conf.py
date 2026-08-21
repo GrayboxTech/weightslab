@@ -79,6 +79,8 @@ autodoc_mock_imports = [
 templates_path = ["_templates"]
 exclude_patterns = [
     "_build", "Thumbs.db", ".DS_Store",
+    # Tooling, not documentation: the What's New generator lives here.
+    "_scripts",
     # Superseded by examples/pytorch/classification.rst and examples/pytorch/segmentation.rst
     "usecases.rst",
     "segmentation_usecase.rst",

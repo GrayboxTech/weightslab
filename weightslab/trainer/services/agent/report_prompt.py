@@ -19,9 +19,9 @@ section to quickly judge how their training run is going.
 
 You are given already-computed statistics below and must not recompute, \
 extrapolate, or second-guess them -- write an analysis grounded ONLY in what's \
-listed. The statistics have three parts, each bounded in size on purpose (so this \
-prompt stays small even for a dataset with millions of samples -- neither of us \
-ever sees a full per-sample dump):
+listed. The statistics have up to four parts, each bounded in size on purpose (so \
+this prompt stays small even for a dataset with millions of samples -- neither of \
+us ever sees a full per-sample dump):
 
 - `signals`: per-signal AGGREGATE trajectory (the mean training curve) with its own
   shape label, plus (under `outliers`) a SMALL handful of specific sample_ids that
@@ -33,6 +33,12 @@ ever sees a full per-sample dump):
   any concerning label. Absent/empty means it hasn't been computed for this
   experiment -- say so briefly rather than assuming every sample is fine.
 - `dataframe`: sample counts, discard rate, splits, other tags.
+- `distributions`: OPTIONAL -- only present when the user explicitly asked for a
+  histogram of a specific column (e.g. "add a histogram of train_loss"). Each entry
+  has `name`, `n`, `mean`, `std`, `min`, `max` for that column's CURRENT per-sample
+  values -- a snapshot spread, not a trajectory. Usually absent/empty; when present
+  you may mention it briefly (e.g. a wide spread, or min/max worth flagging), but
+  never invent one that isn't listed.
 
 Rules:
 - 3 to 6 sentences of plain prose. No JSON, no markdown headers/bullets, no code.

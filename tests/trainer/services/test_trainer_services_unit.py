@@ -1,3 +1,4 @@
+import math
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -32,8 +33,11 @@ class _DummyCtx:
 
 class TestExperimentServiceUnit(unittest.TestCase):
     def test_get_latest_logger_data_full_history_nested(self):
+        # The full-history path reads signal_logger.get_signal_history_downsampled
+        # (DuckDB does the reduction there now -- see its docstring), not the
+        # legacy get_signal_history.
         signal_logger = MagicMock()
-        signal_logger.get_signal_history.return_value = {
+        signal_logger.get_signal_history_downsampled.return_value = {
             "train/loss": {
                 "exp-hash": {
                     0: [{"metric_name": "train/loss", "model_age": 0, "metric_value": 1.0, "experiment_hash": "exp-hash"}],
@@ -53,6 +57,44 @@ class TestExperimentServiceUnit(unittest.TestCase):
         self.assertEqual(response.points[0].model_age, 0)
         self.assertEqual(response.points[1].model_age, 1)
 
+    def test_get_latest_logger_data_full_history_downsample_keeps_last_point(self):
+        # Regression test: downsampling now happens inside DuckDB
+        # (get_signal_history_downsampled), which always keeps the curve's true
+        # first and last steps (see its docstring). The service layer must
+        # forward that curve as-is -- in particular it must not re-slice it with
+        # a fixed stride, which would start at index 0 and drop the tail of a
+        # fixed-length run (10000 points, max_points=1000, step=10 lands the
+        # last kept index at 9990, silently dropping steps 9991-9999).
+        from weightslab.trainer.services.experiment_service import _uniform_indices
+
+        kept_ages = _uniform_indices(10000, 1000)
+        signal_logger = MagicMock()
+        signal_logger.get_signal_history_downsampled.return_value = {
+            "train/loss_CE": {
+                "exp-hash": {
+                    age: [{
+                        "metric_name": "train/loss_CE",
+                        "model_age": age,
+                        "metric_value": 1.0 / (age + 1),
+                        "experiment_hash": "exp-hash",
+                    }]
+                    for age in kept_ages
+                }
+            }
+        }
+        ctx = _DummyCtx(components={"signal_logger": signal_logger})
+        with patch("weightslab.trainer.services.experiment_service.DataService"):
+            service = ExperimentService(ctx)
+
+        request = pb2.GetLatestLoggerDataRequest(request_full_history=True, max_points=1000, break_by_slices=False)
+        response = service.GetLatestLoggerData(request, None)
+
+        model_ages = [p.model_age for p in response.points]
+        self.assertLessEqual(len(model_ages), 1000)
+        self.assertEqual(model_ages[0], 0)
+        self.assertEqual(max(model_ages), 9999)
+        self.assertEqual(model_ages[-1], 9999)
+
     def test_get_latest_logger_data_queue_mode(self):
         signal_logger = MagicMock()
         signal_logger.get_and_clear_queue.return_value = [
@@ -69,6 +111,90 @@ class TestExperimentServiceUnit(unittest.TestCase):
         self.assertEqual(response.points[0].metric_name, "train/acc")
         signal_logger.get_and_clear_queue.assert_called_once()
 
+    def test_get_step_samples_includes_per_sample_values(self):
+        # The "Highlight step samples" -> "snapshot this step" flow needs each
+        # id's own value at the step, not just the ids -- see query_per_sample_at_step.
+        signal_logger = MagicMock()
+        signal_logger.resolve_graph_name.return_value = "train/loss"
+        signal_logger.get_step_sample_ids.return_value = (["a", "b"], 2)
+        signal_logger.query_per_sample_at_step.return_value = [("a", 0.5), ("b", 1.25)]
+
+        ctx = _DummyCtx(components={"signal_logger": signal_logger})
+        with patch("weightslab.trainer.services.experiment_service.DataService"):
+            service = ExperimentService(ctx)
+
+        response = service.GetStepSamples(
+            pb2.StepSamplesRequest(metric_name="train/loss", experiment_hash="hash1", model_age=10),
+            None,
+        )
+
+        self.assertTrue(response.success)
+        self.assertEqual(list(response.sample_ids), ["a", "b"])
+        self.assertEqual(list(response.sample_values), [0.5, 1.25])
+        signal_logger.query_per_sample_at_step.assert_called_once_with(
+            "train/loss", ["a", "b"], 10, "hash1")
+
+    def test_get_step_samples_empty_hash_queries_any_run(self):
+        # experiment_hash="" means "any run" for get_step_sample_ids, but
+        # query_per_sample_at_step's "any" is None -- "" would filter to a
+        # literal empty-string hash and silently return nothing.
+        signal_logger = MagicMock()
+        signal_logger.resolve_graph_name.return_value = "train/loss"
+        signal_logger.get_step_sample_ids.return_value = (["a"], 1)
+        signal_logger.query_per_sample_at_step.return_value = [("a", 0.5)]
+
+        ctx = _DummyCtx(components={"signal_logger": signal_logger})
+        with patch("weightslab.trainer.services.experiment_service.DataService"):
+            service = ExperimentService(ctx)
+
+        service.GetStepSamples(
+            pb2.StepSamplesRequest(metric_name="train/loss", experiment_hash="", model_age=10),
+            None,
+        )
+
+        signal_logger.query_per_sample_at_step.assert_called_once_with(
+            "train/loss", ["a"], 10, None)
+
+    def test_get_step_samples_nan_for_a_sample_missing_its_value(self):
+        signal_logger = MagicMock()
+        signal_logger.resolve_graph_name.return_value = "train/loss"
+        signal_logger.get_step_sample_ids.return_value = (["a", "b"], 2)
+        # "b" has no per-sample row at this step (e.g. a differently-sized batch).
+        signal_logger.query_per_sample_at_step.return_value = [("a", 0.5)]
+
+        ctx = _DummyCtx(components={"signal_logger": signal_logger})
+        with patch("weightslab.trainer.services.experiment_service.DataService"):
+            service = ExperimentService(ctx)
+
+        response = service.GetStepSamples(
+            pb2.StepSamplesRequest(metric_name="train/loss", experiment_hash="hash1", model_age=10),
+            None,
+        )
+
+        self.assertEqual(response.sample_values[0], 0.5)
+        self.assertTrue(math.isnan(response.sample_values[1]))
+
+    def test_get_step_samples_value_lookup_failure_still_returns_ids(self):
+        # A value-lookup crash must not take down the ids the action actually
+        # needs to highlight the grid -- it degrades to "no snapshot values".
+        signal_logger = MagicMock()
+        signal_logger.resolve_graph_name.return_value = "train/loss"
+        signal_logger.get_step_sample_ids.return_value = (["a"], 1)
+        signal_logger.query_per_sample_at_step.side_effect = RuntimeError("duckdb boom")
+
+        ctx = _DummyCtx(components={"signal_logger": signal_logger})
+        with patch("weightslab.trainer.services.experiment_service.DataService"):
+            service = ExperimentService(ctx)
+
+        response = service.GetStepSamples(
+            pb2.StepSamplesRequest(metric_name="train/loss", experiment_hash="hash1", model_age=10),
+            None,
+        )
+
+        self.assertTrue(response.success)
+        self.assertEqual(list(response.sample_ids), ["a"])
+        self.assertTrue(math.isnan(response.sample_values[0]))
+
     @unittest.skip(
         "Skipped on dev: the break-by-slices aggregation (query_per_sample + "
         "tag-filtered MEAN curve) is not implemented in this branch's "
@@ -82,9 +208,12 @@ class TestExperimentServiceUnit(unittest.TestCase):
         # GROUP BY step / AVG natively).
         _pts = [("11", 3, 0.3, "exp"), ("12", 3, 0.6, "exp")]
 
-        def _agg(graph_name, sample_ids=None, exp_hash=None):
+        def _agg(graph_name, sample_ids=None, exp_hash=None, exp_hashes=None):
             wanted = {str(s) for s in sample_ids} if sample_ids is not None else None
-            rows = [t for t in _pts if wanted is None or str(t[0]) in wanted]
+            allowed = set(exp_hashes) if exp_hashes else None
+            rows = [t for t in _pts
+                    if (wanted is None or str(t[0]) in wanted)
+                    and (allowed is None or t[3] in allowed)]
             by_hash: dict = {}
             for sid, step, val, h in rows:
                 by_hash.setdefault(h, {}).setdefault(step, []).append(val)
@@ -390,6 +519,127 @@ class TestDataServiceHelpersUnit(unittest.TestCase):
         tags = service._get_unique_tags()
         self.assertEqual(tags, ["alpha", "zeta"])
 
+    def test_get_unique_tags_includes_declared_but_unused_tags(self):
+        """A tag created in the painter has no column until it is painted.
+
+        It still has to be reported, or it vanishes from the UI on the very next
+        refresh -- which is the bug the declared-tag registry exists to fix.
+        """
+        service = DataService.__new__(DataService)
+        service._all_datasets_df = pd.DataFrame(
+            {f"{SampleStatsEx.TAG.value}:painted": [True], "value": [1]}
+        )
+
+        class _Manager:
+            def get_declared_boolean_tags(self):
+                return ["declared", "painted"]
+
+            def get_categorical_tags(self):
+                return {}
+
+        service._df_manager = _Manager()
+
+        # Reported once each, whether the tag came from a column, the registry,
+        # or (like "painted") both.
+        self.assertEqual(service._get_unique_tags(), ["declared", "painted"])
+
+    def test_get_unique_tags_ignores_declared_tag_that_is_categorical(self):
+        service = DataService.__new__(DataService)
+        service._all_datasets_df = pd.DataFrame({"value": [1]})
+
+        class _Manager:
+            def get_declared_boolean_tags(self):
+                return ["weather"]
+
+            def get_categorical_tags(self):
+                return {"weather": ["rainy", "sunny"]}
+
+        service._df_manager = _Manager()
+
+        # Categorical tags are reported separately, as CategoricalTagDefs.
+        self.assertEqual(service._get_unique_tags(), [])
+
+    def test_get_unique_tags_survives_a_manager_without_the_registry(self):
+        service = DataService.__new__(DataService)
+        service._all_datasets_df = pd.DataFrame(
+            {f"{SampleStatsEx.TAG.value}:alpha": [True]}
+        )
+        service._df_manager = object()
+        self.assertEqual(service._get_unique_tags(), ["alpha"])
+
+    def test_register_tag_declares_it_on_the_dataframe_manager(self):
+        service = DataService.__new__(DataService)
+        service._all_datasets_df = pd.DataFrame({"value": [1]})
+        service._log_audit = lambda *args, **kwargs: None
+        service._slowUpdateInternals = lambda **kwargs: None
+
+        registered = []
+
+        class _Manager:
+            def register_boolean_tag(self, name):
+                registered.append(name)
+                return True
+
+        service._df_manager = _Manager()
+
+        response = service._register_tag("tag:fresh")
+        self.assertTrue(response.success)
+        # The "tag:" prefix is the column's, not the tag's.
+        self.assertEqual(registered, ["fresh"])
+
+    def test_register_tag_rejects_a_blank_name_and_a_missing_manager(self):
+        service = DataService.__new__(DataService)
+        service._all_datasets_df = pd.DataFrame({"value": [1]})
+        service._log_audit = lambda *args, **kwargs: None
+        service._slowUpdateInternals = lambda **kwargs: None
+        service._df_manager = None
+
+        self.assertFalse(service._register_tag("   ").success)
+        self.assertFalse(service._register_tag("fresh").success)
+
+    def test_edit_data_sample_registers_a_tag_without_pausing_training(self):
+        """Declaring a tag edits no sample, so it must not stop the run.
+
+        EditDataSample pauses training before applying an edit; registration is
+        handled ahead of that, and this pins it there.
+        """
+        service = DataService.__new__(DataService)
+        service._all_datasets_df = pd.DataFrame({"value": [1]})
+        service._log_audit = lambda *args, **kwargs: None
+        service._slowUpdateInternals = lambda **kwargs: None
+
+        class _Trainer:
+            paused = False
+
+            def pause(self):
+                self.paused = True
+
+        trainer = _Trainer()
+        hyperparams = {"is_training": True}
+
+        class _Ctx:
+            components = {"trainer": trainer, "hyperparams": hyperparams}
+
+            def ensure_components(self):
+                return None
+
+        service._ctx = _Ctx()
+
+        class _Manager:
+            def register_boolean_tag(self, name):
+                return True
+
+        service._df_manager = _Manager()
+
+        class _Request:
+            stat_name = "__register_tag__"
+            string_value = "fresh"
+
+        response = service.EditDataSample(_Request(), None)
+        self.assertTrue(response.success)
+        self.assertFalse(trainer.paused)
+        self.assertTrue(hyperparams["is_training"])
+
     def test_parse_tags_handles_mixed_separators(self):
         service = DataService.__new__(DataService)
         parsed = service._parse_tags(" hard , medium;easy ; ")
@@ -509,6 +759,88 @@ class TestDataServiceHelpersUnit(unittest.TestCase):
         self.assertTrue(response.success)
         self.assertTrue(service._df_manager.flush.called)
         self.assertTrue(checkpoint_manager.save_data_snapshot.called)
+
+
+class TestDataServiceExportAnnotationsUnit(unittest.TestCase):
+
+    def test_export_annotations_success(self):
+        service = DataService.__new__(DataService)
+        req = pb2.ExportAnnotationsRequest(format=pb2.EXPORT_FORMAT_CVAT, origin="train_loader")
+
+        with patch(
+            "weightslab.export.exporter.export_annotations",
+            return_value=(b"<annotations/>", "annotations_cvat.xml", "application/xml", 3),
+        ) as mock_export:
+            response = service.ExportAnnotations(req, None)
+
+        mock_export.assert_called_once_with("cvat", origin="train_loader", use_predictions=False, tags=None)
+        self.assertTrue(response.success)
+        self.assertEqual(response.payload, b"<annotations/>")
+        self.assertEqual(response.filename, "annotations_cvat.xml")
+        self.assertEqual(response.mime_type, "application/xml")
+        self.assertEqual(response.image_count, 3)
+
+    def test_export_annotations_passes_predictions_flag(self):
+        service = DataService.__new__(DataService)
+        req = pb2.ExportAnnotationsRequest(format=pb2.EXPORT_FORMAT_LABEL_STUDIO, include_predictions=True)
+
+        with patch(
+            "weightslab.export.exporter.export_annotations",
+            return_value=(b"[]", "annotations_label_studio.json", "application/json", 0),
+        ) as mock_export:
+            service.ExportAnnotations(req, None)
+
+        mock_export.assert_called_once_with("label_studio", origin=None, use_predictions=True, tags=None)
+
+    def test_export_annotations_passes_tags(self):
+        service = DataService.__new__(DataService)
+        req = pb2.ExportAnnotationsRequest(format=pb2.EXPORT_FORMAT_CVAT, tags=["ToReview", "outlier"])
+
+        with patch(
+            "weightslab.export.exporter.export_annotations",
+            return_value=(b"<annotations/>", "annotations_cvat.xml", "application/xml", 1),
+        ) as mock_export:
+            service.ExportAnnotations(req, None)
+
+        mock_export.assert_called_once_with(
+            "cvat", origin=None, use_predictions=False, tags=["ToReview", "outlier"],
+        )
+
+    def test_export_annotations_unknown_format_value(self):
+        service = DataService.__new__(DataService)
+        req = pb2.ExportAnnotationsRequest(format=99)
+
+        response = service.ExportAnnotations(req, None)
+
+        self.assertFalse(response.success)
+        self.assertIn("99", response.message)
+
+    def test_export_annotations_missing_optional_dependency(self):
+        service = DataService.__new__(DataService)
+        req = pb2.ExportAnnotationsRequest(format=pb2.EXPORT_FORMAT_V7_DARWIN)
+
+        with patch(
+            "weightslab.export.exporter.export_annotations",
+            side_effect=ImportError("Segmentation polygon export requires OpenCV"),
+        ):
+            response = service.ExportAnnotations(req, None)
+
+        self.assertFalse(response.success)
+        self.assertIn("OpenCV", response.message)
+
+    def test_export_annotations_generic_failure_does_not_raise(self):
+        service = DataService.__new__(DataService)
+        req = pb2.ExportAnnotationsRequest(format=pb2.EXPORT_FORMAT_CVAT)
+
+        with patch(
+            "weightslab.export.exporter.export_annotations",
+            side_effect=RuntimeError("boom"),
+        ):
+            response = service.ExportAnnotations(req, None) # must not raise
+
+        self.assertFalse(response.success)
+        self.assertIn("boom", response.message)
+
 
 if __name__ == "__main__":
     unittest.main()

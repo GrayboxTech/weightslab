@@ -1,6 +1,23 @@
 Experiment Reports
 ===================
 
+.. warning:: Unstable — in active development
+
+   Experiment report generation is **experimental** and still changing. The
+   report's content and layout, and the on-disk location of what it writes,
+   are all subject to change between releases, and generation can fail or
+   produce an incomplete report on some experiments — particularly ones with
+   unusual signal shapes, very long histories, or no authenticated agent
+   provider.
+
+   Treat what it produces as a **draft to read**, not as an artifact to
+   archive, publish, or cite, and don't build tooling on the file paths or the
+   HTML structure yet. The Python and CLI entry points below give you the most
+   control over what goes in, so prefer those over the studio button when the
+   result matters.
+
+   Please report what breaks — that feedback is what stabilises it.
+
 Ask the AI agent how your experiment is doing and it can produce a
 self-contained HTML report: signal trajectory plots, an automatic health
 classification per signal, dataset stats (sample counts, discard rate, tag
@@ -45,6 +62,7 @@ they produce the same artifact:
      wl.ai_report_generation(signals=["train_loss"])         # specific signals
      wl.ai_report_generation(use_agent=False)                # skip the LLM call
      wl.ai_report_generation(output_path="reports/run.html") # choose the file
+     wl.ai_report_generation(distributions=["train_loss"])   # + a histogram section
 
   It returns the path written.
 
@@ -57,6 +75,7 @@ they produce the same artifact:
      report train_loss val_loss
      report --output /tmp/run_42.html
      report --no-agent
+     report --distributions train_loss,val_loss
 
   The reply gives the path, the number of signals included, and whether the
   written analysis made it in.
@@ -76,6 +95,56 @@ they produce the same artifact:
   .. code-block:: text
 
      Generate an experiment report on train_loss and val_loss.
+
+  To add a value-distribution histogram for a specific column (see
+  `Distributions`_ below), including as a follow-up on a report you already
+  generated:
+
+  .. code-block:: text
+
+     Generate an experiment report and include a histogram of train_loss.
+     Add a distribution of val_loss to the report.
+
+  This always goes through the SAME single backend action — the agent must
+  never break "generate a report" into several separate analysis questions
+  and hand-write its own summary; that would skip the plots/styling below
+  entirely.
+
+Updating a report vs. generating a new one
+---------------------------------------------
+
+Every path above always writes a *fresh*, separately timestamped file by
+default. When you ask through chat, though, wording matters:
+
+.. code-block:: text
+
+   Generate a report.                                # always a NEW file
+   Update the report with a histogram of val_loss.    # overwrites the last one
+   Add a histogram of val_loss to the report.         # overwrites the last one
+   Also include the confidence signal in it.          # overwrites the last one
+
+"Generate"/"create"/"how is this going" (no reference to one already made)
+always produces a new file. Wording that refers to an *existing* report
+("update", "add X to **the** report", "also include Y in **it**") overwrites
+the most recently generated report for this experiment instead — the agent's
+reply says which happened ("updated"/"generated ... experiment report") and
+still names the file. Asking to "update" when nothing has been generated yet
+isn't an error: it just creates the first one, same as a plain "generate"
+would.
+
+A follow-up "add" is intentionally cumulative — asking to add a histogram of
+``val_loss`` after already having one for ``train_loss`` keeps both in the
+updated file, not just the newest one, as long as the request stays in the
+same conversation. There's no server-side memory of a report's contents
+behind this — the agent reasons about what to keep from what you (and it)
+said earlier in the chat, so it works within one back-and-forth but doesn't
+persist across separate sessions.
+
+Python/CLI callers that want the same overwrite-in-place behavior can pass
+the previous run's own path back in as ``output_path``
+(:func:`ai_report_generation`) / ``--output`` (the CLI's ``report`` command)
+— they already have direct control over the file, so there's no separate
+"update" flag for them.
 
 - **Weights Studio button**: the bar-chart icon immediately left of the
   notebook button in the connected app's header. Left-click generates a
@@ -100,10 +169,13 @@ What's in the report
   by the agent's own LLM. It is grounded *only* in the numbers described
   below (never raw per-step history), so it can comment on the data but
   cannot invent a signal, trend, or number that isn't actually there.
-- **Signals** — one card per plotted signal: its trajectory (aggregated over
-  training, from the experiment logger — see :doc:`logger`), and a health
-  badge from the same :ref:`loss-shape classification <custom-signal-classifier>`
-  vocabulary used elsewhere in WeightsLab:
+- **Signals** — one card per plotted signal, rendered as an interactive
+  chart (see `Interactive report editing`_): one colored curve per run that
+  logged this signal, with a legend naming each run — not a single flattened
+  average — plus a health badge from the same
+  :ref:`loss-shape classification <custom-signal-classifier>` vocabulary used
+  elsewhere in WeightsLab (computed from the current run's aggregated
+  trajectory):
 
   ==============  =========  ====================================================
   Label           Badge      Meaning
@@ -122,6 +194,14 @@ What's in the report
   history swung the most (``max - min``). Both are ranked *inside DuckDB*
   (``LoggerQueue.top_k_samples_by_reduce``) and only the top few ever leave
   the database — see `Why per-sample data doesn't blow up the report`_.
+- **Distributions** *(optional — only when asked for)* — a value-distribution
+  histogram plus n/mean/std/range for each column named via ``distributions``
+  (see `Generating a report`_ above). Unlike a Signals card, this reads the
+  *current* per-sample dataframe, not the aggregated training curve — so it
+  answers "how spread out is train_loss across samples right now", not "how
+  did it move over training". A name that doesn't resolve to a column, or
+  resolves to one with no numeric values, still gets a card saying so rather
+  than being silently dropped. Not present at all when nobody asked for one.
 - **Loss-Shape Classification** — if per-sample loss-shape classification has
   already been computed for this experiment (:doc:`logger`'s
   ``wl.write_loss_shapes`` / the background auto-tagger), a count of samples
@@ -130,6 +210,51 @@ What's in the report
   so — it never runs the classifier itself.
 - **Dataset** — total sample count, discard count/rate, per-split counts
   (the ``origin`` column), and a breakdown of any ``tag:*`` columns present.
+
+Light / dark mode
+--------------------
+
+The report follows the browser's ``prefers-color-scheme`` automatically, and
+also has its own toggle button (top-right of the banner) for overriding that
+— the choice is remembered (via ``localStorage``, scoped to that report file)
+so reopening the same report keeps the theme you picked. Signal/distribution
+plots are rendered once by matplotlib on a fixed white canvas, so they sit in
+a small always-light thumbnail card in either theme — this keeps their own
+text and gridlines legible instead of rendering (and shipping) two copies of
+every plot.
+
+Interactive report editing
+-----------------------------
+
+The report is still one self-contained HTML file (works offline, nothing to
+install), but it isn't a static snapshot — every Signals/Distributions card
+and the Runs table below can be adjusted in the browser before you share or
+print it:
+
+- **Hover a card** to reveal its toolbar: move it up/down within its section,
+  remove it from the report, or (Signals cards, and Distributions cards with
+  a plot) expand it into a larger modal.
+- **Zoom** — drag a rectangle across a Signals chart to zoom into that step
+  range; double-click to reset. This is what "zoom in for the PDF" means
+  here: the zoomed range is just the chart's current state, and that's
+  exactly what gets captured when you print/export.
+- **Runs** — a table of every run recorded for this experiment (name, hash,
+  notes, timestamps — the same data the Studio runs popup shows, see
+  :doc:`checkpointing`), each removable from the report via its row's ``×``.
+  Only present when the report was generated with a checkpoint manager
+  available (every normal generation path has one).
+- **``+ Title`` / ``+ Text``** (top toolbar) — add your own heading or free
+  text anywhere in that toolbar's notes area, then move/remove it like any
+  other block.
+- **Export to PDF** (top toolbar) — calls the browser's own print dialog
+  with print-specific styling (editing controls hidden, cards kept from
+  splitting across pages); "Save as PDF" in that dialog captures the report
+  exactly as you've arranged/zoomed it.
+
+All of this is local to that browser tab — nothing is written back to the
+``.html`` file on disk. Reopening the file (or generating a new report)
+starts from the original layout again; export to PDF (or your browser's
+"Save Page As") to keep a copy of a specific arrangement.
 
 Why per-sample data doesn't blow up the report
 --------------------------------------------------

@@ -5,7 +5,7 @@ import warnings
 
 from weightslab.proto import experiment_service_pb2 as weightslab_dot_proto_dot_experiment__service__pb2
 
-GRPC_GENERATED_VERSION = '1.76.0'
+GRPC_GENERATED_VERSION = '1.68.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in weightslab/proto/experiment_service_pb2_grpc.py depends on'
+        + f' but the generated code in weightslab/proto/experiment_service_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -89,10 +89,20 @@ class ExperimentServiceStub(object):
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetSignalTrajectoryRequest.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetSignalTrajectoryResponse.FromString,
                 _registered_method=True)
+        self.GetStepSamples = channel.unary_unary(
+                '/ExperimentService/GetStepSamples',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesResponse.FromString,
+                _registered_method=True)
         self.GetPointCloud = channel.unary_stream(
                 '/ExperimentService/GetPointCloud',
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.PointCloudRequest.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.PointCloudChunk.FromString,
+                _registered_method=True)
+        self.GetMedia = channel.unary_stream(
+                '/ExperimentService/GetMedia',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.MediaRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.MediaChunk.FromString,
                 _registered_method=True)
         self.EditDataSample = channel.unary_unary(
                 '/ExperimentService/EditDataSample',
@@ -129,6 +139,21 @@ class ExperimentServiceStub(object):
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ResetAgentResponse.FromString,
                 _registered_method=True)
+        self.ClearAgentHistory = channel.unary_unary(
+                '/ExperimentService/ClearAgentHistory',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ClearAgentHistoryResponse.FromString,
+                _registered_method=True)
+        self.CompactAgentHistory = channel.unary_unary(
+                '/ExperimentService/CompactAgentHistory',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.CompactAgentHistoryResponse.FromString,
+                _registered_method=True)
+        self.GetAgentContextUsage = channel.unary_unary(
+                '/ExperimentService/GetAgentContextUsage',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetAgentContextUsageResponse.FromString,
+                _registered_method=True)
         self.RunNotebookCell = channel.unary_stream(
                 '/ExperimentService/RunNotebookCell',
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.RunNotebookCellRequest.SerializeToString,
@@ -159,6 +184,21 @@ class ExperimentServiceStub(object):
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.RestoreCheckpointRequest.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.RestoreCheckpointResponse.FromString,
                 _registered_method=True)
+        self.ListExperimentRuns = channel.unary_unary(
+                '/ExperimentService/ListExperimentRuns',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ListExperimentRunsRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ListExperimentRunsResponse.FromString,
+                _registered_method=True)
+        self.RenameExperimentRun = channel.unary_unary(
+                '/ExperimentService/RenameExperimentRun',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.RenameExperimentRunRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.RenameExperimentRunResponse.FromString,
+                _registered_method=True)
+        self.SetExperimentRunNotes = channel.unary_unary(
+                '/ExperimentService/SetExperimentRunNotes',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.SetExperimentRunNotesRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.SetExperimentRunNotesResponse.FromString,
+                _registered_method=True)
         self.TriggerEvaluation = channel.unary_unary(
                 '/ExperimentService/TriggerEvaluation',
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.TriggerEvaluationRequest.SerializeToString,
@@ -173,6 +213,11 @@ class ExperimentServiceStub(object):
                 '/ExperimentService/CancelEvaluation',
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.CancelEvaluationRequest.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.CancelEvaluationResponse.FromString,
+                _registered_method=True)
+        self.ExportAnnotations = channel.unary_unary(
+                '/ExperimentService/ExportAnnotations',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsResponse.FromString,
                 _registered_method=True)
 
 
@@ -256,9 +301,29 @@ class ExperimentServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetStepSamples(self, request, context):
+        """Every sample id that contributed to one step of one signal. Backs the plot's
+        right-click "Highlight step samples": the whole batch behind a point, not
+        just the samples that were flagged as off-trend.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def GetPointCloud(self, request, context):
         """Raw point cloud of one sample (task_type "detection_pointcloud"), server-streamed
         in binary chunks for the interactive 3D viewer.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetMedia(self, request, context):
+        """Playable media of one sample (task_type "video_generation" /
+        "audio_generation"), server-streamed in binary chunks for the modal
+        player. Grid and list previews never call this — they use the poster
+        frame carried by the ordinary raw_data stat — so clip length does not
+        affect browsing cost.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -302,6 +367,35 @@ class ExperimentServiceServicer(object):
 
     def ResetAgent(self, request, context):
         """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ClearAgentHistory(self, request, context):
+        """Wipe the agent's conversation history (self.history) without touching the
+        provider connection -- distinct from ResetAgent, which drops the connection.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CompactAgentHistory(self, request, context):
+        """Summarize the agent's conversation history via the active model, replacing
+        it with the summary. Distinct from OpenCode's own session compaction (which
+        this does not touch) -- this is the SDK agent's own self.history.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetAgentContextUsage(self, request, context):
+        """Context-window usage breakdown for the active model. A fresh OpenCode
+        session is created per agent call (see opencode_chat.py), so there is no
+        persistent session to total across turns -- this reports the LAST
+        completed call's token usage, which is exactly the size of the context
+        the NEXT call will resend (the full history is baked into the prompt
+        text every time).
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -351,6 +445,26 @@ class ExperimentServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ListExperimentRuns(self, request, context):
+        """Runs (experiment hashes) recorded under this root_log_dir: list them,
+        and rename/annotate them independent of the hash itself.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RenameExperimentRun(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SetExperimentRunNotes(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def TriggerEvaluation(self, request, context):
         """Evaluation mode
         """
@@ -366,6 +480,16 @@ class ExperimentServiceServicer(object):
 
     def CancelEvaluation(self, request, context):
         """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ExportAnnotations(self, request, context):
+        """Export bounding-box/segmentation annotations to a relabeling-tool format
+        (CVAT XML, Label Studio JSON, or V7/Darwin JSON). Unary: the whole file
+        (or a zip, for formats that need one file per image) comes back as bytes
+        in a single response.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -428,10 +552,20 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetSignalTrajectoryRequest.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetSignalTrajectoryResponse.SerializeToString,
             ),
+            'GetStepSamples': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetStepSamples,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesResponse.SerializeToString,
+            ),
             'GetPointCloud': grpc.unary_stream_rpc_method_handler(
                     servicer.GetPointCloud,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.PointCloudRequest.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.PointCloudChunk.SerializeToString,
+            ),
+            'GetMedia': grpc.unary_stream_rpc_method_handler(
+                    servicer.GetMedia,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.MediaRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.MediaChunk.SerializeToString,
             ),
             'EditDataSample': grpc.unary_unary_rpc_method_handler(
                     servicer.EditDataSample,
@@ -468,6 +602,21 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ResetAgentResponse.SerializeToString,
             ),
+            'ClearAgentHistory': grpc.unary_unary_rpc_method_handler(
+                    servicer.ClearAgentHistory,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ClearAgentHistoryResponse.SerializeToString,
+            ),
+            'CompactAgentHistory': grpc.unary_unary_rpc_method_handler(
+                    servicer.CompactAgentHistory,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.CompactAgentHistoryResponse.SerializeToString,
+            ),
+            'GetAgentContextUsage': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetAgentContextUsage,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetAgentContextUsageResponse.SerializeToString,
+            ),
             'RunNotebookCell': grpc.unary_stream_rpc_method_handler(
                     servicer.RunNotebookCell,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.RunNotebookCellRequest.FromString,
@@ -498,6 +647,21 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.RestoreCheckpointRequest.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.RestoreCheckpointResponse.SerializeToString,
             ),
+            'ListExperimentRuns': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListExperimentRuns,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ListExperimentRunsRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ListExperimentRunsResponse.SerializeToString,
+            ),
+            'RenameExperimentRun': grpc.unary_unary_rpc_method_handler(
+                    servicer.RenameExperimentRun,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.RenameExperimentRunRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.RenameExperimentRunResponse.SerializeToString,
+            ),
+            'SetExperimentRunNotes': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetExperimentRunNotes,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.SetExperimentRunNotesRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.SetExperimentRunNotesResponse.SerializeToString,
+            ),
             'TriggerEvaluation': grpc.unary_unary_rpc_method_handler(
                     servicer.TriggerEvaluation,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.TriggerEvaluationRequest.FromString,
@@ -512,6 +676,11 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     servicer.CancelEvaluation,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.CancelEvaluationRequest.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.CancelEvaluationResponse.SerializeToString,
+            ),
+            'ExportAnnotations': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExportAnnotations,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -822,6 +991,33 @@ class ExperimentService(object):
             _registered_method=True)
 
     @staticmethod
+    def GetStepSamples(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetStepSamples',
+            weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.StepSamplesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
     def GetPointCloud(request,
             target,
             options=(),
@@ -838,6 +1034,33 @@ class ExperimentService(object):
             '/ExperimentService/GetPointCloud',
             weightslab_dot_proto_dot_experiment__service__pb2.PointCloudRequest.SerializeToString,
             weightslab_dot_proto_dot_experiment__service__pb2.PointCloudChunk.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetMedia(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/ExperimentService/GetMedia',
+            weightslab_dot_proto_dot_experiment__service__pb2.MediaRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.MediaChunk.FromString,
             options,
             channel_credentials,
             insecure,
@@ -1038,6 +1261,87 @@ class ExperimentService(object):
             _registered_method=True)
 
     @staticmethod
+    def ClearAgentHistory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/ClearAgentHistory',
+            weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ClearAgentHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CompactAgentHistory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/CompactAgentHistory',
+            weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.CompactAgentHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetAgentContextUsage(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetAgentContextUsage',
+            weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.GetAgentContextUsageResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
     def RunNotebookCell(request,
             target,
             options=(),
@@ -1200,6 +1504,87 @@ class ExperimentService(object):
             _registered_method=True)
 
     @staticmethod
+    def ListExperimentRuns(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/ListExperimentRuns',
+            weightslab_dot_proto_dot_experiment__service__pb2.ListExperimentRunsRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ListExperimentRunsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RenameExperimentRun(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/RenameExperimentRun',
+            weightslab_dot_proto_dot_experiment__service__pb2.RenameExperimentRunRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.RenameExperimentRunResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SetExperimentRunNotes(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/SetExperimentRunNotes',
+            weightslab_dot_proto_dot_experiment__service__pb2.SetExperimentRunNotesRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.SetExperimentRunNotesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
     def TriggerEvaluation(request,
             target,
             options=(),
@@ -1270,6 +1655,33 @@ class ExperimentService(object):
             '/ExperimentService/CancelEvaluation',
             weightslab_dot_proto_dot_experiment__service__pb2.CancelEvaluationRequest.SerializeToString,
             weightslab_dot_proto_dot_experiment__service__pb2.CancelEvaluationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExportAnnotations(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/ExportAnnotations',
+            weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -106,6 +106,10 @@ class LedgeredDataFrameManager:
         # list of allowed category values. Distinguishes multi-value string tags
         # (e.g. weather -> [rainy, sunny]) from the legacy boolean tags.
         self._categorical_tags: Dict[str, List[str]] = {}
+        # Boolean tags declared explicitly (painter/SDK) rather than discovered
+        # from a "tag:<name>" column. Keeps a created-but-unused tag alive across
+        # refreshes, which read the tag list back out of the data.
+        self._declared_boolean_tags: set[str] = set()
         self._enable_flushing_threads = enable_flushing_threads
         self._enable_h5_persistence = enable_h5_persistence
         self.first_init = True
@@ -385,6 +389,76 @@ class LedgeredDataFrameManager:
     def get_array_store(self) -> H5ArrayStore | None:
         """Get the array store instance."""
         return self._array_store
+
+    # ------------------------------------------------------------------
+    # Boolean tag registry
+    # ------------------------------------------------------------------
+    def register_boolean_tag(self, name: str) -> bool:
+        """Declare a boolean tag so it exists before any sample wears it.
+
+        A tag typed into the UI's painter has no sample attached to it yet, so
+        nothing in the data would report it and the next refresh would drop it.
+        Declaring it here makes the tag part of the experiment's state: the
+        ``tag:<name>`` column is created (all False) and the name is remembered,
+        so every subsequent query reports it whether or not it is used.
+
+        The column is materialized through the normal dirty-row path so the H5
+        store learns about it on the next flush, exactly as a painted tag would.
+        Returns True when the tag is registered (or already was).
+        """
+        prefix = SampleStats.Ex.TAG.value + ":"
+        name = str(name).strip()
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+        if not name or name.lower() == "none":
+            return False
+        # A categorical tag is a different kind of column (string values, with a
+        # declared category set) -- never shadow one with a boolean.
+        if self.is_categorical_tag(name):
+            return False
+
+        column = prefix + name
+        first_sample_id = None
+        with self._lock:
+            self._declared_boolean_tags.add(name)
+            if not self._df.empty and column not in self._df.columns:
+                self._df[column] = False
+                index = self._df.index
+                first = index[0]
+                first_sample_id = first[0] if isinstance(index, pd.MultiIndex) else first
+
+        # One dirty row is enough for the store to learn the new column; marking
+        # every row would rewrite the whole dataset to record an unused tag.
+        if first_sample_id is not None:
+            try:
+                self.mark_dirty_batch([first_sample_id], force_flush=True)
+            except Exception as e:
+                logger.debug(f"[LedgeredDataFrameManager] Could not mark tag column dirty: {e}")
+        return True
+
+    def unregister_boolean_tag(self, name: str) -> None:
+        """Forget a declared boolean tag (its column is dropped separately).
+
+        Without this a deleted tag would be re-reported from the registry and the
+        chip would come straight back on the next refresh.
+        """
+        prefix = SampleStats.Ex.TAG.value + ":"
+        name = str(name).strip()
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+        if not name:
+            return
+        with self._lock:
+            self._declared_boolean_tags.discard(name)
+
+    def get_declared_boolean_tags(self) -> List[str]:
+        """Names (without the ``tag:`` prefix) of tags declared via the UI/SDK.
+
+        Includes tags no sample wears yet, which is the whole point: they have to
+        survive a refresh driven by what the data currently contains.
+        """
+        with self._lock:
+            return sorted(self._declared_boolean_tags)
 
     # ------------------------------------------------------------------
     # Categorical tag registry
@@ -966,6 +1040,25 @@ class LedgeredDataFrameManager:
                 return obj
             return obj[batch_index]
 
+        # Look up each sample's current NB_SEEN so we can increment it (a buffered
+        # record only carries the new value being written, not the running total).
+        current_nb_seen = {}
+        if step is not None and is_meaningful(step):
+            try:
+                current_nb_seen = self.get_sample_column_values(sample_ids, SampleStats.Ex.NB_SEEN.value)
+            except Exception:
+                pass # Never block training on best-effort NB_SEEN lookup
+
+            # A not-yet-flushed record for this sample is more recent than the
+            # ledger; prefer it so two enqueue_batch calls before a flush still
+            # increment from each other instead of both reading the same base.
+            with self._buffer_lock:
+                for sid in sample_ids:
+                    key = sid if not isinstance(sid, (np.ndarray, list)) else sid[0]
+                    buffered_val = self._buffer.get(key, {}).get(SampleStats.Ex.NB_SEEN.value)
+                    if buffered_val is not None:
+                        current_nb_seen[self._normalize_sample_id(key)] = buffered_val
+
         # Build all records BEFORE acquiring lock (faster)
         records_to_add = {}
         for batch_index, sid in enumerate(sample_ids):
@@ -1006,6 +1099,8 @@ class LedgeredDataFrameManager:
             ## Step
             if step is not None and is_meaningful(step):
                 rec[SampleStats.Ex.LAST_SEEN.value] = int(step)
+                prev_nb_seen = current_nb_seen.get(self._normalize_sample_id(sample_id))
+                rec[SampleStats.Ex.NB_SEEN.value] = (int(prev_nb_seen) if is_meaningful(prev_nb_seen) else 0) + 1
 
             # Save losses with safe conversion (handles scalars, arrays, NaNs)
             loss_dict = self._safe_loss_dict(losses, batch_index)
@@ -1340,6 +1435,34 @@ class LedgeredDataFrameManager:
 
         return tainted
 
+    def get_group_column_values(self, group_ids: List[Any], origin: str, column: str) -> Dict[Any, Any]:
+        """Return the current value of ``column`` for each group id (first member found).
+
+        Used by save_group_signals to read the previous NB_SEEN/etc. count before
+        incrementing it, since group members share the same value once broadcast.
+        """
+        group_col = SampleStats.Ex.GROUP_ID.value
+        origin_col = SampleStats.Ex.ORIGIN.value
+        values: Dict[Any, Any] = {}
+
+        with self._lock:
+            if self._df.empty or group_col not in self._df.columns or column not in self._df.columns:
+                return values
+
+            mask = (
+                (self._df[origin_col] == origin) &
+                (self._df[group_col].isin(group_ids))
+            )
+            slice_df = self._df[mask]
+            if slice_df.empty:
+                return values
+
+            for gid, val in zip(slice_df[group_col], slice_df[column]):
+                if gid not in values:
+                    values[gid] = val
+
+        return values
+
     def get_discarded_sample_ids(self, sample_ids: List[Any], origin: str) -> set:
         """Return the subset of sample_ids that are marked as discarded.
 
@@ -1395,6 +1518,41 @@ class LedgeredDataFrameManager:
             discarded_ids = set(str(sid) for sid in discarded)
 
         return discarded_ids
+
+    def get_sample_column_values(self, sample_ids: List[Any], column: str) -> Dict[Any, Any]:
+        """Return the current value of ``column`` for each sample id's canonical row.
+
+        Used by enqueue_batch to read the previous NB_SEEN count before
+        incrementing it — the buffer only carries the delta being written, not
+        the running total, so the running total must come from the ledger.
+        Keyed by the *normalized* sample id (str), matching enqueue_batch's own
+        ``sample_id`` values.
+        """
+        values: Dict[Any, Any] = {}
+        with self._lock:
+            if self._df.empty or column not in self._df.columns:
+                return values
+
+            coerced_ids = [self._coerce_sample_id_for_index(sid) for sid in sample_ids]
+
+            try:
+                if isinstance(self._df.index, pd.MultiIndex) and self._df.index.nlevels >= 2:
+                    sample_level = self._df.index.get_level_values(0)
+                    anno_level = self._df.index.get_level_values(1)
+                    mask = sample_level.isin(coerced_ids) & (anno_level == 0)
+                    slice_df = self._df[mask]
+                    sids = slice_df.index.get_level_values(0)
+                else:
+                    mask = self._df.index.isin(coerced_ids)
+                    slice_df = self._df[mask]
+                    sids = slice_df.index
+
+                for sid, val in zip(sids, slice_df[column]):
+                    values[self._normalize_sample_id(sid)] = val
+            except Exception:
+                pass
+
+        return values
 
     def get_row(self, origin: str, sample_id: int, annotation_id: int = None) -> pd.Series | pd.DataFrame | None:
         """Get row(s) by sample_id and optional annotation_id.

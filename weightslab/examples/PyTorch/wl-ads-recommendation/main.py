@@ -147,7 +147,6 @@ if __name__ == "__main__":
     eval_full_to_train_steps_ratio = parameters.get("eval_full_to_train_steps_ratio", 100)
     write_export_ratio = parameters.get("write_export_ratio", 100)
     enable_h5_persistence = parameters.get("enable_h5_persistence", True)
-    training_steps_to_do = parameters.get("training_steps_to_do", 1000)
 
     # Model (Wide & Deep CTR)
     _model = WideDeepCTR(
@@ -226,17 +225,24 @@ if __name__ == "__main__":
     print(f" Logs will be saved to: {log_dir}")
     print("=" * 60 + "\n")
 
+    # Training runs until YOU stop it -- from the studio's pause button, the CLI,
+    # or Ctrl+C. itertools.count() rather than range(training_steps_to_do): a
+    # predefined step budget ends the process mid-experiment, which is the
+    # opposite of how WeightsLab is used (inspect the curves, edit the data or
+    # the architecture, keep going). `training_steps_to_do` remains a live
+    # hyperparameter for the UI's own "run N more steps" control; it is not a
+    # ceiling on this loop.
     if tqdm_display:
         train_range = tqdm.tqdm(
-            range(training_steps_to_do) if training_steps_to_do != None else itertools.count(),
+            itertools.count(),
             desc="Training",
-            bar_format="{desc}: {n}/{total} [{elapsed}<{remaining}, {rate_fmt}] {bar} | {postfix}",
+            bar_format="{desc}: {n} steps [{elapsed}, {rate_fmt}] {bar} | {postfix}",
             ncols=140,
             position=0,
             leave=True,
         )
     else:
-        train_range = range(training_steps_to_do) if training_steps_to_do != None else itertools.count()
+        train_range = itertools.count()
 
     # ================
     # Training Loop

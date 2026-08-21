@@ -38,13 +38,16 @@ Choose the `kind` based on the user's VERB and INTENT:
 | **Clarify** | "Sort by metrics" (if multiple exist) | `clarify` |
 | **Model Question** | "Which layer has...", "Is layer X frozen?", "Show model details", "How many neurons in..." | `model_info` |
 | **Model Management** | "Freeze layer/neurons...", "Reset layer/neurons...", "Unfreeze layer/neurons..." | `model_action` |
+| **Pause training** | "Pause training", "Stop training", "Halt the run", "Freeze the run for now" | `action` (`action_name="pause_training"`) |
+| **Resume training** | "Resume training", "Continue training", "Start training again", "Unpause" | `action` (`action_name="resume_training"`) |
 | **Save checkpoint** | "Save a checkpoint", "Dump the model weights", "Save the model (and its architecture)" | `action` (`action_name="save_checkpoint"`) |
 | **Save data state** | "Save the current data state", "Persist the tags and discards", "Snapshot the dataset state" | `action` (`action_name="save_data"`) |
 | **Load experiment** | "Load experiment state from hash <h>", "Restore the experiment <h>", "Go back to state <h>" | `action` (`action_name="load_experiment"`, `action_params={{"hash": "<h>"}}`) |
 | **Load weights** | "Load the model weights from step 500", "Roll back weights to step 500", "Load weights at step 500 from hash <h>" | `action` (`action_name="load_weights"`, `action_params={{"step": 500}}`) |
 | **Tune hyperparameter** | "Set the batch size to 32", "Increase the learning rate by 10%", "Change the dumping model ratio to 15", "Change the evaluation ratio to 20" | `action` (`action_name="set_hyperparam"`; see rule 11) |
 | **Config question (READ-ONLY)** | "Show me the root log dir", "What is the batch size?", "Display the whole configuration", "Show the config" | `action` (`action_name="show_config"`; `action_params={{"param": "<key>"}}` for one value, omit for the whole config) |
-| **Experiment report** | "Generate a report", "How is this experiment going?", "Create a report on training progress", "Summarize the experiment" | `action` (`action_name="generate_experiment_report"`; optional `action_params={{"signals": ["<name>", ...]}}`) |
+| **Experiment report (new)** | "Generate a report", "How is this experiment going?", "Create a report on training progress", "Summarize the experiment" | `action` (`action_name="generate_experiment_report"`; optional `action_params={{"signals": ["<name>", ...], "distributions": ["<name>", ...]}}`) |
+| **Experiment report (update)** | "Update the report", "Regenerate the report with...", "Add a histogram of X to the report", "Also include Y in it" | `action` (`action_name="generate_experiment_report"`; `action_params={{"update_existing": true, ...}}`) |
 | **History query** | "...that never had train loss below 0.5", "...whose loss was ever above 5", "min/max/mean loss OVER TRAINING" | `transform`/`keep` using `signal_history(...)` (see rule 10) |
 
 ---
@@ -94,13 +97,20 @@ Choose the `kind` based on the user's VERB and INTENT:
   - `model_action_name`: `"freeze"`, `"reset"`, or `"unfreeze"`, for `model_action`. `"unfreeze"` only ever touches layers/neurons that are ALREADY frozen (it is implemented as re-applying freeze, which toggles); it is a no-op on anything not currently frozen.
   - `neuron_indices`: Optional list of specific neuron indices within the selected layer(s), for `model_action`. Omit to target whole layers.
   - `action_name`: Name of an external action, for `kind="action"` (`primary_goal="action"`). Supported:
+    - `"pause_training"` — pause the training loop. Same control as the UI's pause button; takes effect at the next step boundary.
+    - `"resume_training"` — resume a paused training loop. Same control as the UI's play button. It can legitimately report that it could not resume yet (the experiment hash is still being computed) — relay that rather than retrying in a loop.
     - `"save_checkpoint"` — dump model weights; add `action_params={{"architecture": true}}` to also save the model architecture.
     - `"save_data"` — snapshot the current data state (tags + discard flags).
     - `"load_experiment"` — load & apply a FULL saved experiment state (model + weights + data + config) by hash; REQUIRES `action_params={{"hash": "<exp_hash>"}}` (the hash the user gives).
     - `"load_weights"` — load ONLY model weights, optionally at a specific step: `action_params={{"step": <int>}}` (and optionally `"hash": "<exp_hash>"`; defaults to the current experiment).
     - `"set_hyperparam"` — change a training hyperparameter: `action_params={{"param": "<name-or-dotted-path>", "op": "<set|scale>", "value": <number>}}` (see rule 11).
     - `"show_config"` — READ-ONLY: display the experiment configuration. Omit `action_params` to dump the whole config, or pass `action_params={{"param": "<key-or-dotted-path>"}}` to show a single value (e.g. `"root_log_dir"`, `"batch_size"`). Never modifies anything — use it for any "show/what is/display the config/setting" question.
-    - `"generate_experiment_report"` — READ-ONLY: build an HTML report (signal trajectory plots + health classification + dataset stats + a written analysis) summarizing how the current experiment is going, saved under the experiment's `reports/` directory. Optionally pass `action_params={{"signals": ["<name>", ...]}}` to report on specific signals instead of the automatically-selected most-important ones. Never modifies anything.
+    - `"generate_experiment_report"` — READ-ONLY: build an HTML report (signal trajectory plots + health classification + dataset stats + a written analysis) summarizing how the current experiment is going, saved under the experiment's `reports/` directory. Optionally pass `action_params={{"signals": ["<name>", ...]}}` to report on specific signals instead of the automatically-selected most-important ones, and/or `action_params={{"distributions": ["<column-or-signal-name>", ...]}}` to ADD a "Distributions" section with a value-distribution histogram for each named column/signal (e.g. "add a histogram of train_loss to the report" -> `distributions=["train_loss"]`). Both may be combined in one call. Never modifies anything. This is the ONLY correct way to satisfy "generate a report"/"how is this experiment going"/"summarize training progress" — never decompose a report request into several separate `analysis`/`data_analysis` steps to compute numbers yourself; the report already computes and plots everything in one deterministic pass.
+
+      **`"update_existing"` (bool, default omitted = `false`)** — decides which FILE the report is written to:
+      - `false`/omitted → always write a brand-new, separately timestamped report. Use this for a request that doesn't reference an existing report: "Generate a report", "How is this experiment going?", "Create a report on training progress".
+      - `true` → overwrite the MOST RECENTLY generated report for this experiment instead of creating another one. Use this whenever the user's wording refers to a report that (as far as they're concerned) already exists: "Update the report", "Regenerate the report with...", "Add a histogram of X to the report", "Also include Y in it", "Redo the report but...". If nothing has been generated yet, the backend transparently falls back to creating a fresh one — you never need to check first.
+      - When you set `update_existing=true` for a request that only adds ONE new thing (e.g. "also add a histogram of val_loss"), check the conversation History for a prior `generate_experiment_report` call in this session and CARRY FORWARD its `signals`/`distributions` alongside the new one (e.g. previous `distributions=["train_loss"]` + this request -> `distributions=["train_loss", "val_loss"]`) — updating overwrites the whole file, so anything not re-listed would otherwise silently disappear from it. If you can't find a prior call to carry forward from, just pass what was asked for this turn.
   - `action_params`: Optional dict of parameters for the action (e.g. `{{"architecture": true}}`, `{{"hash": "abc123..."}}`, `{{"step": 500}}`, `{{"param": "batch_size", "op": "set", "value": 32}}`).
 
 ---
@@ -860,12 +870,58 @@ User: "Display the whole configuration"
 **Ex51: Generate An Experiment Report (READ-ONLY)**
 User: "How is this experiment going? Generate a report."
 {{
-  "reasoning": "Read-only request for a summary of experiment health. Use generate_experiment_report with no params so it auto-selects the most important signals.",
+  "reasoning": "Read-only request for a summary of experiment health. Use generate_experiment_report with no params so it auto-selects the most important signals. This one action already builds the whole report (plots, stats, analysis) -- it must NOT be split into separate analysis/data_analysis steps.",
   "primary_goal": "action",
   "steps": [
     {{
       "kind": "action",
       "action_name": "generate_experiment_report"
+    }}
+  ]
+}}
+
+
+**Ex52: Add A Histogram Distribution To The Report (READ-ONLY, Update-In-Place)**
+User: "Add a histogram distribution of train_loss to the report"
+{{
+  "reasoning": "The wording 'to THE report' refers to a report that (as far as the user is concerned) already exists, so this overwrites the most recent one (update_existing=true) rather than creating yet another timestamped file, in addition to requesting the Distributions section for this column.",
+  "primary_goal": "action",
+  "steps": [
+    {{
+      "kind": "action",
+      "action_name": "generate_experiment_report",
+      "action_params": {{ "update_existing": true, "distributions": ["train_loss"] }}
+    }}
+  ]
+}}
+
+
+**Ex52b: Second Follow-Up Add Carries The First One Forward (READ-ONLY, Update-In-Place)**
+History (last turn): user asked "Add a histogram distribution of train_loss to the report" -> generate_experiment_report with action_params={{"update_existing": true, "distributions": ["train_loss"]}}
+User: "Now also add one for val_loss"
+{{
+  "reasoning": "Another update to the SAME report. Overwriting replaces the whole file, so train_loss's distribution (added last turn, per History) must be re-listed alongside val_loss or it would silently disappear from the report.",
+  "primary_goal": "action",
+  "steps": [
+    {{
+      "kind": "action",
+      "action_name": "generate_experiment_report",
+      "action_params": {{ "update_existing": true, "distributions": ["train_loss", "val_loss"] }}
+    }}
+  ]
+}}
+
+
+**Ex53: Report On Specific Signals Plus A Distribution (READ-ONLY)**
+User: "Generate a report on train_loss and val_loss, and include a distribution of val_loss"
+{{
+  "reasoning": "Combine both optional params on the same generate_experiment_report action: signals restricts the trajectory plots, distributions adds the histogram section.",
+  "primary_goal": "action",
+  "steps": [
+    {{
+      "kind": "action",
+      "action_name": "generate_experiment_report",
+      "action_params": {{ "signals": ["train_loss", "val_loss"], "distributions": ["val_loss"] }}
     }}
   ]
 }}
