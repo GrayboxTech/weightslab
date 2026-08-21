@@ -27,7 +27,7 @@ The **report button** sits in the header, immediately left of the notebook
 button, and is disabled until a backend connects.
 
 Generating a report
-===================
+-------------------
 
 **Left-click** it. This sends the same request the chat bar would — "Generate
 an experiment report" — through the normal agent pipeline. There is no
@@ -40,7 +40,7 @@ while it runs. The finished report is written under
 ``<root_log_dir>/reports/``.
 
 Browsing existing reports
-==========================
+--------------------------
 
 **Right-click** the button to list the reports already on disk for this
 experiment, newest first, and open one. That listing is served over plain
@@ -48,7 +48,7 @@ same-origin HTTP by ``weightslab start`` — browsing and opening a report never
 touches gRPC or the agent, so it keeps working even when generation doesn't.
 
 What lands in the report
-=========================
+-------------------------
 
 The same artifact the other entry points produce: per-signal trajectory plots
 with an automatic health classification, bounded per-sample outliers, dataset
@@ -59,7 +59,7 @@ See :doc:`../experiment_reports` for the full description, and for the Python
 (:func:`ai_report_generation`) and CLI (``report``) entry points.
 
 Known rough edges
-==================
+------------------
 
 - Generation is a single long agent turn: there is no partial output and no
   resume if it fails midway. Re-run it.

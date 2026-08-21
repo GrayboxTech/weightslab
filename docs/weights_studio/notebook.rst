@@ -24,7 +24,7 @@ no serialization or IPC in between.
    before any backend exists at all.
 
 How it works
-=============
+-------------
 
 - The button is disabled until a backend connects, then becomes clickable.
 - The notebook document persists as ``notebook.ipynb`` under the experiment's
@@ -40,7 +40,7 @@ How it works
 - A run can be interrupted mid-flight with the stop button next to the cell.
 
 Cell types
-==========
+----------
 
 Cells can be **code** or **markdown** — toggle a cell's type with the small
 button in its gutter:
@@ -51,7 +51,7 @@ button in its gutter:
   (or run the cell again) to drop back into the raw source for editing.
 
 Asking the agent for code
-==========================
+--------------------------
 
 A cell whose source starts with ``>`` is not executed as Python — it's sent
 to the AI agent as a natural-language request for code:
@@ -72,7 +72,7 @@ output — click it to send the code and traceback back to the agent and ask
 for a fix, without retyping it as a ``>`` prompt yourself.
 
 Example
-=======
+-------
 
 A typical first cell against a live experiment:
 
@@ -92,7 +92,7 @@ with the agent's generated ``matplotlib`` code, which you then run to see
 the plot rendered inline in the cell's output.
 
 Saving and running everything
-==============================
+------------------------------
 
 - **Save**: writes the current notebook (source + outputs) to
   ``notebook.ipynb``. This also happens automatically right after any cell
@@ -105,14 +105,14 @@ Saving and running everything
   already exists.
 
 Window controls
-================
+----------------
 
 The notebook opens as a floating, draggable window: drag its header to move
 it, drag an edge or corner to resize, or use the maximize button to fill the
 viewport and restore it back to its previous size and position.
 
 Turning it off
-===============
+---------------
 
 Set ``ENABLE_NOTEBOOK=0`` before ``weightslab start`` to remove both the
 button and the window entirely (dev server: ``VITE_ENABLE_NOTEBOOK`` — see

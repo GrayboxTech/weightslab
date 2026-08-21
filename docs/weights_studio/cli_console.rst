@@ -7,7 +7,7 @@ controlling a running experiment through the global ledger.
 Transport: local TCP text commands with JSON responses.
 
 How to start it
-===============
+---------------
 
 From your training script (recommended):
 
@@ -24,7 +24,7 @@ Connect from a terminal::
   weightslab cli --port 60000 # or specify one
 
 Console actions
-===============
+---------------
 
 Full reference: :doc:`../user_commands`. Quick summary:
 

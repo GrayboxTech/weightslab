@@ -16,7 +16,7 @@ a ``resource/`` prefix.
 This is on by default and needs no setup.
 
 Finding the signals
-===================
+-------------------
 
 Type ``resource/`` into the :ref:`plots board search <studio-plots>` to pull
 every resource curve to the front of the board. Narrow it from there —
@@ -51,7 +51,7 @@ The signals, by category:
        ``…/temperature_celsius`` — one full set **per device**
 
 Reading them next to your own curves
-====================================
+------------------------------------
 
 Sampling runs on a wall-clock cadence, but each sample is logged against the
 **model's age** — the same x axis your loss and metric curves use. That is what
@@ -79,7 +79,7 @@ of an axis no other plot shares.
    A GPU that stays pinned after you hit Pause is visible here.
 
 Configuring it
-==============
+--------------
 
 Two ways, and the YAML wins where both are set.
 
@@ -112,7 +112,7 @@ while the YAML takes **per-category booleans**, so reach for the file when you
 only want to switch one category off.
 
 Practical settings
-==================
+------------------
 
 .. list-table::
    :header-rows: 1

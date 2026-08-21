@@ -10,7 +10,7 @@ Header bar
 Left to right, the header carries every session-wide control.
 
 Training: Pause and Resume
-==========================
+--------------------------
 
 .. figure:: ../_static/screenshots/training-controls.png
    :alt: Training pause/resume control and the force-checkpoint button
@@ -31,7 +31,7 @@ the weights.
    to pause by hand first.
 
 Run Evaluation
-==============
+--------------
 
 .. figure:: ../_static/screenshots/evaluate-popover.png
    :alt: The Run Evaluation popover
@@ -48,7 +48,7 @@ Evaluating a tagged subset is the fast path for "did my fix actually help the
 samples I flagged?" — tag the bad ones, run eval on just that tag, compare.
 
 Mode selector: train / audit / eval
-===================================
+-----------------------------------
 
 .. figure:: ../_static/screenshots/mode-selector.png
    :alt: Mode selector with train, audit and eval options
@@ -60,7 +60,7 @@ Mode selector: train / audit / eval
 - **eval** — the evaluation pass configured above.
 
 Auto-refresh and cache
-======================
+----------------------
 
 .. figure:: ../_static/screenshots/refresh-config.png
    :alt: Auto-refresh configuration popover
@@ -78,7 +78,7 @@ On a large dataset, turning data auto-refresh **off** while you work through a
 selection keeps the grid from re-fetching under you.
 
 Notebook and report buttons
-===========================
+---------------------------
 
 Two buttons sit left of the logo, both disabled until a backend connects:
 
@@ -90,7 +90,7 @@ A third indicator reports the status of a **local Jupyter** server started
 from the landing page, with a menu to reopen it.
 
 Dark mode
-=========
+---------
 
 Switches the whole studio between light and dark themes. The choice persists
 across reloads.

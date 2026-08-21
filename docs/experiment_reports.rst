@@ -1,6 +1,23 @@
 Experiment Reports
 ===================
 
+.. warning:: Unstable — in active development
+
+   Experiment report generation is **experimental** and still changing. The
+   report's content and layout, and the on-disk location of what it writes,
+   are all subject to change between releases, and generation can fail or
+   produce an incomplete report on some experiments — particularly ones with
+   unusual signal shapes, very long histories, or no authenticated agent
+   provider.
+
+   Treat what it produces as a **draft to read**, not as an artifact to
+   archive, publish, or cite, and don't build tooling on the file paths or the
+   HTML structure yet. The Python and CLI entry points below give you the most
+   control over what goes in, so prefer those over the studio button when the
+   result matters.
+
+   Please report what breaks — that feedback is what stabilises it.
+
 Ask the AI agent how your experiment is doing and it can produce a
 self-contained HTML report: signal trajectory plots, an automatic health
 classification per signal, dataset stats (sample counts, discard rate, tag

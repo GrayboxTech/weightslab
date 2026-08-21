@@ -135,6 +135,19 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    experiment_reports
    resource_monitoring
    export
+<<<<<<< HEAD
+=======
+   checkpointing
+   experiment_reports
+
+
+.. toctree::
+   :maxdepth: 2
+   :caption: WEIGHTS STUDIO
+   :hidden:
+
+   weights_studio/index
+>>>>>>> 0336068fcc73207bd3a3688c5c8f32faff619c9d
 
 
 .. toctree::
