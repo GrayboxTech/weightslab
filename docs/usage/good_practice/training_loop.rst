@@ -4,7 +4,6 @@ Training loop
 =============
 
 
-
 Write your training loop so it runs **until you stop it** — not for a
 predefined number of steps. Use ``itertools.count()`` (or ``while True``), and
 let the studio's Pause button, the CLI, or ``Ctrl+C`` decide when it ends:
@@ -23,7 +22,8 @@ let the studio's Pause button, the CLI, or ``Ctrl+C`` decide when it ends:
    studio drops to "no backend connected", the notebook's shared kernel dies,
    the agent loses the experiment, and the only way back is to restart
    WeightsLab and reload from a checkpoint. There is no "resume" button for a
-   process that is no longer running.
+   process that is no longer running. If you use the end function keep_serving()
+   after the loop, the process stays alive and you can still inspect and export.
 
 Why this matters more here than in a normal training script: WeightsLab is
 built around **staying in the experiment**. You watch the curves, spot a
@@ -35,8 +35,7 @@ chosen before you knew what the run would look like.
 
 .. note::
 
-   ``training_steps_to_do`` is still a useful hyperparameter — it remains live
-   and editable in the studio, and it drives the UI's own "run N more steps"
+   ``training_steps_to_do`` is still a useful hyperparameter — it remains live, and it drives the UI's own "run N more steps"
    control. Just don't use it as the bound of your ``for`` loop. It is a
    **target you can change while training**, not a ceiling on the process.
 
@@ -59,4 +58,4 @@ To stop cleanly, use whichever of these fits:
 
 Every bundled example already follows this pattern — see
 ``weightslab/examples/PyTorch/wl-classification/main.py``, which iterates
-``itertools.count()`` and finishes with ``wl.keep_serving()``.
+``itertools.count()``.

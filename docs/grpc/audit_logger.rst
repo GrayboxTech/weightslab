@@ -435,5 +435,5 @@ See Also
 ========
 
 - :doc:`grpc_functions`: All gRPC RPC handlers and their behavior
-- :doc:`/weights_studio/index`: Using the UI to trigger logged actions
+- :doc:`/weights_studio_ui/index`: Using the UI to trigger logged actions
 - :doc:`/configuration`: gRPC configuration options

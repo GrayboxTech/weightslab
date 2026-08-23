@@ -4,8 +4,20 @@ Model Interaction
 Model interaction focuses on wrapping a model, understanding its graph/dependency
 structure, and applying architecture operations at runtime.
 
+.. code-block:: python
+
+   import weightslab as wl
+   model = wl.watch_or_edit(my_model)
+
+
 Model wrapping parameters (``flag="model"``)
 --------------------------------------------
+
+- Observe training signals at batch/sample granularity.
+- Watch the model's own training dynamics — gradients, weights, activations —
+  per layer and per step (see `Training-dynamics signals`_).
+- Keep a stable ledger/proxy handle across runtime updates.
+- Enable dynamic controls without rewriting your loop architecture.
 
 Key ``wl.watch_or_edit(model, flag="model", ...)`` parameters:
 
@@ -52,6 +64,18 @@ For full API signatures, see :doc:`user_functions`.
 With and without ``compute_dependencies``
 -----------------------------------------
 
+.. warning::
+
+   Unstable: The dependency graph is still under development.
+   It is not yet guaranteed to be correct for all models, and it may change in future releases.
+   Please report any issues you encounter.
+
+.. note::
+
+   The dependency graph is used to determine which layers are affected by an
+   architecture operation. If you do not need these operations, you can skip
+   computing it for a faster wrapping.
+
 Fast wrapping (no dependency graph):
 
 .. code-block:: python
@@ -96,7 +120,12 @@ Runtime architecture operations
 -------------------------------
 
 The wrapped model interface supports architecture operations through
-``model.operate(...)``:
+``model.operate(...)``. Operation behavior:
+
+- ``ADD``: expands layer capacity
+- ``PRUNE``: removes selected neurons/channels
+- ``FREEZE``: disables updates for selected neurons/channels
+- ``RESET``: reinitializes selected weights
 
 .. code-block:: python
 
@@ -198,12 +227,6 @@ Best practices
 - Raise ``model_signals_every_n_steps`` before dropping metrics: the activation
   forward hooks are the only per-step cost worth thinking about, and sampling
   every 10th step keeps the curves just as readable.
-Operation behavior:
-
-- ``ADD``: expands layer capacity
-- ``PRUNE``: removes selected neurons/channels
-- ``FREEZE``: disables updates for selected neurons/channels
-- ``RESET``: reinitializes selected weights
 
 Standalone model-only integration (UI + CLI ready)
 --------------------------------------------------

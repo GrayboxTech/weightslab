@@ -88,6 +88,10 @@ exclude_patterns = [
     "usage.rst",
     # SDK params moved into configuration.rst
     "usage/parameters.rst",
+    # Stray experiment directory(ies) left behind by running `weightslab
+    # start`/the agent from inside docs/ (e.g. while capturing screenshots).
+    # Not documentation source.
+    "wl-*",
 ]
 
 html_theme = "furo"

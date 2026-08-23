@@ -215,3 +215,5 @@ Now that you run the classification task and try WeightsLab, you can integrate i
 To do so, please read the following:
 
 - ``four_way_approach``: understand model/data/hyperparameters/logger together.
+- :doc:`agent_quickstart`: connect the natural-language agent to a running
+  experiment in four steps.

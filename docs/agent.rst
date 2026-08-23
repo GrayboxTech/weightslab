@@ -103,6 +103,15 @@ Initialization and configuration
    export OPENCODE_MODEL=openrouter/anthropic/claude-opus-4.6  # optional
    pytest weightslab/tests/trainer/services/test_agent_live_prompt_evaluation.py -v
 
+.. code-block:: bash
+
+   # Requires a local OpenCode server already running and authenticated
+   # (opencode has no API-key env var of its own -- see "Initializing the
+   # agent" below).
+   export UTEST_AGENT_PROMPT_EVALUATION=1
+   export OPENCODE_MODEL=openrouter/anthropic/claude-opus-4.6  # optional
+   pytest weightslab/tests/trainer/services/test_agent_live_prompt_evaluation.py -v
+
 Without ``UTEST_AGENT_PROMPT_EVALUATION`` set, the suite logs a note and
 skips entirely (it never runs by accident in CI or against a real model
 unintentionally). A small always-on sanity check for the harness itself
