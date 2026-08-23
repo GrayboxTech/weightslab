@@ -7,7 +7,7 @@ Practical recommendations for running WeightsLab at scale — large datasets,
 long experiments, and production-like setups.
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 0
 
    data_and_loaders
    training_loop

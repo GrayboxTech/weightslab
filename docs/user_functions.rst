@@ -2255,4 +2255,4 @@ registrations outside the decorators/functions above).
   building tooling on top of WeightsLab rather than a training script.
 - This is exactly what powers the ``status`` / ``list_models`` /
   ``list_loaders`` / ``list_optimizers`` / ``dump`` commands in the
-  interactive CLI — see :doc:`user_commands`.
+  interactive CLI — see :doc:`weights_studio_cli/cli_console`.

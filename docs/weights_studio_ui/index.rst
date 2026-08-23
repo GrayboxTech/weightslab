@@ -1,5 +1,5 @@
-Weights Studio Guide
-====================
+Weights Studio UI
+=================
 
 Weights Studio is the visual frontend for WeightsLab experiments.
 It ships **inside the Python package** — no Docker, no Envoy.
@@ -57,41 +57,30 @@ To suppress auto-opening the browser::
 Sections
 --------
 
-Setup and access
-~~~~~~~~~~~~~~~~
-
-.. toctree::
-   :maxdepth: 0
-
-   ports
-   security
-   configuration
-   deployment
-
 Feature reference
 ~~~~~~~~~~~~~~~~~
 
-Everything the studio puts on screen, what it is for, and how to drive it.
+Everything the studio puts on screen, what it is for, and how to drive it —
+grouped into four parts. Each page below covers its own subsections; see the
+page itself for the details.
 
 .. toctree::
-   :maxdepth: 0
+   :maxdepth: 1
 
    landing_page
-   header_bar
-   left_panel
-   data_board
-   detail_modal
-   plots
-   resource_monitoring
    agent
-   notebook
-   reports
+   left_panel
+   main_area
+   more/index
 
-Operating it
-~~~~~~~~~~~~
-
-.. toctree::
-   :maxdepth: 0
-
-   cli_console
-   troubleshooting
+- :doc:`landing_page` — the pre-experiment surface: agent chat, local Jupyter,
+  Colab quickstarts, :ref:`report generation <studio-report-generation>`, and
+  the :ref:`embedded-notebook`.
+- :doc:`agent` — the docked chat bar and Agent Window: commands, ``/loop``
+  jobs, setup, and history behavior.
+- :doc:`left_panel` — run management (training controls, evaluation, mode,
+  auto-refresh), in-training hyperparameter edits, tag painter mode, metadata
+  sorting/histograms, and data actions (save, export).
+- :doc:`main_area` — the Plots Board (search, merged curves, error bands,
+  right-click actions, resource monitoring) and the Data Board (grid/list
+  modes, quick filters, selection, tagging, the detail modal).

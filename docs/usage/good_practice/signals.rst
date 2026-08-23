@@ -5,7 +5,7 @@ Signals and storage
 
 
 
-Choose this based on storage budget and how often you need overlays during
+Choose this based on storage budget, task complexity (e.g., number of classes, annotation density) and how often you need overlays during
 training.
 
 **Light mode** — train keeps only per-sample loss, eval keeps full data:
@@ -21,6 +21,12 @@ training.
 
 Use this when you want lighter train-time writes but still need rich eval-time
 inspection in Studio.
+
+.. note::
+
+   We still include 'batch_ids' in the signal call for both train and eval, so you can still sort and filter by sample in the UI.
+   The studio will not store the full arrays for train, but it will still let you inspect the loss per sample and history.
+
 
 **Standard mode** — both train and eval store full data:
 

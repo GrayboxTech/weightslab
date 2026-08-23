@@ -97,7 +97,7 @@ they produce the same artifact:
      Generate an experiment report on train_loss and val_loss.
 
   To add a value-distribution histogram for a specific column (see
-  `Distributions`_ below), including as a follow-up on a report you already
+  **Distributions** below), including as a follow-up on a report you already
   generated:
 
   .. code-block:: text

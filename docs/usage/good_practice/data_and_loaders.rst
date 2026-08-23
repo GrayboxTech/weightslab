@@ -1,6 +1,3 @@
-Dataset and loaders
-===================
-
 .. _good-practice-heavy-experiment:
 
 Heavy-experiment loader flags

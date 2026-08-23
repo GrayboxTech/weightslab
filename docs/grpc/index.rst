@@ -100,6 +100,6 @@ Next Steps
 See Also
 ========
 
-- :doc:`/weights_studio/index`: UI implementation using gRPC client
+- :doc:`/weights_studio_ui/index`: UI implementation using gRPC client
 - :doc:`/configuration`: All gRPC configuration options
 - :doc:`/user_functions`: API reference for WeightsLab SDK
