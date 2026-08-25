@@ -539,6 +539,14 @@ message DataSamplesResponse {
   bool success = 1;
   string message = 2;
   repeated DataRecord data_records = 3;
+  // True when the server is currently serving a FILTERED/agent-generated
+  // subview of the dataset rather than the full dataset. Server-authoritative
+  // so a fresh client (private window, no cached UI state) can still show the
+  // "you are viewing a subview" warning ribbon and offer a reset. Mirrors the
+  // backend's own _is_filtered flag.
+  bool is_subview = 4;
+  int64 view_count = 5;   // rows in the current (possibly filtered) view
+  int64 total_count = 6;  // rows in the full dataset
 }
 
 // --- Server-side histogram binning ---
