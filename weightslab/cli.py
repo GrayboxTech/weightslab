@@ -602,6 +602,13 @@ def example_start(args):
 
     logger.info(f"Starting the WeightsLab {label} ({kind}) example...")
     logger.info(f" {main_py}")
+    # Install OpenCode in the background (logged) so it's ready if the user opens
+    # the chat; the example itself is pure training and never needs it to run.
+    # Configuration (sign-in) stays optional -- surface it as info, never an
+    # error, so a run with no agent configured doesn't look like it failed.
+    _prewarm_opencode()
+    if not agent_is_configured():
+        _log_agent_config_hint()
     logger.info("In another terminal, launch the UI with: weightslab start")
     logger.info("Then open the URL printed by `weightslab start` — stop the example with Ctrl+C.")
     if not _CERTS_DIR_IN_ORIGINAL_ENV:
@@ -777,6 +784,83 @@ def _print_experiment_guidance(experiment_dir: Path) -> None:
     logger.info("=" * 60)
 
 
+def _opencode_auth_paths() -> "list[Path]":
+    """Candidate locations of OpenCode's own credential store (written by
+    `opencode auth login`). Existence of any means the agent has been
+    initialized on this machine."""
+    candidates = []
+    xdg = os.environ.get("XDG_DATA_HOME", "").strip()
+    if xdg:
+        candidates.append(Path(xdg) / "opencode" / "auth.json")
+    if _is_windows():
+        for var in ("APPDATA", "LOCALAPPDATA"):
+            base = os.environ.get(var)
+            if base:
+                candidates.append(Path(base) / "opencode" / "auth.json")
+    candidates.append(Path.home() / ".local" / "share" / "opencode" / "auth.json")
+    return candidates
+
+
+def _agent_env_files() -> "list[Path]":
+    """Candidate user-provided agent env files (.env). Mirrors the paths
+    agent.py's _load_config actually loads, so "found here" == "used there"."""
+    pkg_dir = Path(__file__).resolve().parent          # .../weightslab
+    return [Path.cwd() / ".env", pkg_dir / ".env", pkg_dir.parent / ".env"]
+
+
+def agent_is_configured() -> bool:
+    """True if the agent has been initialized -- i.e. an env file / credential is
+    present so it can be used without any further step:
+      * OPENCODE_URL set (explicit server), or
+      * a user `.env` present (agent.py loads it), or
+      * a prior `opencode auth login` (its credential store exists).
+
+    Deliberately does NOT count agent_config.yaml: it ships in the repo/wheel and
+    only carries URL/model *defaults*, not a credential, so counting it would
+    make the "not initialized" hint never fire.
+    """
+    if os.environ.get("OPENCODE_URL", "").strip():
+        return True
+    if any(p.is_file() for p in _agent_env_files()):
+        return True
+    return any(p.is_file() for p in _opencode_auth_paths())
+
+
+def _log_agent_config_hint() -> None:
+    """Tell the user OpenCode is installed but the agent still needs a one-time
+    sign-in -- an INFO note, not an error. The assistant is optional; a run that
+    never uses it must not look broken."""
+    logger.info(
+        "OpenCode is installed, but the agent is not initialized yet — run "
+        "`weightslab agent init` to sign in (or set OPENCODE_URL / add a .env at "
+        "your project root). The assistant is optional; continuing without it."
+    )
+
+
+def _prewarm_opencode() -> None:
+    """Install OpenCode in the background if not already present (logged).
+
+    Delegates to the shared, once-per-process installer so the ~180 MB first-run
+    download never blocks the UI, and repeated launches don't re-download.
+    """
+    from weightslab import opencode_binary
+    opencode_binary.ensure_managed_binary_in_background(reason="weightslab start", logger=logger)
+
+
+def _prewarm_opencode_or_hint() -> None:
+    """Install OpenCode up front (background, logged) so the agent is ready, and
+    -- separately -- hint how to sign in when nothing is configured yet.
+
+    Installing the binary is unconditional: it is a free, one-time fetch and is
+    what makes `weightslab start` leave the agent usable. Signing in stays
+    opt-in (`weightslab agent init`); we only *hint* at it, never do it
+    implicitly -- that is the "no agent env found -> no init, just info" rule.
+    """
+    _prewarm_opencode()
+    if not agent_is_configured():
+        _log_agent_config_hint()
+
+
 def ui_start_native(args):
     """`weightslab start`: launch the Weights Studio UI natively (no Docker).
 
@@ -809,6 +893,12 @@ def ui_start_native(args):
     os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = str(experiment_dir)
     os.environ["WL_LAST_EXPERIMENT_DIR"] = str(experiment_dir)
     _print_experiment_guidance(experiment_dir)
+
+    # If the agent has been initialized, provision OpenCode up front (in the
+    # background) so it is ready the moment the user opens the chat. If it has
+    # NOT been initialized, do nothing but log how to enable it -- an
+    # unconfigured run stays agent-free and error-free.
+    _prewarm_opencode_or_hint()
 
     ui_host = getattr(args, "host", None) or os.getenv("WEIGHTSLAB_UI_HOST", "0.0.0.0")
     preferred_ui_port, ui_port_source = _resolve_ui_port(args)
@@ -927,6 +1017,46 @@ def _add_example_kind_flags(p: argparse.ArgumentParser) -> None:
     p.set_defaults(example_kind=_DEFAULT_EXAMPLE)
 
 
+def agent_init(args):
+    """`weightslab agent init`: initialize the AI assistant.
+
+    Provisions the OpenCode binary (Node-free, via weightslab.opencode_binary)
+    and then runs `opencode auth login` so the user signs in once. This is the
+    explicit opt-in that `weightslab start` / `start example` only *hint* at when
+    no agent is configured -- nothing here happens implicitly.
+    """
+    from weightslab import opencode_binary
+
+    logger.info("Provisioning the OpenCode agent binary (no Node.js required)...")
+    path = opencode_binary.ensure_managed_binary()
+    if not path:
+        logger.error(
+            "Could not provision OpenCode (offline?). Retry with network access, "
+            "or install Node.js 20+ and `npm i -g opencode-ai`."
+        )
+        sys.exit(1)
+    logger.info(f"OpenCode ready: {path}")
+
+    if getattr(args, "provision_only", False):
+        logger.info("Provision-only: skipping interactive sign-in.")
+        logger.info(f"Sign in later with: weightslab agent init   (or: {path} auth login)")
+        return
+
+    logger.info("Launching `opencode auth login` — follow the prompts to sign in.")
+    try:
+        rc = subprocess.run([str(path), "auth", "login"]).returncode
+    except KeyboardInterrupt:
+        logger.info("Sign-in cancelled. Re-run `weightslab agent init` anytime.")
+        return
+    if rc != 0:
+        logger.warning(
+            f"`opencode auth login` exited with code {rc}. "
+            "Re-run `weightslab agent init` to try again."
+        )
+        sys.exit(rc)
+    logger.info("Agent initialized. The assistant is now available in `weightslab start`.")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser (banner + detailed command reference).
 
@@ -945,7 +1075,7 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    sub = parser.add_subparsers(dest="command", metavar="{se,start,cli,tunnel,export,help}")
+    sub = parser.add_subparsers(dest="command", metavar="{se,start,cli,tunnel,export,agent,help}")
 
     # weightslab se [--force-certs] [certs_dir]
     se_parser = sub.add_parser("se", help="Set up the secure environment (TLS certs + gRPC auth token)")
@@ -1035,6 +1165,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "start", help="Start a bundled PyTorch example (default: classification)")
     _add_example_kind_flags(example_alias_start)
 
+    # weightslab agent init [--provision-only]
+    agent_parser = sub.add_parser(
+        "agent", help="Manage the AI assistant (OpenCode), e.g. `weightslab agent init`")
+    agent_sub = agent_parser.add_subparsers(dest="agent_action", metavar="{init}")
+    agent_init_parser = agent_sub.add_parser(
+        "init", help="Provision OpenCode and sign in so the assistant is ready to use")
+    agent_init_parser.add_argument(
+        "--provision-only", action="store_true",
+        help="Only download/verify the OpenCode binary; skip the interactive "
+             "sign-in (for headless/CI environments).")
+
     sub.add_parser("help", help="Show this help message")
 
     return parser
@@ -1070,6 +1211,11 @@ def main():
     elif args.command == "example":
         # Alias for `start example` — tolerate the swapped subcommand order.
         example_start(args)
+    elif args.command == "agent":
+        if getattr(args, "agent_action", None) == "init":
+            agent_init(args)
+        else:
+            _build_parser().parse_args(["agent", "--help"])
     else:
         parser.print_help()
 

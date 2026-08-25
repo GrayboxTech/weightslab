@@ -43,6 +43,8 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from weightslab import opencode_binary
+
 _LOGGER = logging.getLogger(__name__)
 
 # Generous: a cold `npx` run downloads the package before the server binds.
@@ -67,6 +69,17 @@ DEFAULT_OPENCODE_PORT = 4096
 # Escape hatch for a machine where 4096 is spoken for by something permanent,
 # or where a specific port is the one that happens to be forwarded/published.
 PORT_ENV_VAR = "WEIGHTSLAB_OPENCODE_PORT"
+
+# Host the spawned OpenCode server BINDS to. Loopback by default -- the server
+# has filesystem access and must never be reachable off the machine on a normal
+# local run. But in a container reached over an SSH tunnel / published port, the
+# browser's request arrives on the container's network interface, not its
+# loopback, so a 127.0.0.1-only bind is refused. Setting this to 0.0.0.0 (done
+# in the weightslab dev container) lets the published port reach it. Only the
+# BIND host changes; the URL handed to the browser stays 127.0.0.1 (which the
+# tunnel maps), so this never widens what address the page is told to use.
+HOST_ENV_VAR = "WEIGHTSLAB_OPENCODE_HOST"
+DEFAULT_OPENCODE_HOST = "127.0.0.1"
 
 # Dropped directly in the workspace directory, next to (and alongside) the
 # AGENTS.md the landing-page agent already seeds there -- same "lives with
@@ -234,6 +247,17 @@ def write_lock(workspace_dir: str, url: str, pid: Optional[int] = None) -> None:
         _LOGGER.warning("Could not write OpenCode lock file under %s", workspace_dir)
 
 
+def opencode_bind_host() -> str:
+    """Host the spawned OpenCode server binds to (``--hostname``).
+
+    ``WEIGHTSLAB_OPENCODE_HOST`` overrides the loopback default -- set it to
+    ``0.0.0.0`` so a container's published port / an SSH tunnel can reach the
+    server. Distinct from the URL reported to the browser, which stays
+    ``127.0.0.1`` on purpose (see HOST_ENV_VAR).
+    """
+    return os.environ.get(HOST_ENV_VAR, "").strip() or DEFAULT_OPENCODE_HOST
+
+
 def default_opencode_port() -> int:
     """The port a fresh spawn asks for first -- DEFAULT_OPENCODE_PORT unless
     WEIGHTSLAB_OPENCODE_PORT overrides it. A malformed or out-of-range value is
@@ -302,15 +326,28 @@ def pick_opencode_port() -> int:
 
 
 def resolve_opencode_argv() -> Optional[list]:
-    """Locate a way to run OpenCode, preferring an already-installed binary.
+    """Locate a way to run OpenCode, in preference order.
 
-    Falls back to ``npx --yes``, which fetches the package into the npx
-    cache on first use -- deliberately not a global ``npm i -g``, which can
-    need elevated permissions and mutates the user's toolchain silently.
+    1. A weightslab-managed binary already provisioned on this machine
+       (``opencode_binary``) -- what makes a clean ``pip install weightslab``
+       work with no Node and no manual OpenCode install.
+    2. An ``opencode`` the user already has on PATH (a global/dev install):
+       respected before we spend bandwidth provisioning our own.
+    3. Provisioning the managed binary now (a one-time ~180 MB fetch from the
+       npm registry, no Node required).
+    4. ``npx --yes`` as a last resort -- fetches into the npx cache on first
+       use; deliberately not a global ``npm i -g`` (needs elevated perms and
+       mutates the user's toolchain silently). Requires Node.
     """
+    managed = opencode_binary.find_managed_binary()
+    if managed:
+        return [str(managed)]
     exe = shutil.which("opencode")
     if exe:
         return [exe]
+    managed = opencode_binary.ensure_managed_binary()
+    if managed:
+        return [str(managed)]
     npx = shutil.which("npx")
     if npx:
         return [npx, "--yes", "opencode-ai@latest"]
@@ -399,8 +436,10 @@ def resolve_or_spawn_opencode(workspace_dir: str, origin: Optional[str] = None,
     if argv is None:
         return {
             "ok": False,
-            "error": "Could not find `opencode` or `npx`. Install Node.js 20+ "
-                     "(which provides npx), or `npm i -g opencode-ai`.",
+            "error": "Could not provision OpenCode: the managed binary download "
+                     "failed (offline?) and no `opencode`/`npx` was found. Restore "
+                     "network access, or install Node.js 20+ (provides npx), or "
+                     "`npm i -g opencode-ai`.",
         }
 
     port = pick_opencode_port()
@@ -408,7 +447,7 @@ def resolve_or_spawn_opencode(workspace_dir: str, origin: Optional[str] = None,
     for value in DEFAULT_CORS_ORIGINS:
         if value not in cors:
             cors.append(value)
-    cmd = argv + ["serve", "--hostname", "127.0.0.1", "--port", str(port)]
+    cmd = argv + ["serve", "--hostname", opencode_bind_host(), "--port", str(port)]
     for value in cors:
         cmd += ["--cors", value]
 

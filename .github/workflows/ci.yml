@@ -224,6 +224,66 @@ jobs:
           # A per-test timeout guards against any regression that hangs a test.
           python -m pytest ./tests -v --timeout=600
 
+  # ── Agent smoke test on a pip-installed package ───────────────────────────
+  # Proves the Option-2 promise end-to-end: install weightslab into a CLEAN
+  # virtualenv (from the built wheel, not editable) and confirm the OpenCode
+  # agent works with NO manual `npm i -g opencode` / `npx` step --
+  #   1. the managed OpenCode binary provisions and runs (`--version`),
+  #   2. `weightslab start` (UI) brings the agent server up even with no
+  #      credential configured (the user can configure it afterwards), and
+  #   3. `weightslab start example` boots without ever hitting the
+  #      "no opencode/npx" path.
+  agent-smoke:
+    needs: [ gate, install ]
+    if: ${{ needs.gate.outputs.run_ci == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: agent smoke (pip install)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Create clean virtual environment and install from wheel
+        run: |
+          python -m venv .venv-smoke
+          . .venv-smoke/bin/activate
+          python -m pip install --upgrade pip build
+          # Build a wheel and install THAT (a real "pip install the package",
+          # not an editable checkout) so package-data / entry points are exercised
+          # exactly as an end user would get them.
+          python -m build --wheel
+          python -m pip install dist/*.whl --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Agent smoke — provision opencode + weightslab start
+        env:
+          WEIGHTSLAB_LOG_LEVEL: INFO
+          # Force the managed provisioning path (do not depend on the runner's
+          # preinstalled Node): the standalone binary must run on its own.
+          WEIGHTSLAB_OPENCODE_AUTODOWNLOAD: '1'
+        run: |
+          . .venv-smoke/bin/activate
+          python scripts/ci/agent_smoke.py start
+
+      - name: Agent smoke — weightslab agent init (CLI, headless)
+        env:
+          WEIGHTSLAB_LOG_LEVEL: INFO
+          WEIGHTSLAB_OPENCODE_AUTODOWNLOAD: '1'
+        run: |
+          . .venv-smoke/bin/activate
+          python scripts/ci/agent_smoke.py cli-init
+
+      - name: Agent smoke — weightslab start example (agent optional, no error)
+        env:
+          WEIGHTSLAB_LOG_LEVEL: INFO
+        run: |
+          . .venv-smoke/bin/activate
+          python scripts/ci/agent_smoke.py example
+
   build-and-publish-dev:
     # Only publish to TestPyPI when pushing to main (not on PRs or dev branch pushes).
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
