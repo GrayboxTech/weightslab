@@ -385,9 +385,9 @@ if __name__ == "__main__":
     else:
         train_range = itertools.count()
 
-    # # =============
-    # # Training Loop
-    # wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+    # =============
+    # Training Loop
+    wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     train_loss = None
     test_loss, test_metric = None, None
