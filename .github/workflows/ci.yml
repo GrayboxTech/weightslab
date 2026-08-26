@@ -200,6 +200,11 @@ jobs:
     # Depends on the fast 3.11 install gate; `gate` is also a direct need so this
     # job can read run_ci (the matrix and main-only jobs run independently).
     needs: [ gate, install ]
+    # Safety net: without this, a hang falls back to GitHub's 360-minute
+    # default. pytest's own --timeout=600 below should already catch a stuck
+    # test, but this bounds the whole job even if some hang manages to dodge
+    # that (e.g. a shared resource -- see WEIGHTSLAB_NOTEBOOK_EXEC_TIMEOUT).
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -221,6 +226,12 @@ jobs:
       - name: Run unit tests - General
         run: |
           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+          # Bounds EmbeddedKernelBridge's per-cell wait (default: unbounded --
+          # see notebook_service.py) so a dead/unresponsive embedded kernel in
+          # TestNotebookKernelEmbedded fails that one test fast instead of
+          # holding the kernel's lock forever and wedging every later test in
+          # the same contract-test class behind it.
+          export WEIGHTSLAB_NOTEBOOK_EXEC_TIMEOUT="60"
           # A per-test timeout guards against any regression that hangs a test.
           python -m pytest ./tests -v --timeout=600
 
