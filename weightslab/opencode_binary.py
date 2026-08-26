@@ -25,6 +25,7 @@ The platform/arch/musl/AVX2 selection logic mirrors ``opencode-ai``'s own
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import platform
@@ -338,11 +339,20 @@ _bg_started = False
 
 def ensure_managed_binary_in_background(reason: str = "", logger: Optional[logging.Logger] = None) -> None:
     """Install OpenCode in a daemon thread if it isn't already present, logging
-    the install. Idempotent, best-effort, and non-blocking -- the caller (a CLI
-    launch or ``import weightslab``) never waits on the ~180 MB download.
+    the install. Idempotent, best-effort, and non-blocking -- a long-running
+    caller (a CLI launch or ``import weightslab`` in an app) never waits on the
+    ~180 MB download.
 
-    Respects WEIGHTSLAB_OPENCODE_AUTODOWNLOAD. Only the FIRST call per process
-    does anything; the rest return immediately.
+    A short-lived caller that exits right after import IS made to wait (see the
+    ``atexit`` hook below): a daemon thread still doing network/ssl I/O when
+    CPython starts tearing down interpreter state on exit is a known segfault
+    vector (use-after-free in the ssl/socket C extensions, not a catchable
+    Python exception) -- observed as `python -c "import weightslab"` dying with
+    "Segmentation fault (core dumped)" right after the import finished. Joining
+    at atexit -- which runs in the main thread before ``Py_Finalize`` begins
+    tearing down module/C-extension state -- closes that race. This only costs
+    time on the very first import on a machine; once the binary is cached,
+    ``find_managed_binary()`` above short-circuits and no thread is spawned.
     """
     global _bg_started
     log = logger or _LOGGER
@@ -369,4 +379,8 @@ def ensure_managed_binary_in_background(reason: str = "", logger: Optional[loggi
         except Exception as exc:  # pragma: no cover - best-effort
             log.debug("OpenCode background install failed: %s", exc)
 
-    threading.Thread(target=_run, name="opencode-install", daemon=True).start()
+    t = threading.Thread(target=_run, name="opencode-install", daemon=True)
+    t.start()
+    # Bounded by download_managed_binary()'s own per-candidate _DOWNLOAD_TIMEOUT,
+    # so this can't hang process exit indefinitely -- see the docstring above.
+    atexit.register(t.join)
