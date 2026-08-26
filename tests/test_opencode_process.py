@@ -16,6 +16,7 @@ temp directory, not mocked away.
 import json
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -46,6 +47,15 @@ def stop_workspace_server(workspace_dir):
     except (OSError, ValueError):
         return
     if not pid:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
         return
     try:
         os.killpg(os.getpgid(pid), signal.SIGTERM)
