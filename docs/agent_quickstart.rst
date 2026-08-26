@@ -19,25 +19,39 @@ server. This page is the fastest path from "just installed WeightsLab" to
 What you need
 --------------
 
-- WeightsLab installed (``pip install weightslab``) — this brings the
-  ``opencode-ai`` bundled binary with it, so there is nothing extra to
-  install for the agent itself.
+- WeightsLab installed (``pip install weightslab``). That's the only install
+  step: WeightsLab provisions the OpenCode binary itself, on first use, into a
+  per-user cache — **no Node.js and no manual ``npm``/``opencode`` install
+  required**.
 - One set of credentials for a model provider: an OpenRouter API key, an
   Anthropic key, or a local Ollama install. Pick whichever you already have.
 
-Step 1 — authenticate OpenCode once
+Step 1 — initialize the agent once
 ------------------------------------
 
 The agent's provider and credentials live entirely inside OpenCode, never in
-WeightsLab itself. Do this once per machine:
+WeightsLab itself. The one-liner below provisions the OpenCode binary (if it
+isn't already) and then signs you in — do this once per machine:
 
 .. code-block:: bash
 
-   opencode auth login
+   weightslab agent init
 
-Follow the prompts to sign in to OpenRouter, Anthropic, or point it at a
-local Ollama endpoint. You can also do this later from the browser, using the
-login modal on the Weights Studio landing page — no terminal required.
+Follow the prompts to sign in to OpenRouter, Anthropic, or point it at a local
+Ollama endpoint. Equivalent alternatives:
+
+- ``opencode auth login`` — if you prefer to drive OpenCode directly (WeightsLab
+  installs the binary either way).
+- The login modal on the Weights Studio landing page — no terminal required.
+- ``weightslab agent init --provision-only`` — headless/CI: just install the
+  binary, skip the interactive sign-in.
+
+.. note::
+
+   You can skip this step and start straight away — if no credential is found,
+   WeightsLab logs an *info* line ("OpenCode is installed, but the agent is not
+   initialized yet — run ``weightslab agent init``") and keeps running. The
+   assistant is optional; nothing else is blocked.
 
 Step 2 — start an experiment
 ------------------------------
