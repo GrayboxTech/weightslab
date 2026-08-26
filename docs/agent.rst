@@ -95,6 +95,13 @@ Use ``weightslab cli`` and run:
 
 Initialization and configuration
 --------------------------------
+.. code-block:: bash
+   # Requires a local OpenCode server already running and authenticated
+   # (opencode has no API-key env var of its own -- see "Initializing the
+   # agent" below).
+   export UTEST_AGENT_PROMPT_EVALUATION=1
+   export OPENCODE_MODEL=openrouter/anthropic/claude-opus-4.6  # optional
+   pytest weightslab/tests/trainer/services/test_agent_live_prompt_evaluation.py -v
 
 .. code-block:: bash
 

@@ -24,6 +24,12 @@ Key ``wl.watch_or_edit(model, flag="model", ...)`` parameters:
 .. list-table::
    :header-rows: 1
 
+- Observe training signals at batch/sample granularity.
+- Watch the model's own training dynamics — gradients, weights, activations —
+  per layer and per step (see `Training-dynamics signals`_).
+- Keep a stable ledger/proxy handle across runtime updates.
+- Enable dynamic controls without rewriting your loop architecture.
+
    * - Parameter
      - Default
      - Behavior

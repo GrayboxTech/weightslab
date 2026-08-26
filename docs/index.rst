@@ -88,6 +88,13 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
       Complete SDK, CLI, and gRPC documentation.
 
 
+   .. .. grid-item-card:: Weights Studio
+   ..    :link: weights_studio/index
+   ..    :link-type: doc
+
+   ..    Web-based UI to inspect, edit, and optimize training behavior in real time.
+
+
 .. toctree::
    :maxdepth: 2
    :caption: GETTING STARTED
