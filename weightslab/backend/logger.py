@@ -1487,10 +1487,13 @@ class LoggerQueue:
         actually drawable -- not by the table size. This is what makes a
         hundred-million-row history openable.
 
-        The curve is split into ``max_points`` equal step-buckets and one
-        representative (the bucket's earliest step) is emitted per bucket, via a
-        streaming hash aggregate rather than a sort/window. Three further rules
-        keep the reduced curve faithful:
+        The curve is split into ``max_points / 2`` equal step-buckets and TWO
+        representatives — the bucket's minimum-value and maximum-value rows — are
+        emitted per bucket (min/max decimation), via a streaming hash aggregate
+        rather than a sort/window. Keeping both extremes is what preserves spikes
+        that fall between bucket edges (earliest-per-bucket used to drop them);
+        halving the bucket count keeps the total at ~``max_points`` per curve.
+        Three further rules keep the reduced curve faithful:
 
         * the curve's true first and last steps are always emitted, so endpoints
           and the x-extent never move under downsampling;
@@ -1511,14 +1514,19 @@ class LoggerQueue:
             keep_special: emit marker/annotated/outlier rows regardless of
                 bucketing.
         """
-        n_buckets = max(int(max_points or _DEFAULT_MAX_POINTS_PER_CURVE),
+        # Two representatives per bucket (the min-value and max-value rows, see
+        # `reps` below) preserve spikes, so halve the bucket count to still net
+        # ~max_points per curve overall. 10k points -> 500 buckets x {min,max}
+        # -> ~1000 points, WITH the spikes that plain earliest-per-bucket
+        # decimation used to drop.
+        n_buckets = max(int(max_points or _DEFAULT_MAX_POINTS_PER_CURVE) // 2,
                         _MIN_POINTS_PER_CURVE)
         where, params = self._scope_filters(metric_names, exp_hashes, x_min, x_max)
         cols = ", ".join(_SIGNAL_READ_COLS)
         # arg_min(col, step) picks each column from the bucket's earliest-step
         # row, so a representative is one real row rather than a blend. Rows
         # sharing a step within a bucket tie arbitrarily -- acceptable for a
-        # decimated view, and the zoom path resolves them.
+        # decimated view, and the zoom path resolves them. Used for the endpoints.
         picks = ", ".join(
             f"arg_min({c}, step) AS {c}" for c in _SIGNAL_READ_COLS
             if c not in ("metric_name", "experiment_hash", "step")
@@ -1526,6 +1534,18 @@ class LoggerQueue:
         picks_max = ", ".join(
             f"arg_max({c}, step) AS {c}" for c in _SIGNAL_READ_COLS
             if c not in ("metric_name", "experiment_hash", "step")
+        )
+        # Per-bucket VALUE extremes: the whole row at the bucket's min metric_value
+        # and the whole row at its max metric_value (step included, via
+        # arg_min/arg_max over metric_value). This is min/max decimation — a spike
+        # is by definition its bucket's extreme, so it always survives.
+        picks_vmin = ", ".join(
+            f"arg_min({c}, metric_value) AS {c}" for c in _SIGNAL_READ_COLS
+            if c not in ("metric_name", "experiment_hash")
+        )
+        picks_vmax = ", ".join(
+            f"arg_max({c}, metric_value) AS {c}" for c in _SIGNAL_READ_COLS
+            if c not in ("metric_name", "experiment_hash")
         )
         sql = f"""
         WITH scoped AS (
@@ -1560,7 +1580,13 @@ class LoggerQueue:
               ON s.metric_name = b.m AND s.experiment_hash IS NOT DISTINCT FROM b.h
         ),
         reps AS (
-            SELECT metric_name, experiment_hash, MIN(step) AS step, {picks}
+            -- Min/max decimation: keep BOTH the lowest- and highest-value row of
+            -- each bucket so up- and down-spikes between bucket edges survive
+            -- (plain earliest-per-bucket dropped them).
+            SELECT metric_name, experiment_hash, {picks_vmin}
+            FROM tagged GROUP BY metric_name, experiment_hash, bucket
+            UNION ALL
+            SELECT metric_name, experiment_hash, {picks_vmax}
             FROM tagged GROUP BY metric_name, experiment_hash, bucket
         ),
         ends AS (

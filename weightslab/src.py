@@ -5570,7 +5570,13 @@ def _ai_report_generation_result(
         _dm = get_dataframe()
         df = _dm.get_combined_df() if _dm is not None else None
     except Exception as _e:
-        logger.debug("ai_report_generation: no sample dataframe available (%s).", _e)
+        # Warn (not debug): if get_combined_df() raises — e.g. array/media proxy
+        # conversion choking on a video-generation dataframe — the report would
+        # otherwise silently degrade to "No sample dataframe data available yet"
+        # and read as broken for no visible reason. Surface it, keep going.
+        logger.warning(
+            "ai_report_generation: sample dataframe unavailable (%s); the report's "
+            "Dataset/Media sections will be empty.", _e, exc_info=True)
         df = None
 
     # The narrative comes from the live agent — the same LLM call the Studio

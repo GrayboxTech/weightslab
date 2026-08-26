@@ -584,6 +584,10 @@ class DataService:
         )
 
         self._is_filtered = False # Track if the current view is filtered/modified by user
+        # Last known FULL (unfiltered) row count, cached whenever GetDataSamples
+        # serves the unfiltered view, so the subview ribbon can report an accurate
+        # "X of Y" total even while a filter is active. See GetDataSamples.
+        self._last_full_count = 0
         # logger.info("[DataService] Skipping expensive startup computations (aspect ratio, natural sort, signals).")
         # These should be triggered on-demand or run in background to avoid blocking training start.
 
@@ -4990,7 +4994,31 @@ class DataService:
 
         try:
             # Process the request directly without deduplication logicj
-            return self._process_get_data_samples(request, context)
+            resp = self._process_get_data_samples(request, context)
+            # Stamp the server-authoritative subview state onto EVERY response so
+            # a fresh client (private window, no cached UI state) can render the
+            # "you are viewing a subview" warning ribbon + reset in both grid and
+            # list mode. Mirrors self._is_filtered, which is set on agent
+            # masks/filters/sorts and cleared on @reset.
+            try:
+                is_sub = bool(getattr(self, "_is_filtered", False))
+                resp.is_subview = is_sub
+                view_df = getattr(self, "_all_datasets_df", None)
+                if view_df is not None:
+                    resp.view_count = int(len(view_df))
+                    # Remember the full-dataset size whenever we serve the
+                    # UNfiltered view, so we can still report an accurate total
+                    # (for the "X of Y samples" ribbon) once a filter is applied
+                    # and _all_datasets_df holds only the subview. Survives across
+                    # a fresh client connecting to this same backend, since the
+                    # backend serves the full view at least once at startup.
+                    if not is_sub:
+                        self._last_full_count = int(len(view_df))
+                    full = int(getattr(self, "_last_full_count", 0) or 0)
+                    resp.total_count = full if full else int(len(view_df))
+            except Exception:
+                logger.debug("GetDataSamples: could not stamp subview state", exc_info=True)
+            return resp
 
         except Exception as e:
             logger.error("Error in GetDataSamples: %s", str(e), exc_info=True)
