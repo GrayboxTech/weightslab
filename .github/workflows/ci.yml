@@ -204,7 +204,7 @@ jobs:
     # default. pytest's own --timeout=600 below should already catch a stuck
     # test, but this bounds the whole job even if some hang manages to dodge
     # that (e.g. a shared resource -- see WEIGHTSLAB_NOTEBOOK_EXEC_TIMEOUT).
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -233,7 +233,16 @@ jobs:
           # the same contract-test class behind it.
           export WEIGHTSLAB_NOTEBOOK_EXEC_TIMEOUT="60"
           # A per-test timeout guards against any regression that hangs a test.
-          python -m pytest ./tests -v --timeout=600
+          # -m "not scale": tests/backend/test_logger_scale.py deliberately
+          # builds a multi-million-row DuckDB fixture to stress-test large-scale
+          # queries (see its module docstring) -- real, by-design heavy work,
+          # not a hang, but easily 600s+ on a shared/throttled runner. Its own
+          # marker registration (pyproject.toml) already says "deselect with
+          # -m 'not scale'"; this job just never actually did. Each `scale`
+          # test hitting the per-test timeout instead of being deselected burns
+          # 10 minutes AND leaves the job stuck at the same progress % across
+          # unrelated pushes, which read as a hang.
+          python -m pytest ./tests -v --timeout=600 -m "not scale"
 
   # ── Agent smoke test on a pip-installed package ───────────────────────────
   # Proves the Option-2 promise end-to-end: install weightslab into a CLEAN
