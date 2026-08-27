@@ -57,21 +57,9 @@ To suppress auto-opening the browser::
 Sections
 --------
 
-Feature reference
-~~~~~~~~~~~~~~~~~
-
 Everything the studio puts on screen, what it is for, and how to drive it —
 grouped into four parts. Each page below covers its own subsections; see the
 page itself for the details.
-
-.. toctree::
-   :maxdepth: 1
-
-   landing_page
-   agent
-   left_panel
-   main_area
-   more/index
 
 - :doc:`landing_page` — the pre-experiment surface: agent chat, local Jupyter,
   Colab quickstarts, :ref:`report generation <studio-report-generation>`, and
@@ -84,3 +72,4 @@ page itself for the details.
 - :doc:`main_area` — the Plots Board (search, merged curves, error bands,
   right-click actions, resource monitoring) and the Data Board (grid/list
   modes, quick filters, selection, tagging, the detail modal).
+- :doc:`more/index` — More to know.

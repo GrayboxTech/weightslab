@@ -10,7 +10,7 @@ Installed as a console script via pyproject.toml:
 
 .. code-block:: bash
 
-   weightslab {se,start,cli,tunnel,export,help} ...
+   weightslab {se,start,cli,tunnel,export,agent,help} ...
 
 Run weightslab, weightslab -h, or weightslab help to print the full built-in help.
 
@@ -27,6 +27,8 @@ Run weightslab, weightslab -h, or weightslab help to print the full built-in hel
      - Run a bundled training example.
    * - weightslab cli
      - Connect to a running experiment interactive console.
+   * - weightslab agent
+     - Provision and sign in to the integrated OpenCode agent.
    * - weightslab tunnel
      - Forward a remote gRPC backend to a local TCP port.
    * - weightslab export
@@ -52,11 +54,15 @@ weightslab start
 
 .. code-block:: bash
 
-   weightslab start [--port PORT] [--config FILE] [--host HOST]
+   weightslab start [DIR] [--port PORT] [--config FILE] [--host HOST]
                     [--backend-host HOST] [--backend-port PORT]
                     [--no-browser] [--certs]
 
 Runs the UI natively from Python.
+
+``DIR`` *(positional, optional)* — establishes the experiment directory (its
+checkpoints, logs, and ``notebook.ipynb`` live there). UI-only; it does not
+start training on its own.
 
 Port resolution order:
 
@@ -64,7 +70,7 @@ Port resolution order:
 2. ui_port from --config / WEIGHTSLAB_EXPERIMENT_CONFIG config file
 3. WL_LAST_UI_PORT
 4. WEIGHTSLAB_UI_PORT (compatibility)
-5. 50051
+5. 8080
 
 If the chosen port is already in use, weightslab start falls back to a random
 available port and logs it.
@@ -83,7 +89,8 @@ weightslab start example
 
 .. code-block:: bash
 
-   weightslab start example [--cls|--seg|--det|--clus|--gen|--3d_det|--2d_det]
+   weightslab start example [--cls|--seg|--det|--clus|--gen|--3d_det|--2d_det
+                             |--model|--data|--config|--logger]
 
 Runs one of the bundled PyTorch examples in the foreground (stop with
 Ctrl+C). Installs the example's own ``requirements.txt``/``requirements.in``
@@ -116,6 +123,23 @@ the documented form.
    * - ``--2d_det``
      - 2D LiDAR point-cloud detection
 
+One-level-at-a-time MNIST demos (four-way SDK approach — see
+:doc:`four_way_approach`), also mutually exclusive with the flags above:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Flag
+     - Example
+   * - ``--model``
+     - Model interaction only
+   * - ``--data``
+     - Data exploration only
+   * - ``--config``
+     - Config management only
+   * - ``--logger``
+     - Logger and signals only
+
 **Examples**
 
 .. code-block:: bash
@@ -125,7 +149,7 @@ the documented form.
    weightslab start example --3d_det       # 3D LiDAR detection
    weightslab example start --det          # tolerant alias, same as `start example --det`
 
-Then, in another terminal: ``weightslab launch`` and open
+Then, in another terminal: ``weightslab start`` and open
 ``http://localhost:5173``. See :doc:`examples/index` for what each example
 demonstrates.
 
@@ -138,76 +162,17 @@ weightslab cli
 
 Connects to a running experiment CLI server.
 
-weightslab tunnel
-~~~~~~~~~~~~~~~~~
+weightslab agent
+~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
-   weightslab tunnel [ENDPOINT] [--listen-port N] [--listen-host H] [--remote-port N]
+   weightslab agent init [--provision-only]
 
-Forwards a remote gRPC endpoint to a local TCP port.
-
-- Use raw TCP tunnels (for example bore or ngrok tcp).
-- Default local listen port is 50051.
-
-- The remote tunnel must be **raw TCP**, *not* an HTTP/gRPC-Web tunnel. A
-  zero-signup option is `bore <https://github.com/ekzhang/bore>`_ with its free
-  public relay: ``bore local 50051 --to bore.pub`` (prints ``bore.pub:<port>``).
-  ``ngrok tcp 50051`` also works but now requires a credit card on the free tier.
-- The backend must run **plaintext** — the default ``weightslab launch``
-  (no ``--certs``) — so no TLS terminates mid-path.
-
-**Arguments**
-
-- ``ENDPOINT`` *(positional, optional)* — the remote backend as ``host:port``
-  (e.g. ``0.tcp.ngrok.io:12345``); a ``tcp://`` prefix is accepted and
-  stripped. Default: the ``WEIGHTSLAB_TUNNEL_ENDPOINT`` environment variable, so
-  a bare ``weightslab tunnel`` works once that is exported.
-- ``--listen-port``, ``-p`` *(int)* — local port to expose. Default: **50051**
-  (the port the bundled Envoy upstream dials — leave it unless you changed
-  ``GRPC_BACKEND_PORT``).
-- ``--listen-host`` *(str)* — interface to bind. Default: **auto** —
-  ``127.0.0.1`` on Windows/macOS (Docker Desktop reaches host loopback via
-  ``host.docker.internal``), ``0.0.0.0`` on Linux (compose ``host-gateway``
-  resolves to the bridge IP, which cannot reach a loopback-only listener).
-- ``--remote-port`` *(int)* — the remote port, when ``ENDPOINT`` has only a
-  host and no ``:port``.
-
-**Examples**
-
-.. code-block:: bash
-
-   weightslab tunnel bore.pub:12345               # bridge remote backend -> localhost:50051
-   weightslab tunnel tcp://bore.pub:12345         # tcp:// prefix is fine
-   weightslab tunnel                              # uses $WEIGHTSLAB_TUNNEL_ENDPOINT
-   weightslab tunnel host.example.com --remote-port 50051
-   weightslab tunnel host:50051 -p 50055          # expose locally on a different port
-
-**Typical workflow** (Colab backend, local UI):
-
-.. code-block:: bash
-
-   # 1) In Colab: expose the training backend over raw TCP (prints bore.pub:<port>)
-   #    !bore local 50051 --to bore.pub
-
-   # 2) On your machine, in two terminals:
-   weightslab launch                           # plaintext HTTP (default)
-   weightslab tunnel bore.pub:12345               # in another window, the host:port bore printed
-
-   # 3) Open http://localhost:5173 — Studio streams live from Colab.
-
-.. note::
-
-   Step 1 can be done for you: call ``wl.serve(serving_grpc=True,
-   serving_bore=True)`` in the training script. It downloads ``bore``, opens the
-   relay, and prints the exact ``weightslab tunnel bore.pub:<port>`` line to run
-   on your machine — see ``serve`` in :doc:`user_functions`.
-
-The command probes the remote on startup (warning, not fatal, if it isn't up
-yet), re-resolves the endpoint per connection (so a changing tunnel IP is picked
-up), and runs until ``Ctrl+C``. See the classification Colab notebook
-(``examples/Notebooks/PyTorch/wl-classification.ipynb``) for the end-to-end
-setup.
+Provisions the integrated OpenCode agent (downloads the per-user OpenCode
+binary if missing) and signs it in. ``--provision-only`` stops after
+provisioning, without walking through sign-in. This is the CLI counterpart to
+typing ``/init`` in the Weights Studio agent bar — see :doc:`agent`.
 
 weightslab tunnel
 ~~~~~~~~~~~~~~~~~~

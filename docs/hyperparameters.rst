@@ -138,14 +138,3 @@ UI:
 
 - Hyperparameters panel runtime edits
 - Agent-driven config changes (for example "set batch size to 32")
-
-Related automated tests (verified)
-----------------------------------
-
-Config registration/update coverage:
-
-- ``tests/general/test_four_way_standalone.py::TestConfigLevelCli`` (the standalone
-  above, including YAML-path registration and ``set_hp`` through the CLI socket)
-- ``tests/general/test_hyperparams.py`` (register/get/set behavior)
-- ``tests/general/test_cli.py`` (CLI hyperparameter commands including ``set_hp``)
-- ``tests/test_src_functions.py`` (root log-dir and source-level behavior)

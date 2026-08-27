@@ -460,10 +460,14 @@ body[data-theme="dark"] .wl-only-dark {
   height: 2.7rem;
 }
 
-/* The menu: right column, flex-end aligned */
+/* The menu: right column, flex-end aligned. flex: 0 0 auto -- it always
+   renders at its natural content width and never shrinks; .wl-topnav-center
+   is the only flexible item, so it's the one that yields space, by
+   construction, instead of a shrink-weight fight between two flexible
+   siblings (see the tip-vs-menu history in .wl-topnav-center below). */
 .wl-topnav-menu {
   display: flex;
-  flex: 1;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: flex-end;
   gap: 0.4rem;
@@ -561,20 +565,39 @@ body[data-theme="dark"]  .wl-topnav-theme .wl-ti-dark  { display: inline-flex; }
 }
 
 /* ── Topnav center tip ───────────────────────────────────────────────────── */
+
+/* No longer used as a flex spacer -- .wl-topnav-center now sits directly in
+   the row and fills this role itself. Kept in the DOM (wl-topnav.js still
+   creates it) but taken out of layout. */
 .wl-topnav-left {
-  flex: 1;
+  display: none;
 }
 
+/* Two earlier attempts got this wrong by treating the tip and the menu as
+   two independently-flexible siblings (flex:1 each, or later a fixed
+   percentage) -- the browser's flex-shrink weighting favors whichever item
+   has the larger flex-basis, which was the menu, so the tip either got
+   crushed toward zero or had to be hidden by JS collision detection almost
+   constantly (the menu's 7 items routinely need more than half the bar).
+   Making .wl-topnav-menu flex: 0 0 auto (never shrinks, natural width) and
+   this the ONLY flexible item removes the fight entirely: overlap is
+   structurally impossible, and this simply gets narrower -- gracefully,
+   via overflow+ellipsis on the text inside -- as the menu needs more room. */
 .wl-topnav-center {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
   display: flex;
   align-items: center;
   gap: 0.35rem;
-  max-width: 38%;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   pointer-events: none;
+}
+
+/* wl-ribbon.js toggles this when the shrunk box gets too narrow to show
+   anything useful, rather than letting a 1-2 character sliver + ellipsis
+   render. */
+.wl-topnav-center.wl-topnav-center--collides {
+  visibility: hidden;
 }
 
 .wl-topnav-tip-icon {

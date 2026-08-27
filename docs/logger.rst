@@ -129,7 +129,8 @@ Signal-shape classification
 
 Per-sample trajectories can be classified into categorical tags (for example
 monotonic / plateaued / forgotten) and used by Studio, agent flows, and reports.
-See :doc:`user_functions` for classifier customization APIs.
+See :doc:`signal_trajectory_classification` for the concept and
+:doc:`user_functions` for classifier customization APIs.
 
 Standalone logger-only integration (UI + CLI ready)
 ---------------------------------------------------
@@ -178,7 +179,8 @@ CLI and UI surfaces
 CLI:
 
 - ``status``
-- ``evaluate`` / ``eval_status`` (needs a registered loader to evaluate)
+- ``evaluate`` / ``eval_status`` (needs a registered loader to evaluate; see
+  :doc:`custom_evaluation` to override what actually runs)
 - ``report [--no-agent]`` — renders the logged history as HTML under
   ``<root_log_dir>/reports/``
 
@@ -187,16 +189,3 @@ UI:
 - live signal plots
 - sample ranking by signal values
 - report button and signal diagnostics
-
-Related automated tests (verified)
-----------------------------------
-
-Signal and logger coverage:
-
-- ``tests/general/test_four_way_standalone.py::TestLoggerLevelCli`` (the standalone
-  above: one history point per step with no model registered, plus ``report``
-  through the CLI socket)
-- ``tests/general/test_signals.py`` (save/compute signal flows)
-- ``tests/general/test_signals_wrapping.py`` (wrapping behavior across tasks)
-- ``tests/backend/test_logger_core.py`` (logger histories, queueing, markers)
-- ``tests/model/test_logger.py`` (model-linked logger behaviors)

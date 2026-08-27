@@ -118,7 +118,7 @@ default. When you ask through chat, though, wording matters:
 
 .. code-block:: text
 
-   Generate a report.                                # always a NEW file
+   Generate a report.                                 # always a NEW file
    Update the report with a histogram of val_loss.    # overwrites the last one
    Add a histogram of val_loss to the report.         # overwrites the last one
    Also include the confidence signal in it.          # overwrites the last one

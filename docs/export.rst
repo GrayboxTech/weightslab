@@ -79,11 +79,29 @@ same as ``weightslab cli``. See :doc:`user_commands` for every flag.
 
 **Weights Studio UI**
 
-The "Export" button sits next to the Save and Grid settings controls in the
-Details panel. Clicking it opens a small format picker (CVAT / Label
-Studio / V7) with an optional tag selector; the chosen format (and tags, if
-any) trigger an ``ExportAnnotations`` gRPC call and the response downloads
-as a file in your browser.
+The download-arrow icon button sits in the Details panel's header actions,
+between the manual-save and grid-settings buttons. Clicking it opens a small
+floating menu next to the button:
+
+- A **tag filter section** — one checkbox per existing ``tag:<name>`` column
+  (boolean or categorical), only shown if any tags exist. Leave every box
+  unchecked to export the whole dataset; check one or more to restrict to
+  samples carrying **any** of them.
+- Three **format buttons** — "Export to CVAT (XML)", "Export to Label Studio
+  (JSON)", "Export to V7 / Darwin (zip)".
+
+Clicking a format button fires the ``ExportAnnotations`` gRPC call
+immediately (with the checked tags, or none) — there is no format preview
+step. A toast shows "Exporting annotations…", then either a success message
+with the image count and a browser download of the file, or an error
+message if the call fails. The UI always exports ground-truth targets; it
+does not currently expose the ``use_predictions``/``--predictions`` toggle
+that the Python and CLI paths have.
+
+.. note::
+
+   The export button is disabled in sandbox mode, with a tooltip explaining
+   why — sandbox sessions can't download data out of the demo.
 
 **In-app chat agent**
 

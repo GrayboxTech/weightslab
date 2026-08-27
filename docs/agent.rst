@@ -95,27 +95,6 @@ Use ``weightslab cli`` and run:
 
 Initialization and configuration
 --------------------------------
-.. code-block:: bash
-   # Requires a local OpenCode server already running and authenticated
-   # (opencode has no API-key env var of its own -- see "Initializing the
-   # agent" below).
-   export UTEST_AGENT_PROMPT_EVALUATION=1
-   export OPENCODE_MODEL=openrouter/anthropic/claude-opus-4.6  # optional
-   pytest weightslab/tests/trainer/services/test_agent_live_prompt_evaluation.py -v
-
-.. code-block:: bash
-
-   # Requires a local OpenCode server already running and authenticated
-   # (opencode has no API-key env var of its own -- see "Initializing the
-   # agent" below).
-   export UTEST_AGENT_PROMPT_EVALUATION=1
-   export OPENCODE_MODEL=openrouter/anthropic/claude-opus-4.6  # optional
-   pytest weightslab/tests/trainer/services/test_agent_live_prompt_evaluation.py -v
-
-Without ``UTEST_AGENT_PROMPT_EVALUATION`` set, the suite logs a note and
-skips entirely (it never runs by accident in CI or against a real model
-unintentionally). A small always-on sanity check for the harness itself
-(fixture shape, op-runner correctness) still runs regardless.
 
 Resolution order, last one wins:
 
@@ -190,19 +169,6 @@ Remote provider — OpenRouter
      - —
      - ``true`` (the shipped ``agent_config.yaml`` sets ``false``)
      - Also set up Ollama, so a failing/absent cloud key still leaves a working agent.
-
-Environment-only setup (nothing to edit in the repo):
-
-.. code-block:: bash
-
-   pytest weightslab/tests/trainer/services/test_agent_prompt_unit.py \
-          weightslab/tests/trainer/services/test_agent_model_and_safety_unit.py \
-          weightslab/tests/trainer/services/test_agent_service_unit.py -v
-
-These exercise the planner/executor logic directly (handlers, safety nets,
-resolvers, dispatch) via hand-built plans rather than natural language — they
-don't call an LLM, so they're not "queries" in the same sense as the live
-suite above, but they pin down every fix described in this page.
 
 Conversation memory (what's actually kept between turns)
 ------------------------------------------------------------

@@ -18,11 +18,17 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 .. grid:: 1 1 2 3
    :gutter: 2
 
-   .. grid-item-card:: Quickstart
-      :link: quickstart
+   .. grid-item-card:: Agent Quickstart
+      :link: agent_quickstart
       :link-type: doc
 
-      Install and run WeightsLab in minutes.
+      Start using the AI agent to analyze and optimize your training.
+
+   .. grid-item-card:: Good Practices
+      :link: usage/good_practice/index
+      :link-type: doc
+
+      Standardize your training code for WeightsLab integration.
 
    .. grid-item-card:: Weights Studio UI
       :link: weights_studio_ui/index
@@ -41,12 +47,6 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
       :link-type: doc
 
       Understand the 4-level workflow and each part independently.
-
-   .. grid-item-card:: Examples
-      :link: examples/index
-      :link-type: doc
-
-      End-to-end runnable integrations.
 
    .. grid-item-card:: Notebooks
       :link: notebooks
@@ -78,21 +78,11 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       Export bounding boxes and segmentation masks to CVAT, Label Studio, or V7 for relabeling.
 
-   .. grid-item-card:: gRPC Communication
-      :link: grpc/index
-
    .. grid-item-card:: Reference
       :link: user_functions
       :link-type: doc
 
       Complete SDK, CLI, and gRPC documentation.
-
-
-   .. .. grid-item-card:: Weights Studio
-   ..    :link: weights_studio/index
-   ..    :link-type: doc
-
-   ..    Web-based UI to inspect, edit, and optimize training behavior in real time.
 
 
 .. toctree::
@@ -128,8 +118,8 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    :hidden:
 
    four_way_approach
-   agent
-   checkpointing
+   signal_trajectory_classification
+   custom_evaluation
 
 
 .. toctree::
@@ -137,8 +127,10 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    :caption: TOOLS
    :hidden:
 
-   experiment_reports
    resource_monitoring
+   experiment_reports
+   checkpointing
+   agent
    export
 
 

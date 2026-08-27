@@ -81,10 +81,6 @@ Two boundaries are worth knowing before mixing and matching:
   are routed into the tracked sample dataframe. Step-level curves do not.
 - ``evaluate`` in the CLI needs a registered loader to evaluate.
 
-``tests/general/test_four_way_standalone.py`` checks all four: it asserts, from the
-examples' own source, that no example registers another level's flag, and it drives
-each level's documented CLI commands over a real CLI socket.
-
 Minimal integration order
 -------------------------
 
@@ -93,7 +89,7 @@ Minimal integration order
    import weightslab as wl
    import torch.nn as nn
    import torch.optim as optim
-   
+
    # ...
    # 1) Register shared hyperparameters
    hp = wl.watch_or_edit(parameters, flag="hyperparameters", defaults=parameters)
@@ -132,11 +128,19 @@ After the four levels are in place, use :doc:`agent` as an optional accelerator
 for natural-language operations from UI or CLI (tag/discard/filter/report/model
 actions) without changing your training loop.
 
-Subpages
---------
+
+Recommended next reading
+------------------------
+Now that you understand the four levels, you can explore them in more detail:
+
+- :doc:`model_interaction`: inspect and control model/optimizer/loss runtime behavior.
+- :doc:`data_exploration`: tag, discard, and query difficult samples.
+- :doc:`hyperparameters`: live update experiment configuration.
+- :doc:`logger`: persist and analyze per-step/per-sample trajectories.
+
 
 .. toctree::
-   :maxdepth: 1
+   :hidden:
 
    model_interaction
    data_exploration

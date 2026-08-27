@@ -43,6 +43,7 @@ LEAD_IN = re.compile(
 TAIL = re.compile(r"\n*One platform\. Unmatched flexibility\..*\Z", re.S)
 
 SECTION_MARKER = re.compile(r"\s*#{2,4}\s+([A-Z][^#\n]{0,40}?)\s+(?=[-*`\[A-Z])")
+TOPLEVEL_HEADING = re.compile(r"#{2,6}\s+([^\n#]+?)\s*$", re.M)
 ITEM_SPLIT = re.compile(r"\s+-\s+(?=[\[`*\w])")
 PR_BULLET = re.compile(r"^\[([^\]]+)\]\(([^)]+)\)\s*:?\s*(.*)$", re.S)
 
@@ -158,10 +159,47 @@ def summary_to_rst(body: str) -> list:
     if not text:
         return ["   *No description was published with this release.*"]
 
+    # Some releases write real ATX headers (``#### Foo``) straight into the
+    # welcome section instead of the usual flattened "PR list" shape -- and
+    # the flattening GitHub applies to the release template can glue one onto
+    # the tail of the preceding sentence on the same line. In both cases the
+    # heading is the remainder of its raw line, so marking off everything
+    # from the hashes to end-of-line (multiline mode) catches both without
+    # needing them on their own line first.
+    marked = TOPLEVEL_HEADING.sub(
+        lambda m: "\n\n@@" + m.group(1).strip().strip("*").strip() + "@@\n\n", text)
+
     lines, entries, current = [], [], None
-    for raw in text.splitlines():
+
+    def flush_entries():
+        for entry in entries:
+            joined = " ".join(entry).strip()
+            match = PR_BULLET.match(joined)
+            if match:
+                label, url, description = match.groups()
+                lines.append("   - `" + label.strip() + " <" + url.strip() + ">`__")
+                lines.extend(_description_lines(description, "     "))
+            else:
+                lines.extend(_wrap(_sanitize(md_inline_to_rst(joined)), 86, first="   - ", rest="     "))
+            lines.append("")
+        entries.clear()
+
+    for raw in marked.splitlines():
         stripped = raw.strip()
         if not stripped or stripped == "---":
+            continue
+        heading = re.fullmatch(r"@@(.+)@@", stripped)
+        if heading:
+            # A heading always closes whatever bullet/list came before it, so
+            # its entries are flushed (keeping them grouped under the right
+            # heading) before the heading itself is emitted as bold text with
+            # blank lines on both sides -- RST requires that gap around a
+            # paragraph sitting next to a list.
+            flush_entries()
+            current = None
+            lines.append("")
+            lines.append("   **" + md_inline_to_rst(heading.group(1)) + "**")
+            lines.append("")
             continue
         if stripped.startswith("- "):
             current = [stripped[2:]]
@@ -173,16 +211,7 @@ def summary_to_rst(body: str) -> list:
         else:
             lines.extend(_wrap(_sanitize(md_inline_to_rst(stripped)), 86, first="   ", rest="   "))
 
-    for entry in entries:
-        joined = " ".join(entry).strip()
-        match = PR_BULLET.match(joined)
-        if match:
-            label, url, description = match.groups()
-            lines.append("   - `" + label.strip() + " <" + url.strip() + ">`__")
-            lines.extend(_description_lines(description, "     "))
-        else:
-            lines.extend(_wrap(_sanitize(md_inline_to_rst(joined)), 86, first="   - ", rest="     "))
-        lines.append("")
+    flush_entries()
 
     while lines and not lines[-1].strip():
         lines.pop()

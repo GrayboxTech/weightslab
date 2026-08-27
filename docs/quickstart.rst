@@ -2,7 +2,7 @@ Quickstart
 ==========
 
 This page gives you a practical, minimal path to get WeightsLab running.
-If you prefer to start from examples, see ``usecases`` right after this setup.
+If you prefer to start from examples, see :doc:`examples/index` right after this setup.
 
 Prerequisites
 -------------
@@ -18,22 +18,29 @@ Create and activate a virtual environment and install WeightsLab.
 
 .. code-block:: bash
 
-   # From the repository root
-   python -m venv .venv
-
-   # Windows PowerShell
-   .\.venv\Scripts\Activate.ps1
-   # Linux/macOS
-   # source .venv/bin/activate
-
    python -m pip install weightslab
 
+.. tip::
 
-1) Try the bundled example
---------------------------
+   For reproducible experiments, you can install in a virtual environment with the following command:
 
-To see WeightsLab working end to end without writing any code, start a bundled
-example like the classification example (--cls). It run a small experiment on a classification task:
+   .. code-block:: bash
+
+      # From the repository root
+      python -m venv .venv
+
+      # Windows PowerShell
+      .\.venv\Scripts\Activate.ps1
+      # Linux/macOS
+      # source .venv/bin/activate
+
+
+Try the bundled example
+~~~~~~~~~~~~~~~~~~~~~~~
+
+To see WeightsLab working end to end without writing any code, start one of the bundled
+examples (--cls, --seg, --det, --2d_det, --3d_det).
+It run a small bundled experiment:
 
 .. code-block:: bash
 
@@ -46,8 +53,8 @@ Then, in another terminal, launch the UI and open the URL printed by the command
    weightslab start
 
 
-2) Local integration in your own Python script (MNIST)
--------------------------------------------------------
+Local integration in your own Python script (MNIST)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Below is your MNIST CNN training pattern, first instrumented with TensorBoard,
 then with TensorBoard removed and replaced by WeightsLab.
@@ -104,12 +111,19 @@ then with TensorBoard removed and replaced by WeightsLab.
    optimizer = optim.Adam(model.parameters(), lr=cfg.get("optimizer", {}).get("lr", 1e-3))
    loss = nn.CrossEntropyLoss(reduction="none")
    -  writer = SummaryWriter(log_dir="./runs/mnist_baseline")
+   +
+   + # Wrap your objects with WeightsLab to watch and edit them in real time.
+   + ## Wrap the hyperparameters first
    +  hp = wl.watch_or_edit(cfg, flag="hyperparameters")
+   +
+   + ## Wrap the model and optimizer next
    +  model = wl.watch_or_edit(model, flag="model", device=device)
    +  optimizer = wl.watch_or_edit(
    +      optimizer,
    +      flag="optimizer",
    +  )
+   +
+   + ## Then wrap the loss and metrics functions
    +  loss = wl.watch_or_edit(
    +      loss,
    +      flag="loss",
@@ -125,8 +139,9 @@ then with TensorBoard removed and replaced by WeightsLab.
    +      shuffle=True,
    +      is_training=True,
    +  )
+   +
+   + # Finally start the WeightsLab backend and keep it running while you train.
    +  wl.serve(serving_grpc=True, serving_cli=True)
-   +  wl.start_training(timeout=3)
 
    step = 0
    while 1:
@@ -148,8 +163,8 @@ then with TensorBoard removed and replaced by WeightsLab.
    +  wl.keep_serving()
 
 
-3) Notebook Code with Google Colab
-----------------------------------
+Notebook Code with Google Colab
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Start by opening this notebook:
 
@@ -173,7 +188,7 @@ Pass ``--certs`` to generate (if missing) and use TLS certificates + a gRPC auth
 .. important::
 
    When using certs, it is prefered to set manually the ``WEIGHTSLAB_CERTS_DIR`` environment variable so the training backend and any new
-   terminal use the **same** certificates — it is the single source of truth for TLS/auth. Please note that this step has to be done before starting the experiment.
+   terminal use the **same** certificates — it is the single source of truth for TLS/auth. **Please note that this step has to be done before starting the experiment.**
 
 Run ``weightslab``, ``weightslab help``, or ``weightslab -h`` to see the banner and the full
 command reference (``se``, ``start``, ``start example ...``).
@@ -206,7 +221,7 @@ command, with all flags and defaults — lives in :doc:`user_commands`.
       "Using the context in AGENTS.md, integrate WeightsLab into this training script."
 
    The agent will wire up your model, data loader, loss, and hyperparameters in
-   a few edits — no manual API lookup needed.
+   a few edits — no manual API lookup needed. Otherwise use the :doc:`agent_quickstart` to connect the integrated OpenCode agent to a running experiment and have it generate code for you from the UI.
 
 
 Recommended next reading
@@ -214,6 +229,7 @@ Recommended next reading
 Now that you run the classification task and try WeightsLab, you can integrate it into your training script.
 To do so, please read the following:
 
-- ``four_way_approach``: understand model/data/hyperparameters/logger together.
 - :doc:`agent_quickstart`: connect the natural-language agent to a running
   experiment in four steps.
+- :doc:`usage/good_practice/index`: good coding practices with WeightsLab.
+- :doc:`four_way_approach`: understand WeightsLab's four-way approach to model/data/hyperparameters/logger and their integrations.

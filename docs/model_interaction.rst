@@ -24,12 +24,6 @@ Key ``wl.watch_or_edit(model, flag="model", ...)`` parameters:
 .. list-table::
    :header-rows: 1
 
-- Observe training signals at batch/sample granularity.
-- Watch the model's own training dynamics — gradients, weights, activations —
-  per layer and per step (see `Training-dynamics signals`_).
-- Keep a stable ledger/proxy handle across runtime updates.
-- Enable dynamic controls without rewriting your loop architecture.
-
    * - Parameter
      - Default
      - Behavior
@@ -307,15 +301,3 @@ UI:
 - model architecture and layer inspection
 - model operations through controls/agent
 - version/load interactions via experiment state
-
-Related automated tests (verified)
-----------------------------------
-
-Model wrapping, graph/dependency analysis, and operations are covered by:
-
-- ``tests/general/test_four_way_standalone.py::TestModelLevelCli`` (the standalone
-  above, driven through real CLI commands)
-- ``tests/model/test_dependency_patterns.py`` (TorchFX and ONNX dependency paths)
-- ``tests/model/test_model_with_ops.py`` (ADD/PRUNE/FREEZE/RESET behavior)
-- ``tests/model/test_model_with_ops_unit.py`` (model ops utility behavior)
-- ``tests/backend/test_model_interface_unit.py`` (model interface unit behavior)
