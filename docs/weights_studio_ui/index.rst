@@ -2,7 +2,7 @@ Weights Studio UI
 =================
 
 Weights Studio is the visual frontend for WeightsLab experiments.
-It ships **inside the Python package** — no Docker, no Envoy.
+It ships **inside the Python package**.
 Running ``weightslab start`` serves the bundled SPA and proxies gRPC-Web to
 your training backend, all from one Python process.
 
