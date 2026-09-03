@@ -442,7 +442,6 @@ def process_sample(sid, dataset, do_resize, resize_dims, experiment):
         if not isinstance(_res, (tuple, list)):
             _res = (_res, sid, None)
         tensor = _res[0]
-        idx = _res[1] if len(_res) > 1 else sid
         label = _res[2] if len(_res) > 2 else None
 
         if isinstance(tensor, torch.Tensor):

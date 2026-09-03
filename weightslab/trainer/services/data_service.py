@@ -3974,6 +3974,9 @@ class DataService:
         dfm = self._df_manager
         if view is None or getattr(view, "empty", True) or dfm is None:
             return False
+        # A manager without dirty tracking cannot serve a delta -- rebuild.
+        if not (hasattr(dfm, "take_view_dirty") and hasattr(dfm, "get_source_rows")):
+            return False
         # A column the ledger has but the view lacks can only arrive via a full
         # rebuild -- the differential write below addresses existing columns
         # only. Per-sample signal columns are created on their first write, so
