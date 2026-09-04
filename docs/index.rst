@@ -12,6 +12,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
        <div class="wl-hero-cta-group">
           <a class="wl-hero-cta" href="quickstart.html">Quickstart</a>
           <a class="wl-hero-cta wl-hero-cta-secondary" href="examples/index.html">Examples</a>
+          <a class="wl-hero-cta wl-hero-cta-sandbox" href="https://sandbox.graybx.com/" target="_blank" rel="noopener">Sandbox</a>
        </div>
    </div>
 

@@ -110,6 +110,24 @@ body[data-theme="dark"] .wl-only-dark {
   background: rgba(120, 120, 120, 0.12);
 }
 
+/* Sandbox CTA -- warm gradient built on the #f0a500 accent used elsewhere in
+   the docs chrome, so the external "try it now" link reads as distinct from
+   the in-docs Quickstart/Examples buttons without leaving the palette. */
+.wl-hero-cta-sandbox,
+.wl-hero-cta-sandbox:link,
+.wl-hero-cta-sandbox:visited,
+.wl-hero-cta-sandbox:active,
+.wl-hero-cta-sandbox:focus {
+  background: linear-gradient(135deg, #f0a500 0%, #e2681c 100%) !important;
+  border-color: #e2871a !important;
+  color: #ffffff !important;
+}
+
+.wl-hero-cta-sandbox:hover {
+  background: linear-gradient(135deg, #ffb61f 0%, #f07a2b 100%) !important;
+  border-color: #f0951f !important;
+}
+
 .wl-version-switcher {
   display: inline-flex;
   align-items: center;
