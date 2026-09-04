@@ -312,6 +312,24 @@ def configure_embedded_kernel(enabled: bool) -> None:
     _EMBED_ENABLED = bool(enabled)
 
 
+def _embedded_exec_timeout() -> float | None:
+    """Seconds EmbeddedKernelBridge waits for a single cell to finish, or None
+    for unbounded (the product default -- see EmbeddedKernelBridge.__init__).
+
+    Override via WEIGHTSLAB_NOTEBOOK_EXEC_TIMEOUT for environments (CI) where a
+    dead/unresponsive kernel failing fast matters more than letting a
+    legitimately long-running cell finish -- an unbounded wait there wedges
+    every later test against the same shared kernel behind the first hang.
+    """
+    raw = os.environ.get("WEIGHTSLAB_NOTEBOOK_EXEC_TIMEOUT", "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
 def _ipykernel_available() -> bool:
     try:
         import ipykernel  # noqa: F401
@@ -342,6 +360,7 @@ def ensure_embedded_kernel(data_service, root_log_dir: Path) -> None:
             return
         _EMBED_STATE["started"] = True  # attempted once; never retry
         if not _ipykernel_available():
+            _EMBED_STATE["failed"] = True
             logger.warning(
                 "Embedded notebook kernel requested but `ipykernel`/"
                 "`jupyter_client` are not installed; the studio notebook "
@@ -544,10 +563,20 @@ class EmbeddedKernelBridge:
     NotebookService's kernel-construction lock.
     """
 
-    def __init__(self, connection_file: Path, startup_timeout: float = 30.0):
+    def __init__(self, connection_file: Path, startup_timeout: float = 30.0,
+                 exec_timeout: float | None = None):
         from jupyter_client import BlockingKernelClient
         self._lock = threading.Lock()
         self._busy = False
+        # None (the default) preserves the product's actual contract: a cell
+        # may legitimately run for a long time (e.g. training) and is meant to
+        # be stopped via interrupt(), never by a hidden deadline. Only pass a
+        # finite value where a dead/unresponsive kernel failing fast matters
+        # more than that contract -- e.g. WEIGHTSLAB_NOTEBOOK_EXEC_TIMEOUT in
+        # CI (see _get_kernel()): an unbounded wait here would otherwise hold
+        # `self._lock` forever, wedging every later cell run against the same
+        # shared kernel behind it.
+        self._exec_timeout = exec_timeout
         self._client = BlockingKernelClient(connection_file=str(connection_file))
         self._client.load_connection_file()
         self._client.start_channels()
@@ -563,7 +592,7 @@ class EmbeddedKernelBridge:
                     self._busy = True
                     try:
                         reply = self._client.execute_interactive(
-                            code, allow_stdin=False, timeout=None,
+                            code, allow_stdin=False, timeout=self._exec_timeout,
                             output_hook=lambda msg: _append_iopub_output(
                                 lambda kind, payload: q.put((kind, payload)), msg),
                         )
@@ -893,7 +922,8 @@ class NotebookService:
             connection_file = get_embedded_kernel_connection_file()
             if connection_file is not None:
                 try:
-                    self._kernel = EmbeddedKernelBridge(connection_file)
+                    self._kernel = EmbeddedKernelBridge(
+                        connection_file, exec_timeout=_embedded_exec_timeout())
                     logger.info(
                         "NotebookService: attached to embedded Jupyter kernel (%s)",
                         connection_file)

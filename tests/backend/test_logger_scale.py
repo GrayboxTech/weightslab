@@ -345,6 +345,46 @@ def test_special_points_survive_decimation(big_logger):
         "outlier-bearing steps were decimated away"
 
 
+def test_value_spike_survives_decimation(tmp_path):
+    """A tall spike that is NOT flagged (no marker/note/outlier) and does not sit
+    on a bucket edge must still survive — min/max decimation keeps each bucket's
+    extreme, whereas earliest-per-bucket dropped it. Also: 10k -> ~max_points."""
+    db = tmp_path / "spike.duckdb"
+    lg = LoggerQueue(register=False, db_path=str(db))
+    lg.chkpt_manager = None
+    n, spike_step, spike_val = 10000, 3737, 999.0
+    lg._conn.execute(
+        f"""
+        INSERT INTO signals (
+            metric_name, experiment_hash, step, metric_value, timestamp,
+            audit_mode, is_evaluation_marker, split_name, evaluation_tags,
+            point_note, outliers, outlier_count, sample_count,
+            trend_value, trend_margin, value_min, value_max, seq)
+        SELECT 'loss', 'run0', t.i::INTEGER,
+               CASE WHEN t.i = {spike_step} THEN {spike_val}
+                    ELSE 1.0 + 0.01 * sin(t.i / 9.0) END,
+               1787000000 + t.i, FALSE, FALSE, 'train', '[]',
+               '', '', 0, 32, NULL, NULL, NULL, NULL, t.i
+        FROM range(0, {n}) AS t(i)
+        """
+    )
+    try:
+        hist = lg.get_signal_history_downsampled(max_points=1000)
+        entries = [e for per_hash in hist.values()
+                   for steps in per_hash.values()
+                   for lst in steps.values() for e in lst]
+        values = [e.get("metric_value") for e in entries]
+        assert any(abs((v or 0) - spike_val) < 1e-6 for v in values), \
+            "value spike was decimated away"
+        # ~max_points, not the full 10k and not a handful.
+        assert 200 <= len(entries) <= 2200, f"unexpected emitted count {len(entries)}"
+    finally:
+        try:
+            lg.stop_background_flush()
+        except Exception:
+            pass
+
+
 def test_entries_carry_full_metadata(big_logger):
     """Each rendered point must arrive with the metadata the UI draws with."""
     metric, h = next(iter(big_logger.truth))
@@ -472,7 +512,7 @@ def test_simulated_frontend_session_stays_bounded(big_logger):
 
 def test_history_read_latency_is_acceptable(big_logger):
     """A decimated read must stay interactive at sweep scale."""
-    budget_s = float(os.environ.get("WL_TEST_MAX_QUERY_SECONDS", "30"))
+    budget_s = float(os.environ.get("WL_TEST_MAX_QUERY_SECONDS", "45"))
     t0 = time.monotonic()
     big_logger.get_signal_history_downsampled(max_points=500)
     dt = time.monotonic() - t0

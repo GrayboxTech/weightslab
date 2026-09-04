@@ -1,15 +1,7 @@
-.. _good-practice:
-
-Good Practice
-=============
-
-Practical recommendations for running WeightsLab at scale — large datasets,
-long experiments, and production-like setups.
-
 .. _good-practice-heavy-experiment:
 
-i. Heavy-experiment loader flags
----------------------------------
+Heavy-experiment loader flags
+=============================
 
 When your dataset is large, dense annotation arrays (bounding boxes, masks,
 point clouds) can easily overflow RAM if they are all preloaded at startup.
@@ -67,8 +59,8 @@ What each flag does:
 
 .. _good-practice-get-items:
 
-ii. Implementing ``get_items`` in your dataset class
------------------------------------------------------
+Implementing ``get_items`` in your dataset class
+================================================
 
 WeightsLab occasionally needs to access a sample's metadata or label without
 loading the full image (e.g. computing class weights, building a histogram of
@@ -139,73 +131,3 @@ Usage pattern:
 
 The standard return order is ``(image, uid, target, metadata)``, mirroring
 what the ``DataSampleTrackingWrapper`` yields from ``__iter__``.
-
-iii. Signal storage mode — choosing what to send
--------------------------------------------------
-
-When the studio triggers **inference on the train set** (eval mode on a tagged
-subset), it runs the forward pass and collects predictions. Decide upfront how
-much data you want to store per step, since storing dense predictions for every
-sample can become expensive.
-
-**Light mode** — store everything (predictions + targets) per step:
-
-.. code-block:: python
-
-   loss_per_sample = sig["loss"](outputs, targets, batch_ids=ids, preds=preds)
-
-Use this for small datasets or during debugging. The studio can render the
-prediction overlay and target overlay simultaneously.
-
-**Standard mode** — store only the loss per step and per sample, omit predictions during training:
-
-.. code-block:: python
-
-   loss_per_sample = sig["loss"](outputs, targets, batch_ids=ids)
-
-Predictions and targets are not written to disk. The studio still plots the
-per-sample loss curve; overlays are only available when the studio explicitly
-triggers an eval pass (which passes ``preds`` separately).
-
-**Standard mode with eval-time predictions** — pass processed predictions and
-optionally a different target tensor for eval:
-
-.. code-block:: python
-
-   # During eval (triggered by the studio or your own eval loop):
-   preds_processed = decode_and_nms(outputs.detach())
-   loss_per_sample = sig["loss"](
-      outputs, targets,
-      batch_ids=ids,
-      preds=preds_processed,
-      targets=targets
-   )   # optional: override target if it differs from the one passed to the loss
-
-``preds`` should be **processed** predictions (after NMS, argmax, etc.) rather
-than raw model outputs, because the studio renders them directly as overlays.
-The optional ``targets`` override is useful when the annotation fed to the loss
-function differs from the one the studio should display (e.g. encoded anchors
-vs. decoded boxes).
-
-Summary table
-~~~~~~~~~~~~~
-
-.. list-table::
-   :header-rows: 1
-
-   * - Mode
-     - Call
-     - Stores
-     - Use when
-   * - Light
-     - ``sig(out, tgt, batch_ids=ids, preds=preds)``
-     - loss + predictions + targets
-     - Small dataset, debugging, overlay needed every step
-   * - Standard
-     - ``sig(out, tgt, batch_ids=ids)``
-     - loss only
-     - Large dataset, production, overlays on eval only
-   * - Standard+
-     - ``sig(out, tgt, batch_ids=ids, preds=preds, targets=tgt)``
-     - loss + predictions + targets (eval step only)
-     - Large dataset, overlay on studio-triggered eval passes

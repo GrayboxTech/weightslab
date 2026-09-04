@@ -1,19 +1,51 @@
 Experiment Reports
 ===================
 
+.. warning:: Unstable — in active development
+
+   Experiment report generation is **experimental** and still changing. The
+   report's content and layout, and the on-disk location of what it writes,
+   are all subject to change between releases, and generation can fail or
+   produce an incomplete report on some experiments — particularly ones with
+   unusual signal shapes, very long histories, or no authenticated agent
+   provider.
+
+   Treat what it produces as a **draft to read**, not as an artifact to
+   archive, publish, or cite, and don't build tooling on the file paths or the
+   HTML structure yet. The Python and CLI entry points below give you the most
+   control over what goes in, so prefer those over the studio button when the
+   result matters.
+
+   Please report what breaks — that feedback is what stabilises it.
+
 Ask the AI agent how your experiment is doing and it can produce a
 self-contained HTML report: signal trajectory plots, an automatic health
 classification per signal, dataset stats (sample counts, discard rate, tag
 distribution), and a written analysis grounded in those exact numbers —
 branded with the WeightsLab logo.
 
-.. figure:: _static/logo-light.png
-   :width: 160px
-   :align: right
-   :alt: WeightsLab logo
 
 Generating a report
 --------------------
+
+Quick examples
+~~~~~~~~~~~~~~
+
+.. code-block:: python
+
+   import weightslab as wl
+
+   wl.ai_report_generation()                              # all available signals
+   wl.ai_report_generation(signals=["train_loss"])        # selected signals
+   wl.ai_report_generation(use_agent=False)               # no LLM narrative
+   wl.ai_report_generation(output_path="reports/run.html")
+
+.. code-block:: text
+
+   report
+   report train_loss val_loss
+   report --signals train_loss,val_loss --no-agent
+   How is this experiment going? Generate a report.
 
 Four ways to ask for one — all four run the **same** code path
 (``weightslab.reporting.generate_report``: collect → narrate → render), so
@@ -65,7 +97,7 @@ they produce the same artifact:
      Generate an experiment report on train_loss and val_loss.
 
   To add a value-distribution histogram for a specific column (see
-  `Distributions`_ below), including as a follow-up on a report you already
+  **Distributions** below), including as a follow-up on a report you already
   generated:
 
   .. code-block:: text
@@ -267,12 +299,13 @@ Plotting uses matplotlib (installed as a core dependency of WeightsLab). If you 
 .. code-block:: bash
 
    pip install matplotlib
+
 Without it, the report still renders — the health classification and
 dataset stats sections are unaffected — but signal cards show a text summary
 (first/last/min/max value) instead of a plot.
 
 The written analysis needs a configured agent LLM provider (see
-:doc:`agent`'s *Initializing the agent* section). If no provider is
+:doc:`agent`). If no provider is
 available, the report is still generated with a note that no analysis was
 written, rather than failing outright. The same applies when
 ``wl.ai_report_generation`` is called from a script that isn't serving an

@@ -69,6 +69,20 @@ _DEFAULT_POINT_CLOUD_CHUNK_BYTES = 1 << 20 # 1 MiB
 # doesn't produce unwieldy per-cell lists. Override with WL_SIGNAL_HISTORY_MAX_POINTS.
 #
 # Parsed defensively so a bad env var can't crash module import.
+def _is_registered(handle) -> bool:
+    """True when a ledger handle actually wraps an object.
+
+    Reading ``get_dataframe()`` & co. inserts an empty placeholder proxy, so a
+    non-``None`` handle is not proof that anything was registered — touching one
+    raises "Proxy target not set".
+    """
+    if handle is None:
+        return False
+    if Proxy.is_proxy(handle):
+        return handle.is_set()
+    return True
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -587,6 +601,10 @@ class DataService:
         )
 
         self._is_filtered = False # Track if the current view is filtered/modified by user
+        # Last known FULL (unfiltered) row count, cached whenever GetDataSamples
+        # serves the unfiltered view, so the subview ribbon can report an accurate
+        # "X of Y" total even while a filter is active. See GetDataSamples.
+        self._last_full_count = 0
         # logger.info("[DataService] Skipping expensive startup computations (aspect ratio, natural sort, signals).")
         # These should be triggered on-demand or run in background to avoid blocking training start.
 
@@ -1085,6 +1103,15 @@ class DataService:
         Uses the shared dataframe manager instead of the H5 store and avoids
         blocking on IO. Falls back to last snapshot if retrieval fails.
         """
+        # No tracked dataset (a model-, config- or logger-only integration) means
+        # there is no sample dataframe to pull. That is a normal state, not a
+        # failure, so say so plainly instead of falling into the except below with
+        # the manager proxy's "Proxy target not set".
+        if not _is_registered(self._df_manager):
+            logger.debug("[DataService] No dataframe manager registered yet "
+                         "(no dataset wrapped with flag=\"data\"); data view is empty.")
+            return pd.DataFrame()
+
         try:
             # Load dataframe from the shared dataframe manager with arrays autoloaded from h5 storage
             df = self._df_manager.get_combined_df() if self._df_manager is not None else pd.DataFrame()
@@ -5245,7 +5272,31 @@ class DataService:
 
         try:
             # Process the request directly without deduplication logicj
-            return self._process_get_data_samples(request, context)
+            resp = self._process_get_data_samples(request, context)
+            # Stamp the server-authoritative subview state onto EVERY response so
+            # a fresh client (private window, no cached UI state) can render the
+            # "you are viewing a subview" warning ribbon + reset in both grid and
+            # list mode. Mirrors self._is_filtered, which is set on agent
+            # masks/filters/sorts and cleared on @reset.
+            try:
+                is_sub = bool(getattr(self, "_is_filtered", False))
+                resp.is_subview = is_sub
+                view_df = getattr(self, "_all_datasets_df", None)
+                if view_df is not None:
+                    resp.view_count = int(len(view_df))
+                    # Remember the full-dataset size whenever we serve the
+                    # UNfiltered view, so we can still report an accurate total
+                    # (for the "X of Y samples" ribbon) once a filter is applied
+                    # and _all_datasets_df holds only the subview. Survives across
+                    # a fresh client connecting to this same backend, since the
+                    # backend serves the full view at least once at startup.
+                    if not is_sub:
+                        self._last_full_count = int(len(view_df))
+                    full = int(getattr(self, "_last_full_count", 0) or 0)
+                    resp.total_count = full if full else int(len(view_df))
+            except Exception:
+                logger.debug("GetDataSamples: could not stamp subview state", exc_info=True)
+            return resp
 
         except Exception as e:
             logger.error("Error in GetDataSamples: %s", str(e), exc_info=True)

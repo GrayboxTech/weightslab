@@ -907,37 +907,34 @@ class DataLoaderInterface:
     # Ledger / pause helpers
     # -------------------------------------------------------------------------
     def _sync_batch_size_from_ledger(self) -> None:
-        """Optionally sync batch size from global hyperparams ledger."""
+        """Sync the batch size from the hyperparams ledger, when it defines one.
+
+        The size passed at construction stays authoritative otherwise: a data-only
+        integration (no wrapped hyperparameters, or a config that says nothing
+        about this loader) must keep the batch size it asked for instead of
+        silently dropping to a built-in default.
+        """
         if self._ledger_name is None:
             return
 
         try:
             hp_name = resolve_hp_name()
             if hp_name is None:
-                # no hyperparams; optionally use a default
-                try:
-                    self.set_batch_size(1)
-                except RuntimeError:
-                    pass
                 return
 
             latest = get_hyperparams(hp_name)
-            data_cfg = latest.get("data", {})
-            if self._ledger_name in data_cfg:
-                bs = data_cfg.get(self._ledger_name, {}).get("batch_size", None)
-                if bs is not None:
-                    try:
-                        self.set_batch_size(bs)
-                    except RuntimeError:
-                        # user-supplied dataloader: cannot change size, ignore
-                        pass
-            else:
-                # No config for this dataloader -> optional default
-                try:
-                    logger.debug(f"No batch size config found for '{self._ledger_name}' in latest hyperparams:\n{data_cfg}; using default batch size of 4.")
-                    self.set_batch_size(4)
-                except RuntimeError:
-                    pass
+            data_cfg = latest.get("data", {}) or {}
+            bs = (data_cfg.get(self._ledger_name) or {}).get("batch_size")
+            if bs is None:
+                logger.debug(
+                    "No batch size config for '%s' in the hyperparams ledger; "
+                    "keeping the configured batch size.", self._ledger_name)
+                return
+            try:
+                self.set_batch_size(bs)
+            except RuntimeError:
+                # user-supplied dataloader: cannot change size, ignore
+                pass
         except Exception:
             # Don't let ledger issues break basic iteration
             return

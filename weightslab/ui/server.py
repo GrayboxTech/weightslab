@@ -25,6 +25,7 @@ import atexit
 import base64
 import importlib.util
 import json
+import logging
 import os
 import posixpath
 import re
@@ -47,6 +48,8 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 import grpc
 
 from weightslab import opencode_process
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -75,6 +78,50 @@ _LOCAL_NOTEBOOK_QUICKSTART = os.path.join(
 # Local-only control routes (file copy + process spawn) must never be reachable
 # from anything but the machine running the UI server.
 _LOOPBACK_ADDRESSES = {"127.0.0.1", "::1"}
+
+
+def _parse_trusted_client_nets() -> list:
+    """Extra source networks allowed to hit the local-only control routes,
+    from WEIGHTSLAB_UI_TRUSTED_HOSTS (comma-separated IPs or CIDRs).
+
+    Default is empty: loopback stays the only trusted source. This exists for
+    the container-behind-a-tunnel case -- when the browser reaches the UI via a
+    published port, the request arrives from the container's gateway, not
+    127.0.0.1, so those routes would 403. There the real trust boundary is the
+    SSH tunnel + the host publishing only to 127.0.0.1, so trusting the internal
+    docker network (e.g. "172.16.0.0/12") is safe and must be opted into
+    explicitly. The weightslab dev container sets this.
+    """
+    import ipaddress
+    raw = os.environ.get("WEIGHTSLAB_UI_TRUSTED_HOSTS", "")
+    nets = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(token, strict=False))
+        except ValueError:
+            logger.warning("Ignoring invalid WEIGHTSLAB_UI_TRUSTED_HOSTS entry: %r", token)
+    return nets
+
+
+_TRUSTED_CLIENT_NETS = _parse_trusted_client_nets()
+
+
+def _client_is_trusted(addr: str) -> bool:
+    """True if a request from ``addr`` may hit the local-only control routes:
+    always for loopback, and for any network in WEIGHTSLAB_UI_TRUSTED_HOSTS."""
+    if addr in _LOOPBACK_ADDRESSES:
+        return True
+    if not _TRUSTED_CLIENT_NETS:
+        return False
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return any(ip in net for net in _TRUSTED_CLIENT_NETS)
 
 
 def static_dir() -> str:
@@ -454,33 +501,29 @@ atexit.register(_jupyter_session.shutdown)
 _OPENCODE_START_TIMEOUT = 45.0
 
 
-def _free_port() -> int:
-    """Reserve an unused loopback port by binding and releasing it.
-
-    We pick the port ourselves rather than parsing it out of the child's stdout:
-    that gives us a URL to health-poll immediately, and avoids depending on the
-    exact wording of a startup log line we do not control.
-    """
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+# We pick the port ourselves rather than parsing it out of the child's stdout:
+# that gives us a URL to health-poll immediately, and avoids depending on the
+# exact wording of a startup log line we do not control. Shared with the backend
+# SDK agent's spawn path (opencode_process.resolve_or_spawn_opencode) rather
+# than duplicated here, so both prefer the same DEFAULT_OPENCODE_PORT, honour
+# the same WEIGHTSLAB_OPENCODE_PORT override, and report the chosen port the
+# same way -- a default that only one of the two spawn paths applied would be
+# no more predictable than the random port it replaced.
+_free_port = opencode_process.free_port
+_pick_opencode_port = opencode_process.pick_opencode_port
 
 
 def _resolve_opencode_argv() -> Optional[list]:
-    """Locate a way to run OpenCode, preferring an already-installed binary.
+    """Locate a way to run OpenCode.
 
-    Falls back to ``npx --yes``, which fetches the package into the npx cache on
-    first use. That is deliberately *not* ``npm install -g``: a global install may
-    need elevated permissions and mutates the user's toolchain behind their back,
-    while the npx path needs neither and is equally automatic.
+    Delegates to ``opencode_process.resolve_opencode_argv`` so this UI server and
+    the backend SDK agent share ONE resolution order: a weightslab-managed binary
+    (provisioned on demand for a Node-free ``pip install``) first, then an
+    ``opencode`` already on PATH, then a managed provision, then the ``npx --yes``
+    fallback. Keeping the two paths identical is what stops them disagreeing about
+    which OpenCode to run for the same workspace.
     """
-    exe = shutil.which("opencode")
-    if exe:
-        return [exe]
-    npx = shutil.which("npx")
-    if npx:
-        return [npx, "--yes", "opencode-ai@latest"]
-    return None
+    return opencode_process.resolve_opencode_argv()
 
 
 def _opencode_healthy(base_url: str, timeout: float = 1.5) -> bool:
@@ -588,6 +631,7 @@ class _OpencodeSession:
                 self._external_url = external_url
                 self._workspace = workspace_dir
                 self._error = None
+            logger.info("OpenCode: using the server at %s (OPENCODE_URL).", external_url)
             return {"ok": True, "url": external_url, "reused": False, "workspace": workspace_dir}
 
         lock = opencode_process.read_lock(workspace_dir)
@@ -596,6 +640,10 @@ class _OpencodeSession:
                 self._external_url = lock["url"]
                 self._workspace = workspace_dir
                 self._error = None
+            logger.info(
+                "OpenCode: reusing the running server at %s for workspace %s.",
+                lock["url"], workspace_dir,
+            )
             return {"ok": True, "url": lock["url"], "reused": False,
                      "workspace": workspace_dir, "adopted": "lockfile"}
 
@@ -603,13 +651,16 @@ class _OpencodeSession:
             argv = _resolve_opencode_argv()
             if argv is None:
                 self._error = (
-                    "Could not find `opencode` or `npx`. Install Node.js 20+ "
-                    "(which provides npx), or `npm i -g opencode-ai`."
+                    "Could not provision OpenCode: the managed binary download "
+                    "failed (offline?) and no `opencode`/`npx` was found. Restore "
+                    "network access, or install Node.js 20+ (provides npx), or "
+                    "`npm i -g opencode-ai`."
                 )
                 return {"ok": False, "error": self._error}
 
-            port = _free_port()
-            cmd = argv + ["serve", "--hostname", "127.0.0.1", "--port", str(port)]
+            port = _pick_opencode_port()
+            cmd = argv + ["serve", "--hostname", opencode_process.opencode_bind_host(),
+                          "--port", str(port)]
             for value in _cors_origin_variants(origin):
                 cmd += ["--cors", value]
 
@@ -650,6 +701,14 @@ class _OpencodeSession:
                 # server via the lock file instead of spawning its own --
                 # symmetric with the read above, which covers order (a).
                 opencode_process.write_lock(workspace_dir, base_url, process.pid)
+                # The browser talks to this URL DIRECTLY -- it is not proxied
+                # through this server -- so on any host the page is not served
+                # from (SSH, a container, VS Code Remote) this is the port that
+                # also has to be forwarded. Worth a line of its own for that.
+                logger.info(
+                    "OpenCode: agent server ready at %s (pid %d, workspace %s).",
+                    base_url, process.pid, workspace_dir,
+                )
                 return {"ok": True, "url": base_url, "reused": False,
                         "workspace": workspace_dir}
             time.sleep(0.4)
@@ -659,6 +718,7 @@ class _OpencodeSession:
             f"The agent server did not come up within {int(_OPENCODE_START_TIMEOUT)}s. "
             f"Last output: {tail}"
         )
+        logger.error("OpenCode: %s", self._error)
         _kill_process_tree(process)
         with self._lock:
             self._port = None
@@ -1723,7 +1783,7 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         like every other local-machine action in this server -- this one starts a
         process with filesystem access, so it must never be reachable off-host.
         """
-        if self.client_address[0] not in _LOOPBACK_ADDRESSES:
+        if not _client_is_trusted(self.client_address[0]):
             self._send_json(HTTPStatus.FORBIDDEN,
                             {"ok": False, "error": "Only reachable from localhost."})
             return
@@ -1753,7 +1813,7 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         command in the connected-experiment agent bar). Loopback-only, same
         reasoning as _start_agent_server -- this also starts/reuses that same
         process."""
-        if self.client_address[0] not in _LOOPBACK_ADDRESSES:
+        if not _client_is_trusted(self.client_address[0]):
             self._send_json(HTTPStatus.FORBIDDEN,
                              {"ok": False, "error": "Only reachable from localhost."})
             return
@@ -1786,7 +1846,7 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         self._send_json(status, result)
 
     def _stop_loop(self, loop_id: str):
-        if self.client_address[0] not in _LOOPBACK_ADDRESSES:
+        if not _client_is_trusted(self.client_address[0]):
             self._send_json(HTTPStatus.FORBIDDEN,
                              {"ok": False, "error": "Only reachable from localhost."})
             return
@@ -1797,7 +1857,7 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
     def _update_loop(self, loop_id: str):
         """Change a running loop's prompt and/or interval (the panel's Edit
         action) without stopping and restarting the job."""
-        if self.client_address[0] not in _LOOPBACK_ADDRESSES:
+        if not _client_is_trusted(self.client_address[0]):
             self._send_json(HTTPStatus.FORBIDDEN,
                              {"ok": False, "error": "Only reachable from localhost."})
             return
@@ -1820,7 +1880,7 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         """Backs a loop tab's read-only transcript: its scrollback is just
         this job's own OpenCode session history, written to solely by the
         scheduled check-in (_fire) -- nothing to merge here, only fetching."""
-        if self.client_address[0] not in _LOOPBACK_ADDRESSES:
+        if not _client_is_trusted(self.client_address[0]):
             self._send_json(HTTPStatus.FORBIDDEN,
                              {"ok": False, "error": "Only reachable from localhost."})
             return
@@ -1850,7 +1910,7 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         protobuf body to forward, and this one starts from a plain JSON
         {query, accumulate} instead.
         """
-        if self.client_address[0] not in _LOOPBACK_ADDRESSES:
+        if not _client_is_trusted(self.client_address[0]):
             self._send_json(HTTPStatus.FORBIDDEN,
                              {"ok": False, "error": "Only reachable from localhost."})
             return
@@ -1904,7 +1964,7 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         _data_query/_latest_data_query). {"seq": 0} if nothing has run yet
         this process; the frontend only reacts when seq is NEWER than the
         last one it already handled."""
-        if self.client_address[0] not in _LOOPBACK_ADDRESSES:
+        if not _client_is_trusted(self.client_address[0]):
             self._send_json(HTTPStatus.FORBIDDEN,
                              {"ok": False, "error": "Only reachable from localhost."})
             return
@@ -1916,7 +1976,7 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         _TrackedProcesses' own docstring for why a detached process needs
         this instead of being reachable through the normal process-tree
         kill every OTHER child of this server already gets."""
-        if self.client_address[0] not in _LOOPBACK_ADDRESSES:
+        if not _client_is_trusted(self.client_address[0]):
             self._send_json(HTTPStatus.FORBIDDEN,
                              {"ok": False, "error": "Only reachable from localhost."})
             return
@@ -1961,7 +2021,7 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         # browser can't do itself; this is the one piece of local-only
         # control surface that requires it. Loopback-gated like the other
         # "local machine" actions in this server.
-        if self.client_address[0] not in _LOOPBACK_ADDRESSES:
+        if not _client_is_trusted(self.client_address[0]):
             self._send_json(HTTPStatus.FORBIDDEN,
                              {"ok": False, "error": "Only reachable from localhost."})
             return

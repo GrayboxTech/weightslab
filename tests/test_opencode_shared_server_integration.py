@@ -12,13 +12,17 @@ it). This file instead drives BOTH real classes together against one real
 than trusting that the separately-tested pieces compose correctly.
 """
 
+import os
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
+from tests.test_opencode_process import stop_workspace_server
+from weightslab import opencode_process
 from weightslab.trainer.services.agent.opencode_chat import OpenCodeChat
 from weightslab.ui import server as ui_server
+
 
 _FAKE_OPENCODE_SRC = r"""
 import sys, json
@@ -60,15 +64,42 @@ _FAKE_ARGV = [sys.executable, "-c", _FAKE_OPENCODE_SRC]
 # point of THIS test -- it wants to force the "was dead, needed
 # resolving" path deterministically. Every other address still gets a
 # real health check.
-import weightslab.opencode_process as _ocp  # noqa: E402
-
-_real_opencode_healthy = _ocp.opencode_healthy
+_real_opencode_healthy = opencode_process.opencode_healthy
 
 
 def _healthy_except_bare_default(url: str, timeout: float = 1.5) -> bool:
     if url.rstrip("/") == "http://127.0.0.1:4096":
         return False
     return _real_opencode_healthy(url, timeout=timeout)
+
+
+
+def setUpModule():
+    """Force fresh spawns onto an OS-assigned port for this file only.
+
+    Both spawn paths now ASK for opencode_process.DEFAULT_OPENCODE_PORT (4096)
+    before falling back to a random one, and 4096 is the very address this file
+    patches ``opencode_healthy`` to report dead (see
+    _healthy_except_bare_default). Left alone, a spawn here lands on 4096, the
+    patch declares the server it just started dead, and the health poll times
+    out -- so the test would only pass on a machine where something else
+    already happened to hold 4096, which is precisely the accidental
+    dependence on ambient machine state the patch exists to remove.
+
+    Pinning the override to 0 (= "OS-assigned", the behaviour that predates
+    the default) keeps "the bare default address" and "wherever a real spawn
+    lands" as two distinct things, which is what these tests are about.
+    """
+    global _saved_port_env
+    _saved_port_env = os.environ.get(opencode_process.PORT_ENV_VAR)
+    os.environ[opencode_process.PORT_ENV_VAR] = "0"
+
+
+def tearDownModule():
+    if _saved_port_env is None:
+        os.environ.pop(opencode_process.PORT_ENV_VAR, None)
+    else:
+        os.environ[opencode_process.PORT_ENV_VAR] = _saved_port_env
 
 
 class TestBackendAgentStartsFirst(unittest.TestCase):
@@ -78,6 +109,7 @@ class TestBackendAgentStartsFirst(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(stop_workspace_server, self.tmp)
 
     def test_ui_server_adopts_the_backend_agents_server_instead_of_spawning(self):
         with patch("weightslab.opencode_process.opencode_healthy", side_effect=_healthy_except_bare_default):
@@ -107,6 +139,7 @@ class TestUiServerStartsFirst(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(stop_workspace_server, self.tmp)
 
     def test_backend_agent_adopts_the_ui_servers_server_instead_of_spawning(self):
         with patch("weightslab.opencode_process.opencode_healthy", side_effect=_healthy_except_bare_default), \

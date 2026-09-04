@@ -597,6 +597,11 @@ schema, and category-level toggles.
    * - ``WL_RESOURCE_MONITOR_DISK_PATH``
      - OS root
      - Filesystem path reported by the ``disk`` category's usage metrics.
+   * - ``WL_RESOURCE_MONITOR_STEP_SOURCE``
+     - ``model_age``
+     - What samples are plotted against. ``model_age`` shares the x axis of
+       your loss/metric curves and restarts with training; ``seconds`` uses
+       elapsed seconds since the monitor started.
    * - ``WL_RESOURCE_MONITOR_CONFIG_PATH``
      - *(empty)*
      - Optional directory override for ``resource_monitoring.yaml``.
@@ -784,6 +789,102 @@ Example
    # WeightsLab will look for:
    # /opt/weightslab/config/agent_config.yaml
 
+
+Agent server (OpenCode) ports
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The agent is backed by a local ``opencode serve`` process that both the UI
+server and the backend SDK agent share. These control where it lives.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Variable
+     - Default
+     - Description
+   * - ``WEIGHTSLAB_OPENCODE_PORT``
+     - ``4096``
+     - Port a freshly spawned agent server is asked for. If it is already in
+       use, a free port is chosen instead and the one actually used is logged
+       at ``INFO``. Set this when ``4096`` is permanently taken on the machine,
+       or when a specific port is the one you have forwarded or published.
+   * - ``OPENCODE_URL``
+     - *(unset)*
+     - Adopt an already-running agent server at this URL instead of spawning
+       one. Takes precedence over everything else, and configures **both** the
+       UI server and the SDK agent — set it once and the two converge on a
+       single process.
+   * - ``WEIGHTSLAB_OPENCODE_HOST``
+     - ``127.0.0.1``
+     - Host the spawned agent server **binds** to. Loopback by default (the
+       server has filesystem access and must not be reachable off-machine on a
+       normal local run). Set to ``0.0.0.0`` when running in a container reached
+       over an SSH tunnel / published port, so the published port can reach it —
+       the URL handed to the browser stays ``127.0.0.1`` either way. See
+       :ref:`studio-bridging`.
+   * - ``WEIGHTSLAB_UI_TRUSTED_HOSTS``
+     - *(unset)*
+     - Comma-separated extra source IPs/CIDRs allowed to call the UI server's
+       local-only control routes (start agent, notebook, loops). Loopback is
+       always trusted; behind a tunnel + published port the browser's request
+       arrives from the container gateway, so set e.g.
+       ``172.16.0.0/12,192.168.0.0/16`` there (the real trust boundary being the
+       tunnel + host publishing to ``127.0.0.1``).
+
+.. note::
+
+   The browser talks to the agent server **directly**, not through the UI
+   server's proxy. When the studio runs on a different machine from the
+   browser, this port has to be reachable from the browser's side — see
+   :ref:`studio-bridging`.
+
+Agent installation (OpenCode binary)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+WeightsLab provisions the OpenCode standalone binary itself — no Node.js
+required — the first time it is needed (on ``import weightslab``,
+``weightslab start``, ``weightslab start example``, or the first agent use).
+It is fetched once into a per-user cache and reused. These control that.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Variable
+     - Default
+     - Description
+   * - ``WEIGHTSLAB_OPENCODE_AUTOINSTALL``
+     - ``1``
+     - Auto-install OpenCode in the background (logged) on ``import weightslab``
+       / ``weightslab start`` when it isn't already present. Set to ``0`` to
+       disable the on-import/start install (e.g. air-gapped or CI hosts).
+   * - ``WEIGHTSLAB_OPENCODE_AUTODOWNLOAD``
+     - ``1``
+     - Master switch for the network fetch. ``0`` forbids all on-demand
+       downloads — an already-provisioned binary is still used, but nothing new
+       is fetched (stricter than ``AUTOINSTALL``, which only gates the
+       import/start pre-warm).
+   * - ``WEIGHTSLAB_OPENCODE_VERSION``
+     - *(pinned)*
+     - Override the OpenCode version WeightsLab provisions. Each release pins a
+       known-good version; set this only to track a different one.
+   * - ``WEIGHTSLAB_OPENCODE_HOME``
+     - *(per-user cache)*
+     - Directory the managed binary is installed under. Defaults to the
+       platform cache (``~/.cache/weightslab/opencode`` on Linux,
+       ``%LOCALAPPDATA%\\weightslab\\opencode`` on Windows,
+       ``~/Library/Caches/weightslab/opencode`` on macOS).
+
+.. tip::
+
+   Sign in once with ``weightslab agent init`` (provisions the binary, then runs
+   ``opencode auth login``); ``weightslab agent init --provision-only`` just
+   installs the binary without the interactive sign-in, for headless/CI use.
+   To uninstall, delete ``$WEIGHTSLAB_OPENCODE_HOME`` (default per-user cache
+   above) and set ``WEIGHTSLAB_OPENCODE_AUTOINSTALL=0`` (and, to also block the
+   on-demand fetch, ``WEIGHTSLAB_OPENCODE_AUTODOWNLOAD=0``) so it isn't
+   re-installed.
 
 Agent Provider Setup
 ~~~~~~~~~~~~~~~~~~~~

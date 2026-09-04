@@ -316,6 +316,14 @@ def compute_distribution_entries(
         if col is None:
             entries.append({"name": str(requested), "resolved": False})
             continue
+        # A media column (e.g. media:pred_video on a video-generation run) holds
+        # descriptor JSON, not numbers -- pd.to_numeric would coerce it all to NaN
+        # and the card would wrongly claim "no numeric values". Flag it as media so
+        # the card can say what it actually is. (See _distribution_card_html.)
+        _ms = _media_store()
+        if _ms is not None and _ms.is_media_column(col):
+            entries.append({"name": str(requested), "column": col, "resolved": True, "is_media": True})
+            continue
         try:
             values = pd.to_numeric(df[col], errors="coerce").dropna()
         except Exception:
@@ -496,6 +504,85 @@ def _resolve_runs_map(checkpoint_manager) -> dict:
         return {}
 
 
+def _media_store():
+    """Lazy handle to weightslab.data.media_store (None if unavailable), so this
+    module needn't hard-depend on it and never fails to import when it's absent."""
+    try:
+        from weightslab.data import media_store
+        return media_store
+    except Exception:
+        return None
+
+
+def _poster_data_uri(poster: bytes) -> Optional[str]:
+    """Wrap poster bytes as a data: URI, sniffing PNG vs JPEG (posters are always
+    a still image regardless of the underlying media kind). None when empty."""
+    if not poster:
+        return None
+    if poster[:8] == b"\x89PNG\r\n\x1a\n":
+        mime = "image/png"
+    elif poster[:2] == b"\xff\xd8":
+        mime = "image/jpeg"
+    elif poster[:6] in (b"GIF87a", b"GIF89a"):
+        mime = "image/gif"
+    else:
+        mime = "image/png"  # sensible default; browsers sniff anyway
+    return f"data:{mime};base64,{base64.b64encode(poster).decode('ascii')}"
+
+
+def compute_media_examples(df: Optional[pd.DataFrame], max_fields: int = 8,
+                           max_examples: int = 6) -> list:
+    """Discover media columns (``media:<field>``) in the sample dataframe and pull
+    a few poster frames per field from the in-process media_store, so a
+    video/image/audio-generation run's actual artifacts show up in the report
+    instead of being invisible. Returns ``[]`` for a run with no media (every
+    non-media use case is unchanged). Bounded by ``max_fields``/``max_examples``
+    so it never scales with dataset size."""
+    if df is None or getattr(df, "empty", True):
+        return []
+    ms = _media_store()
+    if ms is None:
+        return []
+    try:
+        media_cols = [c for c in df.columns if isinstance(c, str) and ms.is_media_column(c)]
+    except Exception:
+        return []
+    examples: list = []
+    for col in media_cols[:max_fields]:
+        field = ms.field_from_column(col)
+        try:
+            present = df[col].notna()
+            count = int(present.sum())
+        except Exception:
+            continue
+        if count == 0:
+            continue
+        try:
+            ids = _sample_ids_for_mask(df, present, max_examples)
+        except Exception:
+            ids = []
+        kind = ""
+        thumbnails = []
+        for sid in ids:
+            try:
+                entry = ms.get(field, sid)
+            except Exception:
+                entry = None
+            if not entry:
+                continue
+            kind = kind or str(entry.get("kind") or "")
+            uri = _poster_data_uri(entry.get("poster") or b"")
+            if uri:
+                thumbnails.append({"sample_id": str(sid), "poster_uri": uri})
+        examples.append({
+            "field": field,
+            "kind": kind or "media",
+            "count": count,
+            "thumbnails": thumbnails,
+        })
+    return examples
+
+
 def collect_report_context(
     root_log_dir,
     logger_q,
@@ -575,6 +662,7 @@ def collect_report_context(
         "distributions": compute_distribution_entries(df, distributions, plt),
         "dataframe": compute_dataframe_stats(df),
         "loss_shape_tags": summarize_loss_shape_tags(df),
+        "media": compute_media_examples(df),
         "plotting_available": plt is not None,
         "runs": list(runs_map.values()),
     }
@@ -726,6 +814,13 @@ def _distribution_card_html(entry: dict, block_id: str) -> str:
             f'  <div class="wl-report-noplot">No column matching &quot;{name}&quot; '
             'was found in the dataset.</div></div></div>'
         )
+    if entry.get("is_media"):
+        col = html.escape(str(entry.get("column") or name))
+        return head + (
+            f'  <div class="wl-report-noplot">&quot;{col}&quot; is a media column '
+            '(images/video/audio), not a numeric signal — see the Generated Media '
+            'section for its samples.</div></div></div>'
+        )
     if not entry.get("n"):
         return head + (
             '  <div class="wl-report-noplot">No numeric values logged for this column yet.</div></div></div>'
@@ -745,6 +840,54 @@ def _distribution_card_html(entry: dict, block_id: str) -> str:
     )
     body += "</div></div>"
     return body
+
+
+def _media_section_html(media: list) -> str:
+    """The Generated Media section: poster thumbnails per media field (video/
+    image/audio/...). Returns "" when there is no media, so non-media reports are
+    byte-for-byte unchanged. Uses inline styles with neutral (light/dark-safe)
+    colors so it needs no additions to the report's stylesheet."""
+    if not media:
+        return ""
+    card_style = ("border:1px solid rgba(128,128,128,0.3);border-radius:10px;"
+                  "padding:14px 16px;background:rgba(128,128,128,0.06);min-width:240px")
+    thumb_style = ("width:104px;height:104px;object-fit:cover;border-radius:8px;"
+                   "background:rgba(128,128,128,0.15);border:1px solid rgba(128,128,128,0.25)")
+    cards = []
+    for m in media:
+        field = html.escape(str(m.get("field") or ""))
+        kind = html.escape(str(m.get("kind") or "media"))
+        count = int(m.get("count") or 0)
+        thumbs = m.get("thumbnails") or []
+        if thumbs:
+            thumbs_html = "".join(
+                f'<figure style="margin:0;text-align:center">'
+                f'<img src="{t["poster_uri"]}" loading="lazy" '
+                f'alt="{field} sample {html.escape(str(t["sample_id"]))}" style="{thumb_style}"/>'
+                f'<figcaption class="wl-report-muted" style="font-size:11px;margin-top:4px">'
+                f'#{html.escape(str(t["sample_id"]))}</figcaption></figure>'
+                for t in thumbs
+            )
+        else:
+            thumbs_html = ('<p class="wl-report-muted">Media attached, but no poster '
+                           'frames are cached in this process to preview.</p>')
+        cards.append(
+            f'<div style="{card_style}">'
+            f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+            f'<strong>{field}</strong>'
+            f'<span class="wl-report-muted" style="text-transform:uppercase;font-size:11px;'
+            f'letter-spacing:.04em">{kind}</span>'
+            f'<span class="wl-report-muted" style="font-size:12px">{count:,} sample(s)</span>'
+            f'</div>'
+            f'<div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:10px">{thumbs_html}</div>'
+            f'</div>'
+        )
+    return (
+        '<div class="wl-report-section">'
+        '<h2>Generated Media</h2>'
+        f'<div style="display:flex;flex-wrap:wrap;gap:16px">{"".join(cards)}</div>'
+        '</div>'
+    )
 
 
 def _distributions_section_html(distributions: list) -> str:
@@ -1633,6 +1776,8 @@ _HTML_TEMPLATE = """<!doctype html>
       {signals_html}
     </div>
 
+    {media_section_html}
+
     {distributions_section_html}
 
     <div class="wl-report-section">
@@ -1737,6 +1882,7 @@ def render_report(context: dict, output_path, narrative: Optional[str] = None) -
         root_log_dir=html.escape(context.get("root_log_dir", "")),
         narrative=narrative_html,
         signals_html=signals_html,
+        media_section_html=_media_section_html(context.get("media") or []),
         distributions_section_html=_distributions_section_html(context.get("distributions") or []),
         loss_shape_html=_loss_shape_section_html(context.get("loss_shape_tags") or []),
         dataframe_html=_dataframe_section_html(context.get("dataframe") or {}),

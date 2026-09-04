@@ -476,7 +476,9 @@ def load_label(dataset, sample_id):
         if isinstance(data, (list, tuple)):
             if len(data) == 1:
                 return None # Only data, no label
-            elif len(data) <= 3: # if len==2|3, data, uids, label, no extra info
+            elif len(data) == 2: # (data, label): plain torch dataset, no uid element
+                label = _convert_label(data[1])
+            elif len(data) == 3: # (data, uids, label), no extra info
                 label = _convert_label(data[2])
             elif len(data) > 3: # if len>3, data, uids, label, classes, extra info
                 if len(data) == 4:
