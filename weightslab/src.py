@@ -1585,7 +1585,10 @@ def start_training(timeout: int = None) -> None:
     if timeout is not None and isinstance(timeout, int) and timeout > 0:
         logger.info(f"Starting WeightsLab training mode with a timeout of {timeout} seconds.")
         time.sleep(timeout)
-    pause_ctrl.resume() # Ensure we're not paused if start_training is called after serve
+    # Model-only workflows have no data hash to satisfy the normal resume
+    # safeguard. Bypass it only when no dataloader is registered; data-backed
+    # workflows retain the existing hash-completeness check.
+    pause_ctrl.resume(force=not ledgers.list_dataloaders())
 
 
 def _register_pid_with_ui_server() -> None:

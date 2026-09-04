@@ -3,9 +3,10 @@ import torch as th
 
 from torch import nn
 from enum import Enum
-from typing import List, Set, Optional, Callable, Dict, Any
+from typing import Iterable, List, Set, Optional, Callable, Dict, Any
 
 from weightslab.components.tracking import TrackingMode
+from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 from weightslab.utils.tools import get_children
 from weightslab.utils.modules_dependencies import _ModulesDependencyManager, DepType
 
@@ -104,7 +105,295 @@ class NetworkWithOps(nn.Module):
         return self.name
 
     def get_layer_by_id(self, layer_id: int):
-        return self._dep_manager.id_2_layer[layer_id]
+        layer = self._dep_manager.id_2_layer.get(layer_id)
+        if layer is None:
+            available = sorted(self._dep_manager.id_2_layer)
+            raise ValueError(
+                f"Unknown layer id {layer_id}. Available layer ids: {available}. "
+                "Wrap the model with compute_dependencies=True before using "
+                "the modelling API."
+            )
+        return layer
+
+    def _layer_names_by_id(self) -> Dict[int, str]:
+        """Return qualified PyTorch names for the registered editable layers."""
+        root = getattr(self, "model", None)
+        if not isinstance(root, nn.Module):
+            root = self
+
+        names = {}
+        for qualified_name, module in root.named_modules():
+            get_module_id = getattr(module, "get_module_id", None)
+            if not callable(get_module_id):
+                continue
+            try:
+                names[get_module_id()] = qualified_name or "<root>"
+            except (AttributeError, TypeError):
+                continue
+        return names
+
+    @staticmethod
+    def _neuron_count(layer: nn.Module, attribute: str) -> Optional[int]:
+        getter = getattr(layer, "get_neurons", None)
+        try:
+            value = getter(attribute) if callable(getter) else getattr(layer, attribute, None)
+        except (AttributeError, TypeError, ValueError):
+            value = getattr(layer, attribute, None)
+        return int(value) if isinstance(value, (int, float)) else None
+
+    def get_layer_info(
+        self,
+        layer_id: int,
+        *,
+        include_neurons: bool = True,
+    ) -> Dict[str, Any]:
+        """Return a JSON-serializable description of one editable layer.
+
+        Layer ids are stable for the lifetime of a wrapped model. They are not
+        checkpoint identifiers and may change when a new model is wrapped.
+        """
+        return self._build_layer_info(
+            layer_id,
+            include_neurons=include_neurons,
+            layer_names=self._layer_names_by_id(),
+        )
+
+    def _build_layer_info(
+        self,
+        layer_id: int,
+        *,
+        include_neurons: bool,
+        layer_names: Dict[int, str],
+    ) -> Dict[str, Any]:
+        layer = self.get_layer_by_id(layer_id)
+        input_neurons = self._neuron_count(layer, "in_neurons")
+        output_neurons = self._neuron_count(layer, "out_neurons")
+
+        lr_overrides = getattr(layer, "neuron_2_lr", {})
+        weight_lrs = lr_overrides.get("weight", {}) if lr_overrides else {}
+        neuron_count = output_neurons or 0
+        neuron_lrs = [float(weight_lrs.get(index, 1.0)) for index in range(neuron_count)]
+        frozen_neurons = {index for index, lr in enumerate(neuron_lrs) if lr == 0.0}
+
+        layer_info = {
+            "id": int(layer_id),
+            "name": layer_names.get(layer_id, f"layer_{layer_id}"),
+            "type": getattr(layer, "module_name", layer.__class__.__name__),
+            "input_neurons": input_neurons,
+            "output_neurons": output_neurons,
+            "parameter_count": sum(
+                parameter.numel() for parameter in layer.parameters(recurse=False)
+            ),
+            "frozen_neuron_count": len(frozen_neurons),
+            "operation_counts": dict(getattr(layer, "operation_age", {})),
+        }
+        if include_neurons:
+            layer_info["neurons"] = [
+                {
+                    "id": index,
+                    "learning_rate": neuron_lrs[index],
+                    "frozen": index in frozen_neurons,
+                }
+                for index in range(neuron_count)
+            ]
+        return layer_info
+
+    def get_model_graph(self, *, include_neurons: bool = False) -> Dict[str, Any]:
+        """Return the editable model graph as JSON-serializable primitives.
+
+        The default response is intentionally structural and cheap. Pass
+        ``include_neurons=True`` when per-neuron learning-rate/frozen state is
+        needed.
+        """
+        layer_ids = sorted(self._dep_manager.id_2_layer)
+        if not layer_ids:
+            raise RuntimeError(
+                "Model graph information is unavailable. Wrap the model with "
+                "wl.watch_or_edit(..., flag='model', compute_dependencies=True)."
+            )
+
+        dependency_edges = set()
+        for dependency_type, parents in self._dep_manager.dependency_2_id_2_id.items():
+            for source_id, target_ids in parents.items():
+                dependency_edges.update(
+                    (int(source_id), int(target_id), dependency_type.value)
+                    for target_id in target_ids
+                )
+        dependencies = [
+            {
+                "source_layer_id": source_id,
+                "target_layer_id": target_id,
+                "type": dependency_type,
+            }
+            for source_id, target_id, dependency_type in sorted(dependency_edges)
+        ]
+        layer_names = self._layer_names_by_id()
+
+        return {
+            "schema_version": 1,
+            "name": self.get_name(),
+            "age": self.get_age(),
+            "layers": [
+                self._build_layer_info(
+                    layer_id,
+                    include_neurons=include_neurons,
+                    layer_names=layer_names,
+                )
+                for layer_id in layer_ids
+            ],
+            "dependencies": dependencies,
+        }
+
+    def _validated_neuron_indices(
+        self,
+        layer_id: int,
+        neuron_indices: Optional[Iterable[int] | int],
+        *,
+        allow_empty: bool,
+    ) -> Set[int]:
+        layer = self.get_layer_by_id(layer_id)
+        neuron_count = self._neuron_count(layer, "out_neurons")
+        if neuron_count is None:
+            raise ValueError(f"Layer {layer_id} does not expose output neurons.")
+
+        if neuron_indices is None:
+            indices = set()
+        elif isinstance(neuron_indices, int):
+            indices = {neuron_indices}
+        else:
+            indices = set(neuron_indices)
+        if not all(isinstance(index, int) for index in indices):
+            raise TypeError("neuron_indices must contain integers only.")
+        if not indices and not allow_empty:
+            raise ValueError("neuron_indices cannot be empty for this operation.")
+
+        invalid = sorted(
+            index for index in indices if index < -neuron_count or index >= neuron_count
+        )
+        if invalid:
+            raise ValueError(
+                f"Neuron indices {invalid} are outside layer {layer_id}'s "
+                f"valid range [-{neuron_count}, {neuron_count - 1}]."
+            )
+        return indices
+
+    def add_neurons(self, layer_id: int, count: int = 1) -> None:
+        """Append ``count`` neurons and propagate the change through the graph."""
+        self.get_layer_by_id(layer_id)
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            raise ValueError("count must be a positive integer.")
+        self.operate(
+            layer_id=layer_id,
+            neuron_indices=set(range(count)),
+            op_type=ArchitectureNeuronsOpType.ADD,
+        )
+
+    def prune_neurons(self, layer_id: int, neuron_indices: Iterable[int] | int) -> None:
+        """Remove selected neurons and update dependent layers."""
+        indices = self._validated_neuron_indices(
+            layer_id, neuron_indices, allow_empty=False
+        )
+        self.operate(
+            layer_id=layer_id,
+            neuron_indices=indices,
+            op_type=ArchitectureNeuronsOpType.PRUNE,
+        )
+
+    def freeze_neurons(
+        self,
+        layer_id: int,
+        neuron_indices: Optional[Iterable[int] | int] = None,
+    ) -> None:
+        """Freeze selected neurons idempotently (all when omitted)."""
+        self._set_neurons_frozen(layer_id, neuron_indices, frozen=True)
+
+    def unfreeze_neurons(
+        self,
+        layer_id: int,
+        neuron_indices: Optional[Iterable[int] | int] = None,
+    ) -> None:
+        """Unfreeze selected neurons idempotently (all when omitted)."""
+        self._set_neurons_frozen(layer_id, neuron_indices, frozen=False)
+
+    def _set_neurons_frozen(
+        self,
+        layer_id: int,
+        neuron_indices: Optional[Iterable[int] | int],
+        *,
+        frozen: bool,
+    ) -> None:
+        indices = self._validated_neuron_indices(
+            layer_id, neuron_indices, allow_empty=True
+        )
+        layer = self.get_layer_by_id(layer_id)
+        weight = getattr(layer, "weight", None)
+        if weight is None:
+            raise ValueError(
+                f"Layer {layer_id} has no learnable weights to freeze. "
+                "Select a learnable layer from get_model_graph()."
+            )
+        lr_overrides = getattr(layer, "neuron_2_lr", {})
+        if not weight.requires_grad or "weight" not in lr_overrides:
+            raise ValueError(
+                f"Layer {layer_id} does not have a trainable, per-neuron "
+                "tracked weight. Freeze or unfreeze it through PyTorch before "
+                "wrapping the model."
+            )
+        neuron_count = self._neuron_count(layer, "out_neurons") or 0
+        selected = (
+            {index % neuron_count for index in indices}
+            if indices
+            else set(range(neuron_count))
+        )
+        weight_lrs = lr_overrides["weight"]
+        currently_frozen = {
+            index for index in selected if float(weight_lrs.get(index, 1.0)) == 0.0
+        }
+        indices_to_toggle = (
+            selected - currently_frozen if frozen else currently_frozen
+        )
+        if not indices_to_toggle:
+            return
+        self.operate(
+            layer_id=layer_id,
+            neuron_indices=indices_to_toggle,
+            op_type=ArchitectureNeuronsOpType.FREEZE,
+        )
+
+    def reset_neurons(
+        self,
+        layer_id: int,
+        neuron_indices: Optional[Iterable[int] | int] = None,
+    ) -> None:
+        """Reinitialize selected neurons (all when omitted)."""
+        indices = self._validated_neuron_indices(
+            layer_id, neuron_indices, allow_empty=True
+        )
+        self.operate(
+            layer_id=layer_id,
+            neuron_indices=indices,
+            op_type=ArchitectureNeuronsOpType.RESET,
+        )
+
+    def perturb_neurons(
+        self,
+        layer_id: int,
+        neuron_indices: Optional[Iterable[int] | int] = None,
+        *,
+        ratio: float = 0.1,
+    ) -> None:
+        """Perturb selected weights by a relative random amount."""
+        if not isinstance(ratio, (int, float)) or isinstance(ratio, bool) or not 0 < ratio < 1:
+            raise ValueError("ratio must be strictly between 0 and 1.")
+        indices = self._validated_neuron_indices(
+            layer_id, neuron_indices, allow_empty=True
+        )
+        self.operate(
+            layer_id=layer_id,
+            neuron_indices=indices,
+            op_type=ArchitectureNeuronsOpType.RESET,
+            perturbation_ratio=float(ratio),
+        )
 
     def register_dependencies(
         self,
