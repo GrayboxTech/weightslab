@@ -21,7 +21,7 @@ the example lives.
 What the example does
 ---------------------
 
-One ``YOLO.train(trainer=WLAwareTrainer, ...)`` call gives you:
+One ``YOLO.train(trainer=wl.WLAwareTrainer, ...)`` call gives you:
 
 - Per-sample box / cls / dfl loss and live NMS overlay (train split).
 - Per-sample IoU and post-NMS overlay (val split).
@@ -37,7 +37,7 @@ Integration in three lines
 
    wl.watch_or_edit(cfg, flag="hyperparameters", defaults=cfg, poll_interval=1.0)
    wl.serve()
-   YOLO("yolo11n.pt").train(trainer=WLAwareTrainer, data=..., workers=0, amp=False)
+   YOLO("yolo11n.pt").train(trainer=wl.WLAwareTrainer, data=..., workers=0, amp=False)
    wl.keep_serving()
 
 Required kwargs: ``workers=0`` (UID counter lives in the parent process),

@@ -25,10 +25,6 @@ from torch.utils.data import Dataset
 
 import weightslab as wl
 from weightslab.examples.utils.baseline_models.pytorch.models import FashionCNN as CNN
-from weightslab.components.global_monitoring import (
-    guard_training_context,
-    guard_testing_context
-)
 
 
 # Setup logging
@@ -129,7 +125,7 @@ class MNISTCustomDataset(Dataset):
 def train(loader, model, optimizer, criterion_mlt, device):
     """Single training step using the tracked dataloader + watched loss."""
 
-    with guard_training_context:
+    with wl.guard_training_context:
         (inputs, ids, labels) = next(loader)
         inputs = inputs.to(device)
         labels = labels.to(device)
@@ -165,7 +161,7 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
     losses = torch.tensor(0.0, device=device)
 
     for (inputs, ids, labels) in loader:
-        with guard_testing_context:
+        with wl.guard_testing_context:
             inputs = inputs.to(device)
             labels = labels.to(device)
 

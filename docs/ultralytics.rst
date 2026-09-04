@@ -32,13 +32,12 @@ Minimal integration
 
    import weightslab as wl
    from ultralytics import YOLO
-   from weightslab.integrations.ultralytics import WLAwareTrainer
 
    wl.watch_or_edit(cfg, flag="hyperparameters", defaults=cfg)
    wl.serve()
 
    YOLO("yolo11n.pt").train(
-       trainer=WLAwareTrainer,
+       trainer=wl.WLAwareTrainer,
        data="my_dataset.yaml",
        imgsz=640,
        epochs=100,
@@ -152,7 +151,6 @@ End-to-end sequence
 
    import os, yaml, torch
    import weightslab as wl
-   from weightslab.integrations.ultralytics import WLAwareTrainer
    from ultralytics import YOLO
 
    # 1) Load config and register as live hyperparameters
@@ -170,7 +168,7 @@ End-to-end sequence
 
    # 4) Train — WLAwareTrainer handles all WL wiring internally
    YOLO(cfg["model"]["name"]).train(
-       trainer=WLAwareTrainer,
+       trainer=wl.WLAwareTrainer,
        data=str(cfg["data_root"]),
        imgsz=cfg["image_size"],
        epochs=cfg.get("training_steps_to_do") or 1000,

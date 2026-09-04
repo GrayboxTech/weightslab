@@ -70,7 +70,7 @@ the predicted mask.
 
 .. code-block:: python
 
-   with guard_training_context:
+   with wl.guard_training_context:
        outputs = model(inputs)
        combined = bce_sample(outputs, targets, batch_ids=ids) \
                 + dice_sample(outputs, targets, batch_ids=ids)

@@ -53,7 +53,7 @@ inspect the hardest negatives in the studio.
 .. code-block:: python
 
    def train(loader, model, optimizer, device):
-       with guard_training_context:
+       with wl.guard_training_context:
            images, uids, labels, _ = next(loader)
            embeddings = model(images.to(device))
            triplet_loss = compute_triplet_loss(embeddings, labels)
@@ -61,7 +61,7 @@ inspect the hardest negatives in the studio.
            optimizer.step()
 
    def evaluate(loader, model, device):
-       with guard_testing_context, torch.no_grad():
+       with wl.guard_testing_context, torch.no_grad():
            for images, uids, labels, _ in loader:
                embeddings = model(images.to(device))
                ...

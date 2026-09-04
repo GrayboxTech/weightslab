@@ -103,7 +103,7 @@ aggregate curve view.
 .. code-block:: python
 
    def train(loader, model, optimizer, criterion, device):
-       with guard_training_context:
+       with wl.guard_training_context:
            inputs, ids, targets, _ = next(loader)
            outputs = model(inputs.to(device))
            loss_per_sample = criterion(outputs, targets.to(device),
@@ -112,7 +112,7 @@ aggregate curve view.
            optimizer.step()
 
    def test(loader, model, criterion, metric, device):
-       with guard_testing_context, torch.no_grad():
+       with wl.guard_testing_context, torch.no_grad():
            for inputs, ids, targets, _ in loader:
                criterion(outputs, targets, batch_ids=ids)
                metric(preds, targets, batch_ids=ids)

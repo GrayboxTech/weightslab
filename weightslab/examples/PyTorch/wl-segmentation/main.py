@@ -13,11 +13,6 @@ import weightslab as wl
 from torch import optim
 
 
-from weightslab.components.global_monitoring import (
-    guard_training_context,
-    guard_testing_context,
-)
-
 from utils.data import BDD100kSegDataset, seg_collate
 from utils.model import SmallUNet
 from utils.criterions import (
@@ -80,7 +75,7 @@ def train(loader, model, optimizer, sig, device):
     loader yields (inputs, ids, labels, metadata) because of DataSampleTrackingWrapper.
     `labels` is per sample a LIST of instance masks (see utils/data.seg_collate).
     """
-    with guard_training_context:
+    with wl.guard_training_context:
         (inputs, ids, labels, _) = next(loader)
         inputs = inputs.to(device)
         labels = [[m.to(device) for m in insts] for insts in labels] # per-sample list of instances
@@ -111,7 +106,7 @@ def test(loader, model, sig, device, test_loader_len):
     """Full evaluation pass over the val loader."""
     losses = 0.0
     dices = 0.0
-    with guard_testing_context, torch.no_grad():
+    with wl.guard_testing_context, torch.no_grad():
         for inputs, ids, labels, _ in loader:
             inputs = inputs.to(device)
             labels = [[m.to(device) for m in insts] for insts in labels] # per-sample list of instances

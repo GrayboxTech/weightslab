@@ -71,10 +71,6 @@ from torchmetrics.classification import Accuracy
 from torchvision import datasets, transforms
 
 import weightslab as wl
-from weightslab.components.global_monitoring import (
-    guard_testing_context,
-    guard_training_context,
-)
 
 logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
@@ -206,7 +202,7 @@ def print_layer_legend(model):
 # -----------------------------------------------------------------------------
 def train(loader, model, optimizer, criterion, device):
     """One training step. Nothing here logs model signals -- the hooks do."""
-    with guard_training_context:
+    with wl.guard_training_context:
         inputs, ids, labels = next(loader)
         inputs = inputs.to(device)
         labels = labels.to(device)
@@ -235,7 +231,7 @@ def test(loader, model, criterion, metric, device, num_batches):
     losses = torch.tensor(0.0, device=device)
 
     for inputs, ids, labels in loader:
-        with guard_testing_context, torch.no_grad():
+        with wl.guard_testing_context, torch.no_grad():
             inputs = inputs.to(device)
             labels = labels.to(device)
 
