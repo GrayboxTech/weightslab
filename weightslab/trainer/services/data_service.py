@@ -44,8 +44,8 @@ from weightslab.data.video_utils import (
 from weightslab.data import media_store
 from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview, encode_image_to_raw_bytes
 from weightslab.data.data_utils import load_raw_image_array
-
 # Image encoding / mask compression / proto helpers (extracted)
+
 from weightslab.trainer.services.data_image_utils import (
     rle_encode_mask,
     create_data_stat,
@@ -492,6 +492,23 @@ def rewrite_boolean_keywords_to_bitwise(code: str) -> str:
         return ast.unparse(tree)
     except Exception:
         return code
+
+
+def _histogram_category_cap() -> int:
+    """Max distinct bars a categorical histogram returns (WL_HIST_CATEGORY_CAP).
+
+    Beyond this the response is neither renderable nor informative -- the
+    remainder is folded into a single "(other)" bar.
+    """
+    try:
+        return max(1, int(os.environ.get("WL_HIST_CATEGORY_CAP", "200")))
+    except Exception:
+        return 200
+
+
+def _fast_view_enabled() -> bool:
+    """Differential view refresh. On by default; set WL_FAST_VIEW=0 to opt out."""
+    return os.environ.get("WL_FAST_VIEW", "1") not in ("0", "false", "False")
 
 
 class DataService:
@@ -1109,6 +1126,23 @@ class DataService:
             # merge + proxy conversion) a second time over the whole dataset every refresh.
             df = self._df_manager.get_collapse_annotations_to_samples_df(df)
 
+            # The collapse yields object dtype for signals//* columns. They are
+            # numeric by definition, and an object column sorts ~8x slower
+            # (6.17s vs 0.76s at 3.96M) while also slowing histogram binning,
+            # groupby and every differential write. Coerce them back here, at the
+            # single point the view is materialised.
+            for _c in df.columns:
+                if not str(_c).startswith("signals") or df[_c].dtype != object:
+                    continue
+                try:
+                    _num = pd.to_numeric(df[_c], errors="coerce")
+                    # Only when nothing is lost: a genuinely non-numeric value
+                    # means the column is not what we assume, so leave it be.
+                    if _num.notna().sum() == df[_c].notna().sum():
+                        df[_c] = _num.astype("float32")
+                except Exception as _exc:
+                    logger.debug("[DataService] dtype restore skipped for %r: %s", _c, _exc)
+
             # Ensure sample_id is a column if it was the index
             df = safe_reset_index(df)
 
@@ -1131,7 +1165,9 @@ class DataService:
 
             return df
         except Exception as e:
-            logger.debug(f"[DataService] Error pulling data view: {e}")
+            # Was debug: a swallowed failure here silently freezes the view at
+            # the previous snapshot, which looks exactly like "no new data".
+            logger.error("[DataService] Error pulling data view: %s", e, exc_info=True)
             # Use getattr to safely check for attribute during __init__
             current_df = getattr(self, "_all_datasets_df", None)
             return current_df if current_df is not None else pd.DataFrame()
@@ -1448,8 +1484,9 @@ class DataService:
             except Exception as e:
                 logger.error(f"[DataService] Failed to compute signals for loader '{loader_name}': {e}")
 
-        # Force view update
-        self._slowUpdateInternals(force=True)
+        # Refresh signal values; differential unless the schema actually changed.
+        if not self._fastUpdateInternals():
+            self._slowUpdateInternals(force=True)
 
     def _process_sample_row(self, args):
         """Process a single dataframe row to create a DataRecord."""
@@ -1477,6 +1514,8 @@ class DataService:
             skip_prediction_for_request = metadata_only_request
 
             # ====== Step 2: Load dataset lazily (avoid unnecessary IO for metadata-only) ======
+            # Views the client explicitly asked for; empty => send everything.
+            _wanted_stats = set(getattr(request, "stats_to_retrieve", None) or [])
             needs_dataset = bool(request.include_raw_data) or (not skip_label_for_request)
             dataset = self._get_dataset(origin) if needs_dataset else None
 
@@ -2150,14 +2189,91 @@ class DataService:
                         target_height=target_height,
                     )
 
-                    data_stats.append(
-                        create_data_stat(
-                            name='raw_data',
-                            stat_type='bytes',
-                            thumbnail=raw_data_bytes,
-                            shape=raw_shape,
+                    # An explicit stats_to_retrieve means the client knows which
+                    # views it will draw; raw_data duplicates view rank 0, so
+                    # only send it when actually asked for.
+                    if not _wanted_stats or 'raw_data' in _wanted_stats:
+                        data_stats.append(
+                            create_data_stat(
+                                name='raw_data',
+                                stat_type='bytes',
+                                thumbnail=raw_data_bytes,
+                                shape=raw_shape,
+                            )
                         )
-                    )
+
+                    # Paired/multi-view datasets (e.g. a source+edited image
+                    # pair) can optionally expose additional named views via
+                    # extra_images() -- send each as its own 'image_<name>'
+                    # stat so the frontend renders it as its own grid column
+                    # (isImageFieldName() already recognizes 'image_*'). This
+                    # duck-typed hook is a no-op for datasets that don't
+                    # define it. raw_data above already covers view rank 0
+                    # (e.g. 'source'); extra_images() may repeat that view
+                    # under its own name too -- one small duplicated
+                    # thumbnail, traded for not having to assume which named
+                    # view is redundant across arbitrary datasets.
+                    # Probe the UNWRAPPED dataset: `dataset` is WL's tracking
+                    # wrapper and does not forward extra_images, so testing it
+                    # silently disables every named view.
+                    if hasattr(ds, "extra_images"):
+                        try:
+                            extra_views = ds.extra_images(ds_idx) or {}
+                        except Exception as e:
+                            extra_views = {}
+                            logger.debug(f"extra_images failed for sample_id={sample_id}: {e}")
+                        for view_name, view_pil in extra_views.items():
+                            if view_pil is None:
+                                continue
+                            # Filter BEFORE resize/encode -- that is the cost.
+                            # Still ADVERTISE the view with an empty thumbnail:
+                            # the panel builds its modality list from the stats
+                            # present, so omitting it entirely would delete the
+                            # toggle and make the view unrecoverable.
+                            if (_wanted_stats
+                                    and ("image_%s" % view_name) not in _wanted_stats):
+                                data_stats.append(
+                                    create_data_stat(
+                                        name="image_%s" % view_name,
+                                        stat_type='bytes',
+                                        thumbnail=b"",
+                                        shape=[],
+                                    )
+                                )
+                                continue
+                            try:
+                                resized_view = view_pil
+                                if resized_view.size != (target_width, target_height):
+                                    _view_resample = (
+                                        Image.Resampling.LANCZOS if is_full_resolution
+                                        else Image.Resampling.BILINEAR
+                                    )
+                                    resized_view = resized_view.resize(
+                                        (target_width, target_height), _view_resample
+                                    )
+                                view_bytes, view_shape, _ = encode_image_to_raw_bytes(
+                                    np_img=None,
+                                    middle_pil=resized_view,
+                                    original_shape=[],
+                                    is_volumetric=False,
+                                    is_full_resolution=is_full_resolution,
+                                    target_width=target_width,
+                                    target_height=target_height,
+                                )
+                                data_stats.append(
+                                    create_data_stat(
+                                        name=f"image_{view_name}",
+                                        stat_type='bytes',
+                                        thumbnail=view_bytes,
+                                        shape=view_shape,
+                                    )
+                                )
+                                del view_bytes, resized_view
+                            except Exception as e:
+                                logger.debug(
+                                    f"extra_images encode failed for sample_id={sample_id} "
+                                    f"view={view_name}: {e}"
+                                )
 
                     # For video samples the bytes above are only the poster
                     # frame, so advertise the clip's shape here. This lets the
@@ -2470,16 +2586,49 @@ class DataService:
             return numeric
         return values.astype(str)
 
-    def _sort_values_numeric_aware(self, df: pd.DataFrame, sort_params: dict) -> None:
-        """Sort dataframe while treating sample_id as numeric when possible."""
-        params = dict(sort_params)
-        if params.get("key") is None and self._sort_includes_sample_id(params.get("by")):
-            def _key(series: pd.Series):
-                if str(getattr(series, "name", "")) == SampleStatsEx.SAMPLE_ID.value:
-                    return self._sample_id_sortable_series(series)
-                return series
+    def _numeric_like_sort_cols(self, df: pd.DataFrame, by) -> set:
+        """Sort columns whose values are strings but mean numbers.
 
-            params["key"] = _key
+        '1916469' < '191647' lexicographically but not numerically, so sorting a
+        numeric-valued string column by raw string order is simply wrong. Only
+        object/string columns are candidates; genuinely numeric dtypes already
+        sort correctly and must not be touched.
+        """
+        out = set()
+        by_list = [by] if isinstance(by, str) else list(by or [])
+        for col in by_list:
+            if col == SampleStatsEx.SAMPLE_ID.value:
+                out.add(col)
+                continue
+            try:
+                s = df[col] if col in df.columns else None
+                if s is None or pd.api.types.is_numeric_dtype(s) or hasattr(s, "cat"):
+                    continue
+                probe = s.dropna()
+                if probe.empty:
+                    continue
+                # Cheap decision on a sample: a full 4M-row coercion here would
+                # cost more than the sort it is meant to correct.
+                head = probe.head(2048)
+                coerced = pd.to_numeric(head, errors="coerce")
+                if coerced.notna().all():
+                    out.add(col)
+            except Exception:
+                continue
+        return out
+
+    def _sort_values_numeric_aware(self, df: pd.DataFrame, sort_params: dict) -> None:
+        """Sort dataframe, ordering numeric-valued string columns numerically."""
+        params = dict(sort_params)
+        if params.get("key") is None:
+            numeric_like = self._numeric_like_sort_cols(df, params.get("by"))
+            if numeric_like:
+                def _key(series: pd.Series):
+                    if str(getattr(series, "name", "")) in numeric_like:
+                        return self._sample_id_sortable_series(series)
+                    return series
+
+                params["key"] = _key
 
         df.sort_values(inplace=True, **params)
 
@@ -3527,6 +3676,38 @@ class DataService:
                     # silently stops refreshing).
                     orig_index_names = [n for n in df.index.names if n is not None]
 
+                    # Fast path: nothing in `by` is an index level, so the frame can be
+                    # sorted where it stands. Avoids reset_index + astype(int)/astype(str)
+                    # over every sample_id + a set_index that re-factorizes 3.96M string
+                    # keys -- measured as the bulk of a ~20s sort.
+                    _fp_by = params.get("by")
+                    _fp_list = [_fp_by] if isinstance(_fp_by, str) else list(_fp_by or [])
+                    _fp_res = [
+                        (c if c in df.columns
+                         else ("signals//" + c if ("signals//" + c) in df.columns else c))
+                        for c in _fp_list
+                    ]
+                    if (_fp_res
+                            and all(c in df.columns for c in _fp_res)
+                            and not any(c in orig_index_names for c in _fp_list)
+                            and not any(c in orig_index_names for c in _fp_res)):
+                        _fp_params = dict(params)
+                        _fp_params["by"] = (_fp_res if isinstance(_fp_by, (list, tuple))
+                                            else _fp_res[0])
+                        try:
+                            # Through the helper, NOT df.sort_values directly: a
+                            # numeric-valued string column (group_id, target, ...)
+                            # otherwise sorts lexicographically -- '1916469' before
+                            # '191647'.
+                            self._sort_values_numeric_aware(df, _fp_params)
+                            return "Applied operation: sort_values"
+                        except (TypeError, ValueError, KeyError) as _fp_exc:
+                            # Mixed dtypes or an unexpected key: fall through to the
+                            # original reset/restore path rather than failing the query.
+                            logger.debug(
+                                "[sort] fast path declined (%s); using index round-trip",
+                                type(_fp_exc).__name__)
+
                     def _restore_index():
                         cols = [n for n in orig_index_names if n in df.columns]
                         if cols and not isinstance(df.index, pd.MultiIndex):
@@ -3789,11 +3970,98 @@ class DataService:
         real rebuild+swap via force=True OFF the request path, then releases the guard so
         a later stale read can trigger another. Never raises into a request."""
         try:
-            self._slowUpdateInternals(force=True)
+            if not self._fastUpdateInternals():
+                self._slowUpdateInternals(force=True)
         except Exception:
             logger.exception("[ViewRefresh] background view refresh failed")
         finally:
             self._refresh_in_flight.release()
+
+    # Columns the trainer mutates. Structural columns (origin, edit_prompt,
+    # task_type, ...) never change after registration, so a differential sync
+    # only has to carry these.
+    _FAST_SYNC_PREFIXES = ("signals", "last_seen", "discarded", "prediction", "target")
+
+    def _fast_sync_columns(self, view):
+        return [c for c in view.columns
+                if str(c).startswith(self._FAST_SYNC_PREFIXES)]
+
+
+
+    def _fastUpdateInternals(self, max_dirty: int = 250_000) -> bool:
+        """O(change) view refresh. True if applied, False -> caller must rebuild.
+
+        Falls back when there is no view yet, when a dirty row is absent from
+        the view (new rows => structural change), or when the backlog is large
+        enough that a rebuild is cheaper.
+        """
+        if not _fast_view_enabled():
+            return False            # opt-out: behave exactly as before
+        view = self._all_datasets_df
+        dfm = self._df_manager
+        if view is None or getattr(view, "empty", True) or dfm is None:
+            return False
+        # A manager without dirty tracking cannot serve a delta -- rebuild.
+        if not (hasattr(dfm, "take_view_dirty") and hasattr(dfm, "get_source_rows")):
+            return False
+        # A column the ledger has but the view lacks can only arrive via a full
+        # rebuild -- the differential write below addresses existing columns
+        # only. Per-sample signal columns are created on their first write, so
+        # on a fresh ledger the view predates them and would never gain them.
+        try:
+            _src = getattr(dfm, "_df", None)
+            if _src is not None:
+                _have = set(view.columns)
+                _missing = [c for c in _src.columns
+                            if str(c).startswith(self._FAST_SYNC_PREFIXES)
+                            and c not in _have]
+                if _missing:
+                    return False
+        except Exception:
+            pass
+
+        dirty = dfm.take_view_dirty(limit=max_dirty)
+        if dirty is None:
+            return False            # backlog too large; rebuild is cheaper
+        if not dirty:
+            return True             # nothing changed since last sync
+
+        sids = [str(s) for s in dirty]
+        # Address rows by LABEL. pandas keeps a hash engine on the index, built
+        # in C and cached, so this needs no precomputed position map -- and a
+        # label that is absent surfaces below as a no-match rather than as a
+        # silently wrong row.
+        keep = sids
+
+        cols = self._fast_sync_columns(view)
+        if not cols:
+            return True
+        sub = dfm.get_source_rows(keep, columns=[c for c in cols if c in view.columns])
+        if sub is None or sub.empty:
+            return True
+        if isinstance(sub.index, pd.MultiIndex):
+            sub = sub.droplevel(-1)
+        sub = sub[~sub.index.duplicated(keep="last")]
+
+        # Only rows the view actually holds; a structural change (new sample)
+        # must still fall back to the full rebuild rather than be invented here.
+        SID = SampleStatsEx.SAMPLE_ID.value
+        _names = list(getattr(view.index, "names", []) or [])
+        view_keys = (view.index.get_level_values(SID)
+                     if isinstance(view.index, pd.MultiIndex) and SID in _names
+                     else view.index)
+        # Positions via the Index hash engine: vectorised and cached, so this
+        # costs nothing like the O(rows) dict the position map used to rebuild.
+        _pos = pd.Index(view_keys.astype(str)).get_indexer(sub.index.astype(str))
+        _ok = _pos >= 0
+        if not _ok.any():
+            return True
+        if not _ok.all():
+            return False
+        for c in sub.columns:
+            _ci = view.columns.get_loc(c)
+            view.iloc[_pos, _ci] = sub[c].to_numpy()
+        return True
 
     def _slowUpdateInternals(self, force: bool = False, reset_view: bool = False) -> None:
         """Update the internal dataframe view with the latest data from the manager.
@@ -3965,6 +4233,13 @@ class DataService:
             # Atomic swap to make the new view available to readers
             self._all_datasets_df = updated_df
             self._last_internals_update_time = current_time
+            # The rebuilt view reflects every row, so the differential backlog is
+            # satisfied. This is the only point at which that is true.
+            try:
+                if self._df_manager is not None:
+                    self._df_manager.clear_view_dirty()
+            except Exception:
+                pass
 
         finally:
             held_ms = (time.time() - t_held_start) * 1000
@@ -4482,7 +4757,8 @@ class DataService:
                 )
 
             # Trigger update if needed (it has its own internal locking)
-            self._slowUpdateInternals()
+            if not self._fastUpdateInternals():
+                self._slowUpdateInternals()
 
             # Atomic snapshot of the current authoritative dataframe
             current_df = self._all_datasets_df
@@ -4793,37 +5069,39 @@ class DataService:
                 operations = self._parse_direct_query(request.query)
 
                 # Apply operations with lock
-                with self._watched_lock("_lock[ApplyDataQuery/ops]"):
-                    # Skip the forced full-view rebuild for SORT-ONLY operations. Sorting just
-                    # re-orders the existing snapshot, so a fresh collapse+combine (hundreds of
-                    # ms on large views, and — being lock-held — contends with the training
-                    # thread for multi-second stalls) is unnecessary. Filters/edits still refresh
-                    # so they operate on the latest data. The view is frozen on direct queries
-                    # anyway (_is_filtered=True), so it wasn't auto-refreshing mid-sort regardless.
-                    _SORT_FUNCS = {"df.sort_values", "df.sort_index", "df.sort_view_slice"}
-                    is_sort_only = bool(operations) and all(
-                        op.get("function") in _SORT_FUNCS for op in operations)
-                    if not is_sort_only:
-                        self._slowUpdateInternals(force=True) # Refresh internals before applying non-sort operations
+                _SORT_FUNCS = {"df.sort_values", "df.sort_index", "df.sort_view_slice"}
+                is_sort_only = bool(operations) and all(
+                    op.get("function") in _SORT_FUNCS for op in operations)
 
-                    # Work on a copy to allow concurrent readers to see a consistent state
-                    df = self._all_datasets_df # Remove copy because memory waste and slowdown
-                    messages = []
-
+                def _run_ops(target):
+                    out = []
                     for op in operations:
-                        func = op.get("function")
-                        params = op.get("params", {}) or {}
-                        msg = self._apply_agent_operation(df, func, params)
-                        messages.append(msg)
+                        out.append(self._apply_agent_operation(
+                            target, op.get("function"), op.get("params", {}) or {}))
+                    return " | ".join(out) if out else "No operation performed"
 
-                    final_message = " | ".join(messages) if messages else "No operation performed"
-
-                    # Atomic swap
-                    self._all_datasets_df = df
-
-                    # Direct queries are manipulations -> Freeze the view
-                    if operations:
-                         self._is_filtered = True
+                if is_sort_only:
+                    # Sorting 4M rows costs ~10s; under _lock that stalls the trainer
+                    # for the whole duration (measured 11716ms). Sort a shallow copy
+                    # off-lock, then hold the lock only for the reference swap.
+                    base = self._all_datasets_df
+                    df = base.copy(deep=False) if base is not None else base
+                    final_message = _run_ops(df)
+                    # No position map to rebuild: the differential refresh addresses
+                    # rows by label through pandas' own index engine, so reordering
+                    # the view invalidates nothing.
+                    with self._watched_lock("_lock[ApplyDataQuery/swap]"):
+                        self._all_datasets_df = df
+                        if operations:
+                            self._is_filtered = True
+                else:
+                    with self._watched_lock("_lock[ApplyDataQuery/ops]"):
+                        self._slowUpdateInternals(force=True)
+                        df = self._all_datasets_df
+                        final_message = _run_ops(df)
+                        self._all_datasets_df = df
+                        if operations:
+                            self._is_filtered = True
 
                 return self._build_success_response(
                     df=df,
@@ -5047,17 +5325,37 @@ class DataService:
             if df is None or df.empty:
                 return pb2.HistogramResponse(
                     success=False, message="empty dataframe view", total_rows=0, bins=[])
-            df = safe_reset_index(df)
+            # safe_reset_index copies AND consolidates the entire frame (~70% of
+            # this RPC at 3.96M x 19 by py-spy). It is only needed to reach fields
+            # that live in the index; when they are already columns, use the frame
+            # as it stands.
+            def _field(frame, name):
+                """Series for *name* whether it is a column or an index level."""
+                if name in frame.columns:
+                    return frame[name]
+                names = list(getattr(frame.index, "names", []) or [])
+                if name in names:
+                    return pd.Series(frame.index.get_level_values(name),
+                                     index=frame.index)
+                if getattr(frame.index, "name", None) == name:
+                    return pd.Series(frame.index, index=frame.index)
+                return None
+
+            # Only reset when the histogrammed column itself cannot be reached.
+            # safe_reset_index copies AND block-consolidates the whole frame
+            # (~82% of this RPC by py-spy); get_level_values is ~0.02s.
+            if _field(df, column) is None:
+                df = safe_reset_index(df)
             n = len(df)
             if column not in df.columns:
                 return pb2.HistogramResponse(
                     success=False, message=f"column '{column}' not in view",
                     total_rows=n, bins=[])
 
-            origin = (df["origin"].astype(str).to_numpy() if "origin" in df.columns
-                      else np.full(n, ""))
-            disc = (df["discarded"].astype(bool).to_numpy() if "discarded" in df.columns
-                    else np.zeros(n, bool))
+            _o = _field(df, "origin")
+            origin = _o.astype(str).to_numpy() if _o is not None else np.full(n, "")
+            _d = _field(df, "discarded")
+            disc = _d.astype(bool).to_numpy() if _d is not None else np.zeros(n, bool)
 
             # Detect whether column is categorical (string/object) or numeric.
             # A column is numeric if ANY value coerces to a finite number — even
@@ -5068,7 +5366,9 @@ class DataService:
             # as a spurious "unset" bar). We therefore treat as categorical only
             # a genuine pandas ``category`` dtype, or a column whose values do
             # not coerce to any numeric value at all (pure strings).
-            col_series = df[column]
+            col_series = _field(df, column)
+            if col_series is None:
+                col_series = df[column]
             numeric_vals = pd.to_numeric(col_series, errors="coerce")
             is_category_dtype = (
                 str(col_series.dtype) == "category" or hasattr(col_series, "cat")
@@ -5087,20 +5387,44 @@ class DataService:
             if is_categorical:
                 # --- Categorical path ---
                 labels = col_series.astype(str).where(col_series.notna(), "")
-                gf = pd.DataFrame({"l": labels, "o": origin, "d": disc})
-                total_count = gf.groupby("l")["l"].count().rename("count")
+                # Count first with a single-key value_counts, then restrict the
+                # three-key breakdown to the rows that survive the cap. Grouping
+                # all 3.96M rows by (label, discarded, origin) when the column is
+                # free text builds 722,870 groups to then discard all but 200.
+                total_count = labels.value_counts().rename("count")
+                _cap_pre = _histogram_category_cap()
+                _keep = set(total_count.iloc[:_cap_pre].index)
+                _m = labels.isin(_keep).to_numpy()
                 sub_map: dict = {}
-                for (lbl, d, o), c in gf.groupby(["l", "d", "o"]).size().items():
-                    sub_map.setdefault(str(lbl), []).append(
-                        pb2.HistogramSubBar(origin=str(o), discarded=bool(d), count=int(c)))
+                if _m.any():
+                    gf = pd.DataFrame({"l": labels.to_numpy()[_m],
+                                       "o": origin[_m], "d": disc[_m]})
+                    for (lbl, d, o), c in gf.groupby(["l", "d", "o"]).size().items():
+                        sub_map.setdefault(str(lbl), []).append(
+                            pb2.HistogramSubBar(origin=str(o), discarded=bool(d), count=int(c)))
+                # Cap the output: a free-text column (e.g. edit_prompt) has one
+                # category per sample -- 722,870 bars / 54 MB / 30.5s measured,
+                # which no viewer can draw. Keep the top-N by count and fold the
+                # remainder into one "(other)" bar so the response stays bounded.
+                _ordered = total_count.sort_values(ascending=False)
+                _cap = _histogram_category_cap()
+                _head, _tail = _ordered.iloc[:_cap], _ordered.iloc[_cap:]
                 cat_bars = [
                     pb2.CategoricalHistogramBar(
                         label=str(lbl),
                         count=int(cnt),
                         sub_bars=sub_map.get(str(lbl), []),
                     )
-                    for lbl, cnt in total_count.sort_values(ascending=False).items()
+                    for lbl, cnt in _head.items()
                 ]
+                if len(_tail):
+                    cat_bars.append(pb2.CategoricalHistogramBar(
+                        label="(other: %d categories)" % len(_tail),
+                        count=int(_tail.sum()),
+                        sub_bars=[],
+                    ))
+                    logger.info("[HistCat] column=%s capped %d categories -> %d bars",
+                                column, len(_ordered), len(cat_bars))
                 logger.info("[HistCat] column=%s rows=%d categories=%d",
                             column, n, len(cat_bars))
                 return pb2.HistogramResponse(
@@ -5113,6 +5437,11 @@ class DataService:
                 )
 
             # --- Numeric path (unchanged) ---
+            # Each bar covers a fixed slice of the VIEW: total_rows / max_bins
+            # samples. That is what makes the chart show density -- a column only
+            # 0.2% populated shows a few filled bars and the rest empty. Binning
+            # over just the rows that carry a value makes the chart look equally
+            # full at any coverage, which reads as "everything has a value".
             bars = max(1, min(n, max_bins))
             vals = numeric_vals.to_numpy()
             edges = (np.arange(bars + 1) * n) // bars
@@ -5627,7 +5956,8 @@ class DataService:
 
             with self._watched_lock("_lock[EditDataSample/__copy_metadata__]"):
                 try:
-                    self._slowUpdateInternals()
+                    if not self._fastUpdateInternals():
+                        self._slowUpdateInternals()
                     if self._all_datasets_df is None or self._all_datasets_df.empty:
                         return pb2.DataEditsResponse(
                             success=False,
@@ -5795,7 +6125,8 @@ class DataService:
 
             with self._watched_lock("_lock[EditDataSample/delete-col]"):
                 try:
-                    self._slowUpdateInternals()
+                    if not self._fastUpdateInternals():
+                        self._slowUpdateInternals()
                     if self._all_datasets_df is None or self._all_datasets_df.empty:
                         return pb2.DataEditsResponse(
                             success=False,
@@ -5833,7 +6164,8 @@ class DataService:
                     # Kick a background view-refresh (non-blocking) — the in-memory view
                     # is already consistent after the drop above, so blocking inline rebuild
                     # is unnecessary and causes the gRPC response to stall for 5-10 s.
-                    self._slowUpdateInternals()
+                    if not self._fastUpdateInternals():
+                        self._slowUpdateInternals()
 
                     return pb2.DataEditsResponse(
                         success=True,
@@ -5856,7 +6188,8 @@ class DataService:
 
             with self._watched_lock("_lock[EditDataSample/__discard_by_tag__]"):
                 try:
-                    self._slowUpdateInternals()
+                    if not self._fastUpdateInternals():
+                        self._slowUpdateInternals()
                     if self._all_datasets_df is None or self._all_datasets_df.empty:
                         return pb2.DataEditsResponse(
                             success=False,
@@ -5865,7 +6198,8 @@ class DataService:
 
                     tag_col = f"{SampleStatsEx.TAG.value}:{tag_name}"
                     if tag_col not in self._all_datasets_df.columns:
-                        self._slowUpdateInternals()
+                        if not self._fastUpdateInternals():
+                            self._slowUpdateInternals()
                     df = safe_reset_index(self._all_datasets_df)
                     if tag_col not in df.columns:
                         return pb2.DataEditsResponse(
@@ -6079,7 +6413,8 @@ class DataService:
             # IMPORTANT: keep lock ordering consistent (_update_lock -> _lock).
             # Calling _slowUpdateInternals() while holding _lock can deadlock
             # with concurrent readers/writers under high UI refresh pressure.
-            self._slowUpdateInternals()
+            if not self._fastUpdateInternals():
+                self._slowUpdateInternals()
 
             if context is not None and not context.is_active():
                 return pb2.DataSplitsResponse(success=False, split_names=[])

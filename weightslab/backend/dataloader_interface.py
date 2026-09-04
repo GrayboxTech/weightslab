@@ -43,6 +43,44 @@ logger = logging.getLogger(__name__)
 _DENY_LIST_REFRESH_INTERVAL = 32
 
 
+def _close_inherited_h5_fds(worker_id: int = 0) -> None:
+    """DataLoader worker_init_fn: drop HDF5 handles inherited from the parent.
+
+    torch forks workers, so every fd the parent had open at fork time is
+    duplicated into the child -- including the ledger store. The child never
+    uses them, but their mere existence makes HDF5 refuse the parent's
+    read-write open, which silently kills ledger persistence.
+
+    Closes rather than just dropping the Python object: the fd is what holds
+    the file, and the child has no Python-level reference to it at all.
+    """
+    import os
+    try:
+        fd_dir = "/proc/self/fd"
+        for entry in os.listdir(fd_dir):
+            try:
+                target = os.readlink(os.path.join(fd_dir, entry))
+            except OSError:
+                continue
+            if target.endswith(".h5") or target.endswith(".h5.lock"):
+                try:
+                    os.close(int(entry))
+                except OSError:
+                    pass
+    except Exception:
+        # Never let cleanup break a worker: a leaked handle degrades
+        # persistence, a raising worker_init_fn kills the run.
+        pass
+
+
+def _with_worker_init(kwargs: dict, num_workers: int) -> dict:
+    """Attach the fd cleanup unless the caller supplied its own init."""
+    if num_workers and not kwargs.get("worker_init_fn"):
+        kwargs = dict(kwargs)
+        kwargs["worker_init_fn"] = _close_inherited_h5_fds
+    return kwargs
+
+
 def _resolve_safe_num_workers(dataset: Any, num_workers: int, loader_name: Optional[str] = None) -> int:
     """Clamp worker count for datasets that cannot be pickled by Windows spawn."""
     try:
@@ -177,6 +215,12 @@ class WeightsLabDataSampler(Sampler):
         try:
             origin = self._get_current_origin()
             df_manager = get_dataframe()
+            if origin and df_manager is not None and hasattr(df_manager, "get_discard_revision"):
+                # Deliberately NOT get_origin_revision: that moves on every
+                # per-sample signal write, i.e. every training step, so the
+                # cache below could never hit and __len__ rescanned 3.96M rows
+                # per batch. Discard state is what the deny-list depends on.
+                return ("discard", int(df_manager.get_discard_revision(origin)))
             if origin and df_manager is not None and hasattr(df_manager, "get_origin_revision"):
                 return ("origin", int(df_manager.get_origin_revision(origin)))
         except Exception:
@@ -514,6 +558,7 @@ class DataLoaderInterface:
                 self.tracked_dataset,
                 batch_sampler=batch_sampler,
                 num_workers=num_workers,
+                worker_init_fn=_close_inherited_h5_fds,
                 pin_memory=pin_memory,
                 collate_fn=collate_fn,
                 persistent_workers=self._should_persist_workers(num_workers),
@@ -1134,6 +1179,7 @@ class DataLoaderInterface:
                     self.tracked_dataset,
                     batch_sampler=sampler,
                     num_workers=num_workers,
+                    worker_init_fn=_close_inherited_h5_fds,
                     pin_memory=pin_memory,
                     collate_fn=collate_fn,
                     # Ensure no conflicting args are passed alongside batch_sampler
@@ -1220,6 +1266,7 @@ class DataLoaderInterface:
                         self.tracked_dataset,
                         batch_sampler=sampler,
                         num_workers=num_workers,
+                        worker_init_fn=_close_inherited_h5_fds,
                         pin_memory=pin_memory,
                         collate_fn=collate_fn,
                         persistent_workers=self._should_persist_workers(num_workers),
@@ -1232,6 +1279,7 @@ class DataLoaderInterface:
                         batch_size=batch_size,
                         shuffle=shuffle,
                         num_workers=num_workers,
+                        worker_init_fn=_close_inherited_h5_fds,
                         drop_last=drop_last,
                         pin_memory=pin_memory,
                         collate_fn=collate_fn,

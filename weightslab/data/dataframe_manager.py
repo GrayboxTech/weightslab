@@ -92,7 +92,15 @@ class LedgeredDataFrameManager:
         self._store: H5DataFrameStore | None = None
         self._array_store: H5ArrayStore | None = None
         self._origin_revisions: Dict[str, int] = {}
+        # Bumped ONLY when the `discarded` column changes. The deny-list cache
+        # keys on this instead of _origin_revisions, which training bumps every
+        # step (per-sample signal writes) and which therefore never lets a cache
+        # hit -- turning a per-batch len() into a 3.96M-row scan.
+        self._discard_revisions: Dict[str, int] = {}
         self._pending: set[int] = set()
+        # Parallel dirty set for the view. _pending is drained by the H5 flush,
+        # so the view cannot share it without one consumer starving the other.
+        self._view_pending: set = set()
         self._force_flush = False
         self._flush_interval = flush_interval
         self._flush_max_rows = flush_max_rows
@@ -301,8 +309,65 @@ class LedgeredDataFrameManager:
         if not isinstance(work.index, pd.MultiIndex) and work.index.name != SID:
             work = work.copy()
             work.index.name = SID
+        fast = self._expand_fast_no_instances(work)
+        if fast is not None:
+            return fast
+
         records = work.reset_index().to_dict("records")
         return self._expand_records_to_multi_index(records)
+
+    def _expand_fast_no_instances(self, work: pd.DataFrame):
+        """Vectorized expansion for frames with no per-instance targets.
+
+        Returns the (sample_id, annotation_id=0) frame, or None to signal the
+        caller must use the record-by-record path.
+        """
+        SID = SampleStats.Ex.SAMPLE_ID.value
+        ANNOT = SampleStats.Ex.INSTANCE_ID.value
+        TARGET = SampleStats.Ex.TARGET.value
+        try:
+            flat = work.reset_index()
+            if SID not in flat.columns:
+                return None
+            if TARGET in flat.columns:
+                tgt = flat[TARGET]
+                # Non-object dtype cannot hold a list => every target is scalar.
+                if tgt.dtype == object:
+                    for v in tgt.to_numpy():
+                        if isinstance(v, (list, tuple, np.ndarray)) and len(v) > 0:
+                            return None
+            # _normalize_sample_id always returns str(). astype(str) reproduces
+            # that for numeric dtypes only -- bytes would render as "b'x'".
+            sid_ser = flat[SID]
+            if pd.api.types.is_integer_dtype(sid_ser) or pd.api.types.is_float_dtype(sid_ser):
+                sids = sid_ser.astype(str).tolist()
+            else:
+                sids = [self._normalize_sample_id(v) for v in sid_ser.to_numpy()]
+
+            out = flat.drop(columns=[c for c in (SID, ANNOT) if c in flat.columns])
+            # The record path goes through python lists, so extension dtypes
+            # (string[pyarrow], categorical) come back as object. Match it.
+            for c in out.columns:
+                if isinstance(out[c].dtype, pd.api.extensions.ExtensionDtype):
+                    out[c] = out[c].astype(object)
+            out.index = pd.MultiIndex.from_arrays(
+                [sids, np.zeros(len(out), dtype=np.int64)], names=[SID, ANNOT])
+            return out
+        except Exception:
+            return None
+
+    def _normalize_sample_id_index(self, values) -> "pd.Index":
+        """Vectorized _normalize_sample_id over an Index (~2x; 0.8s -> 0.5s at 2M).
+
+        _normalize_sample_id is str() after unwrapping numpy scalars/bytes, so
+        astype(str) is exact for numeric dtypes; anything else keeps the loop.
+        """
+        try:
+            if pd.api.types.is_integer_dtype(values) or pd.api.types.is_float_dtype(values):
+                return pd.Index(values.astype(str))
+        except Exception:
+            pass
+        return pd.Index([self._normalize_sample_id(v) for v in values])
 
     def _normalize_sample_id(self, sample_id: Any) -> Any:
         """Normalize incoming sample IDs while preserving numeric IDs when possible."""
@@ -320,6 +385,22 @@ class LedgeredDataFrameManager:
 
         return str(sample_id)
 
+    def _level0_index(self):
+        """Level-0 (sample_id) values of the ledger index, cached.
+
+        Keyed on the index object's identity: pandas Index is immutable, so a
+        reindex or rebuild yields a new object and invalidates this. Reusing the
+        object also reuses its hash engine, which is what makes a membership
+        probe O(1) instead of O(rows).
+        """
+        idx = self._df.index
+        key = id(idx)
+        if getattr(self, "_lvl0_key", None) != key:
+            self._lvl0_key = key
+            self._lvl0 = (idx.get_level_values(0)
+                          if isinstance(idx, pd.MultiIndex) else idx)
+        return self._lvl0
+
     def _coerce_sample_id_for_index(self, sample_id: Any) -> Any:
         """Coerce sample_id to match current dataframe index representation.
 
@@ -332,8 +413,10 @@ class LedgeredDataFrameManager:
 
         # Check if multi-index
         if isinstance(self._df.index, pd.MultiIndex):
-            # Get level 0 (sample_id level) values
-            level_0_values = self._df.index.get_level_values(0)
+            # Cached: get_level_values(0) built a new Index over every row on each
+            # call, and a new object means a new hash engine, so this probe was
+            # O(rows) per sample.
+            level_0_values = self._level0_index()
             if sid in level_0_values:
                 return sid
             sid_str = str(sid)
@@ -354,6 +437,11 @@ class LedgeredDataFrameManager:
         with self._lock:
             if self._enable_h5_persistence:
                 self._array_store = array_store
+
+    def _bump_discard_revisions(self, origins: Sequence[Any]) -> None:
+        for origin in origins or []:
+            key = str(origin)
+            self._discard_revisions[key] = self._discard_revisions.get(key, 0) + 1
 
     def _bump_origin_revisions(self, origins: Sequence[Any]) -> None:
         for origin in origins:
@@ -720,7 +808,7 @@ class LedgeredDataFrameManager:
 
         # Normalize sample_id values in multi-index
         if isinstance(df_norm.index, pd.MultiIndex) and df_norm.index.nlevels >= 1:
-            level_0_normalized = pd.Index([self._normalize_sample_id(v) for v in df_norm.index.get_level_values(0)])
+            level_0_normalized = self._normalize_sample_id_index(df_norm.index.get_level_values(0))
             try:
                 if df_norm.index.nlevels == 2:
                     df_norm.index = pd.MultiIndex.from_arrays(
@@ -784,7 +872,29 @@ class LedgeredDataFrameManager:
                         for col in all_cols:
                             if col in self._df.columns and isinstance(self._df[col].dtype, pd.CategoricalDtype):
                                 self._df[col] = self._df[col].astype(object)
-                        self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
+                        # Label-aligned 2D .loc realigns the entire frame (22s at 4M rows
+                        # when adding columns to every row). Resolve row positions once,
+                        # then write each column positionally. Falls back if the index
+                        # has duplicates/misses, where get_indexer returns -1.
+                        _pos = self._df.index.get_indexer(existing_idx)
+                        if len(_pos) and (_pos >= 0).all():
+                            for _c in all_cols:
+                                _ci = self._df.columns.get_loc(_c)
+                                _vals = df_norm.loc[existing_idx, _c].to_numpy()
+                                # An object array (None for "no value yet") written into
+                                # a float column upcasts the WHOLE column to object and
+                                # it never returns -- an 8x penalty on every later sort.
+                                # Coerce to the target dtype so None becomes NaN instead.
+                                try:
+                                    _tgt = self._df[_c].dtype
+                                    if (_vals.dtype == object
+                                            and getattr(_tgt, "kind", "") in "fiu"):
+                                        _vals = pd.to_numeric(_vals, errors="coerce")
+                                except Exception:
+                                    pass
+                                self._df.iloc[_pos, _ci] = _vals
+                        else:
+                            self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
 
                     # Append rows that do not exist yet. Use a boolean mask (not
                     # .loc[difference]) so a duplicate key in df_norm can't be
@@ -805,7 +915,9 @@ class LedgeredDataFrameManager:
             self._auto_register_categorical_tags(df_norm)
 
             # Optimize memory by converting repetitive columns to categorical
-            self._df = self._optimize_dataframe_memory(self._df)
+            # Only columns just written can have changed dtype-wise; a full-frame
+            # nunique() over every object column was ~14s of a 670s startup.
+            self._df = self._optimize_dataframe_memory(self._df, columns=set(df_norm.columns))
 
             # Mark dirty for flush (handle multi-index)
             if isinstance(df_norm.index, pd.MultiIndex):
@@ -814,6 +926,8 @@ class LedgeredDataFrameManager:
                 sample_ids = df_norm.index.tolist()
             self.mark_dirty_batch(sample_ids, force_flush=force_flush)
             self._bump_origin_revisions(affected_origins)
+            if SampleStats.Ex.DISCARDED.value in set(df_norm.columns):
+                self._bump_discard_revisions(affected_origins)
 
     def mark_dirty(self, sample_id: int):
         """Mark sample as dirty for H5 flush.
@@ -823,6 +937,7 @@ class LedgeredDataFrameManager:
         with self._lock:
             normalized_id = self._coerce_sample_id_for_index(sample_id)
             self._pending.add(normalized_id)
+            self._view_pending.add(normalized_id)
 
     def drop_column(self, column: str):
         with self._lock:
@@ -833,6 +948,7 @@ class LedgeredDataFrameManager:
     def mark_dirty_batch(self, sample_ids: List[int], force_flush: bool = False):
         with self._lock:
             self._pending.update(set(sample_ids))
+            self._view_pending.update(set(sample_ids))
             if force_flush:
                 self._force_flush = True
 
@@ -1337,9 +1453,55 @@ class LedgeredDataFrameManager:
                     self._df = pd.concat([self._df, df_local])
             self._bump_origin_revisions([origin])
 
-    def get_origin_revision(self, origin: str) -> int:
+    def take_view_dirty(self, limit: int | None = None):
+        """Drain and return the sample_ids changed since the last view sync.
+
+        Returns None when the backlog exceeds *limit*, meaning a differential
+        update would cost more than a rebuild — the caller should fall back.
+        """
         with self._lock:
-            return int(self._origin_revisions.get(str(origin), 0))
+            if limit is not None and len(self._view_pending) > limit:
+                # Do NOT clear here. The caller is expected to rebuild, but that
+                # rebuild can bail (contended update lock) -- and these ids would
+                # then be lost with nothing to re-mark them. clear_view_dirty()
+                # is called once the rebuilt view is actually swapped in.
+                return None
+            out = list(self._view_pending)
+            self._view_pending.clear()
+            return out
+
+    def clear_view_dirty(self):
+        """Drop the view-dirty backlog: a full rebuild has made the view current."""
+        with self._lock:
+            self._view_pending.clear()
+
+    def get_source_rows(self, sample_ids, columns=None):
+        """Rows for *sample_ids* straight from the source frame. O(len(ids))."""
+        with self._lock:
+            if self._df.empty or not len(sample_ids):
+                return None
+            idx = self._df.index
+            keys = idx.get_level_values(0) if isinstance(idx, pd.MultiIndex) else idx
+            want = set(str(s) for s in sample_ids)
+            mask = keys.astype(str).isin(want)
+            sub = self._df.loc[mask]
+            return sub[columns] if columns else sub
+
+    def get_origin_revision(self, origin: str) -> int:
+        # No lock: a dict read is atomic under the GIL, and this is polled from
+        # __len__ on every batch. Taking self._lock here put the training thread
+        # in contention with the flush thread on the hot path.
+        return int(self._origin_revisions.get(str(origin), 0))
+
+    def get_discard_revision(self, origin: str) -> int:
+        """Revision of the `discarded` column for *origin*.
+
+        Changes only on discard/restore, so a consumer that depends purely on
+        deny-list state can cache against it across training steps. Read without
+        the lock: called per batch, and a stale-by-one read is harmless (the next
+        batch picks the change up), whereas lock contention here is not.
+        """
+        return int(self._discard_revisions.get(str(origin), 0))
 
     def update_by_groups_bulk(self, origin: str, group_ids: List[Any], updates_list: List[Dict[str, Any]]):
         """Broadcast updates to multiple groups in one pass."""
@@ -1535,22 +1697,42 @@ class LedgeredDataFrameManager:
 
             coerced_ids = [self._coerce_sample_id_for_index(sid) for sid in sample_ids]
 
+            idx = self._df.index
             try:
-                if isinstance(self._df.index, pd.MultiIndex) and self._df.index.nlevels >= 2:
-                    sample_level = self._df.index.get_level_values(0)
-                    anno_level = self._df.index.get_level_values(1)
-                    mask = sample_level.isin(coerced_ids) & (anno_level == 0)
-                    slice_df = self._df[mask]
-                    sids = slice_df.index.get_level_values(0)
+                # _positional NB_SEEN lookup: the wanted rows are exactly
+                # (sample_id, 0), so resolve their POSITIONS instead of scanning.
+                # The masked form below materialised both index levels and copied
+                # a boolean-masked frame over every row -- ~1.2s/step at 3.96M
+                # just to read a batch of integers.
+                if idx.has_duplicates:
+                    raise ValueError("non-unique index; use the scan path")
+                if isinstance(idx, pd.MultiIndex) and idx.nlevels >= 2:
+                    pos = idx.get_indexer([(cid, 0) for cid in coerced_ids])
                 else:
-                    mask = self._df.index.isin(coerced_ids)
-                    slice_df = self._df[mask]
-                    sids = slice_df.index
-
-                for sid, val in zip(sids, slice_df[column]):
-                    values[self._normalize_sample_id(sid)] = val
+                    pos = idx.get_indexer(list(coerced_ids))
+                col = self._df[column].to_numpy()
+                for cid, p in zip(coerced_ids, pos):
+                    if p >= 0:
+                        values[self._normalize_sample_id(cid)] = col[p]
             except Exception:
-                pass
+                # Fallback: original scan, for a non-unique index or any dtype
+                # mismatch get_indexer will not tolerate.
+                try:
+                    if isinstance(idx, pd.MultiIndex) and idx.nlevels >= 2:
+                        sample_level = idx.get_level_values(0)
+                        anno_level = idx.get_level_values(1)
+                        mask = sample_level.isin(coerced_ids) & (anno_level == 0)
+                        slice_df = self._df[mask]
+                        sids = slice_df.index.get_level_values(0)
+                    else:
+                        mask = idx.isin(coerced_ids)
+                        slice_df = self._df[mask]
+                        sids = slice_df.index
+
+                    for sid, val in zip(sids, slice_df[column]):
+                        values[self._normalize_sample_id(sid)] = val
+                except Exception:
+                    pass
 
         return values
 
@@ -1907,7 +2089,9 @@ class LedgeredDataFrameManager:
                 self._apply_updates_frame_locked(instance_df, broadcast=False)
             self._apply_updates_frame_locked(sample_df, broadcast=True)
             # Keep newly-added signal columns float32 and empty object cells as None.
-            self._df = self._optimize_dataframe_memory(self._df)
+            self._df = self._optimize_dataframe_memory(
+                self._df,
+                columns=set(sample_df.columns) | set(instance_df.columns))
 
         # Mark all as pending for h5 flush (outside lock)
         self.mark_dirty_batch(sample_ids)
@@ -1945,13 +2129,22 @@ class LedgeredDataFrameManager:
             applied_index = written_s.append(written_i) if len(written_i) else written_s
             update_cols = sample_df.columns.union(instance_df.columns)
             # Keep newly-added signal columns float32 and empty object cells as None.
-            _df = self._optimize_dataframe_memory(self._df)
+            _df = self._optimize_dataframe_memory(self._df, columns=set(update_cols))
             self._df = _df
         finally:
             self._lock.release()
 
         # Det→seg conversion / array normalization over all written rows.
-        if applied_index is not None and len(applied_index) > 0:
+        # This prepares cells for the H5 write, so it is only worth doing for
+        # columns that write will actually include. When predictions/targets are
+        # excluded from the save list (WEIGHTSLAB_SAVE_PREDICTIONS_IN_H5=0) the
+        # pass would otherwise call get_mask per row -- which reads the source
+        # image to size the mask -- for arrays that are never persisted.
+        _savable = set(_filter_columns_by_patterns(
+            list(update_cols), SAMPLES_STATS_TO_SAVE_TO_H5))
+        _norm_cols = [c for c in update_cols
+                      if c in self._array_columns and c in _savable]
+        if applied_index is not None and len(applied_index) > 0 and _norm_cols:
             if applied_index.has_duplicates:
                 applied_index = applied_index[~applied_index.duplicated()]
             normalized_rows = self._df.loc[applied_index].apply(
@@ -2008,6 +2201,33 @@ class LedgeredDataFrameManager:
         # Everything below happens WITHOUT locks - fully async
         self._flush_snapshot_to_h5(data_snapshot, work)
 
+    def _rows_with_array_cells(self, data_snapshot: pd.DataFrame):
+        """Index labels of rows that may hold an array-valued cell.
+
+        Column-wise scan replacing a full iterrows() pass: only object-dtype
+        columns can hold an ndarray/list/tuple/ArrayH5Proxy, and rows with none
+        of those are no-ops for the caller.
+        """
+        cols = [c for c in self._array_columns if c in data_snapshot.columns]
+        if not cols:
+            return []
+        hits = None
+        for col in cols:
+            ser = data_snapshot[col]
+            if ser.dtype != object:
+                continue          # a numeric column cannot hold an array object
+            vals = ser.to_numpy()
+            mask = np.fromiter(
+                (isinstance(v, (np.ndarray, list, tuple, ArrayH5Proxy)) for v in vals),
+                dtype=bool, count=len(vals))
+            if not mask.any():
+                continue
+            found = ser.index[mask]
+            hits = found if hits is None else hits.union(found)
+        if hits is None:
+            return []
+        return list(hits)
+
     def _flush_snapshot_to_h5(self, data_snapshot: pd.DataFrame, work: List[int]):
         """Flush data snapshot to H5 - runs completely outside locks.
 
@@ -2030,7 +2250,10 @@ class LedgeredDataFrameManager:
             arrays_to_store: Dict[str, Dict[str, np.ndarray]] = {}
             rowkey_to_index: Dict[str, Any] = {}
 
-            for idx, row in data_snapshot.iterrows():
+            for idx in self._rows_with_array_cells(data_snapshot):
+                row = data_snapshot.loc[idx]
+                if isinstance(row, pd.DataFrame):      # duplicate label guard
+                    row = row.iloc[0]
                 if is_multi:
                     sample_id, annot = idx[0], int(idx[1])
                 else:
@@ -2103,7 +2326,7 @@ class LedgeredDataFrameManager:
             except Exception as e:
                 logger.error(f"[LedgeredDataFrameManager] Error flushing to H5: {e}")
 
-    def _optimize_dataframe_memory(self, df: pd.DataFrame, categorical_tags: Dict[str, List[str]] | None = None) -> pd.DataFrame:
+    def _optimize_dataframe_memory(self, df: pd.DataFrame, categorical_tags: Dict[str, List[str]] | None = None, columns=None) -> pd.DataFrame:
         """Optimize dataframe memory by converting repetitive string columns to categorical.
 
         Categorical dtype compresses repeated values: instead of storing each string,
@@ -2130,12 +2353,39 @@ class LedgeredDataFrameManager:
         if categorical_tags is None:
             categorical_tags = self._categorical_tags
 
+        # Honour `columns`: only the columns this flush actually wrote can have
+        # gained a float64 signal value or a fresh NaN, so scanning the rest is
+        # O(rows) of pure waste on every flush.
+        _scan_cols = (list(df.columns) if columns is None
+                      else [c for c in df.columns if c in columns])
+
+        # === 0) Repair signal columns that were upcast to object ===
+        # A single None written into a float column converts it permanently, and
+        # object columns sort ~8x slower. signals//* are numeric by definition,
+        # so any object one is damage rather than intent. Runs BEFORE the
+        # NaN->None pass below, which only touches object columns and would
+        # otherwise keep them that way.
+        for col in _scan_cols:
+            if not str(col).startswith("signals") or df[col].dtype != object:
+                continue
+            try:
+                coerced = pd.to_numeric(df[col], errors="coerce")
+                # Only if nothing was lost: a genuine non-numeric value means the
+                # column is not what we think it is, so leave it alone.
+                if coerced.notna().sum() == df[col].notna().sum():
+                    df[col] = coerced.astype(np.float32)
+                    logger.debug(
+                        "[LedgeredDataFrameManager] restored '%s' object -> float32", col)
+            except Exception as exc:
+                logger.debug("[LedgeredDataFrameManager] dtype repair skipped for '%s': %s",
+                             col, exc)
+
         # === 1) Downcast float64 signal columns to float32 ===
         # Per-sample / per-instance signal scalars (loss & metric values) don't need
         # float64 precision, so this halves the cost of every ``signals//*`` column
         # with no practical loss for monitoring. Numeric dtype is preserved (NaNs
         # stay NaN). Done before categorical conversion below.
-        for col in df.columns:
+        for col in _scan_cols:
             if str(col).startswith("signals") and df[col].dtype == np.float64:
                 try:
                     df[col] = df[col].astype(np.float32)
@@ -2159,7 +2409,12 @@ class LedgeredDataFrameManager:
         # into a Categorical, its missing cells are stuck as NaN (categorical code
         # -1) and can no longer be set to a plain None — so we clean object cells to
         # None here first, while they are still plain object dtype.
-        for col in df.columns:
+        for col in _scan_cols:
+            # The docstring above says numeric/bool/categorical are skipped, but the
+            # loop had no dtype check: at registration every signals//* column is all
+            # NaN, so this did a full label-aligned write per float column.
+            if df[col].dtype != object:
+                continue
             na_mask = df[col].isna()
             if na_mask.any():
                 df.loc[na_mask, col] = None
@@ -2171,6 +2426,17 @@ class LedgeredDataFrameManager:
             SampleStats.Ex.TASK_TYPE.value, # Task type (e.g. 'classification', 'segmentation')
         ]
 
+        # nunique() over a 4M-row MultiIndex costs ~8s AND holds the GIL, stalling
+        # the training thread inside forward/backward. Only an object-dtype
+        # candidate reads it, so compute it on first use rather than every flush.
+        _n_rows_cache = []
+
+        def _n_rows():
+            if not _n_rows_cache:
+                _n_rows_cache.append(
+                    df.index.get_level_values(0).nunique()
+                    if isinstance(df.index, pd.MultiIndex) else len(df))
+            return _n_rows_cache[0]
         for col in categorical_candidates:
             if col not in df.columns:
                 continue
@@ -2182,15 +2448,14 @@ class LedgeredDataFrameManager:
             # Only convert to categorical if:
             # 1. Column contains strings (object dtype)
             # 2. Number of unique values < 50% of total rows (good compression ratio)
+            if columns is not None and col not in columns:
+                continue
             if df[col].dtype == 'object':
                 n_unique = df[col].nunique()
                 # Use unique sample count, not row count — with MultiIndex each
                 # sample has multiple annotation rows which would inflate n_rows
                 # and make the ratio appear better than it really is.
-                if isinstance(df.index, pd.MultiIndex):
-                    n_rows = df.index.get_level_values(0).nunique()
-                else:
-                    n_rows = len(df)
+                n_rows = _n_rows()
                 compression_ratio = n_unique / n_rows if n_rows > 0 else 1.0
 
                 if compression_ratio < 0.5 and n_unique > 1: # Worth compressing if < 50% unique
