@@ -1,4 +1,5 @@
 import os
+import itertools
 import yaml
 import logging
 from tqdm import tqdm
@@ -393,8 +394,6 @@ if __name__ == "__main__":
 
     parameters.setdefault("experiment_name", "vad_unet_contrastive")
     parameters.setdefault("device", "auto")
-    # Read training_steps instead of training_steps_to_do to align with config.yaml
-    training_steps = parameters.get("training_steps", 1000)
     eval_full_to_train_steps_ratio = parameters.get("eval_full_to_train_steps_ratio", 200)
     parameters.setdefault("image_size", 256)
     parameters.setdefault("batch_size", 4)
@@ -488,7 +487,14 @@ if __name__ == "__main__":
     # Training Loop
     wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
-    pbar = tqdm(range(training_steps), desc="Training")
+    # Training runs until YOU stop it -- from the studio's pause button, the CLI,
+    # or Ctrl+C. itertools.count() rather than range(training_steps_to_do): a
+    # predefined step budget ends the process mid-experiment, which is the
+    # opposite of how WeightsLab is used (inspect the curves, edit the data or
+    # the architecture, keep going). `training_steps_to_do` remains a live
+    # hyperparameter for the UI's own "run N more steps" control; it is not a
+    # ceiling on this loop.
+    pbar = tqdm(itertools.count(), desc="Training")
     for step in pbar:
         age = model.get_age() if hasattr(model, "get_age") else step
 

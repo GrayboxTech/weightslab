@@ -6,6 +6,7 @@ level (for example, ``weightslab.watch_or_edit`` and ``weightslab.signal``).
 import gc
 import os
 import sys
+import math
 import time
 import types
 import ctypes
@@ -30,7 +31,8 @@ from weightslab.backend.model_interface import ModelInterface
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
-from weightslab.utils.tools import detach_to_cpu, _running_in_notebook
+from weightslab.utils.tools import detach_to_cpu, _running_in_notebook, _running_in_colab, _embedded_kernel_disabled
+from weightslab.trainer.services import notebook_service as _notebook_service
 from weightslab.backend.logger import LoggerQueue
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
@@ -68,6 +70,35 @@ from tqdm import tqdm
 
 # Get global logger
 logger = logging.getLogger(__name__)
+
+
+def _resolve_configured_root_log_dir(configured):
+    """Resolve the experiment ``root_log_dir`` for a serving config.
+
+    Resolution order:
+      1. ``configured`` — an explicit value from the wrapped hyperparameters.
+      2. ``$WEIGHTSLAB_ROOT_LOG_DIR`` — set by ``weightslab start [DIR]`` so an
+         otherwise-unconfigured training run lands in the directory the UI
+         established (shared checkpoints/logs/notebook.ipynb). Only used if it
+         actually points at an existing directory; if it's set but stale/typo'd,
+         a warning is logged and resolution falls through to (3) instead of
+         silently training into a directory the UI never established.
+      3. A throwaway ``tempfile.mkdtemp()`` — last resort so serving never fails
+         for lack of a directory.
+    """
+    if configured:
+        return configured
+    env_dir = os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR")
+    if env_dir:
+        if os.path.isdir(env_dir):
+            return env_dir
+        logger.warning(
+            f"WEIGHTSLAB_ROOT_LOG_DIR is set to '{env_dir}', but that directory "
+            "does not exist. Falling back to a temporary directory instead."
+        )
+    return tempfile.mkdtemp()
+
+
 # Get global dataframe proxy (auto-updated when ledger registers real manager)
 DATAFRAME_M = None
 # Global registry for custom signals
@@ -543,6 +574,14 @@ def _get_step(step: int | None = None) -> int:
         else:
             m = get_model(full_list[0])
 
+    # A name in list_models() can be an empty placeholder proxy (any get_model()
+    # read creates one). Such a handle has no age, and caching current_step on it
+    # would pin every later signal to the first step it ever saw — which is what
+    # flattened the x-axis of logger-only integrations. Ignore it and let the
+    # caller's `step` stand.
+    if m is not None and ledgers.Proxy.is_proxy(m) and not m.is_set():
+        m = None
+
     if m is not None:
         # Safe attribute access (handle Proxy returning None for missing attr)
         if hasattr(m, 'get_age'):
@@ -786,7 +825,7 @@ def _fwd_params(fn):
     except (ValueError, TypeError):
         return frozenset()
 
-_WL_KWARGS = ('flag', 'batch_ids', 'group_id', 'preds', 'signals', 'targets')
+_WL_KWARGS = ('flag', 'batch_ids', 'group_id', 'preds', 'signals', 'targets', 'step')
 
 
 def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
@@ -881,8 +920,10 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     # Extract scalar from tensor
     scalar, batch_scalar = _extract_scalar_from_tensor(batch_scalar, out, batch_ids)
 
-    # Log if requested
-    step = _get_step()
+    # Log if requested. A registered model's age always wins; the caller's
+    # ``step=`` is the fallback, which is what makes wrapped signals usable
+    # without the model level (logger-only integrations).
+    step = _get_step(wl_kw.get('step'))
 
     # Save per-instance values to dataframe with annotation_id
     if per_instance and instance_values is not None:
@@ -1157,10 +1198,43 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # unless the caller explicitly disables it.
         forced_model_wrapping = kwargs.pop('forced_model_wrapping', False)
 
+        # Per-step training-dynamics signals (gradient/weight norms, activation
+        # stats). Popped here rather than forwarded, because ModelInterface has
+        # no business knowing about them: they are hooks ON a wrapped model, not
+        # part of what wrapping means. See components/model_signals.py.
+        track_signals = kwargs.pop('track_model_signals', False)
+        signals_kwargs = {
+            key: kwargs.pop(key)
+            for key in ('model_signals_every_n_steps', 'model_signals_layer_ids')
+            if key in kwargs
+        }
+
         # Now construct the wrapper and let it register into the ledger.
         wrapper = ModelInterface(obj, **kwargs) if forced_model_wrapping or _model == None else _model
 
         # No rebind here since the model wrapper is designed to be a drop-in replacement for the original model
+
+        if track_signals:
+            from weightslab.components.model_signals import METRICS, track_model_signals as _track
+            # `True` means "all of them"; a list/tuple narrows the set.
+            if track_signals is True:
+                metrics = METRICS
+            elif isinstance(track_signals, str):
+                metrics = (track_signals,)
+            else:
+                metrics = tuple(track_signals)
+            try:
+                _track(
+                    _model if _model is not None else wrapper,
+                    metrics=metrics,
+                    every_n_steps=signals_kwargs.get('model_signals_every_n_steps', 1),
+                    layer_ids=signals_kwargs.get('model_signals_layer_ids'),
+                )
+            except Exception as exc:
+                # Instrumentation is observability, never a reason a training
+                # script fails to start -- the run is still fully usable
+                # without these curves.
+                logger.warning(f"Could not install model signal tracking: {exc}")
 
         # Prefer returning the proxy (if one exists) so external callers hold
         # a stable reference that will see updates. If no proxy was
@@ -1349,8 +1423,29 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         if fl in ('hp', 'hyperparams', 'params', 'hyperparameters', 'parameters', 'config'):
             # If obj is a string, treat as a file path and start watcher
             try:
-                # Initialize CheckpointManager if we have a root dir (fallback to default root)
-                obj['root_log_dir'] = obj.get('root_log_dir') or tempfile.mkdtemp()
+                # `obj` is either a live dict or a path to a YAML config. A path
+                # carries no keys, so build the dict view we resolve settings
+                # from by merging the file's content over `defaults`, and feed it
+                # back as `defaults` so the registration below sees root_log_dir.
+                if isinstance(obj, str):
+                    _hp_cfg = dict(kwargs.get('defaults') or {})
+                    if os.path.exists(obj):
+                        try:
+                            import yaml as _yaml
+                            with open(obj, 'r') as _fh:
+                                _hp_cfg.update(_yaml.safe_load(_fh) or {})
+                        except Exception as _e:
+                            logger.warning(
+                                "Could not read hyperparameters file %r (%s); "
+                                "using defaults only.", obj, _e)
+                    kwargs['defaults'] = _hp_cfg
+                else:
+                    _hp_cfg = obj
+
+                # Initialize CheckpointManager if we have a root dir (see
+                # _resolve_configured_root_log_dir for the resolution order).
+                _hp_cfg['root_log_dir'] = _resolve_configured_root_log_dir(
+                    _hp_cfg.get('root_log_dir'))
                 try:
                     # Check if a checkpoint manager is already registered in ledger
                     try:
@@ -1362,7 +1457,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                             raise KeyError("No manager in ledger")
                     except (KeyError, AttributeError):
                         # Create new manager and register it
-                        _checkpoint_manager = CheckpointManager(root_log_dir=obj['root_log_dir'])
+                        _checkpoint_manager = CheckpointManager(root_log_dir=_hp_cfg['root_log_dir'])
                         try:
                             ledgers.register_checkpoint_manager(_checkpoint_manager)
                             logger.info("Registered new checkpoint manager in ledger")
@@ -1389,7 +1484,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                                 exp_hash=latest_hash,
                                 load_model=False,
                                 load_weights=False,
-                                load_config=obj.get('checkpoint_manager', {}).get('load_config', True),
+                                load_config=_hp_cfg.get('checkpoint_manager', {}).get('load_config', True),
                                 force=True,
                                 load_data=False
                             )
@@ -1493,6 +1588,57 @@ def start_training(timeout: int = None) -> None:
     pause_ctrl.resume() # Ensure we're not paused if start_training is called after serve
 
 
+def _register_pid_with_ui_server() -> None:
+    """Tell the ``weightslab start`` UI server that this training process
+    exists, so stopping that workspace (Ctrl+C, closing the terminal) stops
+    this process too.
+
+    The UI server already kills PIDs registered with it on every termination
+    path (``weightslab/ui/server.py``'s ``_TrackedProcesses``) -- but until
+    now the ONLY thing that ever registered one was the agent remembering to
+    POST it by hand right after launching something detached. That second
+    step is skipped often enough to matter: the turn gets interrupted between
+    launch and registration, the model forgets on a relaunch, or the run was
+    started by hand in a terminal that never involved an agent at all. Each
+    miss leaves an orphaned python process holding the GPU and the gRPC port
+    after the UI is long gone. Registering from inside ``serve()`` makes it
+    unskippable for anything that serves.
+
+    Entirely best-effort, and off the calling thread: a stale/unreachable
+    origin must never delay or break a training run. Only ever posts to
+    loopback (the endpoint refuses anything else anyway).
+    """
+    origin = os.environ.get("WEIGHTSLAB_UI_ORIGIN")
+    if not origin:
+        return
+
+    def _post() -> None:
+        try:
+            import json as _json
+            import ssl as _ssl
+            import urllib.request as _urlreq
+
+            payload = _json.dumps({"pid": os.getpid()}).encode("utf-8")
+            request = _urlreq.Request(
+                f"{origin.rstrip('/')}/agent-server/track-process",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            # `weightslab start --certs` serves the UI over HTTPS with its own
+            # self-signed material, which nothing in this process trusts. The
+            # payload is one integer going to loopback, so verification buys
+            # nothing here and would just turn tracking off whenever certs are on.
+            context = _ssl._create_unverified_context() if origin.startswith("https") else None
+            with _urlreq.urlopen(request, timeout=3.0, context=context):
+                pass
+            logger.debug(f"Registered PID {os.getpid()} with the WeightsLab UI at {origin}.")
+        except Exception as exc:
+            logger.debug(f"Could not register this process with the WeightsLab UI at {origin}: {exc}")
+
+    threading.Thread(target=_post, name="wl-track-process", daemon=True).start()
+
+
 def serve(serving_cli: bool = True, serving_grpc: bool = True,
           spawn_cli_client: bool = False, serving_bore: bool = False,
           bore_port: int = None, allow_unconfigured: bool = True, **kwargs):
@@ -1503,6 +1649,13 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
         serving_grpc: Start the gRPC server. In a notebook/Colab, if this is on
             but ``serving_bore`` is off, a warning suggests ``serving_bore=True``
             (the UI runs on your own machine and needs a tunnel to reach here).
+            Also embeds a real Jupyter kernel (sharing this process's live
+            objects) for the studio notebook panel and any external Jupyter
+            client to attach to, unless this process is already itself a
+            notebook/Colab kernel, `ipykernel`/`jupyter_client` aren't
+            installed (``pip install weightslab[notebook-kernel]``), or
+            ``WEIGHTSLAB_DISABLE_EMBEDDED_KERNEL=1`` is set. Only one kernel is
+            ever embedded per process — a second ``serve()`` call reuses it.
         spawn_cli_client: When ``serving_cli`` is True, also open the interactive
             REPL in a new console window (the default, backward-compatible
             behavior). Set to ``False`` to start the CLI server *headless* — it
@@ -1568,18 +1721,46 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
             )
         logger.warning(base_msg)
 
+    # Before anything that can block: whatever happens next, this process
+    # should not outlive the workspace that owns it.
+    _register_pid_with_ui_server()
+
+    # Embed a real Jupyter kernel (shares this process's live objects) so the
+    # studio notebook panel — and any external Jupyter client — can attach to
+    # it, unless we're already inside a notebook/Colab kernel ourselves (mode
+    # C) or the user opted out via WEIGHTSLAB_DISABLE_EMBEDDED_KERNEL.
+    embed_kernel_decision = None
+    if serving_grpc:
+        embed_kernel_decision = not _running_in_notebook() and not _embedded_kernel_disabled()
+        _notebook_service.configure_embedded_kernel(embed_kernel_decision)
+
     if serving_grpc:
         grpc_serve(**kwargs)
 
-    # In a notebook/Colab the backend has no local Weights Studio to talk to
-    # (the UI runs on the user's own machine). Nudge them to open a tunnel.
-    if serving_grpc and not serving_bore and _running_in_notebook():
+    if embed_kernel_decision:
+        connection_file = _notebook_service.get_embedded_kernel_connection_file(wait_timeout=15.0)
+        if connection_file is not None:
+            print("=" * 60)
+            print(" Embedded Jupyter kernel ready (shares live process memory):")
+            print(f"     jupyter console --existing {connection_file}")
+            print(" The studio notebook panel already uses this same kernel.")
+            print("=" * 60)
+        else:
+            logger.warning(
+                "Embedded notebook kernel did not come up in time (or "
+                "ipykernel/jupyter_client are not installed) — the studio "
+                "notebook panel will use the built-in executor instead."
+            )
+
+    # On a REMOTE host (Colab) the local Weights Studio cannot reach this backend
+    # directly, so nudge for a tunnel. A LOCAL notebook serving as the backend
+    # (mode C) is reachable at localhost, so it needs no tunnel and no warning.
+    if serving_grpc and not serving_bore and _running_in_colab():
         logger.warning(
-            "Running in a notebook/Colab with serving_grpc=True but "
-            "serving_bore=False. Weights Studio runs on your OWN machine and "
-            "cannot reach this backend directly. Pass serving_bore=True to open "
-            "a tunnel and sync with the UI: wl.serve(serving_grpc=True, "
-            "serving_bore=True)."
+            "Running in Colab with serving_grpc=True but serving_bore=False. "
+            "Weights Studio runs on your OWN machine and cannot reach this "
+            "backend directly. Pass serving_bore=True to open a tunnel and sync "
+            "with the UI: wl.serve(serving_grpc=True, serving_bore=True)."
         )
 
     bore_endpoint = None
@@ -1620,6 +1801,9 @@ def keep_serving(timeout: int = None, release_gpu: bool = False) -> None:
         release_gpu: If ``True``, move tracked torch objects to CPU and release
             CUDA cached memory before entering the wait loop.
     """
+    # Ensure sync first
+    drain_signals()
+
     if release_gpu:
         _release_gpu_resources()
         logger.info("WeightsLab switched to CPU idle mode for serving.")
@@ -1976,7 +2160,7 @@ def set_categorical_tag(sample_ids: list[int], name: str, value: str) -> bool:
         df_update["annotation_id"] = 0
         df_update = df_update.set_index(["sample_id", "annotation_id"])
         df_manager.upsert_df(df_update, force_flush=True)
-        logger.info(f"Set categorical tag '{tag_name}'={cleaned!r} on {len(sample_ids)} samples")
+        logger.debug(f"Set categorical tag '{tag_name}'={cleaned!r} on {len(sample_ids)} samples")
         return True
     except Exception as e:
         logger.error(f"Failed to set categorical tag '{name}': {e}", exc_info=True)
@@ -2033,9 +2217,33 @@ def discard_samples(
         return False
 
 
+def _origin_df_view(df_manager, origin: str | None, limit: int | None):
+    """Rows of the sample dataframe belonging to *origin* (a loader name).
+
+    ``origin`` is matched against the ``origin`` column — the value the data
+    wrapper writes per row, i.e. the ``loader_name`` given to
+    ``wl.watch_or_edit(..., flag="data")`` (``"train_loader"``, ``"val_loader"``,
+    ...). ``None`` keeps every split.
+    """
+    origin_col = SampleStatsEx.ORIGIN.value
+    limit = -1 if not limit else int(limit)
+    if origin is None:
+        return df_manager.get_df_view(limit=limit)
+    return df_manager.get_df_view(column=origin_col, value=origin, limit=limit)
+
+
+def _sample_ids_of(df) -> list:
+    """Unique ``sample_id`` values of *df*, whose index is
+    ``(sample_id, annotation_id)``. Falls back to a flat index."""
+    index = df.index
+    if getattr(index, 'nlevels', 1) > 1:
+        return index.get_level_values(0).unique().tolist()
+    return index.unique().tolist()
+
+
 def get_samples_by_tag(
     tag: str,
-    origin: str = 'train',
+    origin: str = None,
     limit: int = None
 ) -> list[int]:
     """
@@ -2043,7 +2251,9 @@ def get_samples_by_tag(
 
     Args:
         tag: Tag name to search for
-        origin: Dataset split ('train', 'eval', etc.). Default: 'train'
+        origin: Loader name to restrict to, as passed to
+            ``wl.watch_or_edit(..., flag="data", loader_name=...)`` (for example
+            ``'train_loader'``). ``None`` (default) searches every split.
         limit: Maximum number of sample IDs to return (None = all)
 
     Returns:
@@ -2051,7 +2261,7 @@ def get_samples_by_tag(
 
     Examples:
         >>> # Get all difficult samples
-        >>> difficult_ids = get_samples_by_tag('difficult', origin='train')
+        >>> difficult_ids = get_samples_by_tag('difficult', origin='train_loader')
         >>> print(f"Found {len(difficult_ids)} difficult samples")
     """
     from weightslab.backend.ledgers import get_dataframe
@@ -2063,17 +2273,15 @@ def get_samples_by_tag(
 
     try:
         tag_col = f"{SampleStatsEx.TAG.value}:{tag.strip()}"
-        df = df_manager.get_df_view(origin, limit=limit)
+        df = _origin_df_view(df_manager, origin, limit)
 
         if tag_col not in df.columns:
-            logger.warning(f"Tag '{tag}' not found in {origin} dataset")
+            logger.warning(f"Tag '{tag}' not found in {origin or 'any'} dataset")
             return []
 
         # Filter samples where tag column is True
         tagged_df = df[df[tag_col] == True]
-        sample_ids = tagged_df.index.tolist()
-
-        return sample_ids
+        return _sample_ids_of(tagged_df)
 
     except Exception as e:
         logger.error(f"Failed to get samples by tag: {e}", exc_info=True)
@@ -2081,20 +2289,22 @@ def get_samples_by_tag(
 
 
 def get_discarded_samples(
-    origin: str = 'train',
+    origin: str = None,
     limit: int = None
 ) -> list[int]:
     """
     Get sample IDs that are marked as discarded.
 
     Args:
-        origin: Dataset split ('train', 'eval', etc.). Default: 'train'
+        origin: Loader name to restrict to, as passed to
+            ``wl.watch_or_edit(..., flag="data", loader_name=...)`` (for example
+            ``'train_loader'``). ``None`` (default) searches every split.
         limit: Maximum number of sample IDs to return (None = all)
     Returns:
         List of discarded sample IDs
     Examples:
         >>> # Get all discarded samples
-        >>> discarded_ids = get_discarded_samples(origin='train')
+        >>> discarded_ids = get_discarded_samples(origin='train_loader')
         >>> print(f"Found {len(discarded_ids)} discarded samples")
     """
     from weightslab.backend.ledgers import get_dataframe
@@ -2106,17 +2316,16 @@ def get_discarded_samples(
 
     try:
         discard_col = SampleStatsEx.DISCARDED.value
-        df = df_manager.get_df_view(origin, limit=limit)
+        df = _origin_df_view(df_manager, origin, limit)
 
         if discard_col not in df.columns:
-            logger.warning(f"Discard column not found in {origin} dataset")
+            logger.warning(
+                f"Discard column not found in {origin or 'any'} dataset")
             return []
 
         # Filter samples where discard column is True
         discarded_df = df[df[discard_col] == True]
-        sample_ids = discarded_df.index.tolist()
-
-        return sample_ids
+        return _sample_ids_of(discarded_df)
 
     except Exception as e:
         logger.error(f"Failed to get discarded samples: {e}", exc_info=True)
@@ -2261,14 +2470,6 @@ def save_signals(
             return to_numpy(x)
         return None
 
-    def expand_dim(x):
-        """Add axis if 1D — skip for lists (inhomogeneous shapes)."""
-        if x is None or isinstance(x, list):
-            return x
-        if x.ndim == 1:
-            return x[:, np.newaxis]
-        return x
-
     preds_np = normalize(preds)
     preds_raw_np = normalize(preds_raw)
     target_np = normalize(targets)
@@ -2289,11 +2490,6 @@ def save_signals(
         }
     else:
         losses_data = None
-
-    # Expand dims for 1D arrays (skipped for lists)
-    target_np = expand_dim(target_np)
-    preds_np = expand_dim(preds_np)
-    preds_raw_np = expand_dim(preds_raw_np)
 
     # Enqueue to dataframe manager buffer for efficiency
     DATAFRAME_M.enqueue_batch(
@@ -2706,6 +2902,16 @@ def save_group_signals(
         except Exception:
             pass # Never block training on best-effort discard check
 
+    # Look up each group's current NB_SEEN so we can increment it (it lives in the
+    # ledger, not in the `updates` dict being built below, which starts empty every call).
+    current_nb_seen_by_gid = {}
+    if step is not None and DATAFRAME_M is not None and hasattr(DATAFRAME_M, 'get_group_column_values'):
+        try:
+            current_nb_seen_by_gid = DATAFRAME_M.get_group_column_values(
+                group_ids, origin, SampleStatsEx.NB_SEEN.value)
+        except Exception:
+            pass # Never block training on best-effort NB_SEEN lookup
+
     # Broadcast to all members in ledger (skip tainted groups)
     all_updates = []
     active_group_ids = []
@@ -2720,7 +2926,7 @@ def save_group_signals(
 
         if step is not None:
             updates[SampleStatsEx.LAST_SEEN.value] = step
-            updates[SampleStatsEx.NB_SEEN.value] = 0 if SampleStatsEx.NB_SEEN.value not in updates else updates[SampleStatsEx.NB_SEEN.value] + 1
+            updates[SampleStatsEx.NB_SEEN.value] = current_nb_seen_by_gid.get(gid, 0) + 1
 
         all_updates.append(updates)
         active_group_ids.append(gid)
@@ -2730,6 +2936,317 @@ def save_group_signals(
 
     # Bulk update for performance (avoids repeated dataframe scans)
     DATAFRAME_M.update_by_groups_bulk(origin=origin, group_ids=active_group_ids, updates_list=all_updates)
+
+
+def _encode_one_media(item, kind: str, fps: float, audio, sample_rate: int,
+                      dataset=None):
+    """Encode one media item for transport. Returns (data, mime, poster, meta).
+
+    ``poster`` is the still the grid and list render; the full payload is only
+    fetched when the user opens the sample.
+    """
+    import io as _io
+    import numpy as _np
+
+    from weightslab.data import media_store as _ms
+    from weightslab.data import video_utils as _vu
+    from weightslab.trainer.services.data_image_utils import encode_image_webp
+
+    def _to_numpy(value):
+        if hasattr(value, "detach"):
+            value = value.detach().cpu()
+        if hasattr(value, "numpy"):
+            value = value.numpy()
+        return _np.asarray(value)
+
+    if kind == _ms.KIND_TEXT:
+        # The item IS the text (a caption, a reference completion, ...) — no
+        # array conversion, no poster: the studio shows a "<text>" tag, same
+        # as an unstillable audio field.
+        text = "" if item is None else str(item)
+        data = text.encode("utf-8")
+        return data, "text/plain", b"", {"length": len(text)}
+
+    if item is None:
+        return b"", "", b"", {}
+    arr = _to_numpy(item)
+
+    if kind == _ms.KIND_AUDIO:
+        data = _vu.encode_audio_wav(arr, sample_rate)
+        duration = (len(arr) / float(sample_rate)) if sample_rate else 0.0
+        # Audio has no still; the list shows a "♪" chip instead of a thumbnail.
+        return data, "audio/wav", b"", {
+            "sample_rate": int(sample_rate or 0),
+            "duration_seconds": round(float(duration), 3),
+        }
+
+    if kind == _ms.KIND_POINTCLOUD:
+        from weightslab.data.point_cloud_utils import (
+            get_pc_range, get_point_feature_names, pack_point_cloud,
+            render_thumbnail_2d_for_dataset,
+        )
+        points = _np.asarray(arr, dtype=_np.float32)
+        data, num_points, num_features = pack_point_cloud(points)
+        poster = b""
+        try:
+            poster = encode_image_webp(
+                render_thumbnail_2d_for_dataset(dataset, points), quality=70)
+        except Exception as exc:
+            logger.debug("point-cloud poster render failed: %r", exc)
+        # pc_range/feature_names are what the interactive 3D viewer needs to
+        # frame the camera and offer the right colour modes; without them here
+        # a field-streamed cloud (GetPointCloud with `field` set) would open
+        # with an unframed, unlabeled scene.
+        pc_range = get_pc_range(dataset, points) or ()
+        feature_names = get_point_feature_names(dataset, num_features)
+        return data, "application/octet-stream", poster, {
+            "num_points": int(num_points),
+            "num_features": int(num_features),
+            "pc_range": [float(v) for v in pc_range],
+            "feature_names": list(feature_names),
+        }
+
+    if kind == _ms.KIND_VIDEO:
+        # [T, C, H, W] is the common torch layout; normalize to [T, H, W, C].
+        if arr.ndim == 4 and arr.shape[1] in (1, 3, 4) and arr.shape[1] < min(arr.shape[2], arr.shape[3]):
+            arr = _np.transpose(arr, (0, 2, 3, 1))
+        data, mime, has_audio = _vu.encode_clip(
+            arr, fps, audio=audio, sample_rate=sample_rate)
+        poster = b""
+        try:
+            poster = encode_image_webp(_vu.video_poster_frame(dataset, arr), quality=70)
+        except Exception as exc:
+            logger.debug("video poster render failed: %r", exc)
+        return data, mime, poster, {
+            "frame_count": int(arr.shape[0]),
+            "fps": float(fps),
+            "has_audio": bool(has_audio),
+            "width": int(arr.shape[2]),
+            "height": int(arr.shape[1]),
+            "duration_seconds": round(float(arr.shape[0]) / max(1.0, float(fps)), 3),
+        }
+
+    # image / mask: a single still. [C, H, W] -> [H, W, C].
+    if arr.ndim == 3 and arr.shape[0] in (1, 3, 4) and arr.shape[0] < min(arr.shape[1], arr.shape[2]):
+        arr = _np.transpose(arr, (1, 2, 0))
+    frame = _vu._frames_to_uint8(arr[None])[0]
+    pil = _vu._frame_to_pil(frame)
+    buffer = _io.BytesIO()
+    pil.save(buffer, format="PNG")
+    data = buffer.getvalue()
+    poster = encode_image_webp(pil.convert("RGB"), quality=70)
+    return data, "image/png", poster, {
+        "width": int(pil.width), "height": int(pil.height),
+    }
+
+
+def save_media(
+    field: str,
+    batch_ids,
+    media,
+    kind: str = "image",
+    fps: float = 8.0,
+    audio=None,
+    sample_rate: int = 0,
+    origin: str | None = None,
+    dataset=None,
+):
+    """Attach media to a metadata field so the studio can visualize it.
+
+    This is what makes a **generated** result viewable next to its input: any
+    field — not just the sample's own input — can carry an image, a mask, a
+    video clip, an audio track or a point cloud. In the studio the field becomes
+    a column showing a thumbnail per row (sized to the list's row height), and
+    clicking a thumbnail opens the full viewer: zoomable image, mask overlay,
+    video player with frame scrubbing and sound, or the interactive 3D cloud.
+
+    Args:
+        field: metadata field name, e.g. "pred_video". Stored in the dataframe
+            as the column ``media:pred_video``.
+        batch_ids: the sample ids this media belongs to (same order as ``media``).
+        media: a sequence, one entry per id. Video entries are ``[T, H, W, C]``
+            (or ``[T, C, H, W]``); images/masks are ``[H, W]``/``[H, W, C]``;
+            point clouds are ``[N, F]`` float; audio is a 1-D waveform; text
+            entries are plain strings.
+        kind: one of "image", "mask", "video", "audio", "pointcloud", "text".
+        fps: frame rate for video entries.
+        audio: optional per-sample waveforms muxed into video entries; pass a
+            single waveform to reuse it for every sample.
+        sample_rate: sample rate for ``audio`` (required for it to be muxed).
+        origin: loader name; defaults to the active one.
+        dataset: optional dataset, used only for its poster/thumbnail hooks.
+
+    Example:
+        >>> generated = to_clip_space(sampled)          # [B, T, H, W, C] uint8
+        >>> wl.save_media("pred_video", batch_ids=uids, media=generated,
+        ...               kind="video", fps=8, audio=waveforms, sample_rate=16000)
+    """
+    from weightslab.data import media_store
+
+    global DATAFRAME_M
+    if DATAFRAME_M is None:
+        DATAFRAME_M = get_dataframe()
+    if DATAFRAME_M is None:
+        logger.warning("save_media: no dataframe registered; skipping.")
+        return
+
+    if batch_ids is None or media is None:
+        return
+    if isinstance(batch_ids, th.Tensor):
+        ids = [str(i) for i in batch_ids.detach().cpu().tolist()]
+    else:
+        ids = [str(i) for i in batch_ids]
+    if len(ids) == 0:
+        return
+
+    origin = origin or get_active_origin() or "train_loader"
+    column = media_store.media_column(field)
+
+    # A single waveform is broadcast to every sample; a sequence is per-sample.
+    audio_is_per_sample = (
+        audio is not None
+        and hasattr(audio, "__len__")
+        and len(audio) == len(ids)
+        and hasattr(audio[0], "__len__")
+    )
+
+    for index, sample_id in enumerate(ids):
+        if index >= len(media):
+            break
+        try:
+            item_audio = audio[index] if audio_is_per_sample else audio
+            data, mime, poster, meta = _encode_one_media(
+                media[index], kind=kind, fps=fps, audio=item_audio,
+                sample_rate=sample_rate, dataset=dataset)
+            if not data:
+                continue
+            entry = {
+                "field": field, "sample_id": sample_id, "data": data,
+                "mime": mime, "kind": kind, "poster": poster, "meta": meta,
+            }
+            media_store.put(field, sample_id, data, mime, kind,
+                            poster=poster, meta=meta)
+            # Only the small descriptor goes in the dataframe; the bytes stay in
+            # the media store and are streamed on demand by GetMedia.
+            DATAFRAME_M.update_values(
+                origin=origin,
+                sample_id=int(sample_id) if str(sample_id).isdigit() else sample_id,
+                updates={column: media_store.descriptor_json(entry)},
+            )
+        except Exception as exc:
+            logger.warning("save_media(%s) failed for sample %s: %r",
+                           field, sample_id, exc)
+def save_model_signals(
+    signals: dict,
+    step: int | None = None,
+):
+    """Save **per-step** scalars that describe the MODEL, not any sample.
+
+    This is the step-keyed sibling of :func:`save_signals` (per sample),
+    :func:`save_instance_signals` (per annotation) and
+    :func:`save_group_signals` (per group). Those three all write onto
+    dataframe rows, because every value they record belongs to something in
+    the dataset. A gradient norm does not: it belongs to the optimization
+    step that produced it, and the batch behind it is incidental. So nothing
+    here touches the dataframe — each value becomes one point on its own
+    signal curve, plotted exactly like a watched loss.
+
+    Reach for this for training-dynamics values: gradient norms, weight
+    norms, activation statistics, learning rate, gradient-to-weight ratios.
+    Anything you would otherwise have had to fake by broadcasting one number
+    across a whole batch of ``batch_ids`` — which pollutes every one of those
+    samples' history with a value that was never about them.
+
+    Naming is what groups the curves in the UI, since ``/`` is a path
+    separator there. The convention the shipped examples use:
+
+        ``metrics/global/<name>``            whole-model values
+        ``metrics/layer/<layer_id>/<name>``  per-layer values
+
+    Args:
+        signals (dict): ``{name: value}``. Values may be Python numbers, or
+            0-d / reducible tensors and arrays (mean-reduced to one scalar).
+            Non-finite values (NaN/inf) are dropped rather than plotted —
+            a diverging run should break the curve, not the dashboard.
+        step (int, optional): Training step. Inferred from the watched
+            model's age when omitted, same as every other ``save_*`` verb.
+
+    Examples:
+        Global gradient norm, straight after ``backward()``::
+
+            total = sum(p.grad.pow(2).sum() for p in model.parameters()
+                        if p.grad is not None)
+            wl.save_model_signals({"metrics/global/grad_norm": total.sqrt()})
+
+        Per-layer weight norm::
+
+            wl.save_model_signals({
+                f"metrics/layer/{lid}/weights_norm": layer.weight.norm()
+                for lid, layer in tracked.items()
+            })
+
+    See also:
+        :func:`track_model_signals` — collects all of the above for you via
+        hooks, so a script never writes this loop by hand.
+    """
+    if not signals:
+        return
+
+    step = _get_step(step=step)
+
+    for name, value in signals.items():
+        # One scalar per name per step. `_extract_scalar_from_tensor` already
+        # handles 0-d tensors, arrays and plain numbers (mean-reducing
+        # anything with extra dims), so a caller can hand over whatever shape
+        # their metric naturally has.
+        scalar, _ = _extract_scalar_from_tensor(value)
+        if scalar is None:
+            try:
+                scalar = float(value)
+            except (TypeError, ValueError):
+                logger.debug(f"save_model_signals: skipping non-numeric signal {name!r}")
+                continue
+
+        # A NaN/inf gradient norm is real information ("this run just blew
+        # up"), but it is not a plottable point — it rescales the whole axis
+        # and hides every healthy value before it. Drop the point and say so
+        # once, so the gap in the curve is the signal.
+        if not math.isfinite(scalar):
+            logger.warning(f"save_model_signals: {name} is {scalar} at step {step}; point dropped")
+            continue
+
+        try:
+            _logger_obj = get_logger()
+        except Exception:
+            _logger_obj = None
+        if _logger_obj is None or not hasattr(_logger_obj, 'add_scalars'):
+            return
+
+        # `aggregate_by_step=False` + no per-sample map is the immediate path:
+        # the point is appended to this signal's history as-is instead of
+        # being averaged into a per-step bucket (see LoggerQueue.add_scalars).
+        # That is what we want — there is only ever one value per step here,
+        # so there is nothing to aggregate, and buffering it would delay the
+        # point by a step for no benefit.
+        _logger_obj.add_scalars(
+            name,
+            {name: scalar},
+            global_step=step,
+            signal_per_sample=None,
+            aggregate_by_step=False,
+        )
+
+
+def track_model_signals(model=None, **kwargs):
+    """Instrument a watched model so its training dynamics log themselves.
+
+    Thin re-export of
+    :func:`weightslab.components.model_signals.track_model_signals`; see that
+    function for the full argument list. Equivalent to passing
+    ``track_model_signals=True`` to ``watch_or_edit(model, flag="model")``.
+    """
+    from weightslab.components.model_signals import track_model_signals as _track
+    return _track(model, **kwargs)
 
 
 def clear_all():
@@ -3666,11 +4183,13 @@ def get_current_experiment_hash() -> str | None:
 def query_signal_history(
     signal_name: str,
     exp_hash: str | None = None,
+    sample_ids: list | None = None,
 ) -> list:
-    """Return per-sample history for *signal_name* across all samples.
+    """Return per-sample history for *signal_name*.
 
     Returns a list of ``(sample_id, step, value, experiment_hash)`` tuples.
-    Pass *exp_hash* to restrict to a single experiment run.
+    Pass *exp_hash* to restrict to a single experiment run, and *sample_ids*
+    to restrict to specific samples (default ``None`` = every sample).
 
     Example::
 
@@ -3681,7 +4200,7 @@ def query_signal_history(
     _lg = get_logger()
     if _lg is None:
         return []
-    return _lg.query_per_sample(signal_name, sample_ids=None, exp_hash=exp_hash)
+    return _lg.query_per_sample(signal_name, sample_ids=sample_ids, exp_hash=exp_hash)
 
 
 def query_sample_history(
@@ -4006,25 +4525,20 @@ def write_history(
     instance_rows: list = []
 
     if write_global:
-        for gn, hashes in _lg.get_signal_history().items():
-            if _gn_filter is not None and gn not in _gn_filter:
-                continue
-            for h, steps in hashes.items():
-                if experiment_hash is not None and h != experiment_hash:
-                    continue
-                for step, entries in steps.items():
-                    for entry in entries:
-                        val = (
-                            entry.get("metric_value")
-                            if isinstance(entry, dict)
-                            else float(entry)
-                        )
-                        global_rows.append({
-                            "graph_name": gn,
-                            "experiment_hash": h if h is not None else "",
-                            "step": step,
-                            "metric_value": val,
-                        })
+        # An export must be complete, so this is the uncapped path -- but it
+        # streams tuples instead of calling get_signal_history(max_points=None),
+        # which would first build a nested dict holding a ~9-key metadata dict
+        # per row. Filtering is pushed into SQL so excluded graphs/hashes are
+        # never read at all.
+        for gn, h, step, val in _lg.iter_signal_rows(
+                metric_names=list(_gn_filter) if _gn_filter is not None else None,
+                exp_hashes=[experiment_hash] if experiment_hash is not None else None):
+            global_rows.append({
+                "graph_name": gn,
+                "experiment_hash": h if h is not None else "",
+                "step": step,
+                "metric_value": val,
+            })
         logger.debug("write_history: collected %d global row(s).",
                      len(global_rows))
 
@@ -4393,7 +4907,7 @@ def signal_classifier(signal=None):
             s = wl.trajectory_stats(values)
             if s is None:
                 return None
-            return "monotonic" if s["drop"] > 0.4 else "not_monotonic"
+            return "monotonic" if s["drop_z"] > 2 else "not_monotonic"
     """
     def _register(fn):
         global _GLOBAL_CLASSIFIER
@@ -4418,20 +4932,26 @@ def resolve_signal_classifier(signal_name):
     return _GLOBAL_CLASSIFIER or classify_loss_shape
 
 
-def write_signal_shapes(signal_name, tag_name=None, classifier=None):
-    """Reusable engine: classify every sample's trajectory of *signal_name* into
-    a categorical tag and return the ``{label: count}`` distribution. Works for
-    ANY per-sample signal — loss, accuracy, a second loss, any metric. Reads the
-    full history once (cheap end-of-report reduction). *classifier* (trajectory
-    -> label|None) defaults to whatever :func:`resolve_signal_classifier` returns
-    for *signal_name* — a user ``@signal_classifier``, else the built-in
-    loss-shaped one (for a decreasing metric). *tag_name* defaults to
-    ``'<signal>_shape'``."""
+def write_signal_shapes(signal_name, tag_name=None, classifier=None, exp_hash=None, sample_ids=None):
+    """Reusable engine: classify each sample's own trajectory of *signal_name*
+    into a categorical tag and return the ``{label: count}`` distribution.
+    Works for ANY per-sample signal — loss, accuracy, a second loss, any
+    metric. *classifier* (trajectory -> label|None) defaults to whatever
+    :func:`resolve_signal_classifier` returns for *signal_name* — a user
+    ``@signal_classifier``, else the built-in loss-shaped one (for a
+    decreasing metric). *tag_name* defaults to ``'<signal>_shape'``.
+    *exp_hash* restricts each sample's trajectory to a single experiment run
+    (default ``None`` = every hash merged together). *sample_ids* restricts
+    classification (and the tags written) to specific samples — used by the
+    background auto-tagger to reclassify only the samples that got new data,
+    since one sample's shape never depends on another's; default ``None``
+    classifies every sample logged for the signal (a full end-of-report
+    reduction)."""
     clf = classifier or resolve_signal_classifier(signal_name)
     if tag_name is None:
         tag_name = signal_name + "_shape" if signal_name.endswith('_loss') else signal_name + "_loss_shape"
     series = {}
-    for sid, step, val, _ in query_signal_history(signal_name):
+    for sid, step, val, _ in query_signal_history(signal_name, exp_hash=exp_hash, sample_ids=sample_ids):
         series.setdefault(sid, []).append((step, val))
     by_label = {}
     for sid, pts in series.items():
@@ -4814,6 +5334,281 @@ def write_dataframe(
         )
 
     return path
+
+
+def export_annotations(
+    fmt: str,
+    path: str | None = None,
+    origin: str | None = None,
+    class_names: dict | list | None = None,
+    use_predictions: bool = False,
+    tags: list[str] | None = None,
+) -> str:
+    """Export bounding-box/segmentation annotations to a relabeling-tool format.
+
+    Reads ground-truth (or, with *use_predictions*, model-predicted) boxes and
+    segmentation masks from the registered dataframe and writes them to
+    *path* in *fmt*, ready to hand off to an outsourced relabeling pass.
+
+    Parameters
+    ----------
+    fmt : {"cvat", "label_studio", "v7"}
+        Target format:
+
+        - ``"cvat"`` — a single CVAT XML 1.1 file.
+        - ``"label_studio"`` — a single Label Studio JSON file.
+        - ``"v7"`` — a zip of per-image V7/Darwin JSON 2.0 files (Darwin
+          matches annotations to images by filename on import).
+    path : str, optional
+        Output file path **or** directory. When omitted (``None``), the
+        ``root_log_dir`` from the active checkpoint manager is used, with the
+        format's default filename (e.g. ``annotations_cvat.xml``). If *path*
+        is a directory (or has no extension), the default filename is
+        appended inside it.
+    origin : str, optional
+        Restrict export to one registered split/loader (e.g. ``"train_loader"``).
+        ``None`` exports every registered split.
+    class_names : dict or list, optional
+        Explicit class-id -> name mapping, overriding any auto-detected
+        ``dataset.class_names`` attribute. Without either, labels fall back
+        to ``"class_<id>"``.
+    use_predictions : bool, optional
+        Export model predictions instead of ground-truth targets.
+    tags : list of str, optional
+        Restrict export to samples carrying ANY of these tags (``tag:``
+        prefix optional, e.g. ``["ToReview"]``), matching either a boolean
+        tag set via :func:`tag_samples` or a categorical value set via
+        :func:`set_categorical_tag`. ``None`` (default) exports every sample.
+
+    Returns
+    -------
+    str
+        Absolute path of the file (or zip) that was written.
+
+    Notes
+    -----
+    Only annotation coordinates + a filename are exported — image files
+    themselves are neither copied nor embedded. Ensure the filenames used
+    when uploading images to CVAT/Label Studio/V7 match the ones in the
+    export (real image paths are resolved best-effort from the dataset
+    object; unresolved samples get a synthetic ``sample_<id>.jpg`` name).
+
+    Segmentation polygon export requires OpenCV (``pip install
+    weightslab[export]``); bounding-box export needs no extra dependency.
+
+    Examples
+    --------
+    Export everything to CVAT, auto-named under ``root_log_dir``::
+
+        wl.export_annotations("cvat")
+
+    Export only the validation split to Label Studio, with explicit class names::
+
+        wl.export_annotations(
+            "label_studio", "val_annotations.json",
+            origin="val_loader", class_names=["background", "cat", "dog"],
+        )
+
+    Export only the samples tagged "ToReview" to CVAT, for a relabeling pass::
+
+        wl.export_annotations("cvat", tags=["ToReview"])
+    """
+    import os as _os
+
+    from weightslab.export.exporter import save_export
+
+    if path is None:
+        _lg = get_logger()
+        try:
+            _cm = _lg.chkpt_manager if _lg is not None else None
+            _rld = _cm.root_log_dir if _cm is not None else None
+            path = str(_rld) if _rld is not None else "."
+        except Exception as _e:
+            logger.debug("export_annotations: failed to resolve root_log_dir (%s); "
+                         "falling back to current directory.", _e)
+            path = "."
+        logger.debug("export_annotations: no path given, using output directory %r.", path)
+
+    written_path = save_export(
+        fmt, path,
+        origin=origin, class_names=class_names, use_predictions=use_predictions, tags=tags,
+    )
+    return _os.path.abspath(written_path)
+
+
+def _live_data_service():
+    """The DataService of the experiment running in THIS process, if any.
+
+    ``DataService.__init__`` publishes itself to ``weightslab.backend.cli``
+    (that is also how the CLI console reaches the agent), which makes it the
+    one process-wide handle to the live service — and therefore to the live
+    agent — without importing the gRPC service layer from here."""
+    try:
+        import weightslab.backend.cli as _cli_backend
+        return _cli_backend._get_cli_data_service()
+    except Exception:
+        return None
+
+
+def ai_report_generation(
+    signals: list | None = None,
+    output_path: str | None = None,
+    root_log_dir: str | None = None,
+    use_agent: bool = True,
+    distributions: list | None = None,
+) -> str:
+    """Generate the experiment health report and return the path written.
+
+    Same artifact, same code path as the Weights Studio report button and the
+    agent's ``generate_experiment_report`` action (and the CLI console's
+    ``report`` command): signal trajectory plots, a health label per signal,
+    per-sample outliers, loss-shape tag counts, dataset stats, and a written
+    analysis produced by the agent's LLM from those exact numbers. Call it
+    from your training script or a notebook whenever you want a snapshot —
+    typically at the end of a run, or periodically from a callback.
+
+    The report is written to ``<root_log_dir>/reports/experiment_report_<stamp>.html``
+    unless *output_path* says otherwise.
+
+    Parameters
+    ----------
+    signals : list of str, optional
+        Report on these signals only. Default (``None``): every registered
+        signal with at least 2 logged points, "loss" ones first — see
+        :func:`weightslab.reporting.select_important_signals`.
+    output_path : str, optional
+        Write the HTML here instead of the default timestamped path.
+    root_log_dir : str, optional
+        Experiment directory to report on. Defaults to the active checkpoint
+        manager's ``root_log_dir``.
+    use_agent : bool, default True
+        Write the Analysis section with the agent's LLM. ``False`` skips the
+        LLM call entirely (no provider needed, no tokens spent) and produces
+        the same report minus the prose. With ``True`` but no agent available
+        (none configured, or no experiment being served in this process), the
+        report is still written — just without the analysis, never an error.
+    distributions : list of str, optional
+        Add a "Distributions" section with a value-distribution histogram for
+        each named column/signal (e.g. ``["train_loss"]``), computed over the
+        CURRENT per-sample dataframe rather than the aggregated training
+        curve. Omitted (default): no Distributions section at all.
+
+    Raises
+    ------
+    RuntimeError
+        If there is no experiment directory or no logger to report on — there
+        is no report to return in that case.
+
+    Example::
+
+        import weightslab as wl
+
+        wl.ai_report_generation()                          # everything, with analysis
+        wl.ai_report_generation(signals=["train_loss"])    # one signal
+        wl.ai_report_generation(use_agent=False)           # no LLM call
+        wl.ai_report_generation(distributions=["train_loss"])  # + a histogram section
+    """
+    return _ai_report_generation_result(
+        signals=signals, output_path=output_path,
+        root_log_dir=root_log_dir, use_agent=use_agent,
+        distributions=distributions,
+    )["path"]
+
+
+def _ai_report_generation_result(
+    signals: list | None = None,
+    output_path: str | None = None,
+    root_log_dir: str | None = None,
+    use_agent: bool = True,
+    distributions: list | None = None,
+) -> dict:
+    """:func:`ai_report_generation`'s implementation, keeping the full
+    ``reporting.generate_report`` result dict (path + signal count + narrative
+    state) instead of just the path. The public function returns the path
+    because that is all a training script wants; the CLI console's ``report``
+    command uses this one to also tell the user how many signals went in and
+    whether the written analysis made it."""
+    from weightslab import reporting
+
+    # Reactive signals may still be queued on the worker thread; process them
+    # so the report reflects the latest steps (same as write_dataframe).
+    drain_signals()
+
+    service = _live_data_service()
+
+    if root_log_dir is None:
+        root_log_dir = getattr(service, "_root_log_dir", None)
+    if root_log_dir is None:
+        try:
+            _cm = get_checkpoint_manager()
+            # An unresolved ledger Proxy raises on attribute access — getattr's
+            # default covers "no checkpoint manager registered" either way.
+            root_log_dir = getattr(_cm, "root_log_dir", None)
+        except Exception:
+            root_log_dir = None
+    if not root_log_dir:
+        # A logger-only integration registers no model/config, so no checkpoint
+        # manager exists to ask. Fall back to the directory `weightslab start
+        # [DIR]` advertises, which is also what such a script exports itself.
+        env_dir = os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR")
+        if env_dir and os.path.isdir(env_dir):
+            root_log_dir = env_dir
+    if not root_log_dir:
+        raise RuntimeError(
+            "ai_report_generation: no experiment directory available. Start an "
+            "experiment (wl.watch_or_edit / wl.serve), set WEIGHTSLAB_ROOT_LOG_DIR, "
+            "or pass root_log_dir=..."
+        )
+
+    logger_q = get_logger()
+    if logger_q is None or not hasattr(logger_q, "get_graph_names"):
+        raise RuntimeError(
+            "ai_report_generation: no experiment logger available; nothing to report on."
+        )
+
+    try:
+        _dm = get_dataframe()
+        df = _dm.get_combined_df() if _dm is not None else None
+    except Exception as _e:
+        # Warn (not debug): if get_combined_df() raises — e.g. array/media proxy
+        # conversion choking on a video-generation dataframe — the report would
+        # otherwise silently degrade to "No sample dataframe data available yet"
+        # and read as broken for no visible reason. Surface it, keep going.
+        logger.warning(
+            "ai_report_generation: sample dataframe unavailable (%s); the report's "
+            "Dataset/Media sections will be empty.", _e, exc_info=True)
+        df = None
+
+    # The narrative comes from the live agent — the same LLM call the Studio
+    # button makes. Without a served experiment there is no agent to ask, so
+    # the report degrades to "no written analysis" instead of failing.
+    narrative_fn = None
+    if use_agent:
+        agent = getattr(service, "_agent", None)
+        if agent is not None:
+            narrative_fn = agent.generate_report_narrative
+        else:
+            logger.info(
+                "ai_report_generation: no live agent in this process; writing the "
+                "report without a written analysis."
+            )
+
+    result = reporting.generate_report(
+        root_log_dir, logger_q, df, signals=signals,
+        output_path=output_path, narrative_fn=narrative_fn,
+        distributions=distributions,
+    )
+    if result["narrative_error"]:
+        logger.warning(
+            "ai_report_generation: analysis section skipped — the agent LLM "
+            "failed (%s). The report itself was still written.",
+            result["narrative_error"],
+        )
+    logger.info(
+        "ai_report_generation: wrote report on %d signal(s) to %s",
+        result["n_signals"], result["path"],
+    )
+    return result
 
 
 # ##############################################################################################################

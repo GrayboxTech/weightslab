@@ -1,0 +1,39 @@
+# Resource Monitoring Configuration
+# ##################################
+# Controls the automatic background monitor that samples system/process
+# resource usage (CPU, memory, disk, network, GPU) while WeightsLab is
+# running and logs each value as a signal (visible in Weights Studio like
+# any other loss/metric curve).
+#
+# Variables can be defined from env. variables or directly in this file.
+# Config file values here override env. variables if both are set.
+# See docs/resource_monitoring.rst for the full reference.
+resource_monitoring:
+  # Master switch. Set to false (or env WEIGHTSLAB_DISABLE_RESOURCE_MONITORING=1)
+  # to disable resource monitoring entirely.
+  enabled: true
+
+  # How often (seconds) to sample and log a new batch of metrics.
+  interval_seconds: 15
+
+  # Filesystem path used to report disk usage (resource/disk/utilization_*).
+  # Defaults to the OS root ("/" on Linux/macOS, "C:\" on Windows).
+  # disk_path: "/"
+
+  # What sampled values are plotted against:
+  #   model_age (default) - the watched model's age, so resource curves share
+  #                         the x axis of the loss/metric curves beside them
+  #                         and restart at 0 when training does.
+  #   seconds             - elapsed seconds since the monitor started; counts
+  #                         process uptime and shares its axis with nothing else.
+  # step_source: model_age
+
+  # Per-category toggles. Set any of these to false to stop collecting (and
+  # logging) that category, without touching the others.
+  categories:
+    cpu: true       # system-wide CPU utilization (%)
+    memory: true    # system-wide memory utilization (%)
+    disk: true      # disk usage (%/GB) + cumulative read/written MB
+    network: true   # cumulative bytes sent/received
+    process: true   # this process's CPU/thread/memory usage
+    gpu: true       # NVIDIA GPU clocks/memory/temperature via NVML (no-ops without a GPU)

@@ -79,6 +79,8 @@ autodoc_mock_imports = [
 templates_path = ["_templates"]
 exclude_patterns = [
     "_build", "Thumbs.db", ".DS_Store",
+    # Tooling, not documentation: the What's New generator lives here.
+    "_scripts",
     # Superseded by examples/pytorch/classification.rst and examples/pytorch/segmentation.rst
     "usecases.rst",
     "segmentation_usecase.rst",
@@ -86,6 +88,10 @@ exclude_patterns = [
     "usage.rst",
     # SDK params moved into configuration.rst
     "usage/parameters.rst",
+    # Stray experiment directory(ies) left behind by running `weightslab
+    # start`/the agent from inside docs/ (e.g. while capturing screenshots).
+    # Not documentation source.
+    "wl-*",
 ]
 
 html_theme = "furo"
@@ -93,7 +99,14 @@ html_title = "WeightsLab"
 html_favicon = "_static/favicon.png"
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
-html_js_files = ["version-switcher.js", "github-stars.js", "examples-gallery.js", "wl-topnav.js", "wl-ribbon.js"]
+html_js_files = [
+    "version-switcher.js",
+    "github-stars.js",
+    "examples-gallery.js",
+    "wl-topnav.js",
+    "wl-ribbon.js",
+    "code-copy.js",
+]
 html_theme_options = {
     "light_logo": "logo-light.png",
     "dark_logo":  "logo-dark.png",
@@ -106,3 +119,11 @@ smv_tag_whitelist = r"^v\d+\.\d+\.\d+$"
 smv_remote_whitelist = r"^origin$"
 
 myst_heading_anchors = 3
+
+# Global code-block style for Python/Bash snippets: show line numbers by default.
+highlight_options = {
+    "python": {"linenos": "inline"},
+    "py": {"linenos": "inline"},
+    "bash": {"linenos": "inline"},
+    "sh": {"linenos": "inline"},
+}

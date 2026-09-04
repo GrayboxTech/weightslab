@@ -65,7 +65,7 @@ dependencies = [
   # grpcio-tools ~=1.68 to keep the gencode Colab-compatible; a newer grpcio-tools
   # bumps the gencode and reintroduces the VersionError on Colab. Upper bound <8
   # keeps modern runtimes (7.x) working.
-  "protobuf>=5.28.1,<8",
+  "protobuf>=6.31.1,<8",
   "pydantic>=2.7,<3",
 
   # Imaging
@@ -81,10 +81,33 @@ dependencies = [
   # Environment variable loading (used by agent service)
   "python-dotenv>=1,<2",
 
-  # Agent service runtime deps (imported by default module graph)
+  # Agent service runtime deps (imported by default module graph). Only
+  # langchain-core is needed -- it provides the Runnable/ChatPromptTemplate
+  # abstraction OpenCodeChat.as_runnable() plugs into. No OpenCode-specific
+  # SDK package exists; its client is hand-rolled in opencode_chat.py via
+  # stdlib urllib/threading.
   "langchain-core>=0.3,<2",
-  "langchain-ollama>=0.2,<2",
-  "langchain-openai>=0.2,<2",
+
+  # Jupyter
+  "ipykernel>=6.29,<7",
+  "jupyter_client>=8.6,<9",
+  "notebook>=7.6.1",
+  "ipywidgets>=8.1.8",
+
+  # Reporting
+  "matplotlib>=3.7,<4",
+
+  # Resource monitoring (CPU/memory/disk/network/process + NVIDIA GPU via NVML).
+  # "nvidia-ml-py" is NVIDIA's officially maintained NVML binding, published
+  # under the `pynvml` import name (the standalone `pynvml` PyPI package is the
+  # unmaintained community fork -- do not swap this for it). Core dependency so
+  # GPU metrics work out of the box on GPU machines; the monitor no-ops
+  # gracefully when no NVIDIA driver is present (CPU-only machines). Versioned
+  # after the CUDA driver generation it binds (already at 13.x), not semver --
+  # keep the upper bound loose so a newer driver-generation release isn't
+  # blocked.
+  "psutil>=5.9,<8",
+  "nvidia-ml-py>=11,<14",
 ]
 
 [project.optional-dependencies]
@@ -104,6 +127,14 @@ dev = [
   "grpcio-tools>=1.62,<2",
   "torchinfo>=1.8,<2",
   "httpx>=0.27,<1",
+]
+
+# Optional: segmentation mask -> polygon extraction for annotation export
+# (CVAT/Label Studio/V7). Bounding-box export needs none of this; only
+# lazily imported inside weightslab.export when a segmentation mask is
+# actually encountered.
+export = [
+  "opencv-python-headless>=4.8,<5",
 ]
 
 utest = [
@@ -141,6 +172,17 @@ weightslab = [
   "examples/**/*",
   # Pre-built Weights Studio SPA served by `weightslab start`.
   "ui/static/**/*",
+  # Logo used to brand generated experiment reports (weightslab/reporting.py).
+  "assets/**/*",
+  # weightslab-integration grounding for the landing chat's preset prompts
+  # and for agents dropped directly into a workspace (see opencode_process's
+  # WORKSPACE_SEED_FILES) -- lives inside the package, not just at the
+  # repo root, so a `pip install weightslab` ships it too.
+  "AGENTS.md",
+  # Seeded next to AGENTS.md in every experiment workspace. OpenCode reads a
+  # project config from the directory it is started in, which is that same
+  # workspace; this one points `instructions` at AGENTS.md.
+  "opencode.json",
 ]
 
 [tool.setuptools.exclude-package-data]
@@ -156,3 +198,8 @@ write_to = "weightslab/_version.py"
 # Optional: choose version/local schemes — defaults are usually fine
 version_scheme = "guess-next-dev"
 local_scheme = "no-local-version"
+
+[tool.pytest.ini_options]
+markers = [
+    "scale: large-history robustness tests (sweep-scale fixtures; deselect with -m 'not scale')",
+]

@@ -1,3 +1,5 @@
+import os
+import tempfile
 import unittest
 import numpy as np
 import pandas as pd
@@ -8,6 +10,44 @@ import weightslab.src as src
 from unittest.mock import MagicMock, patch
 
 from weightslab.data.sample_stats import SampleStatsEx
+
+
+class TestResolveConfiguredRootLogDir(unittest.TestCase):
+    """root_log_dir resolution: explicit config > WEIGHTSLAB_ROOT_LOG_DIR > temp dir."""
+
+    def setUp(self):
+        self._env_prev = os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR")
+
+    def tearDown(self):
+        if self._env_prev is None:
+            os.environ.pop("WEIGHTSLAB_ROOT_LOG_DIR", None)
+        else:
+            os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = self._env_prev
+
+    def test_explicit_config_value_wins_over_env(self):
+        os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = "/env/dir"
+        self.assertEqual(src._resolve_configured_root_log_dir("/explicit/dir"), "/explicit/dir")
+
+    def test_env_used_when_config_absent_and_dir_exists(self):
+        with tempfile.TemporaryDirectory() as real_dir:
+            os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = real_dir
+            self.assertEqual(src._resolve_configured_root_log_dir(None), real_dir)
+            self.assertEqual(src._resolve_configured_root_log_dir(""), real_dir)
+
+    def test_env_set_to_missing_dir_warns_and_falls_back_to_tempdir(self):
+        os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = "/definitely/does/not/exist/abc123"
+        with patch("weightslab.src.tempfile.mkdtemp", return_value="/tmp/generated") as mk, \
+                self.assertLogs("weightslab.src", level="WARNING") as log_ctx:
+            result = src._resolve_configured_root_log_dir(None)
+        self.assertEqual(result, "/tmp/generated")
+        mk.assert_called_once()
+        self.assertTrue(any("does not exist" in msg for msg in log_ctx.output))
+
+    def test_falls_back_to_tempdir_when_neither_set(self):
+        os.environ.pop("WEIGHTSLAB_ROOT_LOG_DIR", None)
+        with patch("weightslab.src.tempfile.mkdtemp", return_value="/tmp/generated") as mk:
+            self.assertEqual(src._resolve_configured_root_log_dir(None), "/tmp/generated")
+            mk.assert_called_once()
 
 
 class TestSrcTagAndDiscardFunctions(unittest.TestCase):
@@ -86,10 +126,13 @@ class TestSrcTagAndDiscardFunctions(unittest.TestCase):
         )
 
         with patch("weightslab.backend.ledgers.get_dataframe", return_value=df_manager):
-            out = src.get_samples_by_tag("difficult", origin="train", limit=100)
+            out = src.get_samples_by_tag("difficult", origin="train_loader", limit=100)
 
         self.assertEqual(out, [5, 7])
-        df_manager.get_df_view.assert_called_once_with("train", limit=100)
+        # `origin` filters the rows of the 'origin' column (the loader name); it is
+        # not the column to select.
+        df_manager.get_df_view.assert_called_once_with(
+            column=SampleStatsEx.ORIGIN.value, value="train_loader", limit=100)
 
     def test_get_samples_by_tag_missing_tag_column_returns_empty(self):
         df_manager = MagicMock()
@@ -110,10 +153,37 @@ class TestSrcTagAndDiscardFunctions(unittest.TestCase):
         )
 
         with patch("weightslab.backend.ledgers.get_dataframe", return_value=df_manager):
-            out = src.get_discarded_samples(origin="eval", limit=10)
+            out = src.get_discarded_samples(origin="val_loader", limit=10)
 
         self.assertEqual(out, [100, 102])
-        df_manager.get_df_view.assert_called_once_with("eval", limit=10)
+        df_manager.get_df_view.assert_called_once_with(
+            column=SampleStatsEx.ORIGIN.value, value="val_loader", limit=10)
+
+    def test_get_discarded_samples_without_origin_reads_every_split(self):
+        df_manager = MagicMock()
+        df_manager.get_df_view.return_value = pd.DataFrame(
+            {SampleStatsEx.DISCARDED.value: [True, False]}, index=[1, 2])
+
+        with patch("weightslab.backend.ledgers.get_dataframe", return_value=df_manager):
+            out = src.get_discarded_samples()
+
+        self.assertEqual(out, [1])
+        # No origin and no limit: whole frame, and -1 (not None) so the manager's
+        # `limit > 0` check cannot raise.
+        df_manager.get_df_view.assert_called_once_with(limit=-1)
+
+    def test_get_samples_by_tag_returns_sample_ids_from_a_multiindex(self):
+        df_manager = MagicMock()
+        index = pd.MultiIndex.from_tuples(
+            [(5, 0), (5, 1), (6, 0)], names=["sample_id", "annotation_id"])
+        df_manager.get_df_view.return_value = pd.DataFrame(
+            {"tag:difficult": [True, True, False]}, index=index)
+
+        with patch("weightslab.backend.ledgers.get_dataframe", return_value=df_manager):
+            out = src.get_samples_by_tag("difficult")
+
+        # Sample ids, de-duplicated — not (sample_id, annotation_id) tuples.
+        self.assertEqual(out, [5])
 
 
 class TestSrcSaveSignals(unittest.TestCase):
@@ -147,8 +217,12 @@ class TestSrcSaveSignals(unittest.TestCase):
         kwargs = df_manager.enqueue_batch.call_args.kwargs
 
         np.testing.assert_array_equal(kwargs["sample_ids"], np.array(['10', '11']))
-        self.assertEqual(kwargs["preds"].shape, (2, 1))
-        self.assertEqual(kwargs["targets"].shape, (2, 1))
+        # Scalar-per-sample preds/targets must stay 1-D (B,) here -- an extra
+        # trailing axis makes per-sample indexing downstream (enqueue_batch's
+        # index_batch) yield a length-1 array like [6] instead of a true
+        # scalar 6, which then round-trips through the dataframe as `[6]`.
+        self.assertEqual(kwargs["preds"].shape, (2,))
+        self.assertEqual(kwargs["targets"].shape, (2,))
         self.assertEqual(kwargs["preds_raw"].shape, (2, 2))
         self.assertIn("signals//loss", kwargs["losses"])
         self.assertEqual(kwargs["step"], 7)

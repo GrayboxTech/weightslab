@@ -207,7 +207,6 @@ if __name__ == "__main__":
     os.makedirs(parameters["root_log_dir"], exist_ok=True)
 
     log_dir = parameters["root_log_dir"]
-    max_steps = parameters["training_steps_to_do"]
     eval_full_to_train_steps_ratio = parameters["eval_full_to_train_steps_ratio"]
     verbose = parameters.get("verbose", True)
     tqdm_display = parameters.get("tqdm_display", True)
@@ -375,7 +374,7 @@ if __name__ == "__main__":
     print(" STARTING LIDAR 3D DETECTION TRAINING (PointPillars-lite)")
     print(f" Data source: {_train_dataset.source} "
           f"({len(_train_dataset)} train / {len(_val_dataset)} val frames)")
-    print(f" Total steps: {max_steps}")
+    print(" Total steps: unbounded (stop from the studio, the CLI, or Ctrl+C)")
     print(f" Evaluation every {eval_full_to_train_steps_ratio} steps")
     print(f" Logs will be saved to: {log_dir}")
     print(f" Data root: {data_root}")

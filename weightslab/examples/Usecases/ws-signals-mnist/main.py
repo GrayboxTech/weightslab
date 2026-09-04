@@ -11,9 +11,10 @@ loss_shape comes from WeightsLab's built-in classifier, applied on report write
 Universal loss: the watched crit runs on the test split each epoch too, so test
 samples get a loss trajectory and a shape as well.
 
-Env: WL_STRESS_EPOCHS, WL_STRESS_OUT.
+Env: WL_STRESS_OUT.
 """
 import os, time, gc, json, shutil
+import itertools
 
 import numpy as np
 import torch
@@ -27,7 +28,6 @@ from weightslab.components.global_monitoring import guard_training_context, guar
 
 LOSS = "loss_sample"
 OUT = os.environ.get("WL_STRESS_OUT", "/tmp/wl_stress")
-EPOCHS = int(os.environ.get("WL_STRESS_EPOCHS", "10"))
 BATCH = 64
 
 
@@ -138,8 +138,12 @@ def main():
                     tlg = model(ti)
                     crit(tlg, tl, batch_ids=tid, preds=tlg.argmax(1, keepdim=True))
 
+    # Unbounded: WeightsLab runs until you stop it (studio pause button, CLI, or
+    # Ctrl+C), so there is no epoch budget to exhaust. The report below is
+    # rewritten at the end of every epoch rather than once after the loop --
+    # after an endless loop, "once after" never happens.
     step_times, gstep, t_run = [], 0, time.perf_counter()
-    for ep in range(1, EPOCHS + 1):
+    for ep in itertools.count(1):
         ep_ms = []
         for img, ids, lab in loader:
             img, lab = img.to(dev), lab.to(dev)
@@ -158,22 +162,24 @@ def main():
         rec = {"epoch": ep, "gstep": gstep, "wl_ms": round(wl_ms, 2), "vanilla_ms": round(vanilla_ms, 2),
                "rss_gb": round(rss_gb(), 2), "elapsed_s": round(time.perf_counter() - t_run, 1)}
         metrics.write(json.dumps(rec) + "\n"); metrics.flush()
-        log(f"[run] ep {ep:3d}/{EPOCHS} | WL {wl_ms:6.2f} ms vs vanilla {vanilla_ms:.2f} "
+        log(f"[run] ep {ep:3d} | WL {wl_ms:6.2f} ms vs vanilla {vanilla_ms:.2f} "
             f"= +{100*(wl_ms/vanilla_ms-1):.0f}% | RSS {rec['rss_gb']:.2f} GB | {rec['elapsed_s']:.0f}s")
 
-    import pandas as pd
-    # loss_shape comes from WeightsLab's built-in classifier, run on report write.
-    path = wl.write_dataframe(OUT + "/report.csv", format="csv",
-                              columns=["signals", "tags"], loss_shape_signal=LOSS)
-    df = pd.read_csv(path)
-    sc = [c for c in df.columns if c.endswith("loss_shape")][0]
-    med = float(np.median(step_times))
-    metrics.close()
-    log("\n[run] ===== SUMMARY =====")
-    log(f"[run] vanilla {vanilla_ms:.2f} ms | WL median {med:.2f} ms/step (+{100*(med/vanilla_ms-1):.0f}%)")
-    log(f"[run] report {len(df)} rows | loss_shape covered {df[sc].notna().sum()}/{len(df)}")
-    log(f"[run] shape distribution: {df[sc].value_counts(dropna=True).to_dict()}")
-    log(f"[run] report -> {path}")
+        # Report + summary, refreshed every epoch (same path each time: a
+        # snapshot of the run so far). loss_shape comes from WeightsLab's
+        # built-in classifier, run on report write. `metrics` is left open -- it
+        # is flushed above, and there is no "after the loop" to close it in.
+        import pandas as pd
+        path = wl.write_dataframe(OUT + "/report.csv", format="csv",
+                                  columns=["signals", "tags"], loss_shape_signal=LOSS)
+        df = pd.read_csv(path)
+        sc = [c for c in df.columns if c.endswith("loss_shape")][0]
+        med = float(np.median(step_times))
+        log("\n[run] ===== SUMMARY (after epoch %d) =====" % ep)
+        log(f"[run] vanilla {vanilla_ms:.2f} ms | WL median {med:.2f} ms/step (+{100*(med/vanilla_ms-1):.0f}%)")
+        log(f"[run] report {len(df)} rows | loss_shape covered {df[sc].notna().sum()}/{len(df)}")
+        log(f"[run] shape distribution: {df[sc].value_counts(dropna=True).to_dict()}")
+        log(f"[run] report -> {path}")
 
 
 if __name__ == "__main__":

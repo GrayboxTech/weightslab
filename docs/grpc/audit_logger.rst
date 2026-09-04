@@ -299,32 +299,6 @@ A model checkpoint restore failed:
 3. Check preceding ``pause`` operations
 4. Verify checkpoint ID in the details
 
-Testing
-=======
-
-The audit logger includes comprehensive unit tests covering:
-
-- Event creation and serialization
-- JSON and CSV file writing
-- Thread-safe concurrent logging
-- Error handling and edge cases
-- Complex nested data structures
-- Real-world usage scenarios
-
-Run tests with:
-
-.. code-block:: bash
-
-    pytest weightslab/tests/backend/test_audit_logger.py -v
-
-**Test Coverage:**
-
-- 26 unit tests
-- Success and failure scenarios
-- Concurrent logging with 10+ threads
-- Special characters and Unicode handling
-- Edge cases (empty details, missing files, etc.)
-
 Troubleshooting
 ===============
 
@@ -435,5 +409,5 @@ See Also
 ========
 
 - :doc:`grpc_functions`: All gRPC RPC handlers and their behavior
-- :doc:`/weights_studio`: Using the UI to trigger logged actions
+- :doc:`/weights_studio_ui/index`: Using the UI to trigger logged actions
 - :doc:`/configuration`: gRPC configuration options

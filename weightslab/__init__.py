@@ -36,20 +36,21 @@ _LAZY_EXPORTS = {
 # Everything re-exported straight from .src (attribute name == export name).
 for _name in (
     "watch_or_edit", "start_training", "serve", "keep_serving", "save_signals",
-    "save_instance_signals", "save_group_signals", "tag_samples",
+    "save_instance_signals", "save_group_signals", "save_media", "tag_samples",
+    "save_model_signals", "track_model_signals",
     "register_categorical_tag", "set_categorical_tag", "discard_samples",
     "get_samples_by_tag", "get_discarded_samples", "signal", "eval_fn",
     "compute_signals", "SignalContext", "BatchSignalContext", "StaleSignalError",
     "drain_signals", "clear_all", "run_pending_evaluation",
     "trigger_pending_evaluation_async", "query_signal_history",
     "query_sample_history", "query_instance_history", "write_history",
-    "write_dataframe", "classify_loss_shape", "trajectory_stats",
+    "write_dataframe", "export_annotations", "classify_loss_shape", "trajectory_stats",
     "write_loss_shapes", "write_signal_shapes", "enable_loss_shape_signal",
     "enable_loss_shape_autotag", "disable_loss_shape_autotag",
     "auto_loss_shape_signal_names",
     "signal_classifier", "resolve_signal_classifier",
     "LOSS_SHAPES", "get_current_experiment_hash", "pointcloud_thumbnail",
-    "pointcloud_boxes",
+    "pointcloud_boxes", "ai_report_generation",
 ):
     _LAZY_EXPORTS[_name] = (".src", _name)
 del _name
@@ -94,6 +95,30 @@ if _IS_MAIN_PROCESS:
     logger.info(f"WeightsLab package initialized - Log level: {log_level}, Log to file: {log_to_file}")
     if os.getenv('WEIGHTSLAB_SUPPRESS_BANNER', '0') != '1':
         logger.info(_BANNER)
+
+# Auto-install the OpenCode agent binary on first import, in the background and
+# logged, so `import weightslab` / `weightslab start` / `weightslab start example`
+# all leave the agent ready with no manual step (installation only — signing in
+# stays opt-in via `weightslab agent init`). Guards: main process only (never
+# DataLoader workers); skipped under pytest and when
+# WEIGHTSLAB_OPENCODE_AUTOINSTALL is falsey or the download is disabled. The
+# call itself no-ops instantly when the binary is already present.
+def _autoinstall_opencode_on_import():
+    import sys as _sys
+    if os.environ.get('WEIGHTSLAB_OPENCODE_AUTOINSTALL', '1').strip().lower() in {'0', 'false', 'no', 'off'}:
+        return
+    if 'pytest' in _sys.modules or os.environ.get('PYTEST_CURRENT_TEST'):
+        return
+    try:
+        from weightslab import opencode_binary
+        opencode_binary.ensure_managed_binary_in_background(
+            reason="import weightslab", logger=logger)
+    except Exception as _exc:  # pragma: no cover - best-effort
+        logger.debug("OpenCode auto-install skipped: %s", _exc)
+
+
+if _IS_MAIN_PROCESS:
+    _autoinstall_opencode_on_import()
 
 grpc_tls_enabled = os.environ.get('GRPC_TLS_ENABLED', 'true').lower() == 'true'
 if _IS_MAIN_PROCESS and grpc_tls_enabled and os.environ.get('WEIGHTSLAB_SKIP_SECURE_INIT', 'false').lower() != 'true':
@@ -191,6 +216,9 @@ __all__ = [
     "save_signals",
     "save_instance_signals",
     "save_group_signals",
+    "save_media",
+    "save_model_signals",
+    "track_model_signals",
     "signal",
     "compute_signals",
     "set_log_directory",
@@ -220,6 +248,8 @@ __all__ = [
 
     "write_history",
     "write_dataframe",
+    "export_annotations",
+    "ai_report_generation",
     "classify_loss_shape",
     "write_loss_shapes",
     "write_signal_shapes",

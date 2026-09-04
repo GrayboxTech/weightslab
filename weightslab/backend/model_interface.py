@@ -42,6 +42,7 @@ class ModelInterface(NetworkWithOps):
             compute_dependencies: bool = False,
             weak: bool = False,
             skip_previous_auto_load: bool = False,
+            log_model_signals: bool = True,
             **_
     ):
         """
@@ -78,11 +79,18 @@ class ModelInterface(NetworkWithOps):
                 reference in the ledger. Defaults to False.
             skip_previous_auto_load (bool, optional): If True, skips the automatic loading
                 of previous checkpoints during initialization. Defaults to False.
+            log_model_signals (bool, optional): If True, log the signals the model
+                level owns — ``model/grad_norm`` and ``model/parameters`` — once per
+                training step, so a model-only integration (no wrapped
+                loss/metric) still produces experiment history for the UI, the
+                report and ``wl.write_history()``. Defaults to True.
 
         Returns:
             None: This method initializes the object and does not return any value.
         """
         super(ModelInterface, self).__init__()
+
+        self._log_model_signals = bool(log_model_signals)
 
         # Sanity check of the compute_dependencies and use_onnx flags
         # if compute_dependencies:
@@ -209,7 +217,13 @@ class ModelInterface(NetworkWithOps):
             _checkpoint_auto_every_steps = 0
         self._checkpoint_auto_every_steps = int(_checkpoint_auto_every_steps or 0)
 
-        # Initialize CheckpointManager if we have a root dir (fallback to default root)
+        # Initialize CheckpointManager if we have a root dir. Without wrapped
+        # hyperparameters (a model-only integration) fall back to the directory
+        # `weightslab start [DIR]` advertises, so the run still lands where the UI
+        # looks, and only then to ./root_log_dir.
+        _env_root_log_dir = os.environ.get('WEIGHTSLAB_ROOT_LOG_DIR')
+        if not _root_log_dir and _env_root_log_dir and os.path.isdir(_env_root_log_dir):
+            _root_log_dir = _env_root_log_dir
         root_log_dir = _root_log_dir or os.path.join('.', 'root_log_dir')
 
         # Ensure the wrapper is registered in the ledger to load the checkpoint manager if it exists, or to register a new one if not. This is needed for the auto-load logic to work correctly.
@@ -686,6 +700,60 @@ class ModelInterface(NetworkWithOps):
                     pass
         except Exception:
             pass
+
+    def log_model_signals(self) -> None:
+        """Log the signals the model level owns, once per training step.
+
+        ``model/grad_norm`` (global L2 norm of the gradients that were just
+        computed) and ``model/parameters`` (trainable parameter count, which jumps
+        whenever an architecture operation resizes a layer).
+
+        This is what gives a **model-only** integration real experiment history:
+        without it, nothing writes to the logger until a loss or metric is wrapped
+        (the logger level), so the UI, the report and ``wl.write_history()`` would
+        all be empty. Disable with
+        ``wl.watch_or_edit(model, flag="model", log_model_signals=False)``.
+        """
+        if not getattr(self, '_log_model_signals', True):
+            return
+
+        logger_q = ledgers.get_logger()
+        if logger_q is None or not hasattr(logger_q, 'add_scalars'):
+            return
+
+        try:
+            step = int(self.get_age())
+        except Exception:
+            return
+
+        signals = {}
+        try:
+            with th.no_grad():
+                total = 0.0
+                count = 0
+                trainable = 0
+                for param in self.parameters():
+                    if param.requires_grad:
+                        trainable += param.numel()
+                    if param.grad is None:
+                        continue
+                    total += float(param.grad.detach().float().pow(2).sum().item())
+                    count += 1
+            if count:
+                signals['model/grad_norm'] = total ** 0.5
+            signals['model/parameters'] = float(trainable)
+        except Exception as e:
+            logger.debug(f"Could not compute model-level signals: {e}")
+            return
+
+        for name, value in signals.items():
+            try:
+                logger_q.add_scalars(
+                    name, {name: value}, global_step=step,
+                    signal_per_sample=None, aggregate_by_step=False,
+                )
+            except Exception as e:
+                logger.debug(f"Could not log model-level signal {name}: {e}")
 
     def update_optimizer(self):
         """Public method to update the optimizer, can be called after architecture changes."""

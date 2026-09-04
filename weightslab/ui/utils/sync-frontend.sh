@@ -1,6 +1,6 @@
 #!/bin/sh
 # Vendor the built Weights Studio SPA into this package so `weightslab start`
-# can serve it (and so it ships inside the wheel). Docker-free.
+# can serve it (and so it ships inside the wheel).
 #
 # The frontend build lives in the weights_studio repo (its ./dist, gitignored).
 # This script builds it there (unless SKIP_BUILD=1) and copies dist/ into

@@ -54,6 +54,36 @@
     return '/' + parts.join('/');
   }
 
+  // The topnav is built by wl-topnav.js inside its own DOMContentLoaded
+  // handler, which is registered AFTER this file's (see html_js_files order in
+  // conf.py). In practice the versions.json fetch resolves late enough that the
+  // slot already exists -- but "in practice" is doing too much work there: a
+  // cached manifest can resolve in the same tick, and the switcher would then
+  // silently fall back to the in-page location. Wait for the slot instead.
+  function whenSlotReady(selector, timeoutMs) {
+    return new Promise((resolve) => {
+      const existing = document.querySelector(selector);
+      if (existing) {
+        resolve(existing);
+        return;
+      }
+      let settled = false;
+      const finish = (node) => {
+        if (settled) return;
+        settled = true;
+        observer.disconnect();
+        clearTimeout(timer);
+        resolve(node);
+      };
+      const observer = new MutationObserver(() => {
+        const found = document.querySelector(selector);
+        if (found) finish(found);
+      });
+      const timer = setTimeout(() => finish(document.querySelector(selector)), timeoutMs);
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+    });
+  }
+
   function mountSelector(versions) {
     if (!Array.isArray(versions) || versions.length === 0) {
       return;
@@ -88,12 +118,22 @@
     container.appendChild(label);
     container.appendChild(select);
 
-    const articleHeader = document.querySelector('.content .article-header') || document.querySelector('.content');
-    if (articleHeader) {
-      articleHeader.prepend(container);
-    } else {
-      document.body.prepend(container);
-    }
+    whenSlotReady('.wl-topnav-version', 5000).then((slot) => {
+      if (slot) {
+        container.classList.add('wl-version-switcher--topnav');
+        slot.appendChild(container);
+        return;
+      }
+      // No topnav on this page -- fall back to where the switcher used to live
+      // rather than dropping the control entirely.
+      const articleHeader =
+        document.querySelector('.content .article-header') || document.querySelector('.content');
+      if (articleHeader) {
+        articleHeader.prepend(container);
+      } else {
+        document.body.prepend(container);
+      }
+    });
   }
 
   document.addEventListener('DOMContentLoaded', function () {

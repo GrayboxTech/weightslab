@@ -1,11 +1,9 @@
 <div align="center">
-  <a href="https://grayboxtech.github.io/weightslab/latest/index.html">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/weightslab-banner-product-screen.png" />
-      <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/weightslab-banner-product-screen.png" />
-      <img alt="WeightsLab Banner" src="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/weightslab-banner-light.png" width="100%" />
-    </picture>
-  </a>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/weightslab-banner-product-screen.png" />
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/weightslab-banner-product-screen.png" />
+    <img alt="WeightsLab Banner" src="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/weightslab-banner-light.png" width="100%" />
+  </picture>
 <br>
 
 </div>
@@ -45,7 +43,7 @@ WeightsLab hooks into your existing PyTorch training loop and exposes a live UI 
 
 ## Weightslab in Motion
 <div align="center">
-  <img src="https://github.com/GrayboxTech/assets/blob/main/GIF/weightslab_demo_bdd.gif" width="1280" alt="WeightsLab Studio demo" />
+  <img width="960" height="540" alt="Image" src="https://github.com/user-attachments/assets/2e8f8846-efcd-4188-9d60-fee0674d1105" />
   <!-- <sub><a href="https://youtu.be/GBBDDaJQLWk">▶ Watch full demo</a></sub> -->
 </div>
 
@@ -318,6 +316,20 @@ the exact samples causing them — so you can fix your data, not just log it.
 <br>
 
 Find our documentation [online](https://grayboxtech.github.io/weightslab/latest/index.html).
+
+</details>
+
+<details>
+<summary><b>Agent: chat with your training run (OpenCode)</b></summary>
+
+<br>
+
+WeightsLab ships two distinct agent surfaces — the backend SDK agent for data-manipulation
+queries, and a local [OpenCode](https://opencode.ai)-backed agent with a full bash/file
+toolset that can restart training, edit your code, and run recurring `/loop` monitoring
+jobs. See the [Agent docs](https://grayboxtech.github.io/weightslab/latest/agent.html) for
+how the two connect, how to point either one at a local model, and the full `/loop`
+reference.
 
 </details>
 

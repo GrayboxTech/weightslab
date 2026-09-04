@@ -8,77 +8,58 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    <div class="wl-hero">
      <img src="_static/logo-light.png" alt="Weightslab logo" class="wl-hero-logo wl-only-light" />
      <img src="_static/logo-dark.png" alt="Weightslab logo" class="wl-hero-logo wl-only-dark" />
-     <p class="wl-hero-subtitle">Inspect, edit, and optimize model training with a unified workflow.</p>
+     <p class="wl-hero-subtitle">Inspect, edit, and optimize model training with one workflow.</p>
        <div class="wl-hero-cta-group">
-          <a class="wl-hero-cta" href="quickstart.html">Install & Get Started</a>
-          <a class="wl-hero-cta wl-hero-cta-secondary" href="user_functions.html">API Reference</a>
+          <a class="wl-hero-cta" href="quickstart.html">Quickstart</a>
+          <a class="wl-hero-cta wl-hero-cta-secondary" href="examples/index.html">Examples</a>
+          <a class="wl-hero-cta wl-hero-cta-sandbox" href="https://sandbox.graybx.com/" target="_blank" rel="noopener">Sandbox</a>
        </div>
    </div>
 
-.. grid:: 1 1 2 2
+.. grid:: 1 1 2 3
    :gutter: 2
 
-   .. grid-item-card:: Quickstart
-      :link: quickstart
+   .. grid-item-card:: Agent Quickstart
+      :link: agent_quickstart
       :link-type: doc
 
-      Install, build, and run Weightslab documentation locally in minutes.
+      Start using the AI agent to analyze and optimize your training.
 
-   .. grid-item-card:: Four-Way Approach
+   .. grid-item-card:: Good Practices
+      :link: usage/good_practice/index
+      :link-type: doc
+
+      Standardize your training code for WeightsLab integration.
+
+   .. grid-item-card:: Weights Studio UI
+      :link: weights_studio_ui/index
+      :link-type: doc
+
+      Take control of a running experiment from the browser.
+
+   .. grid-item-card:: Weights Studio CLI
+      :link: weights_studio_cli/index
+      :link-type: doc
+
+      Take control of a running experiment from the terminal.
+
+   .. grid-item-card:: Core Concepts
       :link: four_way_approach
       :link-type: doc
 
-      Understand how model, data, hyperparameters, and logger workflows connect.
+      Understand the 4-level workflow and each part independently.
 
-   .. grid-item-card:: Model + Data Control
-      :link: model_interaction
+   .. grid-item-card:: Notebooks
+      :link: notebooks
       :link-type: doc
 
-      Learn how to wrap training components and iterate on difficult samples.
-
-   .. grid-item-card:: User Functions
-      :link: user_functions
-      :link-type: doc
-
-      Reference all public SDK functions with usage-oriented explanations.
-
-   .. grid-item-card:: User Commands
-      :link: user_commands
-      :link-type: doc
-
-      The ``weightslab`` CLI and its interactive console — every command,
-      flag, and default.
-
-   .. grid-item-card:: Examples
-      :link: examples/index
-      :link-type: doc
-
-      Classification, detection, segmentation, clustering, anomaly detection,
-      LiDAR, and Lightning — all with WeightsLab wired in.
-
-   .. grid-item-card:: PyTorch Lightning
-      :link: pytorch_lightning
-      :link-type: doc
-
-      Integrate Weightslab with Lightning.
-
-   .. grid-item-card:: UltraLytics
-      :link: ultralytics
-      :link-type: doc
-
-      Integrate Weightslab with Ultralytics.
-
-   .. grid-item-card:: Weights Studio
-      :link: weights_studio
-      :link-type: doc
-
-      Deploy and operate the UI: architecture, ports, TLS, and actions.
+      Colab, local notebooks, and in-training notebook workflows.
 
    .. grid-item-card:: Configuration
       :link: configuration
       :link-type: doc
 
-      All environment variables for WeightsLab and Weights Studio with defaults and explanations.
+      Environment variables and runtime toggles.
 
    .. grid-item-card:: AI Agent
       :link: agent
@@ -86,37 +67,47 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       Drive UI actions (sort, dump, load), data analysis, tagging/discarding, and model freeze/reset with natural language.
 
-   .. grid-item-card:: gRPC Communication
-      :link: grpc/index
+   .. grid-item-card:: Experiment Reports
+      :link: experiment_reports
       :link-type: doc
 
-      All RPC handlers, parameters, and behavior. Comprehensive audit logging for user interactions.
+      Ask the agent for a branded HTML report: signal health plots, dataset stats, and a written analysis.
 
-.. admonition:: Weightslab in one sentence
-   :class: note
+   .. grid-item-card:: Annotation Export
+      :link: export
+      :link-type: doc
 
-   Wrap your training script once, then monitor, tag/discard, adjust, and improve continuously.
+      Export bounding boxes and segmentation masks to CVAT, Label Studio, or V7 for relabeling.
+
+   .. grid-item-card:: Reference
+      :link: user_functions
+      :link-type: doc
+
+      Complete SDK, CLI, and gRPC documentation.
 
 
 .. toctree::
    :maxdepth: 2
-   :caption: Getting Started
+   :caption: GETTING STARTED
    :hidden:
 
    quickstart
-
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Usage
-   :hidden:
-
-   usage/good_practice
+   agent_quickstart
+   usage/good_practice/index
 
 
 .. toctree::
    :maxdepth: 3
-   :caption: Examples
+   :caption: WEIGHTS STUDIO
+   :hidden:
+
+   weights_studio_ui/index
+   weights_studio_cli/index
+
+
+.. toctree::
+   :maxdepth: 3
+   :caption: EXAMPLES
    :hidden:
 
    examples/index
@@ -124,31 +115,39 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
 .. toctree::
    :maxdepth: 2
-   :caption: Core Concepts
+   :caption: CORE CONCEPTS
    :hidden:
 
    four_way_approach
-   model_interaction
-   data_exploration
-   agent
-   hyperparameters
-   logger
-   checkpointing
-   .. weights_studio
+   signal_trajectory_classification
+   custom_evaluation
 
 
 .. toctree::
    :maxdepth: 2
-   :caption: External Library Integration
+   :caption: TOOLS
    :hidden:
 
+   resource_monitoring
+   experiment_reports
+   checkpointing
+   agent
+   export
+
+
+.. toctree::
+   :maxdepth: 2
+   :caption: INTEGRATIONS
+   :hidden:
+
+   notebooks
    pytorch_lightning
    ultralytics
 
 
 .. toctree::
    :maxdepth: 1
-   :caption: Configuration
+   :caption: CONFIGURATION
    :hidden:
 
    configuration
@@ -156,9 +155,23 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
 .. toctree::
    :maxdepth: 2
-   :caption: Reference
+   :caption: REFERENCE
    :hidden:
 
    user_functions
    user_commands
    grpc/index
+   whats_new
+
+
+.. Migration guides — written, but deliberately not published yet. The pages
+..    live in docs/migration/ and are reachable by direct link; migration/index.rst
+..    carries :orphan: so this stays warning-free while commented out. Uncomment
+..    the toctree below to put them in the sidebar.
+
+.. .. toctree::
+..    :maxdepth: 2
+..    :caption: MIGRATION
+..    :hidden:
+
+..    migration/index

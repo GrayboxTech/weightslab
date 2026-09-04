@@ -10,13 +10,9 @@ from weightslab.trainer.services.agent.intent_prompt import INTENT_PROMPT
 
 def _install_agent_dependency_stubs():
     stubs = {
-        "langchain_ollama": types.ModuleType("langchain_ollama"),
-        "langchain_openai": types.ModuleType("langchain_openai"),
         "langchain_core": types.ModuleType("langchain_core"),
         "langchain_core.prompts": types.ModuleType("langchain_core.prompts"),
     }
-    stubs["langchain_ollama"].ChatOllama = object
-    stubs["langchain_openai"].ChatOpenAI = object
     stubs["langchain_core.prompts"].ChatPromptTemplate = object
     return stubs
 
@@ -35,18 +31,6 @@ class _FakeAgent:
 
     def _rewrite_origin_literals(self, code):
         return code
-
-
-class _FakeChatModel:
-    def __init__(self, *args, **kwargs):
-        self.args = args
-        self.kwargs = kwargs
-
-    def with_structured_output(self, schema):
-        return self
-
-    def invoke(self, prompt):
-        return SimpleNamespace(content="OK")
 
 
 class TestAgentPromptUnit(unittest.TestCase):
@@ -134,7 +118,7 @@ class TestAgentPromptUnit(unittest.TestCase):
         )
         self.assertEqual(action["function"], "action.save")
 
-    def test_initialize_with_cloud_key_checks_chat_connectivity(self):
+    def test_initialize_with_cloud_key_rejects_non_opencode_provider(self):
         with unittest.mock.patch.dict(sys.modules, _install_agent_dependency_stubs(), clear=False):
             agent_mod = importlib.import_module("weightslab.trainer.services.agent.agent")
 
@@ -142,49 +126,11 @@ class TestAgentPromptUnit(unittest.TestCase):
             _all_datasets_df=agent_mod.pd.DataFrame({"metric": [1.0, 2.0]}),
         )
 
-        with mock.patch.object(agent_mod, "ChatOpenAI", _FakeChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
-            agent = agent_mod.DataManipulationAgent(ctx)
-            ok, message = agent.initialize_with_cloud_key("test-key", "openrouter", "google/gemini-2.5-flash")
-
-        self.assertTrue(ok)
-        self.assertIn("initialized successfully", message)
-        self.assertIsNotNone(agent.chain_openrouter)
-        self.assertEqual(agent.openrouter_model, "google/gemini-2.5-flash")
-
-    def test_initialize_with_cloud_key_fails_when_probe_fails(self):
-        with unittest.mock.patch.dict(sys.modules, _install_agent_dependency_stubs(), clear=False):
-            agent_mod = importlib.import_module("weightslab.trainer.services.agent.agent")
-
-        class _FailingChatModel(_FakeChatModel):
-            def invoke(self, prompt):
-                raise RuntimeError("401 Unauthorized")
-
-        ctx = SimpleNamespace(
-            _all_datasets_df=agent_mod.pd.DataFrame({"metric": [1.0, 2.0]}),
-        )
-
-        with mock.patch.object(agent_mod, "ChatOpenAI", _FailingChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
-            agent = agent_mod.DataManipulationAgent(ctx)
-            ok, message = agent.initialize_with_cloud_key("bad-key", "openrouter", "~google/gemini-flash-latest")
+        agent = agent_mod.DataManipulationAgent(ctx)
+        ok, message = agent.initialize_with_cloud_key("test-key", "grok", "grok-3-mini")
 
         self.assertFalse(ok)
-        self.assertIn("connectivity check failed", message)
-        self.assertIsNone(agent.chain_openrouter)
-
-    def test_initialize_with_cloud_key_rejects_non_openrouter_provider(self):
-        with unittest.mock.patch.dict(sys.modules, _install_agent_dependency_stubs(), clear=False):
-            agent_mod = importlib.import_module("weightslab.trainer.services.agent.agent")
-
-        ctx = SimpleNamespace(
-            _all_datasets_df=agent_mod.pd.DataFrame({"metric": [1.0, 2.0]}),
-        )
-
-        with mock.patch.object(agent_mod, "ChatOpenAI", _FakeChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
-            agent = agent_mod.DataManipulationAgent(ctx)
-            ok, message = agent.initialize_with_cloud_key("test-key", "grok", "grok-3-mini")
-
-        self.assertFalse(ok)
-        self.assertIn("Only OpenRouter", message)
+        self.assertIn("Only OpenCode", message)
 
     def test_build_python_mask_keeps_string_literals(self):
         with unittest.mock.patch.dict(sys.modules, _install_agent_dependency_stubs(), clear=False):
@@ -202,8 +148,7 @@ class TestAgentPromptUnit(unittest.TestCase):
             ),
         )
 
-        with mock.patch.object(agent_mod, "ChatOpenAI", _FakeChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
-            agent = agent_mod.DataManipulationAgent(ctx)
+        agent = agent_mod.DataManipulationAgent(ctx)
 
         mask = agent._build_python_mask(
             [agent_mod.Condition(column="origin", op="==", value="train")]
@@ -213,6 +158,44 @@ class TestAgentPromptUnit(unittest.TestCase):
         self.assertIn("df.index.get_level_values('origin')", mask)
         self.assertIn("== 'train'", mask)
         self.assertNotIn("signals//train_mlt_loss/CE", mask)
+
+    def test_compact_schema_for_prompt_separates_index_levels_from_columns(self):
+        # Regression: a real user hit generated notebook code that did
+        # df["sample_id"]/df["origin"] and raised KeyError, because those are
+        # index levels (set via df.set_index([...], drop=True) in
+        # DataService) on the notebook's df -- never plain columns. The old
+        # schema string listed everything as "- `col` (dtype)" with no way to
+        # tell the two apart, so the LLM had no signal to avoid df["origin"].
+        with unittest.mock.patch.dict(sys.modules, _install_agent_dependency_stubs(), clear=False):
+            agent_mod = importlib.import_module("weightslab.trainer.services.agent.agent")
+
+        ctx = SimpleNamespace(
+            _all_datasets_df=agent_mod.pd.DataFrame(
+                {"label": [0, 1, 0], "loss": [0.1, 0.2, 0.9]},
+                index=agent_mod.pd.MultiIndex.from_tuples(
+                    [("train", 1), ("train", 2), ("test", 3)],
+                    names=["origin", "sample_id"],
+                ),
+            ),
+        )
+
+        agent = agent_mod.DataManipulationAgent(ctx)
+
+        schema_text = agent._compact_schema_for_prompt()
+
+        self.assertIn("Index levels", schema_text)
+        self.assertIn("`origin`", schema_text)
+        self.assertIn("`sample_id`", schema_text)
+        self.assertIn("`label`", schema_text)
+        self.assertIn("`loss`", schema_text)
+        # origin/sample_id must appear ONLY in the index-levels section, not
+        # listed alongside real columns where the LLM would read them as
+        # equally df["..."]-accessible.
+        columns_section = schema_text.split("Index levels")[0]
+        self.assertNotIn("`origin`", columns_section)
+        self.assertNotIn("`sample_id`", columns_section)
+        self.assertIn("`label`", columns_section)
+        self.assertIn("`loss`", columns_section)
 
     # ========== SORTING TESTS ==========
     def test_sort_by_loss_ascending(self):
@@ -282,8 +265,7 @@ class TestAgentPromptUnit(unittest.TestCase):
             ),
         )
 
-        with mock.patch.object(agent_mod, "ChatOpenAI", _FakeChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
-            agent = agent_mod.DataManipulationAgent(ctx)
+        agent = agent_mod.DataManipulationAgent(ctx)
 
         cond1 = agent_mod.Condition(column="origin", op="==", value="train")
         cond2 = agent_mod.Condition(column="loss", op="<", value=0.3)
@@ -329,8 +311,7 @@ class TestAgentPromptUnit(unittest.TestCase):
             ),
         )
 
-        with mock.patch.object(agent_mod, "ChatOpenAI", _FakeChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
-            agent = agent_mod.DataManipulationAgent(ctx)
+        agent = agent_mod.DataManipulationAgent(ctx)
 
         step = agent_mod.AtomicIntent(
             kind="transform",
@@ -362,8 +343,7 @@ class TestAgentPromptUnit(unittest.TestCase):
             ),
         )
 
-        with mock.patch.object(agent_mod, "ChatOpenAI", _FakeChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
-            agent = agent_mod.DataManipulationAgent(ctx)
+        agent = agent_mod.DataManipulationAgent(ctx)
 
         step = agent_mod.AtomicIntent(
             kind="transform",
@@ -457,8 +437,7 @@ class TestAgentPromptUnit(unittest.TestCase):
             ),
         )
 
-        with mock.patch.object(agent_mod, "ChatOpenAI", _FakeChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
-            agent = agent_mod.DataManipulationAgent(ctx)
+        agent = agent_mod.DataManipulationAgent(ctx)
 
         step = agent_mod.AtomicIntent(
             kind="analysis",
@@ -492,8 +471,7 @@ class TestAgentPromptUnit(unittest.TestCase):
             ),
         )
 
-        with mock.patch.object(agent_mod, "ChatOpenAI", _FakeChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
-            agent = agent_mod.DataManipulationAgent(ctx)
+        agent = agent_mod.DataManipulationAgent(ctx)
 
         step = agent_mod.AtomicIntent(
             kind="transform",
@@ -524,8 +502,7 @@ class TestAgentPromptUnit(unittest.TestCase):
             ),
         )
 
-        with mock.patch.object(agent_mod, "ChatOpenAI", _FakeChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
-            agent = agent_mod.DataManipulationAgent(ctx)
+        agent = agent_mod.DataManipulationAgent(ctx)
 
         step = agent_mod.AtomicIntent(
             kind="transform",
@@ -558,8 +535,7 @@ class TestAgentPromptUnit(unittest.TestCase):
             ),
         )
 
-        with mock.patch.object(agent_mod, "ChatOpenAI", _FakeChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
-            agent_mod.DataManipulationAgent(ctx)
+        agent_mod.DataManipulationAgent(ctx)
 
         # First filter: keep only train
         filt_cond = agent_mod.Condition(column="origin", op="==", value="train")
@@ -596,8 +572,7 @@ class TestAgentPromptUnit(unittest.TestCase):
             ),
         )
 
-        with mock.patch.object(agent_mod, "ChatOpenAI", _FakeChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
-            agent = agent_mod.DataManipulationAgent(ctx)
+        agent = agent_mod.DataManipulationAgent(ctx)
 
         step = agent_mod.AtomicIntent(
             kind="transform",
@@ -628,8 +603,7 @@ class TestAgentPromptUnit(unittest.TestCase):
             ),
         )
 
-        with mock.patch.object(agent_mod, "ChatOpenAI", _FakeChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
-            agent = agent_mod.DataManipulationAgent(ctx)
+        agent = agent_mod.DataManipulationAgent(ctx)
 
         step = agent_mod.AtomicIntent(
             kind="transform",

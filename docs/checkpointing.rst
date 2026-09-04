@@ -1,5 +1,5 @@
-Checkpointing and Experiment Versioning
-========================================
+Experiment Versioning
+=====================
 
 WeightsLab versions an experiment by content, not by filename. Every time the
 model, hyperparameters, or data state changes, ``CheckpointManager`` computes a

@@ -290,7 +290,7 @@ class TestGRPCWeightsStudioSDKState(_TimeoutMixin, unittest.TestCase):
         # vectorized path and doesn't need it, but GetDataSamples does).
         ds._data_executor = ThreadPoolExecutor(max_workers=2)
         ds._agent = MagicMock()
-        ds._agent.is_ollama_available.return_value = True
+        ds._agent.is_available.return_value = True
         ds.audit_logger = MagicMock()
 
         return ds, df_manager
@@ -536,9 +536,12 @@ class TestGRPCLoggerOutputIntegration(_TimeoutMixin, unittest.TestCase):
         # curve per experiment_hash via aggregate_per_sample_by_step.
         _pts = [("11", 5, 0.2, "exp-1"), ("12", 5, 0.8, "exp-1")]
 
-        def _agg(graph_name, sample_ids=None, exp_hash=None):
+        def _agg(graph_name, sample_ids=None, exp_hash=None, exp_hashes=None):
             wanted = {str(s) for s in sample_ids} if sample_ids is not None else None
-            rows = [t for t in _pts if wanted is None or str(t[0]) in wanted]
+            allowed = set(exp_hashes) if exp_hashes else None
+            rows = [t for t in _pts
+                    if (wanted is None or str(t[0]) in wanted)
+                    and (allowed is None or t[3] in allowed)]
             by_hash: dict = {}
             for sid, step, val, h in rows:
                 by_hash.setdefault(h, {}).setdefault(step, []).append(val)

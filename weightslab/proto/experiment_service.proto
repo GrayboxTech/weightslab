@@ -30,9 +30,19 @@ service ExperimentService {
   // downsampled to at most max_points and is only included when the sample has
   // at least 3 recorded points.
   rpc GetSignalTrajectory (GetSignalTrajectoryRequest) returns (GetSignalTrajectoryResponse);
+  // Every sample id that contributed to one step of one signal. Backs the plot's
+  // right-click "Highlight step samples": the whole batch behind a point, not
+  // just the samples that were flagged as off-trend.
+  rpc GetStepSamples (StepSamplesRequest) returns (StepSamplesResponse);
   // Raw point cloud of one sample (task_type "detection_pointcloud"), server-streamed
   // in binary chunks for the interactive 3D viewer.
   rpc GetPointCloud (PointCloudRequest) returns (stream PointCloudChunk);
+  // Playable media of one sample (task_type "video_generation" /
+  // "audio_generation"), server-streamed in binary chunks for the modal
+  // player. Grid and list previews never call this — they use the poster
+  // frame carried by the ordinary raw_data stat — so clip length does not
+  // affect browsing cost.
+  rpc GetMedia (MediaRequest) returns (stream MediaChunk);
   rpc EditDataSample (DataEditsRequest) returns (DataEditsResponse);
   rpc GetDataSplits (Empty) returns (DataSplitsResponse);
   rpc CheckAgentHealth (Empty) returns (AgentHealthResponse);
@@ -40,23 +50,102 @@ service ExperimentService {
   rpc ChangeAgentModel (ChangeAgentModelRequest) returns (ChangeAgentModelResponse);
   rpc GetAgentModels (GetAgentModelsRequest) returns (GetAgentModelsResponse);
   rpc ResetAgent (Empty) returns (ResetAgentResponse);
+  // Wipe the agent's conversation history (self.history) without touching the
+  // provider connection -- distinct from ResetAgent, which drops the connection.
+  rpc ClearAgentHistory (Empty) returns (ClearAgentHistoryResponse);
+  // Summarize the agent's conversation history via the active model, replacing
+  // it with the summary. Distinct from OpenCode's own session compaction (which
+  // this does not touch) -- this is the SDK agent's own self.history.
+  rpc CompactAgentHistory (Empty) returns (CompactAgentHistoryResponse);
+  // Context-window usage breakdown for the active model. A fresh OpenCode
+  // session is created per agent call (see opencode_chat.py), so there is no
+  // persistent session to total across turns -- this reports the LAST
+  // completed call's token usage, which is exactly the size of the context
+  // the NEXT call will resend (the full history is baked into the prompt
+  // text every time).
+  rpc GetAgentContextUsage (Empty) returns (GetAgentContextUsageResponse);
+
+  // Notebook (shared in-process Python kernel for the studio UI). Cell output is
+  // server-streamed in chunks (stdout / stderr / result / image), mirroring
+  // GetPointCloud, so long-running cells report incrementally.
+  rpc RunNotebookCell (RunNotebookCellRequest) returns (stream NotebookCellChunk);
+  // Interrupt whichever cell is currently executing (best-effort; raises
+  // KeyboardInterrupt in the executing thread at its next bytecode boundary).
+  rpc InterruptNotebookCell (InterruptNotebookCellRequest) returns (InterruptNotebookCellResponse);
+  // Load the persisted notebook from root_log_dir (writes a default on first use).
+  rpc GetNotebook (Empty) returns (NotebookResponse);
+  // Persist the notebook JSON back under root_log_dir.
+  rpc SaveNotebook (SaveNotebookRequest) returns (SaveNotebookResponse);
+  // Ask the agent to propose Python code for a notebook cell ("> ..." cells).
+  rpc GenerateNotebookCode (GenerateNotebookCodeRequest) returns (GenerateNotebookCodeResponse);
 
   // Checkpoint restore
   rpc RestoreCheckpoint (RestoreCheckpointRequest) returns (RestoreCheckpointResponse);
+
+  // Runs (experiment hashes) recorded under this root_log_dir: list them,
+  // and rename/annotate them independent of the hash itself.
+  rpc ListExperimentRuns (ListExperimentRunsRequest) returns (ListExperimentRunsResponse);
+  rpc RenameExperimentRun (RenameExperimentRunRequest) returns (RenameExperimentRunResponse);
+  rpc SetExperimentRunNotes (SetExperimentRunNotesRequest) returns (SetExperimentRunNotesResponse);
 
   // Evaluation mode
   rpc TriggerEvaluation (TriggerEvaluationRequest) returns (TriggerEvaluationResponse);
   rpc GetEvaluationStatus (GetEvaluationStatusRequest) returns (GetEvaluationStatusResponse);
   rpc CancelEvaluation (CancelEvaluationRequest) returns (CancelEvaluationResponse);
+
+  // Export bounding-box/segmentation annotations to a relabeling-tool format
+  // (CVAT XML, Label Studio JSON, or V7/Darwin JSON). Unary: the whole file
+  // (or a zip, for formats that need one file per image) comes back as bytes
+  // in a single response.
+  rpc ExportAnnotations (ExportAnnotationsRequest) returns (ExportAnnotationsResponse);
 }
 
 // --- Logger Data Sync ---
 message GetLatestLoggerDataRequest {
-  bool request_full_history = 1;  // true = full history, false = only queue (new data)
-  int32 max_points = 2;            // max points per signal (only used for full history)
+  bool request_full_history = 1;  // true = history, false = only queue (new data)
+  int32 max_points = 2;            // max points PER CURVE (metric x experiment hash)
   bool break_by_slices = 3;        // true = return per-sample data filtered by tags
   repeated string tags = 4;        // list of tags to filter samples (used when break_by_slices=true)
   string graph_name = 5;           // specific signal/graph name to filter (used when break_by_slices=true)
+
+  // --- Viewport scoping -----------------------------------------------------
+  // History is never returned in full: it is reduced to `max_points` per curve
+  // inside DuckDB. These fields narrow *what* gets reduced, so a zoom refetches
+  // real detail for one plot instead of re-reading the dashboard.
+  //
+  // Step range currently visible on the x axis. Buckets are laid out across
+  // this range, so zooming in resolves detail rather than restretching the same
+  // decimated points. Ignored unless has_x_range is set (0 is a valid step).
+  int64 x_min = 6;
+  int64 x_max = 7;
+  bool has_x_range = 8;
+  // Restrict to these signals / experiment hashes. Empty means "all". A zoom on
+  // one plot should send just that signal's name.
+  repeated string metric_names = 9;
+  repeated string experiment_hashes = 10;
+  // Return only per-curve bounds and counts (no data points at all), so the UI
+  // can lay out axes and list curves before fetching anything.
+  bool index_only = 11;
+}
+
+// Shape of one curve without any of its points: what GetLatestLoggerData
+// returns when index_only is set.
+message SignalCurveIndex {
+  string metric_name = 1;
+  string experiment_hash = 2;
+  int64 first_step = 3;
+  int64 last_step = 4;
+  int64 point_count = 5;           // rows in the DB behind this curve
+  double value_min = 6;            // MIN(value) over the curve, no points read
+  double value_max = 7;            // MAX(value) over the curve, no points read
+}
+
+// One sample whose signal value at a step sits far off the curve's own trend.
+// Emitted alongside the averaged point it was averaged into, so the UI can show
+// "this step's mean is 0.39, but sample 8123 contributed 2.71".
+message SignalOutlier {
+  string sample_id = 1;
+  float value = 2;                 // that sample's raw signal value at this step
 }
 
 message LoggerDataPoint {
@@ -71,11 +160,44 @@ message LoggerDataPoint {
   repeated string evaluation_tags = 9;
   string point_note = 10;
   bool audit_mode = 11;            // True if logged during audit mode (read-only inspection)
+  // Samples in this step's batch that deviated from the curve's rolling trend,
+  // strongest first and capped at WL_SIGNAL_OUTLIER_TOP_N. Empty for the common
+  // case where the whole batch tracked the trend.
+  repeated SignalOutlier outliers = 12;
+  // How many samples in the batch were flagged, before the top-N cap. Lets the
+  // UI tell "one sample spiked" apart from "the entire batch is off-trend".
+  int32 outlier_count = 13;
+  // Batch size the average was taken over, so outlier_count can be read as a
+  // fraction of the batch rather than an absolute.
+  int32 sample_count = 14;
+  // The on-trend band this point was judged against: centre (the rolling EMA of
+  // the curve) and half-width. Not drawn directly; it is what decides which
+  // samples count as off-trend. has_trend_band is false while the tracker is
+  // still warming up.
+  float trend_value = 15;
+  float trend_margin = 16;
+  bool has_trend_band = 17;
+  // ABSOLUTE extremes of this step's batch — the real lowest and highest sample
+  // values, not a standard deviation. This is what the UI draws as the error
+  // band around the curve, so a step containing an outlier makes the band spike
+  // out to that value instead of averaging it away.
+  // has_value_range is false for signals that log no per-sample data.
+  float value_min = 18;
+  float value_max = 19;
+  bool has_value_range = 20;
 }
 
 message GetLatestLoggerDataResponse {
   repeated LoggerDataPoint points = 1;  // All points from all metrics
   string weightslab_version = 2;        // backend weightslab package version (shown in UI logo tooltip)
+  // Per-curve shape. Always populated for a history read (cheap grouped
+  // aggregate), so the client can tell "this curve was decimated from 4.2M
+  // points" from "this curve has 12 points", and knows the true step extent
+  // even though `points` only carries the decimated subset.
+  repeated SignalCurveIndex curves = 3;
+  // The reduction actually applied, echoed back so the client can decide
+  // whether a zoom needs a refetch.
+  int32 applied_max_points = 4;
 }
 
 message Empty {}
@@ -417,6 +539,14 @@ message DataSamplesResponse {
   bool success = 1;
   string message = 2;
   repeated DataRecord data_records = 3;
+  // True when the server is currently serving a FILTERED/agent-generated
+  // subview of the dataset rather than the full dataset. Server-authoritative
+  // so a fresh client (private window, no cached UI state) can still show the
+  // "you are viewing a subview" warning ribbon and offer a reset. Mirrors the
+  // backend's own _is_filtered flag.
+  bool is_subview = 4;
+  int64 view_count = 5;   // rows in the current (possibly filtered) view
+  int64 total_count = 6;  // rows in the full dataset
 }
 
 // --- Server-side histogram binning ---
@@ -476,6 +606,26 @@ message GetMetaDataResponse {
 }
 
 // --- On-demand per-signal trajectory (right-click a signal -> plot) ---
+// --- All samples behind one plotted step ---
+message StepSamplesRequest {
+  string metric_name = 1;
+  string experiment_hash = 2;   // "" = any run
+  int32 model_age = 3;
+  int32 max_samples = 4;        // 0 => no cap
+}
+
+message StepSamplesResponse {
+  bool success = 1;
+  string message = 2;
+  repeated string sample_ids = 3;
+  int32 total_available = 4;    // count before max_samples truncation
+  // Parallel to sample_ids: that sample's own value of `metric_name` at
+  // `model_age`, or NaN where the per-sample table has no row for it (e.g. an
+  // id from an older/differently-sized batch). Lets the UI snapshot the exact
+  // per-sample values behind a plotted step instead of only its ids.
+  repeated float sample_values = 5;
+}
+
 message GetSignalTrajectoryRequest {
   string signal_name = 1;            // signal to plot (UI spelling; resolved server-side)
   repeated string sample_ids = 2;    // samples currently shown to plot for
@@ -500,6 +650,10 @@ message PointCloudRequest {
   string sample_id = 1;
   string origin = 2;       // loader name (e.g. "train_loader")
   int32 max_points = 3;    // 0 = use the server default cap
+  // Metadata field to stream, i.e. the "media:<field>" column attached by
+  // wl.save_media (e.g. "pred_cloud"). Empty means the sample's own point
+  // cloud (task_type "detection_pointcloud"), which is the existing behavior.
+  string field = 4;
 }
 
 message PointCloudChunk {
@@ -517,6 +671,39 @@ message PointCloudChunk {
   // ["x","y","z","intensity"] or ["x","y","z","nx","ny","nz","r","g","b"].
   // Drives the viewer's available colour / shading modes.
   repeated string feature_names = 9;
+}
+
+message MediaRequest {
+  string sample_id = 1;
+  string origin = 2;       // loader name (e.g. "train_loader")
+  // "video" (default) streams the muxed clip; "audio" streams only the
+  // soundtrack, which the frame explorer uses to draw a waveform without
+  // re-downloading the video.
+  string kind = 3;
+  int32 max_frames = 4;    // 0 = use the server default cap
+  // Metadata field to stream, i.e. the "media:<field>" column attached by
+  // wl.save_media (e.g. "pred_video"). Empty means the sample's own input
+  // clip, which is what the poster in the grid shows.
+  string field = 5;
+}
+
+message MediaChunk {
+  bool success = 1;
+  string message = 2;
+  // Set on the first chunk only:
+  string mime_type = 3;        // "video/mp4" | "image/gif" | "audio/wav"
+  int32 frame_count = 4;       // frames actually encoded (after any capping)
+  float fps = 5;
+  bool has_audio = 6;          // true when the muxed clip carries a soundtrack
+  int32 width = 7;
+  int32 height = 8;
+  int32 total_bytes = 9;       // full payload size, for progress reporting
+  float duration_seconds = 10;
+  int32 sample_rate = 11;      // audio streams only
+  // Every chunk:
+  bytes data = 12;
+  int32 chunk_index = 13;
+  int32 total_chunks = 14;
 }
 
 enum SampleEditType {
@@ -542,6 +729,17 @@ message DataEditsRequest {
   // EDIT_REMOVE with float_value == -1 still deletes the whole tag column.
   bool is_categorical = 8;
   repeated string categories = 9;
+
+  // --- Per-sample snapshot support (stat_name == "__save_step_signal_snapshot__") ---
+  // One value per entry of samples_ids, written into a new metadata column
+  // (unlike float_value, which EDIT_OVERRIDE applies uniformly to every id).
+  // string_value carries the source signal name and float_value the step;
+  // see build_step_snapshot_column_name for the resulting column name.
+  repeated float sample_values = 10;
+  // The run these values came from (the curve the user acted on), embedded in
+  // the snapshot's column name. Empty falls back to the currently active
+  // experiment, same as __copy_metadata__'s own hash.
+  string experiment_hash = 11;
 }
 
 message DataEditsResponse {
@@ -562,6 +760,12 @@ message AgentHealthResponse {
 // --- Agent Onboarding ---
 enum AgentProviderType {
   PROVIDER_OPENROUTER = 0;
+  // A local OpenCode server (opencode.ai) backs the LLM calls instead of a
+  // direct OpenRouter connection. No api_key is used for this provider -- the
+  // credential lives in OpenCode's own config, entered once via `opencode auth
+  // login` or the Weights Studio landing page's login modal. `model` carries
+  // OpenCode's "providerID/modelID" string (e.g. "openrouter/anthropic/claude-opus-4.6").
+  PROVIDER_OPENCODE = 1;
 }
 
 message InitializeAgentRequest {
@@ -597,6 +801,28 @@ message ResetAgentResponse {
   string message = 2;
 }
 
+message ClearAgentHistoryResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message CompactAgentHistoryResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GetAgentContextUsageResponse {
+  bool success = 1;
+  string message = 2;
+  string model = 3;              // "providerID/modelID" currently active, "" if unknown.
+  int64 context_window = 4;      // Model's context-window size in tokens, 0 if unknown.
+  int64 input_tokens = 5;        // Last completed call's input tokens (system+tools+history+message).
+  int64 output_tokens = 6;
+  int64 reasoning_tokens = 7;
+  int64 cache_read_tokens = 8;   // Portion of input_tokens served from a cached prefix.
+  int64 cache_write_tokens = 9;  // Portion of input_tokens newly written to the cache.
+}
+
 // --- Checkpoint Restore ---
 message RestoreCheckpointRequest {
   string experiment_hash = 1;  // Hash code of checkpoint to restore
@@ -605,6 +831,43 @@ message RestoreCheckpointRequest {
 message RestoreCheckpointResponse {
   bool success = 1;            // Whether restore was successful
   string message = 2;          // Details/error message
+}
+
+// --- Experiment Runs (list / rename / notes) ---
+message ExperimentRunInfo {
+  string experiment_hash = 1;      // 24-char HP_MODEL_DATA hash
+  string experiment_name = 2;      // User-facing label, from config or auto-generated
+  string notes = 3;                // Free-text note, empty if unset
+  string created = 4;              // ISO-8601
+  string last_used = 5;            // ISO-8601
+  int32 latest_weight_step = 6;    // -1 if no weight checkpoint saved yet
+  bool is_current = 7;             // Whether this is the manager's currently loaded run
+}
+
+message ListExperimentRunsRequest {}
+
+message ListExperimentRunsResponse {
+  repeated ExperimentRunInfo runs = 1;
+}
+
+message RenameExperimentRunRequest {
+  string experiment_hash = 1;
+  string new_name = 2;
+}
+
+message RenameExperimentRunResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message SetExperimentRunNotesRequest {
+  string experiment_hash = 1;
+  string notes = 2;
+}
+
+message SetExperimentRunNotesResponse {
+  bool success = 1;
+  string message = 2;
 }
 
 // --- Evaluation Mode ---
@@ -637,4 +900,92 @@ message CancelEvaluationRequest {
 message CancelEvaluationResponse {
   bool success = 1;
   string message = 2;
+}
+
+// --- Notebook ---
+message RunNotebookCellRequest {
+  string code = 1;       // Python source of the cell to execute.
+  string cell_id = 2;    // Client-side identifier, echoed back for correlation.
+}
+
+// Marks the end of a cell run, after all output chunks have been streamed.
+message NotebookCellDone {
+  int32 exec_count = 1;  // Monotonic execution counter of the shared kernel.
+  bool ok = 2;           // False when the cell raised (see error_traceback).
+}
+
+message InterruptNotebookCellRequest {
+}
+
+message InterruptNotebookCellResponse {
+  bool ok = 1;           // False when no cell was running to interrupt.
+  string error = 2;
+}
+
+// One incremental piece of a running cell's output.
+message NotebookCellChunk {
+  string cell_id = 1;
+  oneof payload {
+    string stdout = 2;
+    string stderr = 3;
+    string result_text = 4;       // repr() of the last expression, if any.
+    bytes image_png = 5;          // A matplotlib figure encoded as PNG.
+    string error_traceback = 6;   // Formatted traceback when the cell raised.
+    NotebookCellDone done = 7;    // Always the final chunk of a run.
+  }
+}
+
+message NotebookResponse {
+  string ipynb_json = 1;  // The notebook as ipynb (nbformat v4) JSON.
+  bool existed = 2;       // False when a default template was just created.
+  string path = 3;        // Absolute path of the notebook under root_log_dir.
+  string name = 4;        // Notebook base name (file stem, no .ipynb).
+}
+
+message SaveNotebookRequest {
+  string ipynb_json = 1;
+  string name = 2;        // Optional: rename the notebook to this base name
+                          // (no .ipynb). Backend indexes it if it collides.
+}
+
+message SaveNotebookResponse {
+  bool ok = 1;
+  string path = 2;
+  string error = 3;
+  string name = 4;        // The base name actually used (possibly indexed).
+}
+
+message GenerateNotebookCodeRequest {
+  string prompt = 1;         // The user's instruction (text after the leading ">").
+  string context_code = 2;   // Optional surrounding notebook code for context.
+}
+
+message GenerateNotebookCodeResponse {
+  string code = 1;         // Proposed Python for the cell.
+  string explanation = 2;  // Short natural-language explanation.
+  bool ok = 3;
+  string error = 4;
+}
+
+// --- Annotation export (relabeling-tool formats) ---
+enum AnnotationExportFormat {
+  EXPORT_FORMAT_CVAT = 0;
+  EXPORT_FORMAT_LABEL_STUDIO = 1;
+  EXPORT_FORMAT_V7_DARWIN = 2;
+}
+
+message ExportAnnotationsRequest {
+  AnnotationExportFormat format = 1;
+  string origin = 2;              // restrict to one split/loader; "" = all loaders
+  bool include_predictions = 3;   // export model predictions instead of ground-truth targets
+  repeated string tags = 4;       // restrict to samples carrying ANY of these tags (tag: prefix optional); empty = all samples
+}
+
+message ExportAnnotationsResponse {
+  bool success = 1;
+  string message = 2;
+  bytes payload = 3;    // export file bytes (a zip, for formats that need one file per image)
+  string filename = 4;  // suggested filename (with extension), e.g. "annotations_cvat.xml"
+  string mime_type = 5; // e.g. "application/xml", "application/json", "application/zip"
+  int32 image_count = 6; // number of images included, for UI feedback
 }

@@ -1,4 +1,4 @@
-"""Docker-free WeightsLab UI server.
+"""WeightsLab UI server.
 
 A single stdlib HTTP server that does everything the old Docker stack
 (Envoy + nginx frontend image) used to do:
@@ -21,21 +21,35 @@ no new runtime dependencies.
 
 from __future__ import annotations
 
+import atexit
 import base64
+import importlib.util
+import json
+import logging
 import os
 import posixpath
+import re
+import shutil
+import signal
 import socket
 import ssl
 import struct
+import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Iterable, Optional, Tuple
-from urllib.parse import unquote
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import grpc
+
+from weightslab import opencode_process
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -54,6 +68,60 @@ _HOP_BY_HOP = {
     "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
     "content-type", "accept", "accept-encoding", "origin", "referer",
 }
+
+# The bundled quickstart opened by the "Local Jupyter Notebook" landing-page
+# button, relative to the ``weightslab`` package root.
+_LOCAL_NOTEBOOK_QUICKSTART = os.path.join(
+    "examples", "Notebooks", "Local", "wl-local-studio-quickstart.ipynb",
+)
+
+# Local-only control routes (file copy + process spawn) must never be reachable
+# from anything but the machine running the UI server.
+_LOOPBACK_ADDRESSES = {"127.0.0.1", "::1"}
+
+
+def _parse_trusted_client_nets() -> list:
+    """Extra source networks allowed to hit the local-only control routes,
+    from WEIGHTSLAB_UI_TRUSTED_HOSTS (comma-separated IPs or CIDRs).
+
+    Default is empty: loopback stays the only trusted source. This exists for
+    the container-behind-a-tunnel case -- when the browser reaches the UI via a
+    published port, the request arrives from the container's gateway, not
+    127.0.0.1, so those routes would 403. There the real trust boundary is the
+    SSH tunnel + the host publishing only to 127.0.0.1, so trusting the internal
+    docker network (e.g. "172.16.0.0/12") is safe and must be opted into
+    explicitly. The weightslab dev container sets this.
+    """
+    import ipaddress
+    raw = os.environ.get("WEIGHTSLAB_UI_TRUSTED_HOSTS", "")
+    nets = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(token, strict=False))
+        except ValueError:
+            logger.warning("Ignoring invalid WEIGHTSLAB_UI_TRUSTED_HOSTS entry: %r", token)
+    return nets
+
+
+_TRUSTED_CLIENT_NETS = _parse_trusted_client_nets()
+
+
+def _client_is_trusted(addr: str) -> bool:
+    """True if a request from ``addr`` may hit the local-only control routes:
+    always for loopback, and for any network in WEIGHTSLAB_UI_TRUSTED_HOSTS."""
+    if addr in _LOOPBACK_ADDRESSES:
+        return True
+    if not _TRUSTED_CLIENT_NETS:
+        return False
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return any(ip in net for net in _TRUSTED_CLIENT_NETS)
 
 
 def static_dir() -> str:
@@ -103,6 +171,1396 @@ def _trailer_frame(status: int, message: str) -> bytes:
 
 
 # --------------------------------------------------------------------------- #
+# Local Jupyter Notebook session (one per weightslab process)
+# --------------------------------------------------------------------------- #
+
+# Matches the "http://.../?token=..." line Jupyter prints on startup. The
+# server is only ever launched rooted at notebooks_dir (see open_notebook()),
+# so this one captured base URL + token is enough to deep-link into ANY
+# notebook inside it, not just the one that triggered the launch.
+_JUPYTER_URL_RE = re.compile(r"https?://\S*token=\S+")
+
+
+def _build_jupyter_cmd(notebooks_dir: str) -> list:
+    # --no-browser: we always open the exact deep-linked notebook URL
+    # ourselves (see open_notebook()) instead of letting Jupyter open its own
+    # tab at the bare directory listing.
+    jupyter_exe = shutil.which("jupyter")
+    base = [jupyter_exe] if jupyter_exe else [sys.executable, "-m", "jupyter"]
+    return base + ["notebook", notebooks_dir, "--no-browser"]
+
+
+class _JupyterSession:
+    """Tracks the single local Jupyter Notebook SERVER process this weightslab
+    UI server has launched, rooted at one experiment's ``notebooks/`` dir.
+    Repeated "Local Jupyter Notebook" clicks -- whether re-opening the same
+    file or picking a different one already in that directory -- reuse this
+    one server (one port, one set of kernels) instead of spawning another;
+    each just opens its own browser tab via a deep link into the shared
+    server. Torn down when this weightslab session ends.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._process: Optional[subprocess.Popen] = None
+        self._notebooks_dir: Optional[str] = None
+        self._url: Optional[str] = None
+        self._url_ready = threading.Event()
+        self._last_name: Optional[str] = None
+
+    def _is_running_locked(self) -> bool:
+        return self._process is not None and self._process.poll() is None
+
+    def _drain_output(self, process: "subprocess.Popen[str]") -> None:
+        # Jupyter keeps logging every request to this stream for the life of
+        # the process; it must be continuously drained or the pipe buffer
+        # fills and blocks the subprocess, regardless of whether we still
+        # care about any particular line.
+        try:
+            for line in process.stdout:  # type: ignore[union-attr]
+                if self._url is None:
+                    match = _JUPYTER_URL_RE.search(line)
+                    if match:
+                        self._url = match.group(0)
+                        self._url_ready.set()
+        except Exception:  # pragma: no cover - best-effort log draining
+            pass
+
+    def open_notebook(self, notebooks_dir: str, name: str) -> dict:
+        """Ensure the one Jupyter server for ``notebooks_dir`` is running,
+        then open ``name`` (a bare ``*.ipynb`` filename already inside it) in
+        a fresh browser tab -- spawning the server on the first call, reusing
+        it (new tab, no new process) on every call after."""
+        with self._lock:
+            self._last_name = name
+            if self._is_running_locked():
+                reused = True
+            else:
+                self._url = None
+                self._url_ready.clear()
+                self._notebooks_dir = notebooks_dir
+                try:
+                    process = subprocess.Popen(
+                        _build_jupyter_cmd(notebooks_dir),
+                        cwd=notebooks_dir,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                        # Process-group leader (POSIX) so shutdown() can kill
+                        # the whole tree via os.killpg, not just this one PID
+                        # -- see the comment on _kill_process_tree() for why.
+                        start_new_session=True,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    return {"ok": False, "error": str(exc)}
+                self._process = process
+                threading.Thread(target=self._drain_output, args=(process,), daemon=True).start()
+                reused = False
+
+        # Only actually waits on a fresh spawn; already set when reusing.
+        self._url_ready.wait(timeout=10)
+        path = os.path.join(notebooks_dir, name)
+        if not self._url:
+            return {
+                "ok": True, "path": path, "reused": reused,
+                "warning": "Jupyter is still starting -- try again in a moment if no tab opened.",
+            }
+
+        parts = urlsplit(self._url)
+        token = (parse_qs(parts.query).get("token") or [None])[0]
+        deep_url = f"{parts.scheme}://{parts.netloc}/notebooks/{quote(name)}"
+        if token:
+            deep_url += f"?token={token}"
+        threading.Timer(0.1, lambda: _safe_open(deep_url)).start()
+        return {"ok": True, "path": path, "reused": reused}
+
+    def shutdown(self) -> None:
+        """Stop the tracked process, if any -- called when this weightslab
+        UI server itself shuts down, so a Jupyter session never outlives the
+        weightslab session that launched it.
+
+        Deliberately does NOT clear ``self._process``: status() needs to keep
+        telling "was started, now dead" (killed) apart from "never started"
+        (none) after this runs, and a Popen handle stays inspectable via
+        ``.poll()`` long after the process it wraps has exited.
+        """
+        with self._lock:
+            process = self._process
+        if process is None or process.poll() is not None:
+            return
+        _kill_process_tree(process)
+
+    def status(self) -> dict:
+        """Reported to the frontend's status cog: "none" (never launched this
+        session), "running" (process alive -- optionally with a kernelId, best
+        effort, for the most recently opened notebook), or "killed" (was
+        launched, has since exited)."""
+        with self._lock:
+            process = self._process
+            name_with_ext = self._last_name
+            url = self._url
+        if process is None:
+            return {"state": "none"}
+        name = os.path.splitext(name_with_ext)[0] if name_with_ext else None
+        if process.poll() is None:
+            result = {"state": "running", "name": name}
+            kernel_id = _fetch_jupyter_kernel_id(url, name_with_ext)
+            if kernel_id:
+                result["kernelId"] = kernel_id
+            return result
+        return {"state": "killed", "name": name}
+
+
+def _fetch_jupyter_kernel_id(url: Optional[str], target_name: Optional[str]) -> Optional[str]:
+    """Best-effort lookup of the running kernel's short id (the same 8-hex-char
+    form Jupyter/VS Code show, e.g. "9c929328") via Jupyter's own /api/sessions
+    REST endpoint. Returns None on anything unexpected -- this must never break
+    or slow down the status poll just because Jupyter's API shape differs
+    across versions, the token-less-auth case isn't handled, or the server
+    isn't ready yet.
+    """
+    if not url or not target_name:
+        return None
+    try:
+        import urllib.request
+
+        parts = urlsplit(url)
+        token = (parse_qs(parts.query).get("token") or [None])[0]
+        api_url = f"{parts.scheme}://{parts.netloc}/api/sessions"
+        if token:
+            api_url += f"?token={token}"
+        with urllib.request.urlopen(api_url, timeout=1.0) as resp:
+            sessions = json.loads(resp.read().decode("utf-8"))
+        for session in sessions:
+            notebook = session.get("notebook") or {}
+            session_name = notebook.get("name") or session.get("name")
+            if session_name == target_name:
+                kernel_id = (session.get("kernel") or {}).get("id")
+                if kernel_id:
+                    return kernel_id[:8]
+    except Exception:
+        return None
+    return None
+
+
+def _kill_process_tree(process: "subprocess.Popen") -> None:
+    """Terminate ``process`` AND all of its descendants.
+
+    Jupyter's own server process spawns a separate kernel subprocess (and, on
+    Windows, the ``jupyter`` console-script launcher is itself sometimes an
+    extra hop): plain ``Popen.terminate()``/``kill()`` only signal the ONE PID
+    we hold a handle to and leave the rest running as orphans -- verified
+    against a real Jupyter server, whose ipykernel_launcher survived a plain
+    ``terminate()`` on its parent. ``taskkill /T`` (Windows) and a
+    process-group signal (POSIX, via the ``start_new_session=True`` the
+    process was spawned with) both walk the whole tree instead.
+    """
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception:  # pragma: no cover - best-effort cleanup
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        except Exception:
+            try:
+                process.terminate()
+            except Exception:  # pragma: no cover - best-effort cleanup
+                pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        if os.name != "nt":
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except Exception:
+                pass
+        try:
+            process.kill()
+            process.wait(timeout=2)
+        except Exception:  # pragma: no cover - best-effort cleanup
+            pass
+    except Exception:  # pragma: no cover - process already reaped
+        pass
+
+
+def _kill_pid_tree(pid: int) -> None:
+    """Same tree-kill as _kill_process_tree, but for a PID this server never
+    held a subprocess.Popen handle for -- see _TrackedProcesses, below."""
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception:  # pragma: no cover - best-effort cleanup
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except Exception:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except Exception:  # pragma: no cover - already gone
+                pass
+
+
+class _TrackedProcesses:
+    """PIDs the agent (landing-page chat or a /loop job) told us about right
+    after launching something DETACHED (training, a relaunched crashed run,
+    ...), via ``POST /agent-server/track-process``.
+
+    A detached process (``Start-Process ... -WindowStyle Hidden``, or POSIX
+    ``setsid``) is invisible to _kill_process_tree's own ancestor-based
+    tree-kill: that walk only finds descendants whose PID/PPID chain is
+    traceable through STILL-LIVE intermediate processes at kill time, and a
+    detached launcher's immediate shell typically exits almost immediately
+    after spawning it, breaking that chain permanently (Windows keeps no
+    record of an exited process, so a later `taskkill /T` from any ancestor
+    higher up can never discover a child of a parent that's already gone).
+    Tracking the PID directly here sidesteps the whole problem -- this
+    server kills it explicitly, by PID, needing no intermediate chain at
+    all.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._pids: "set[int]" = set()
+
+    def track(self, pid: int) -> None:
+        with self._lock:
+            self._pids.add(pid)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            pids = list(self._pids)
+            self._pids.clear()
+        for pid in pids:
+            _kill_pid_tree(pid)
+
+
+_tracked_processes = _TrackedProcesses()
+atexit.register(_tracked_processes.shutdown)
+
+
+class _LatestDataQuery:
+    """The most recent query the landing-page agent ran itself via
+    POST /agent-server/data-query, so the browser can find out about it
+    without the agent's own bash/curl call ever touching the page's JS.
+
+    A query typed directly into the UI updates the grid and the "now
+    viewing a subset -- reset?" banner as part of the SAME client-side call
+    that sent it (main.ts's handleQuerySubmit). The agent's bash tool has
+    no such hook into the page -- its curl call is a plain HTTP round trip
+    from a shell process, invisible to any open tab. agentChat.ts instead
+    polls GET /agent-server/data-query/latest once per turn (on
+    session.idle, not continuously) and compares `seq` against the last one
+    it already reacted to; a new one replays main.ts's own grid/banner
+    logic for this query's response. `query` is kept alongside the
+    response fields because the banner is rendered with the query's own
+    text, which the browser has no other way to learn for a bridge-
+    triggered call.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._seq = 0
+        self._query: Optional[str] = None
+        self._payload: dict = {}
+
+    def record(self, query: str, payload: dict) -> None:
+        with self._lock:
+            self._seq += 1
+            self._query = query
+            self._payload = dict(payload)
+
+    def get(self) -> dict:
+        with self._lock:
+            if self._seq == 0:
+                return {"seq": 0}
+            return {"seq": self._seq, "query": self._query, **self._payload}
+
+
+_latest_data_query = _LatestDataQuery()
+
+
+_jupyter_session = _JupyterSession()
+atexit.register(_jupyter_session.shutdown)
+
+
+# --------------------------------------------------------------------------- #
+# OpenCode agent server (backs the landing-page agent chat)
+# --------------------------------------------------------------------------- #
+
+# Generous: a cold `npx` run downloads the package before the server binds.
+_OPENCODE_START_TIMEOUT = 45.0
+
+
+# We pick the port ourselves rather than parsing it out of the child's stdout:
+# that gives us a URL to health-poll immediately, and avoids depending on the
+# exact wording of a startup log line we do not control. Shared with the backend
+# SDK agent's spawn path (opencode_process.resolve_or_spawn_opencode) rather
+# than duplicated here, so both prefer the same DEFAULT_OPENCODE_PORT, honour
+# the same WEIGHTSLAB_OPENCODE_PORT override, and report the chosen port the
+# same way -- a default that only one of the two spawn paths applied would be
+# no more predictable than the random port it replaced.
+_free_port = opencode_process.free_port
+_pick_opencode_port = opencode_process.pick_opencode_port
+
+
+def _resolve_opencode_argv() -> Optional[list]:
+    """Locate a way to run OpenCode.
+
+    Delegates to ``opencode_process.resolve_opencode_argv`` so this UI server and
+    the backend SDK agent share ONE resolution order: a weightslab-managed binary
+    (provisioned on demand for a Node-free ``pip install``) first, then an
+    ``opencode`` already on PATH, then a managed provision, then the ``npx --yes``
+    fallback. Keeping the two paths identical is what stops them disagreeing about
+    which OpenCode to run for the same workspace.
+    """
+    return opencode_process.resolve_opencode_argv()
+
+
+def _opencode_healthy(base_url: str, timeout: float = 1.5) -> bool:
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(base_url + "/global/health", timeout=timeout) as resp:
+            return 200 <= int(resp.status) < 300
+    except Exception:
+        return False
+
+
+def _cors_origin_variants(origin: Optional[str]) -> list:
+    """Expand one origin into the set a browser might actually send.
+
+    ``localhost`` and ``127.0.0.1`` are *different* origins to the CORS check, and
+    getting that wrong produces the single most confusing failure in this whole
+    feature: every request is blocked, and from the page it is indistinguishable
+    from the server being down. So allow both spellings of whichever we were given.
+    """
+    origins: list = []
+
+    def add(value: str) -> None:
+        if value and value not in origins:
+            origins.append(value)
+
+    if origin:
+        add(origin)
+        if "localhost" in origin:
+            add(origin.replace("localhost", "127.0.0.1"))
+        elif "127.0.0.1" in origin:
+            add(origin.replace("127.0.0.1", "localhost"))
+    return origins
+
+
+class _OpencodeSession:
+    """Tracks the single OpenCode server process this UI server has launched.
+
+    The browser cannot start a process, so the landing-page agent asks us to do it
+    (``POST /agent-server/start``). The child is rooted at the experiment
+    directory, which becomes the agent's workspace, and is torn down with this
+    UI server so it never outlives the session that spawned it.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._process: Optional[subprocess.Popen] = None
+        self._port: Optional[int] = None
+        self._workspace: Optional[str] = None
+        self._error: Optional[str] = None
+        self._log: list = []
+        # Set when OPENCODE_URL points at an already-running server we adopted
+        # instead of spawning our own -- see ensure(). Mutually exclusive with
+        # self._process; only one of the two is ever active at a time.
+        self._external_url: Optional[str] = None
+
+    def _running_locked(self) -> bool:
+        if self._external_url is not None:
+            return True
+        return self._process is not None and self._process.poll() is None
+
+    def _url_locked(self) -> Optional[str]:
+        if self._external_url is not None:
+            return self._external_url
+        return f"http://127.0.0.1:{self._port}" if self._port else None
+
+    def _drain_output(self, process: "subprocess.Popen[str]") -> None:
+        # Must be drained for the life of the process or the pipe buffer fills and
+        # blocks the child. We keep only a short tail, purely so a failed start can
+        # report why instead of a bare timeout.
+        try:
+            for line in process.stdout:  # type: ignore[union-attr]
+                self._log.append(line.rstrip())
+                del self._log[:-15]
+        except Exception:  # pragma: no cover - best-effort log draining
+            pass
+
+    def ensure(self, workspace_dir: str, origin: Optional[str]) -> dict:
+        """Start the agent server if it is not already running, and wait until it
+        answers a health check. Idempotent: a second call while alive is a no-op.
+
+        If OPENCODE_URL is set and healthy, adopt it directly instead of
+        spawning a child -- this is what makes the shared root config in
+        agent.py's _load_config actually converge: point both the SDK agent
+        and this UI server at one already-running server via one env var,
+        rather than each independently spawning its own.
+
+        Failing that, check opencode_process.py's lock file for this same
+        workspace directory: the backend SDK agent (agent.py's
+        DataManipulationAgent, via OpenCodeChat._ensure_reachable) writes
+        one there the first time IT needs a server and none exists yet, so
+        a `weightslab start <dir>` that comes along afterward -- with no
+        OPENCODE_URL set by anyone -- still adopts that same server instead
+        of spawning a second one for the identical experiment directory.
+        """
+        _ensure_workspace_agent_files(workspace_dir)
+        with self._lock:
+            if self._running_locked():
+                return {"ok": True, "url": self._url_locked(), "reused": True,
+                        "workspace": self._workspace}
+
+        external_url = os.environ.get("OPENCODE_URL", "").strip()
+        if external_url and _opencode_healthy(external_url):
+            with self._lock:
+                self._external_url = external_url
+                self._workspace = workspace_dir
+                self._error = None
+            logger.info("OpenCode: using the server at %s (OPENCODE_URL).", external_url)
+            return {"ok": True, "url": external_url, "reused": False, "workspace": workspace_dir}
+
+        lock = opencode_process.read_lock(workspace_dir)
+        if lock and lock.get("url") and _opencode_healthy(lock["url"]):
+            with self._lock:
+                self._external_url = lock["url"]
+                self._workspace = workspace_dir
+                self._error = None
+            logger.info(
+                "OpenCode: reusing the running server at %s for workspace %s.",
+                lock["url"], workspace_dir,
+            )
+            return {"ok": True, "url": lock["url"], "reused": False,
+                     "workspace": workspace_dir, "adopted": "lockfile"}
+
+        with self._lock:
+            argv = _resolve_opencode_argv()
+            if argv is None:
+                self._error = (
+                    "Could not provision OpenCode: the managed binary download "
+                    "failed (offline?) and no `opencode`/`npx` was found. Restore "
+                    "network access, or install Node.js 20+ (provides npx), or "
+                    "`npm i -g opencode-ai`."
+                )
+                return {"ok": False, "error": self._error}
+
+            port = _pick_opencode_port()
+            cmd = argv + ["serve", "--hostname", opencode_process.opencode_bind_host(),
+                          "--port", str(port)]
+            for value in _cors_origin_variants(origin):
+                cmd += ["--cors", value]
+
+            self._log = []
+            self._error = None
+            try:
+                process = subprocess.Popen(
+                    cmd,
+                    cwd=workspace_dir,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    # Process-group leader so shutdown() can kill the whole tree --
+                    # npx spawns the real binary as a child, so killing only this
+                    # PID would orphan the server.
+                    start_new_session=True,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                self._error = str(exc)
+                return {"ok": False, "error": self._error}
+
+            self._process = process
+            self._port = port
+            self._workspace = workspace_dir
+            threading.Thread(target=self._drain_output, args=(process,), daemon=True).start()
+
+        # Health-poll outside the lock so status() stays responsive while a cold
+        # npx download runs.
+        base_url = f"http://127.0.0.1:{port}"
+        deadline = time.monotonic() + _OPENCODE_START_TIMEOUT
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            if _opencode_healthy(base_url):
+                # So a backend SDK agent that starts AFTER this UI server
+                # (order (b): `weightslab start` first) finds this same
+                # server via the lock file instead of spawning its own --
+                # symmetric with the read above, which covers order (a).
+                opencode_process.write_lock(workspace_dir, base_url, process.pid)
+                # The browser talks to this URL DIRECTLY -- it is not proxied
+                # through this server -- so on any host the page is not served
+                # from (SSH, a container, VS Code Remote) this is the port that
+                # also has to be forwarded. Worth a line of its own for that.
+                logger.info(
+                    "OpenCode: agent server ready at %s (pid %d, workspace %s).",
+                    base_url, process.pid, workspace_dir,
+                )
+                return {"ok": True, "url": base_url, "reused": False,
+                        "workspace": workspace_dir}
+            time.sleep(0.4)
+
+        tail = " / ".join(self._log[-4:]) or "no output"
+        self._error = (
+            f"The agent server did not come up within {int(_OPENCODE_START_TIMEOUT)}s. "
+            f"Last output: {tail}"
+        )
+        logger.error("OpenCode: %s", self._error)
+        _kill_process_tree(process)
+        with self._lock:
+            self._port = None
+        return {"ok": False, "error": self._error}
+
+    def status(self) -> dict:
+        with self._lock:
+            process = self._process
+            url = self._url_locked()
+            workspace = self._workspace
+            error = self._error
+            external = self._external_url is not None
+        if external:
+            return {"state": "running", "url": url, "workspace": workspace}
+        if process is None:
+            return {"state": "none", "error": error}
+        if process.poll() is None:
+            return {"state": "running", "url": url, "workspace": workspace}
+        return {"state": "killed", "workspace": workspace, "error": error}
+
+    def shutdown(self) -> None:
+        with self._lock:
+            process = self._process
+            # An externally-provided OPENCODE_URL server is not ours to kill --
+            # just drop the reference so a later ensure() re-evaluates it fresh.
+            self._external_url = None
+        if process is None or process.poll() is not None:
+            return
+        _kill_process_tree(process)
+
+
+_opencode_session = _OpencodeSession()
+atexit.register(_opencode_session.shutdown)
+
+
+# --------------------------------------------------------------------------- #
+# /agent-server/docs -- integration docs for preset prompts
+# --------------------------------------------------------------------------- #
+
+# AGENTS.md lives inside the package itself (weightslab/weightslab/AGENTS.md,
+# so parents[1] from here), which is what actually ships in a `pip install`
+# (see pyproject.toml's package-data) -- parents[2], the repo root, is kept
+# as a fallback only for anything not (yet) moved into the package. Missing
+# entirely is not an error; the preset prompt still works without it, just
+# without that extra grounding.
+def _repo_doc_path(filename: str) -> Optional[Path]:
+    here = Path(__file__).resolve()
+    for candidate in (here.parents[1] / filename, here.parents[2] / filename):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _read_repo_doc(filename: str) -> Optional[str]:
+    path = _repo_doc_path(filename)
+    if path is None:
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+# Seeding AGENTS.md + opencode.json into the workspace lives in
+# opencode_process, not here: the backend SDK agent reaches that module
+# directly without ever going through this server, and both spawn paths have
+# to leave a workspace in the same state. See its WORKSPACE_SEED_FILES.
+_ensure_workspace_agent_files = opencode_process.ensure_workspace_agent_files
+
+
+# The MNIST preset's counterpart to _read_repo_doc: a complete, working
+# reference implementation is more actionable grounding than an excerpt alone
+# (confirmed live: the excerpt in AGENTS.md wasn't enough on its own to stop a
+# model from re-deriving the API from the installed package instead of using
+# it directly). Scoped to just the one usecase the requesting preset actually
+# matches -- attaching all of them to every request would trade the "a few
+# minutes to generate" goal away for thoroughness nobody asked for here.
+_KNOWN_EXAMPLE_USECASES = {
+    "wl-ads-recommendation", "wl-classification", "wl-clustering",
+    "wl-detection", "wl-fraud-detection", "wl-generation", "wl-segmentation",
+}
+
+
+def _read_example_main(usecase: str) -> Optional[str]:
+    """Best-effort main.py for one of weightslab's own PyTorch usecase
+    examples. `usecase` is client-supplied (a query param) -- checked against
+    a fixed allowlist first, never trusted as a path component directly."""
+    if usecase not in _KNOWN_EXAMPLE_USECASES:
+        return None
+    here = Path(__file__).resolve()
+    candidate = here.parents[1] / "examples" / "PyTorch" / usecase / "main.py"
+    if candidate.is_file():
+        try:
+            return candidate.read_text(encoding="utf-8")
+        except OSError:
+            return None
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# /loop -- recurring OpenCode-backed monitoring jobs
+# --------------------------------------------------------------------------- #
+
+# Minimum interval a loop can be scheduled at -- guards against a typo'd
+# "/loop 30s ..." hammering the model every few seconds.
+_LOOP_MIN_INTERVAL_SECONDS = 30.0
+
+# Caps a single check-in's wall-clock time (_opencode_send_and_collect's own
+# default is 600s, generous for the SDK/landing chat's own interactive use).
+# 150s was tried first and was wrong: it was sized for "what's the last loss
+# value" wandering off into `--help`/directory-listing guessing (a real
+# problem, fixed by the preamble's own efficiency guidance instead, see
+# _LOOP_SYSTEM_PREAMBLE), but a loop's task can just as legitimately be
+# "look at the training trends and decide what to do -- discard samples,
+# freeze layers, edit the model" -- multi-step agentic work on a slow/free
+# model that genuinely needs minutes, not seconds. 150s cut that off mid-
+# investigation every single tick (confirmed live: job.last_error == "timed
+# out" on back-to-back ticks of exactly this kind of prompt). This is a
+# backstop against a truly runaway session, not a budget for ordinary work.
+_LOOP_CHECKIN_TIMEOUT_SECONDS = 450.0
+
+# Loops run against the live training process with a broad toolset (bash,
+# file edits, pause/discard/restart) -- an unbounded number of them is an
+# unbounded number of concurrent interventions. Shared across both chat
+# surfaces since _loop_registry is a single process-wide instance.
+_LOOP_MAX_CONCURRENT = 3
+
+# Every mutating capability this job needs already exists as a verb typed
+# INSIDE `weightslab cli`'s interactive REPL (weightslab.cli:main -> backend/
+# cli.py's cli_client_main, a localhost TCP command server to the live
+# training process) -- there is NO separate top-level `weightslab status`/
+# `weightslab pause` etc; those are argparse subcommands for `se`/`start`/
+# `tunnel`/`cli` only. Confirmed the hard way: an earlier preamble phrased
+# these as if they were their own shell commands, and a model followed that
+# literally -- `weightslab status` (a nonexistent subcommand, silently a
+# no-op/usage error) followed by several minutes of guessing (`--help`,
+# directory listings, log greps) before it independently discovered piping
+# into `cli` was the real mechanism. Since bash tool calls are one-shot (no
+# persistent stdin), a command reaches that REPL by piping it in and letting
+# EOF close the session, e.g. `echo "status" | weightslab cli`.
+#
+# The loop's OpenCode session gets the SAME full toolset the landing page
+# chat runs with (bash/read/write/edit/patch, no restriction), so it can pipe
+# into `cli` directly.
+_LOOP_SYSTEM_PREAMBLE = (
+    "You are a recurring monitoring agent for a live WeightsLab run. "
+    "Workspace: the experiment directory (bash/read/write/edit/patch rooted there).\n\n"
+    "`weightslab cli` is the ONLY way to inspect/control the run -- it's an "
+    "interactive session, not separate shell commands. Pipe ONE line in per "
+    "command (bash is one-shot; EOF ends the session), e.g.:\n"
+    "  echo \"status\" | weightslab cli\n"
+    "Lines you can pipe in:\n"
+    "  status                    -- component NAMES + model age only, NO metric/hyperparam values\n"
+    "  agent query \"<question>\"  -- plain-English read OR edit (e.g. \"what is the last train loss\", "
+    "\"discard samples where loss > 5\") -- the right tool for any metric/signal question, status never has that\n"
+    "  agent query \"Generate an experiment report.\"  -- the SAME command also builds a complete, "
+    "styled HTML report (signal plots, health classification, dataset stats, written analysis) in "
+    "ONE call when the task asks for a report/summary of how the run is going -- never assemble a "
+    "report yourself from several separate 'agent query' answers plus your own write tool, that "
+    "skips the plots/styling the backend already produces. On a LATER tick, \"agent query \\\"Update "
+    "the report with a histogram of val_loss.\\\"\" overwrites that SAME report file instead of "
+    "creating another one each check-in -- use that phrasing (\"update\"/\"add X to it\") once a "
+    "report already exists for this run, plain \"generate\" only for the first one\n"
+    "  pause / resume             -- freeze/resume weight updates\n"
+    "  discard <sample_id>        -- discard one sample by id\n\n"
+    "Be fast: for a simple question, pipe one command in and answer from its "
+    "reply. Only go further (logs, editing code, restarting a crashed run via "
+    "ps/pgrep + relaunch) when the task actually needs it.\n\n"
+    "Launch anything long-running (training, a relaunched crashed run, a "
+    "server) DETACHED so the command returns immediately -- e.g. (PowerShell) "
+    "`$p = Start-Process python -ArgumentList \"-u\",\"train.py\" "
+    "-WindowStyle Hidden -PassThru`, never a bare `python train.py` in the "
+    "foreground. A foreground launch blocks THIS tool call -- and therefore "
+    "this whole check-in, and the next one after it -- until the entire run "
+    "finishes, since this session processes one turn at a time. This applies "
+    "just as much once you've decided the run genuinely needs to happen (e.g. "
+    "relaunching a crashed one) as it does anywhere else -- that is exactly "
+    "the case this rule is for, not an exception to it. If a bash call you "
+    "already made hasn't finished, the fix is to switch that launch to "
+    "Start-Process, never to raise its timeout and wait longer -- a bigger "
+    "timeout still blocks the same way, only for longer, and leaves you with "
+    "no PID to act on if you're later asked to stop it.\n\n"
+    "A DETACHED process like that is NOT automatically stopped when this "
+    "workspace is (Ctrl+C on `weightslab start`, or the process otherwise "
+    "exiting) -- it has no OS-level relationship to this workspace's own "
+    "process tree once launched this way. A script that calls `wl.serve()` "
+    "registers itself and needs nothing from you; for anything else, register "
+    "its PID right after launching it, so it is stopped too: "
+    "`Invoke-RestMethod -Method Post -Uri "
+    "'{origin}/agent-server/track-process' -ContentType 'application/json' "
+    "-Body (@{{pid=$p.Id}} | ConvertTo-Json)`. Do this for anything you "
+    "relaunch, not just the first run -- and keep that PID in mind for the "
+    "rest of this job's life: it's what makes a later stop/kill instant "
+    "(`Stop-Process -Id <pid> -Force`) instead of having to go rediscover "
+    "which process is the right one.\n\n"
+    "NEVER stop/kill a process you did not yourself start in this session (or "
+    "the one crashed run you were explicitly asked to relaunch) without "
+    "asking the user first and naming the exact PID/command. Finding an "
+    "unfamiliar, duplicate-looking, or seemingly-stale process via ps/"
+    "tasklist/Get-CimInstance is not authorization to end it -- describe what "
+    "you found and wait for a go-ahead instead of cleaning it up yourself.\n\n"
+    "An exec/bash call blocks THIS check-in until it returns, with no "
+    "per-call timeout -- a command that can hang (a broad WMI/"
+    "Get-CimInstance scan, Stop-Process on something with stuck threads, "
+    "anything that can wait on a lock or a confirmation prompt) stalls the "
+    "whole check-in indefinitely, not just that one command. Prefer the "
+    "narrowest command that answers the question (a specific known PID over "
+    "a broad process scan); if something doesn't return in a few seconds, "
+    "don't just retry the same broad query -- report what you know and ask "
+    "rather than keep guessing.\n\n"
+    "Your reply renders Markdown and LaTeX ($...$/$$...$$ or \\(...\\)/\\[...\\]) "
+    "-- use real formulas for anything math-shaped instead of describing them in prose.\n\n"
+    # weights_studio/src/agent/loopChatPane.ts looks for this EXACT trailing
+    # "Task:\n" and shows only what follows it (the actual prompt) -- the
+    # preamble above is real instruction content the model needs, but not
+    # something the user asked to read every time a loop tab opens. If this
+    # tail ever changes, update the matching string there too.
+    "Task:\n{prompt}"
+)
+
+
+def _opencode_json_request(base_url: str, path: str, method: str = "GET", body: Optional[dict] = None, timeout: float = 30.0):
+    import urllib.request
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"Content-Type": "application/json"} if body is not None else {}
+    req = urllib.request.Request(f"{base_url.rstrip('/')}{path}", data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _parse_model_value(value) -> Optional[dict]:
+    """"provider/model-id" -> {"providerID", "modelID"}.
+
+    Split on the FIRST slash only -- model ids routinely contain their own
+    ("openrouter/anthropic/claude-haiku-4.5" is provider `openrouter`, model
+    `anthropic/claude-haiku-4.5"). Mirrors weights_studio's opencodeClient.ts
+    parseModelValue, which reads the same strings back out of this config.
+    """
+    if not isinstance(value, str) or "/" not in value:
+        return None
+    provider, _, model = value.partition("/")
+    if not provider or not model:
+        return None
+    return {"providerID": provider, "modelID": model}
+
+
+def _opencode_resolve_model(base_url: str, explicit: Optional[dict] = None) -> Optional[dict]:
+    """Which model a loop's check-ins should run on, most specific first.
+
+    A loop can't inherit a model implicitly: its check-ins run in their own
+    session, from this process, with no chat attached. But it also shouldn't
+    have to be told one by whichever surface happened to type /loop -- the
+    answer already exists in the same OpenCode the chat is using:
+
+      1. `explicit` -- the model the chat that started this loop is on right
+         now. The most current signal there is, when a caller can offer it.
+      2. `GET /config`'s own `model` -- the default the model picker writes
+         back to opencode.json on every pick (opencodeClient.ts's
+         setDefaultModel), so it IS "whatever the user last chose", and it
+         survives the browser, the CLI and other machines.
+      3. The provider defaults from `/config/providers` -- what OpenCode
+         itself would have fallen back to. Resolved here rather than left
+         implicit so the job can record and display what it picked.
+
+    None if even that is unavailable, in which case the check-in goes out
+    without a model and OpenCode decides, exactly as before.
+    """
+    if isinstance(explicit, dict) and explicit.get("providerID") and explicit.get("modelID"):
+        return {"providerID": str(explicit["providerID"]), "modelID": str(explicit["modelID"])}
+
+    try:
+        config = _opencode_json_request(base_url, "/config", timeout=10.0)
+        parsed = _parse_model_value((config or {}).get("model"))
+        if parsed:
+            return parsed
+    except Exception:  # noqa: BLE001 - fall through to the next source
+        pass
+
+    try:
+        providers = _opencode_json_request(base_url, "/config/providers", timeout=10.0)
+        defaults = (providers or {}).get("default") or {}
+        for provider in (providers or {}).get("providers") or []:
+            provider_id = provider.get("id")
+            if provider_id and defaults.get(provider_id):
+                return {"providerID": str(provider_id), "modelID": str(defaults[provider_id])}
+    except Exception:  # noqa: BLE001 - no model, OpenCode picks
+        pass
+
+    return None
+
+
+def _opencode_error_text(props: dict) -> str:
+    """Flatten a `session.error` event's payload into one line.
+
+    Shape is not pinned down by GET /doc beyond "an error object", and the
+    interesting part is nested at a different depth depending on where the
+    failure came from (provider rejection vs. internal) -- so this digs for a
+    message rather than assuming one path, and falls back to the raw JSON so
+    an unrecognised shape still reaches the user instead of being swallowed.
+    """
+    error = props.get("error")
+    if isinstance(error, str):
+        return error
+    if isinstance(error, dict):
+        data = error.get("data")
+        if isinstance(data, dict):
+            for key in ("message", "error", "detail"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        for key in ("message", "name"):
+            value = error.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        try:
+            return json.dumps(error)[:400]
+        except (TypeError, ValueError):
+            pass
+    return "The agent server reported an error for this check-in."
+
+
+def _opencode_send_and_collect(
+    base_url: str,
+    session_id: str,
+    text: str,
+    model: Optional[dict] = None,
+    timeout: float = 600.0,
+) -> tuple:
+    """Returns `(text, error)` -- `error` is None on a clean turn.
+
+    Both halves matter: a turn can end via `session.error` having produced no
+    text at all (a provider rejecting the request outright, e.g. a model with
+    no tool-use endpoints against a toolset-carrying prompt), and that used to
+    come back as an empty string indistinguishable from "the agent had nothing
+    to say". Nothing raised, so the job recorded no error either, and the tab
+    showed the check-in prompt with silence under it, every interval, forever.
+    """
+    """Open the SSE event stream, THEN send the message, THEN read the stream
+    until this session goes idle -- same stream-first ordering and event
+    parsing as weights_studio/src/landing/agent/opencodeClient.ts and
+    weightslab/trainer/services/agent/opencode_chat.py's _collect_reply.
+    Duplicated in miniature here (rather than importing opencode_chat.py)
+    because this module is deliberately stdlib-only -- see its own docstring --
+    and this loop wants the opposite tool policy (full toolset, no
+    restriction) from that module's SDK-agent use case anyway.
+
+    A loop check-in can legitimately run long (the agent may read logs, edit
+    files, run training-control commands) -- default timeout is 10 minutes,
+    generous relative to the loop's own interval (minimum 1 minute), and a
+    slow check-in simply delays that job's next tick rather than blocking
+    anything else (each job's timer callback runs independently)."""
+    import urllib.error
+    import urllib.request
+
+    stream_req = urllib.request.Request(f"{base_url.rstrip('/')}/event", headers={"Accept": "text/event-stream"})
+    stream = urllib.request.urlopen(stream_req, timeout=timeout)
+
+    send_errors: list = []
+
+    def _send() -> None:
+        try:
+            # `model` mirrors what the chat surfaces send ({providerID,
+            # modelID}); omitted, OpenCode falls back to its own configured
+            # default, which is not necessarily one that supports tool use --
+            # and this prompt hands the agent a full toolset, so a default
+            # like an image-generation model fails the turn outright.
+            body = {"parts": [{"type": "text", "text": text}]}
+            if model:
+                body["model"] = model
+            _opencode_json_request(
+                base_url, f"/session/{session_id}/message", method="POST",
+                body=body, timeout=timeout,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced via send_errors
+            send_errors.append(exc)
+
+    sender = threading.Thread(target=_send, daemon=True)
+    text_parts: dict = {}
+    assistant_message_ids: set = set()
+    error: Optional[str] = None
+
+    hit_deadline = False
+    try:
+        sender.start()
+        data_lines: list = []
+        deadline = time.monotonic() + timeout
+        for raw_line in stream:
+            if time.monotonic() > deadline:
+                hit_deadline = True
+                break
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+            if line == "":
+                if data_lines:
+                    payload = "\n".join(data_lines)
+                    data_lines = []
+                    try:
+                        event = json.loads(payload)
+                    except (ValueError, TypeError):
+                        continue
+                    event_type = event.get("type")
+                    props = event.get("properties") or {}
+                    if event_type == "message.updated":
+                        msg = props.get("info") or props.get("message") or props
+                        msg_session = str(msg.get("sessionID") or "")
+                        if (not msg_session or msg_session == session_id) and \
+                                str(msg.get("role") or "") == "assistant" and msg.get("id"):
+                            assistant_message_ids.add(str(msg["id"]))
+                    elif event_type == "message.part.updated":
+                        part = props.get("part") or props
+                        part_session = str(part.get("sessionID") or "")
+                        message_id = str(part.get("messageID") or "")
+                        if (not part_session or part_session == session_id) and \
+                                message_id in assistant_message_ids and part.get("type") == "text" \
+                                and isinstance(part.get("text"), str):
+                            text_parts[str(part.get("id") or message_id)] = part["text"]
+                    elif event_type == "session.error" and \
+                            str(props.get("sessionID") or "") == session_id:
+                        error = _opencode_error_text(props)
+                        break
+                    elif event_type == "session.idle" and \
+                            str(props.get("sessionID") or "") == session_id:
+                        break
+                continue
+            if line.startswith(":"):
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip(" "))
+    except (urllib.error.URLError, TimeoutError, OSError):
+        pass  # degrade to whatever text was collected so far
+    finally:
+        stream.close()
+
+    sender.join(timeout=1.0)
+    if send_errors and not text_parts:
+        exc = send_errors[0]
+        # The message-send POST itself (not the SSE read loop, which has its
+        # own `hit_deadline` check above) is what actually blocks for the
+        # whole turn -- OpenCode's POST /session/{id}/message doesn't return
+        # until the model is done, so THIS is where a check-in that runs long
+        # actually times out at the socket level. Left as a raw exception,
+        # `str(exc)` for a socket timeout is just "timed out" -- accurate but
+        # unhelpful next to the deadline-check path's own clear message, so
+        # this is reworded to match it rather than leaking the bare Python
+        # exception text into job.last_error.
+        if isinstance(exc, (TimeoutError, OSError)):
+            raise TimeoutError(f"Check-in did not finish within {int(timeout)}s and was cut off.") from exc
+        raise exc
+
+    # Distinct from "no reply" below (_fire's own fallback, for a turn that
+    # ended cleanly with nothing to show) -- this one DID something, it just
+    # ran out of time doing it (e.g. wandering through several slow bash
+    # calls instead of answering directly). Whatever text had streamed in by
+    # then is kept and returned alongside this, rather than thrown away.
+    if hit_deadline and error is None:
+        error = f"Check-in did not finish within {int(timeout)}s and was cut off."
+
+    return "".join(text_parts[key] for key in text_parts), error
+
+
+def _opencode_get_messages(base_url: str, session_id: str) -> list:
+    """A loop's chat tab reads its own scrollback from here -- same shape
+    weights_studio's opencodeClient.ts's getSessionMessages() already
+    consumes (each item `{info, parts}`), a trivial GET via the JSON helper
+    above rather than a new primitive: both scheduled ticks and manual
+    messages land as ordinary turns in this same session, so its own message
+    list already is the merged transcript, nothing to reconcile here."""
+    return _opencode_json_request(base_url, f"/session/{session_id}/message", method="GET")
+
+
+class _LoopJob:
+    def __init__(self, job_id: str, prompt: str, interval_seconds: float, workspace: str,
+                 model: Optional[dict] = None, origin: Optional[str] = None) -> None:
+        self.id = job_id
+        self.prompt = prompt
+        self.interval_seconds = interval_seconds
+        self.workspace = workspace
+        # This server's own address, as the browser saw it when /loop start
+        # was called -- interpolated into _LOOP_SYSTEM_PREAMBLE so the loop's
+        # model can call /agent-server/track-process itself, same reasoning
+        # as agentChat.ts's use of location.origin for the landing chat.
+        self.origin = origin
+        # {providerID, modelID} chosen in the chat that started this loop, or
+        # None to let OpenCode pick its default. Fixed for the job's life --
+        # a check-in is meant to be the same measurement every interval.
+        self.model = model
+        # True only while a check-in is actually in flight. The tab polls
+        # this: without it there is no difference on screen between "the
+        # agent is working on this right now" and "nothing is happening",
+        # which is most of a loop's life given the 1-minute minimum interval.
+        self.running = False
+        self.last_run_started_at: Optional[float] = None
+        self.session_id: Optional[str] = None
+        self.base_url: Optional[str] = None
+        self.next_run_at: Optional[float] = None
+        self.last_result: Optional[str] = None
+        self.last_error: Optional[str] = None
+        self.timer: Optional[threading.Timer] = None
+        self.stopped = False
+        # True once the monitoring preamble (role + available CLI verbs) has
+        # been sent as this session's first message -- after that, both the
+        # scheduled tick and manual messages send plain text. Separate from
+        # session_id being set: the session itself is now created eagerly in
+        # start(), before any message (scheduled or manual) has gone out.
+        self.preamble_sent = False
+
+
+class _LoopRegistry:
+    """Recurring OpenCode-backed monitoring jobs, e.g. `/loop 30m <prompt>`.
+
+    Lives here (this UI server process) rather than in the browser tab or the
+    training backend: the browser can't run a persistent timer that survives
+    a page reload, and the training backend doesn't need to be touched at all
+    since every intervention the loop needs is already reachable through the
+    local `weightslab` CLI over bash (see _LOOP_SYSTEM_PREAMBLE). A job
+    survives a page reload/tab close (tied to this process, not the tab) but
+    not a full `weightslab start` restart -- no persistence beyond that,
+    matching every other piece of state in this server (Jupyter/OpenCode
+    sessions).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._jobs: dict = {}
+        self._next_id = 1
+
+    def start(self, prompt: str, interval_seconds: float, workspace_dir: str, origin: Optional[str],
+              model: Optional[dict] = None) -> dict:
+        prompt = (prompt or "").strip()
+        if not prompt:
+            return {"ok": False, "error": "A monitoring prompt is required."}
+        if interval_seconds < _LOOP_MIN_INTERVAL_SECONDS:
+            return {"ok": False, "error": f"Minimum loop interval is {int(_LOOP_MIN_INTERVAL_SECONDS)}s."}
+
+        with self._lock:
+            if len(self._jobs) >= _LOOP_MAX_CONCURRENT:
+                return {
+                    "ok": False,
+                    "error": f"{_LOOP_MAX_CONCURRENT} loops already running -- "
+                             f"stop one first (\"/loop stop <id>\").",
+                }
+
+        ensured = _opencode_session.ensure(workspace_dir, origin)
+        if not ensured.get("ok"):
+            return {"ok": False, "error": ensured.get("error") or "Could not start the agent server."}
+        base_url = ensured["url"]
+
+        # Resolved once, here, and pinned for the job's life: a monitoring
+        # loop is meant to be the same measurement every interval, so a model
+        # changed in the chat later must not silently change what this job
+        # has been reporting. Recorded on the job (and surfaced by list())
+        # so a run of failing check-ins can be traced to the model behind it.
+        model = _opencode_resolve_model(base_url, model)
+
+        # Created eagerly now -- not lazily on the first tick, as before --
+        # so a loop's chat tab has a session to show/send into immediately,
+        # before its first check-in has even run. Done here, between the two
+        # admission checks rather than inside either, same reasoning as
+        # ensure() just above: a network round-trip has no business running
+        # while holding the lock that also serializes list()/stop()/update().
+        try:
+            created = _opencode_json_request(
+                base_url, "/session", method="POST",
+                body={"title": f"weightslab-loop-{int(time.time())}"},
+            )
+            session_id = created["id"]
+        except Exception as exc:
+            return {"ok": False, "error": f"Could not start a chat session for this loop: {exc}"}
+
+        with self._lock:
+            if len(self._jobs) >= _LOOP_MAX_CONCURRENT:
+                # Lost the race between the two checks -- the session just
+                # created above will never be used. Best-effort delete rather
+                # than leak it (this registry already tolerates a leaked
+                # session on stop(), below; unlike that one, this is a
+                # certain, immediate leak, so it's worth the extra call).
+                try:
+                    _opencode_json_request(base_url, f"/session/{session_id}", method="DELETE")
+                except Exception:
+                    pass
+                return {
+                    "ok": False,
+                    "error": f"{_LOOP_MAX_CONCURRENT} loops already running -- "
+                             f"stop one first (\"/loop stop <id>\").",
+                }
+            job_id = str(self._next_id)
+            self._next_id += 1
+            job = _LoopJob(job_id, prompt, interval_seconds, workspace_dir, model, origin=origin)
+            job.base_url = base_url
+            job.session_id = session_id
+            self._jobs[job_id] = job
+
+        threading.Thread(target=self._fire, args=(job_id, base_url), daemon=True).start()
+        return {"ok": True, "id": job_id, "intervalSeconds": interval_seconds}
+
+    def get_messages(self, job_id: str) -> dict:
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            return {"ok": False, "error": f"No loop job {job_id}."}
+        try:
+            messages = _opencode_get_messages(job.base_url, job.session_id)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "messages": messages}
+
+    def _fire(self, job_id: str, base_url: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None or job.stopped:
+            return  # stopped before this tick ran
+
+        with self._lock:
+            job.running = True
+            job.last_run_started_at = time.time()
+
+        try:
+            # The monitoring preamble (role + available CLI verbs) goes out
+            # as this session's first message, exactly once; every check-in
+            # after that is just the plain prompt.
+            send_preamble = not job.preamble_sent
+            text = (
+                _LOOP_SYSTEM_PREAMBLE.format(prompt=job.prompt, origin=job.origin or "http://127.0.0.1:8080")
+                if send_preamble else job.prompt
+            )
+            result, error = _opencode_send_and_collect(
+                base_url, job.session_id, text, job.model, timeout=_LOOP_CHECKIN_TIMEOUT_SECONDS,
+            )
+            with self._lock:
+                if job_id in self._jobs:
+                    job.last_result = result
+                    # A turn that ends with neither text nor a reported error
+                    # is still a failed check-in from the user's side -- the
+                    # tab would show the prompt and nothing under it. Say so
+                    # rather than leaving the silence unexplained.
+                    job.last_error = error or (
+                        None if result.strip()
+                        else "The check-in produced no reply. If this repeats, the model "
+                             "selected for this loop may not support tool use."
+                    )
+                    if send_preamble:
+                        job.preamble_sent = True
+        except Exception as exc:
+            with self._lock:
+                if job_id in self._jobs:
+                    job.last_error = str(exc)
+
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.stopped:
+                return  # stopped while this tick was running
+            job.running = False
+            # Measured from when the answer LANDED, not from when the tick
+            # fired -- a check-in that takes two minutes on a five-minute
+            # loop leaves five clear minutes before the next one, instead of
+            # the interval quietly eating the agent's own working time.
+            job.next_run_at = time.time() + job.interval_seconds
+            timer = threading.Timer(job.interval_seconds, self._fire, args=(job_id, base_url))
+            timer.daemon = True
+            job.timer = timer
+            timer.start()
+
+    def stop(self, job_id: str) -> dict:
+        with self._lock:
+            job = self._jobs.pop(job_id, None)
+            if job is not None:
+                job.stopped = True
+        if job is None:
+            return {"ok": False, "error": f"No loop job {job_id}."}
+        if job.timer is not None:
+            job.timer.cancel()
+        return {"ok": True}
+
+    def update(self, job_id: str, prompt: Optional[str] = None, interval_seconds: Optional[float] = None) -> dict:
+        """Change a running job's prompt and/or interval in place. An interval
+        change reschedules from now rather than waiting out the old timer, so
+        the change is felt immediately instead of on the tick after next."""
+        if prompt is not None and not prompt.strip():
+            return {"ok": False, "error": "The monitoring prompt cannot be empty."}
+        if interval_seconds is not None and interval_seconds < _LOOP_MIN_INTERVAL_SECONDS:
+            return {"ok": False, "error": f"Minimum loop interval is {int(_LOOP_MIN_INTERVAL_SECONDS)}s."}
+
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return {"ok": False, "error": f"No loop job {job_id}."}
+
+            if prompt is not None:
+                job.prompt = prompt.strip()
+
+            reschedule = interval_seconds is not None and interval_seconds != job.interval_seconds
+            if interval_seconds is not None:
+                job.interval_seconds = interval_seconds
+
+            if reschedule and job.timer is not None:
+                job.timer.cancel()
+                job.next_run_at = time.time() + job.interval_seconds
+                timer = threading.Timer(job.interval_seconds, self._fire, args=(job_id, job.base_url))
+                timer.daemon = True
+                job.timer = timer
+                timer.start()
+
+            return {
+                "ok": True,
+                "id": job.id,
+                "prompt": job.prompt,
+                "intervalSeconds": job.interval_seconds,
+                "nextRunAt": job.next_run_at,
+            }
+
+    def list(self) -> list:
+        with self._lock:
+            jobs = list(self._jobs.values())
+        return [
+            {
+                "id": j.id,
+                "prompt": j.prompt,
+                "intervalSeconds": j.interval_seconds,
+                "nextRunAt": j.next_run_at,
+                "lastResult": j.last_result,
+                "lastError": j.last_error,
+                # What the tab needs to tell "working on it" apart from
+                # "waiting for the next interval" -- the countdown alone
+                # can't, since next_run_at only moves once a run finishes.
+                "running": j.running,
+                "lastRunStartedAt": j.last_run_started_at,
+                # "provider/model-id", or None if none could be resolved and
+                # OpenCode is choosing per check-in. Shown in the loop's tab:
+                # when check-ins fail for a model-shaped reason (no tool-use
+                # endpoints being the common one), the model this job is
+                # actually pinned to is the first thing worth seeing.
+                "model": f"{j.model['providerID']}/{j.model['modelID']}" if j.model else None,
+            }
+            for j in jobs
+        ]
+
+    def shutdown(self) -> None:
+        with self._lock:
+            jobs = list(self._jobs.values())
+            self._jobs.clear()
+        for job in jobs:
+            job.stopped = True
+            if job.timer is not None:
+                job.timer.cancel()
+
+
+_loop_registry = _LoopRegistry()
+atexit.register(_loop_registry.shutdown)
+
+
+def _run_shutdown_cleanup() -> None:
+    """Every termination path this server can take (Ctrl+C, closing the
+    terminal, a bare `kill`) converges here. Each of these four is
+    independent and best-effort, so order doesn't matter and one raising
+    doesn't stop the others -- see each class's own shutdown()."""
+    _tracked_processes.shutdown()
+    _opencode_session.shutdown()
+    _loop_registry.shutdown()
+    _jupyter_session.shutdown()
+
+
+def _raise_keyboard_interrupt(signum, frame) -> None:
+    raise KeyboardInterrupt()
+
+
+# CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT -- the ones that
+# mean "this process is going away", as opposed to CTRL_C_EVENT (0) /
+# CTRL_BREAK_EVENT (1), which Python already turns into SIGINT/SIGBREAK on
+# its own and which this handler explicitly leaves alone.
+_WINDOWS_TERMINATING_CTRL_EVENTS = (2, 5, 6)
+
+# Holds the ctypes callback so it isn't garbage-collected out from under
+# Windows once registered -- SetConsoleCtrlHandler only keeps a raw function
+# pointer, not a reference that would keep the wrapping Python object alive.
+_console_ctrl_handler_ref = None
+
+
+def _on_windows_ctrl_event(ctrl_type: int) -> bool:
+    """The actual console-control-event logic, kept separate from the
+    ctypes registration below so it's unit-testable without a real Windows
+    console or a real SetConsoleCtrlHandler call."""
+    if ctrl_type in _WINDOWS_TERMINATING_CTRL_EVENTS:
+        _run_shutdown_cleanup()
+        return True
+    return False
+
+
+def _install_windows_console_handler() -> None:
+    """Closing the console window, logging off, or a system shutdown sends
+    CTRL_CLOSE_EVENT/CTRL_LOGOFF_EVENT/CTRL_SHUTDOWN_EVENT -- none of which
+    the `signal` module can catch (that only covers CTRL_C_EVENT/
+    CTRL_BREAK_EVENT, as SIGINT/SIGBREAK). SetConsoleCtrlHandler is the only
+    way to intercept the others, so this calls it directly via ctypes rather
+    than adding a pywin32 dependency for one function. Runs on an
+    OS-spawned thread, not the main one -- Windows also kills the process
+    shortly after delivering one of these regardless of what the handler
+    does, so _run_shutdown_cleanup (not this registration) is what has to
+    stay fast.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    global _console_ctrl_handler_ref
+    handler_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+    _console_ctrl_handler_ref = handler_type(_on_windows_ctrl_event)
+    try:
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(_console_ctrl_handler_ref, True)
+    except Exception:  # pragma: no cover - best-effort; Ctrl+C still works
+        pass
+
+
+def _install_termination_handlers() -> None:
+    """Makes closing the terminal or a bare `kill` run the SAME cleanup as
+    Ctrl+C, instead of leaving a DETACHED launch this server was tracking
+    (see _TrackedProcesses), plus its own OpenCode/Jupyter children,
+    orphaned -- confirmed live: neither SIGTERM/SIGHUP (POSIX) nor
+    CTRL_CLOSE_EVENT (Windows) becomes a catchable Python exception the way
+    SIGINT does by default, so without this, only Ctrl+C itself was ever
+    covered.
+
+    POSIX: SIGTERM/SIGHUP re-raised as KeyboardInterrupt, so they run
+    through the EXACT same `except KeyboardInterrupt` below rather than a
+    second, duplicate cleanup path.
+
+    Windows: see _install_windows_console_handler.
+    """
+    try:
+        signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+        if hasattr(signal, "SIGHUP"):  # not defined on Windows
+            signal.signal(signal.SIGHUP, _raise_keyboard_interrupt)
+    except ValueError:
+        # Only the main thread of the main interpreter may install signal
+        # handlers -- best-effort if serve_ui(block=True) is ever called
+        # from somewhere else (e.g. embedded in another app's own thread).
+        # Ctrl+C (SIGINT) is still caught either way; only the closed-
+        # terminal/bare-kill cases this function exists for are unaffected.
+        pass
+
+    if os.name == "nt":
+        _install_windows_console_handler()
+
+
+# --------------------------------------------------------------------------- #
 # Request handler
 # --------------------------------------------------------------------------- #
 
@@ -118,6 +1576,7 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
     channel: "grpc.Channel" = None  # type: ignore[assignment]
     grpc_auth_token: Optional[str] = None
     rpc_timeout: float = 300.0
+    experiment_dir: Optional[str] = None
 
     # -- logging: quiet by default, honour WEIGHTSLAB_UI_VERBOSE ------------- #
     def log_message(self, fmt, *args):  # noqa: D401
@@ -146,6 +1605,35 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path == "/local-notebook/status":
+            self._send_json(HTTPStatus.OK, _jupyter_session.status())
+            return
+        if path == "/agent-server/status":
+            self._send_json(HTTPStatus.OK, _opencode_session.status())
+            return
+        if path == "/agent-server/loop/list":
+            self._send_json(HTTPStatus.OK, {"loops": _loop_registry.list()})
+            return
+        if path.startswith("/agent-server/loop/") and path.endswith("/messages"):
+            loop_id = path[len("/agent-server/loop/"):-len("/messages")]
+            self._get_loop_messages(loop_id)
+            return
+        if path == "/agent-server/docs":
+            self._get_agent_docs()
+            return
+        if path == "/agent-server/data-query/latest":
+            self._get_latest_data_query()
+            return
+        if path == "/local-notebook/list":
+            self._list_local_notebooks()
+            return
+        if path == "/experiment-report/list":
+            self._list_experiment_reports()
+            return
+        if path.startswith("/experiment-report/view/"):
+            self._serve_experiment_report(path[len("/experiment-report/view/"):])
+            return
         self._serve_static()
 
     def do_HEAD(self):  # noqa: N802
@@ -153,7 +1641,25 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if path.startswith(self.api_prefix + "/") or path == self.api_prefix:
+        if path == "/local-notebook":
+            self._start_local_notebook()
+        elif path == "/agent-server/start":
+            self._start_agent_server()
+        elif path == "/agent-server/loop/start":
+            self._start_loop()
+        elif path.startswith("/agent-server/loop/") and path.endswith("/stop"):
+            loop_id = path[len("/agent-server/loop/"):-len("/stop")]
+            self._stop_loop(loop_id)
+        elif path.startswith("/agent-server/loop/") and path.endswith("/update"):
+            loop_id = path[len("/agent-server/loop/"):-len("/update")]
+            self._update_loop(loop_id)
+        elif path == "/agent-server/data-query":
+            self._data_query()
+        elif path == "/agent-server/track-process":
+            self._track_process()
+        elif path == "/agent-server/history":
+            self._dump_agent_history()
+        elif path.startswith(self.api_prefix + "/") or path == self.api_prefix:
             self._proxy_grpc_web(path)
         else:
             self._send_simple(HTTPStatus.NOT_FOUND, "Not found")
@@ -235,6 +1741,457 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
             metadata.append(("x-grpc-token", self.grpc_auth_token))
             metadata.append(("authorization", f"Bearer {self.grpc_auth_token}"))
         return metadata
+
+    # ------------------------------------------------------------------ #
+    # Local Jupyter Notebook launcher (landing-page button)
+    # ------------------------------------------------------------------ #
+    def _notebooks_dir_path(self) -> str:
+        experiment_dir = self.experiment_dir or os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR") or os.getcwd()
+        return os.path.join(experiment_dir, "notebooks")
+
+    def _read_json_body(self) -> dict:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if not length:
+            return {}
+        try:
+            raw = self.rfile.read(length)
+            return json.loads(raw.decode("utf-8")) or {}
+        except Exception:
+            return {}
+
+    def _list_local_notebooks(self):
+        notebooks_dir = self._notebooks_dir_path()
+        entries = []
+        if os.path.isdir(notebooks_dir):
+            for filename in sorted(os.listdir(notebooks_dir)):
+                if filename.endswith(".ipynb"):
+                    entries.append({
+                        "name": filename,
+                        "path": os.path.join(notebooks_dir, filename),
+                    })
+        self._send_json(HTTPStatus.OK, {"notebooks": entries})
+
+    def _start_agent_server(self):
+        """Start (or reuse) the OpenCode server backing the landing-page agent.
+
+        Same shape and same reasoning as ``_start_local_notebook`` below: spawning
+        a process is an OS-level action, so the browser asks us to do it. Rooted at
+        the experiment directory, which becomes the agent's workspace. Loopback-only,
+        like every other local-machine action in this server -- this one starts a
+        process with filesystem access, so it must never be reachable off-host.
+        """
+        if not _client_is_trusted(self.client_address[0]):
+            self._send_json(HTTPStatus.FORBIDDEN,
+                            {"ok": False, "error": "Only reachable from localhost."})
+            return
+
+        workspace = self.experiment_dir or os.getcwd()
+        os.makedirs(workspace, exist_ok=True)
+
+        # Prefer the browser's own Origin header: it is the exact string the CORS
+        # check will compare against. Fall back to reconstructing it from Host.
+        origin = self.headers.get("Origin")
+        if not origin:
+            host = self.headers.get("Host") or "localhost"
+            scheme = "https" if isinstance(getattr(self, "connection", None), ssl.SSLSocket) else "http"
+            origin = f"{scheme}://{host}"
+
+        result = _opencode_session.ensure(workspace, origin)
+        if result.get("ok"):
+            # Told outright rather than left for the model to discover by
+            # trial and error -- see opencode_process.shell_platform_note()
+            # and _default_shell()'s docstring for why guessing was the bug.
+            result.update(opencode_process.shell_platform_note())
+        status = HTTPStatus.OK if result.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR
+        self._send_json(status, result)
+
+    def _start_loop(self):
+        """Start a recurring OpenCode-backed monitoring job (the `/loop`
+        command in the connected-experiment agent bar). Loopback-only, same
+        reasoning as _start_agent_server -- this also starts/reuses that same
+        process."""
+        if not _client_is_trusted(self.client_address[0]):
+            self._send_json(HTTPStatus.FORBIDDEN,
+                             {"ok": False, "error": "Only reachable from localhost."})
+            return
+
+        body = self._read_json_body()
+        prompt = str(body.get("prompt") or "")
+        try:
+            interval_minutes = float(body.get("intervalMinutes") or 0)
+        except (TypeError, ValueError):
+            interval_minutes = 0
+
+        workspace = self.experiment_dir or os.getcwd()
+        os.makedirs(workspace, exist_ok=True)
+
+        origin = self.headers.get("Origin")
+        if not origin:
+            host = self.headers.get("Host") or "localhost"
+            scheme = "https" if isinstance(getattr(self, "connection", None), ssl.SSLSocket) else "http"
+            origin = f"{scheme}://{host}"
+
+        # Whatever model the chat that typed /loop is itself on, when it can
+        # say. Entirely optional -- the registry resolves the rest from
+        # OpenCode's own config either way, see _opencode_resolve_model.
+        model = body.get("model")
+        if not (isinstance(model, dict) and model.get("providerID") and model.get("modelID")):
+            model = None
+
+        result = _loop_registry.start(prompt, interval_minutes * 60.0, workspace, origin, model)
+        status = HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST
+        self._send_json(status, result)
+
+    def _stop_loop(self, loop_id: str):
+        if not _client_is_trusted(self.client_address[0]):
+            self._send_json(HTTPStatus.FORBIDDEN,
+                             {"ok": False, "error": "Only reachable from localhost."})
+            return
+        result = _loop_registry.stop(loop_id)
+        status = HTTPStatus.OK if result.get("ok") else HTTPStatus.NOT_FOUND
+        self._send_json(status, result)
+
+    def _update_loop(self, loop_id: str):
+        """Change a running loop's prompt and/or interval (the panel's Edit
+        action) without stopping and restarting the job."""
+        if not _client_is_trusted(self.client_address[0]):
+            self._send_json(HTTPStatus.FORBIDDEN,
+                             {"ok": False, "error": "Only reachable from localhost."})
+            return
+
+        body = self._read_json_body()
+        prompt = body.get("prompt")
+        interval_seconds = None
+        if body.get("intervalMinutes") is not None:
+            try:
+                interval_seconds = float(body["intervalMinutes"]) * 60.0
+            except (TypeError, ValueError):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "intervalMinutes must be a number."})
+                return
+
+        result = _loop_registry.update(loop_id, prompt=prompt, interval_seconds=interval_seconds)
+        status = HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST
+        self._send_json(status, result)
+
+    def _get_loop_messages(self, loop_id: str):
+        """Backs a loop tab's read-only transcript: its scrollback is just
+        this job's own OpenCode session history, written to solely by the
+        scheduled check-in (_fire) -- nothing to merge here, only fetching."""
+        if not _client_is_trusted(self.client_address[0]):
+            self._send_json(HTTPStatus.FORBIDDEN,
+                             {"ok": False, "error": "Only reachable from localhost."})
+            return
+        result = _loop_registry.get_messages(loop_id)
+        status = HTTPStatus.OK if result.get("ok") else HTTPStatus.NOT_FOUND
+        self._send_json(status, result)
+
+    def _data_query(self):
+        """Lets the landing-page agent chat perform dataset/model actions --
+        discard, tag, sort, filter, analyze, compute stats, and the rest of
+        DataManipulationAgent's `action.*`/handler surface -- itself, via its
+        bash tool, instead of needing a second tab for it (the merged Agent
+        Window's Backend Agent capability -- see agentChat.ts's standing
+        instruction that points the model at this endpoint).
+
+        Deliberately NOT a new code path: this calls the SAME
+        ExperimentService.ApplyDataQuery RPC the (now-retired) gRPC query bar
+        always used, over the SAME upstream channel `_proxy_grpc_web` already
+        proxies everything else through -- so every safety invariant that
+        pipeline already enforces (WL never deletes rows, only flags them;
+        protected columns can't be silently overwritten; etc., see
+        data_service.py/agent.py) applies here unchanged. The difference is
+        only in HOW the request gets built: a real DataQueryRequest message,
+        called as the genuinely unary RPC it is, rather than grpc-web's
+        forward-raw-bytes-as-unary-stream trick (see _proxy_grpc_web) -- that
+        shortcut only works when the caller already HAS a serialized
+        protobuf body to forward, and this one starts from a plain JSON
+        {query, accumulate} instead.
+        """
+        if not _client_is_trusted(self.client_address[0]):
+            self._send_json(HTTPStatus.FORBIDDEN,
+                             {"ok": False, "error": "Only reachable from localhost."})
+            return
+
+        body = self._read_json_body()
+        query = str(body.get("query") or "").strip()
+        if not query:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "A query is required."})
+            return
+        accumulate = bool(body.get("accumulate", False))
+
+        from weightslab.proto import experiment_service_pb2 as pb2
+
+        request = pb2.DataQueryRequest(query=query, accumulate=accumulate, is_natural_language=True)
+        call = self.channel.unary_unary(
+            "/ExperimentService/ApplyDataQuery",
+            request_serializer=pb2.DataQueryRequest.SerializeToString,
+            response_deserializer=pb2.DataQueryResponse.FromString,
+        )
+        try:
+            response = call(request, metadata=self._collect_metadata(), timeout=self.rpc_timeout)
+        except grpc.RpcError as err:
+            message = err.details() or str(err)
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": message})
+            return
+
+        payload = {
+            "ok": bool(response.success),
+            "message": response.message,
+            "numberOfAllSamples": response.number_of_all_samples,
+            "numberOfSamplesInTheLoop": response.number_of_samples_in_the_loop,
+            "numberOfDiscardedSamples": response.number_of_discarded_samples,
+            "uniqueTags": list(response.unique_tags),
+            "analysisResult": response.analysis_result,
+            "agentIntentType": int(response.agent_intent_type),
+        }
+        # The agent's own bash tool called this endpoint directly -- nothing
+        # in the browser's own JS observed the request or its response the
+        # way it would for a query typed into the UI, so the grid/subview
+        # banner never updates on its own without this: see
+        # _latest_data_query's docstring for how the frontend picks it up.
+        _latest_data_query.record(query, payload)
+        self._send_json(HTTPStatus.OK, payload)
+
+    def _get_latest_data_query(self):
+        """Polled once by agentChat.ts whenever a Frontend Agent turn ends
+        (session.idle) -- NOT continuously -- so main.ts can replay the
+        SAME grid-refresh/subview-banner reaction a query typed directly
+        into the (now-retired) backend query bar always triggered
+        client-side, for a query the agent just ran itself instead (see
+        _data_query/_latest_data_query). {"seq": 0} if nothing has run yet
+        this process; the frontend only reacts when seq is NEWER than the
+        last one it already handled."""
+        if not _client_is_trusted(self.client_address[0]):
+            self._send_json(HTTPStatus.FORBIDDEN,
+                             {"ok": False, "error": "Only reachable from localhost."})
+            return
+        self._send_json(HTTPStatus.OK, _latest_data_query.get())
+
+    def _track_process(self):
+        """Registers a PID the agent (landing-page chat or a /loop job) just
+        launched DETACHED, so Ctrl+C on this workspace stops it too -- see
+        _TrackedProcesses' own docstring for why a detached process needs
+        this instead of being reachable through the normal process-tree
+        kill every OTHER child of this server already gets."""
+        if not _client_is_trusted(self.client_address[0]):
+            self._send_json(HTTPStatus.FORBIDDEN,
+                             {"ok": False, "error": "Only reachable from localhost."})
+            return
+
+        body = self._read_json_body()
+        try:
+            pid = int(body.get("pid"))
+        except (TypeError, ValueError):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "pid must be an integer."})
+            return
+
+        _tracked_processes.track(pid)
+        self._send_json(HTTPStatus.OK, {"ok": True})
+
+    def _get_agent_docs(self):
+        """AGENTS.md content for the landing chat's preset prompts to attach,
+        so the agent has a grounded, accurate weightslab integration pattern
+        instead of guessing. Best-effort and never errors -- if a file
+        genuinely is not present (e.g. a `pip install` without a repo
+        checkout), it is just omitted from the response.
+
+        ?example=<usecase> (repeatable) additionally attaches each named
+        PyTorch usecase's complete main.py (see _KNOWN_EXAMPLE_USECASES) --
+        whichever ones the requesting preset asks for. Unknown/unlisted
+        usecases are silently skipped rather than erroring, same as a missing
+        AGENTS.md."""
+        files = []
+        agents_md = _read_repo_doc("AGENTS.md")
+        if agents_md:
+            files.append({"name": "AGENTS.md", "content": agents_md})
+
+        query = parse_qs(urlsplit(self.path).query)
+        for usecase in query.get("example") or []:
+            example_main = _read_example_main(usecase)
+            if example_main:
+                files.append({"name": f"examples/PyTorch/{usecase}/main.py", "content": example_main})
+
+        self._send_json(HTTPStatus.OK, {"files": files})
+
+    def _start_local_notebook(self):
+        # Copying a file and spawning a process are OS-level actions the
+        # browser can't do itself; this is the one piece of local-only
+        # control surface that requires it. Loopback-gated like the other
+        # "local machine" actions in this server.
+        if not _client_is_trusted(self.client_address[0]):
+            self._send_json(HTTPStatus.FORBIDDEN,
+                             {"ok": False, "error": "Only reachable from localhost."})
+            return
+
+        notebooks_dir = self._notebooks_dir_path()
+        os.makedirs(notebooks_dir, exist_ok=True)
+
+        # An explicit "name" picks an EXISTING notebook from the landing
+        # page's dropdown; omitted/empty means "+ New from template".
+        requested_name = (self._read_json_body().get("name") or "").strip()
+        if requested_name:
+            # Bare filename only, resolved strictly inside notebooks_dir --
+            # never let a client-supplied name escape it via "..", an
+            # absolute path, etc.
+            name = os.path.basename(requested_name)
+            if not name.endswith(".ipynb"):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Not a .ipynb file."})
+                return
+            if not os.path.isfile(os.path.join(notebooks_dir, name)):
+                self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": f"{name} not found."})
+                return
+        else:
+            package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            source = os.path.join(package_root, _LOCAL_NOTEBOOK_QUICKSTART)
+            if not os.path.isfile(source):
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {
+                    "ok": False,
+                    "error": "Quickstart notebook not found in this install.",
+                })
+                return
+            name = os.path.basename(source)
+            dest = os.path.join(notebooks_dir, name)
+            # Keep any in-progress edits: only seed the file the first time.
+            if not os.path.isfile(dest):
+                shutil.copyfile(source, dest)
+
+        # `jupyter` (the launcher) can be on PATH without a notebook server
+        # backend installed -- check for the actual server package first,
+        # since that's what determines whether `jupyter notebook` can serve
+        # anything at all.
+        has_notebook_backend = any(
+            importlib.util.find_spec(mod) is not None
+            for mod in ("notebook", "jupyterlab", "notebook_shim")
+        )
+        if not has_notebook_backend:
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {
+                "ok": False,
+                "error": "Jupyter Notebook is not installed. Run `pip install notebook` and try again.",
+            })
+            return
+
+        # One Jupyter SERVER per weightslab session, rooted at notebooks_dir:
+        # reuses a still-running launch (new browser tab, no new process)
+        # instead of spawning another (see _JupyterSession), and gets torn
+        # down together with this server (serve_ui()'s shutdown path).
+        result = _jupyter_session.open_notebook(notebooks_dir, name)
+        status = HTTPStatus.OK if result.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR
+        self._send_json(status, result)
+
+    # ------------------------------------------------------------------ #
+    # Experiment report browser (connected-app report button)
+    # ------------------------------------------------------------------ #
+    # Generation itself goes through the EXISTING agent query pipeline
+    # (ApplyDataQuery -> the "generate_experiment_report" action, see
+    # data_service.py) -- these two endpoints only browse what's already on
+    # disk under <experiment_dir>/reports/, exactly like the local-notebook
+    # endpoints above browse <experiment_dir>/notebooks/. Same assumption:
+    # this UI server and the connected training backend share a filesystem
+    # (the documented `weightslab start` usage), so root_log_dir resolved
+    # here is the same directory the backend wrote reports into.
+    def _agent_history_dir_path(self) -> str:
+        experiment_dir = self.experiment_dir or os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR") or os.getcwd()
+        return os.path.join(experiment_dir, "agent")
+
+    def _dump_agent_history(self):
+        """Write the agent conversation to the experiment directory.
+
+        POSTed by the chat itself after every finished turn, so a session's
+        transcript lands next to the run it was about (``<experiment>/agent/``)
+        instead of living only in the browser and the OpenCode server's own
+        state -- which is where it used to stay, and which is not part of
+        anything the user keeps, copies or shares with the experiment.
+
+        One file per session, overwritten as the conversation grows: the body
+        carries the whole transcript rather than a delta, so a reload or a
+        missed POST self-heals on the next turn instead of leaving a file with a
+        hole in it.
+        """
+        payload = self._read_json_body()
+        markdown = payload.get("markdown")
+        if not isinstance(markdown, str) or not markdown.strip():
+            self._send_json(HTTPStatus.BAD_REQUEST,
+                            {"ok": False, "error": "markdown is required"})
+            return
+
+        # Client-supplied, so it never reaches the filesystem as-is: everything
+        # outside a safe alphabet becomes '_' and the result is used as a bare
+        # filename inside the agent directory (same guard as the notebook and
+        # report endpoints).
+        session = str(payload.get("session") or "").strip() or "session"
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", session)[:80] or "session"
+
+        directory = self._agent_history_dir_path()
+        try:
+            os.makedirs(directory, exist_ok=True)
+            path = os.path.join(directory, f"conversation-{safe}.md")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(markdown)
+        except OSError as err:
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR,
+                            {"ok": False, "error": str(err)})
+            return
+
+        self._send_json(HTTPStatus.OK, {"ok": True, "path": path})
+
+    def _reports_dir_path(self) -> str:
+        experiment_dir = self.experiment_dir or os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR") or os.getcwd()
+        return os.path.join(experiment_dir, "reports")
+
+    def _list_experiment_reports(self):
+        reports_dir = self._reports_dir_path()
+        entries = []
+        if os.path.isdir(reports_dir):
+            for filename in os.listdir(reports_dir):
+                if not filename.endswith(".html"):
+                    continue
+                full_path = os.path.join(reports_dir, filename)
+                try:
+                    mtime = os.path.getmtime(full_path)
+                except OSError:
+                    mtime = 0
+                entries.append({"name": filename, "path": full_path, "modified_at": mtime})
+        entries.sort(key=lambda e: e["modified_at"], reverse=True)
+        self._send_json(HTTPStatus.OK, {"reports": entries})
+
+    def _serve_experiment_report(self, raw_name: str):
+        reports_dir = self._reports_dir_path()
+        # Bare filename only, resolved strictly inside reports_dir -- same
+        # traversal guard as _start_local_notebook's "name" handling (never
+        # let a client-supplied name escape it via "..", an absolute path,
+        # a different drive on Windows, etc.).
+        name = os.path.basename(unquote(raw_name))
+        if not name.endswith(".html"):
+            self._send_simple(HTTPStatus.BAD_REQUEST, "Not an .html report.")
+            return
+        full_path = os.path.join(reports_dir, name)
+        if not os.path.isfile(full_path):
+            self._send_simple(HTTPStatus.NOT_FOUND, f"{name} not found.")
+            return
+        try:
+            with open(full_path, "rb") as f:
+                data = f.read()
+        except OSError as exc:
+            self._send_simple(HTTPStatus.INTERNAL_SERVER_ERROR, f"Could not read report: {exc}")
+            return
+        self.send_response(HTTPStatus.OK)
+        self._send_cors()
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_json(self, status: HTTPStatus, payload: dict):
+        data = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self._send_cors()
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     # ------------------------------------------------------------------ #
     # Static SPA serving (with SPA fallback to index.html)
@@ -359,6 +2316,11 @@ _UI_ENV_GLOBALS = [
      ("ENABLE_HYPERPARAMETERS_OPTIMIZATION", "WS_ENABLE_HYPERPARAMETERS_OPTIMIZATION",
       "VITE_ENABLE_HYPERPARAMETERS_OPTIMIZATION")),
     ("WS_ENABLE_AGENT", ("ENABLE_AGENT", "WS_ENABLE_AGENT", "VITE_ENABLE_AGENT")),
+    # Shared with the SDK agent's own OPENCODE_URL config (agent.py's
+    # _load_config) -- setting OPENCODE_URL once configures both sides, and
+    # is also what _OpencodeSession.ensure() prefers over spawning its own
+    # server (see below).
+    ("WS_OPENCODE_URL", ("OPENCODE_URL", "WS_OPENCODE_URL", "VITE_OPENCODE_URL")),
 ]
 
 
@@ -437,8 +2399,9 @@ def serve_ui(
     certs_dir: Optional[str] = None,
     grpc_auth_token: Optional[str] = None,
     block: bool = True,
+    experiment_dir: Optional[str] = None,
 ) -> ThreadingHTTPServer:
-    """Start the Docker-free WeightsLab UI server.
+    """Start the WeightsLab UI server.
 
     Serves the bundled SPA and proxies gRPC-Web to ``backend_host:backend_port``.
 
@@ -458,6 +2421,11 @@ def serve_ui(
     block:
         When True (default) serve forever; otherwise return immediately with the
         server running in a daemon thread.
+    experiment_dir:
+        This run's root_log_dir, if already resolved by the caller (e.g.
+        ``weightslab start``). Used by the "Local Jupyter Notebook" landing-page
+        button to know where to drop ``notebooks/``; falls back to
+        ``WEIGHTSLAB_ROOT_LOG_DIR`` then the current directory.
     """
     root = static_dir()
     if not has_static_assets():
@@ -490,6 +2458,7 @@ def serve_ui(
             "channel": channel,
             "api_prefix": "/api",
             "grpc_auth_token": grpc_auth_token,
+            "experiment_dir": experiment_dir,
         },
     )
 
@@ -502,6 +2471,16 @@ def serve_ui(
     ui_port = httpd.server_address[1]
     display_host = "localhost" if ui_host in ("0.0.0.0", "::", "") else ui_host
     url = f"{scheme}://{display_host}:{ui_port}"
+
+    # Where /agent-server/track-process lives, for anything launched from an
+    # environment descending from this process -- most importantly the
+    # OpenCode server (spawned by this server, so it inherits this) and
+    # therefore the agent's own shell, and therefore any training process the
+    # agent starts from it. weightslab.src.serve() reads this and registers
+    # ITSELF, so a run is tracked even when nobody POSTs its PID by hand; see
+    # _register_pid_with_ui_server there for why that mattered. Loopback
+    # rather than display_host because the endpoint only answers loopback.
+    os.environ["WEIGHTSLAB_UI_ORIGIN"] = f"{scheme}://127.0.0.1:{ui_port}"
 
     sys.stdout.write(
         "\n"
@@ -520,6 +2499,10 @@ def serve_ui(
         thread.start()
         return httpd
 
+    # Only for the blocking (real CLI) path -- see _install_termination_handlers'
+    # own docstring for why plain Ctrl+C alone used to be the only covered case.
+    _install_termination_handlers()
+
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -527,6 +2510,7 @@ def serve_ui(
     finally:
         httpd.shutdown()
         httpd.server_close()
+        _run_shutdown_cleanup()
     return httpd
 
 

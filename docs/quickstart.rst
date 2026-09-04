@@ -2,7 +2,7 @@ Quickstart
 ==========
 
 This page gives you a practical, minimal path to get WeightsLab running.
-If you prefer to start from examples, see ``usecases`` right after this setup.
+If you prefer to start from examples, see :doc:`examples/index` right after this setup.
 
 Prerequisites
 -------------
@@ -18,22 +18,29 @@ Create and activate a virtual environment and install WeightsLab.
 
 .. code-block:: bash
 
-   # From the repository root
-   python -m venv .venv
-
-   # Windows PowerShell
-   .\.venv\Scripts\Activate.ps1
-   # Linux/macOS
-   # source .venv/bin/activate
-
    python -m pip install weightslab
+
+.. tip::
+
+   For reproducible experiments, you can install in a virtual environment with the following command:
+
+   .. code-block:: bash
+
+      # From the repository root
+      python -m venv .venv
+
+      # Windows PowerShell
+      .\.venv\Scripts\Activate.ps1
+      # Linux/macOS
+      # source .venv/bin/activate
 
 
 Try the bundled example
-------------------------
+~~~~~~~~~~~~~~~~~~~~~~~
 
-To see WeightsLab working end to end without writing any code, start a bundled
-example like the classification example (--cls). It run a small experiment on a classification task:
+To see WeightsLab working end to end without writing any code, start one of the bundled
+examples (--cls, --seg, --det, --2d_det, --3d_det).
+It run a small bundled experiment:
 
 .. code-block:: bash
 
@@ -46,85 +53,122 @@ Then, in another terminal, launch the UI and open the URL printed by the command
    weightslab start
 
 
-.. Launch WeightsLab services from your training script
-.. ----------------------------------------------------
+Local integration in your own Python script (MNIST)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. At minimum, enable gRPC + CLI so the UI and local console can interact with your run. CLI will allow you to inspect and adjust hyperparameters on the fly, modify model architecture, and debug parameters, while gRPC serves data to the UI for monitoring and sample tagging.
+Below is your MNIST CNN training pattern, first instrumented with TensorBoard,
+then with TensorBoard removed and replaced by WeightsLab.
 
-.. .. code-block:: python
+.. code-block:: python
+   :linenos:
+   :class: wl-diff-lines
 
-..    import weightslab as wl
-
-..    # Start service endpoints used by Weights Studio and CLI.
-..    wl.serve(serving_grpc=True, serving_cli=True)
-
-..    # Keep services alive while training is running.
-..    wl.keep_serving()
-
-.. If you want to run the CLI on another process, run:
-
-.. .. code-block:: bash
-
-..    python -m weightslab.backend.cli serve --host localhost --port 60000
+   import torch
+   import torch.nn as nn
+   import torch.optim as optim
+   -  from torch.utils.tensorboard import SummaryWriter
+   from torchvision import datasets, transforms
+   +  import weightslab as wl
 
 
-.. Connect with the CLI client
-.. ---------------------------
+   class CNN(nn.Module):
+       def __init__(self):
+           super().__init__()
+   +          self.input_shape = (1, 28, 28)  # Weightslab necessary input shape for MNIST
+           self.net = nn.Sequential(
+               nn.Conv2d(1, 32, 3, padding=1),
+               nn.ReLU(),
+               nn.MaxPool2d(2),
+               nn.Conv2d(32, 64, 3, padding=1),
+               nn.ReLU(),
+               nn.MaxPool2d(2),
+               nn.Flatten(),
+               nn.Linear(64 * 7 * 7, 10),
+           )
 
-.. .. code-block:: bash
+       def forward(self, x):
+           return self.net(x)
 
-..    python -m weightslab.backend.cli client --host localhost --port 60000
 
-.. Useful first commands:
+   cfg = {
+       "device": "auto",
+       "data_root": "./data",
+       "data": {
+           "train_loader": {
+               "batch_size": 64,
+           }
+       },
+       "optimizer": {
+           "lr": 1e-3,
+       },
+   }
+   device = "cuda" if torch.cuda.is_available() and cfg["device"] in ["auto", "cuda"] else "cpu"
 
-.. - ``help``: list all command syntaxes and examples.
-.. - ``status``: show current models/loaders/optimizers/hyperparameters.
-.. - ``pause`` / ``resume``: toggle training state safely.
-.. - ``hp`` and ``hp <name>``: inspect hyperparameter sets.
-.. - ``set_hp [hp_name] <key.path> <value>``: update one hyperparameter value.
+   train_ds = datasets.MNIST(cfg["data_root"], train=True, download=True, transform=transforms.ToTensor())
+   train_loader = torch.utils.data.DataLoader(train_ds, batch_size=cfg["data"]["train_loader"]["batch_size"], shuffle=True)
 
-.. Evaluation from the CLI
-.. ~~~~~~~~~~~~~~~~~~~~~~~
+   model = CNN().to(device)
+   optimizer = optim.Adam(model.parameters(), lr=cfg.get("optimizer", {}).get("lr", 1e-3))
+   loss = nn.CrossEntropyLoss(reduction="none")
+   -  writer = SummaryWriter(log_dir="./runs/mnist_baseline")
+   +
+   + # Wrap your objects with WeightsLab to watch and edit them in real time.
+   + ## Wrap the hyperparameters first
+   +  hp = wl.watch_or_edit(cfg, flag="hyperparameters")
+   +
+   + ## Wrap the model and optimizer next
+   +  model = wl.watch_or_edit(model, flag="model", device=device)
+   +  optimizer = wl.watch_or_edit(
+   +      optimizer,
+   +      flag="optimizer",
+   +  )
+   +
+   + ## Then wrap the loss and metrics functions
+   +  loss = wl.watch_or_edit(
+   +      loss,
+   +      flag="loss",
+   +      signal_name="train/loss",
+   +      per_sample=True,
+   +      log=True,
+   +  )
+   +  train_loader = wl.watch_or_edit(
+   +      train_ds,
+   +      flag="data",
+   +      loader_name="train_loader",
+   +      batch_size=cfg["data"]["train_loader"]["batch_size"],
+   +      shuffle=True,
+   +      is_training=True,
+   +  )
+   +
+   + # Finally start the WeightsLab backend and keep it running while you train.
+   +  wl.serve(serving_grpc=True, serving_cli=True)
 
-.. The CLI can trigger evaluation exactly as Weights Studio does.  Training is
-.. paused automatically, evaluation runs in a background thread, and the result
-.. is printed to the console when it completes.
+   step = 0
+   while 1:
+   +      with wl.guard_training_context:
+   -      inputs, labels = next(iter(train_loader))
+   +             inputs, uids, labels, metadata = next(iter(train_loader))
+              inputs, labels = inputs.to(device), labels.to(device)
+              optimizer.zero_grad()
+              logits = model(inputs)
+   -          loss_per_sample = loss(logits, labels)
+   +             loss_per_sample = loss(logits, labels, batch_ids=uids, preds=logits)
+              loss_per_sample.mean().backward()
+              optimizer.step()
+      if step % 20 == 0:
+         print(f"Loss: {loss_per_sample.mean().item():.4f}")
+      step += 1
 
-.. .. code-block:: text
+   -  writer.close()
+   +  wl.keep_serving()
 
-..    # Evaluate on the first registered dataloader (WeightsLab picks it automatically)
-..    wl> evaluate
 
-..    # Evaluate on a specific split
-..    wl> evaluate val_loader
+Notebook Code with Google Colab
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-..    # Evaluate only the first 50 batches
-..    wl> evaluate test_loader --steps 50
+Start by opening this notebook:
 
-..    # Evaluate only samples tagged "difficult"
-..    wl> evaluate train_loader --tags difficult
-
-..    # Poll progress
-..    wl> eval_status
-
-..    # Cancel
-..    wl> cancel_eval
-
-..    # Resume training afterwards
-..    wl> resume
-
-.. Audit mode
-.. ~~~~~~~~~~
-
-.. Audit mode lets you freeze weights (optimizer ``step()`` is skipped) while the
-.. training loop keeps running, so you can inspect gradients and activations
-.. without modifying the model.
-
-.. .. code-block:: text
-
-..    wl> audit on     # enable  — optimizer steps are skipped
-..    wl> audit off    # disable — normal training restores
-..    wl> audit        # show current state
+- `WeightsLab Colab Quickstart <https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/Colab/wl-colab-quickstart.ipynb>`_
 
 
 Use Weightslab Studio (UI)
@@ -144,7 +188,7 @@ Pass ``--certs`` to generate (if missing) and use TLS certificates + a gRPC auth
 .. important::
 
    When using certs, it is prefered to set manually the ``WEIGHTSLAB_CERTS_DIR`` environment variable so the training backend and any new
-   terminal use the **same** certificates — it is the single source of truth for TLS/auth. Please note that this step has to be done before starting the experiment.
+   terminal use the **same** certificates — it is the single source of truth for TLS/auth. **Please note that this step has to be done before starting the experiment.**
 
 Run ``weightslab``, ``weightslab help``, or ``weightslab -h`` to see the banner and the full
 command reference (``se``, ``start``, ``start example ...``).
@@ -177,7 +221,7 @@ command, with all flags and defaults — lives in :doc:`user_commands`.
       "Using the context in AGENTS.md, integrate WeightsLab into this training script."
 
    The agent will wire up your model, data loader, loss, and hyperparameters in
-   a few edits — no manual API lookup needed.
+   a few edits — no manual API lookup needed. Otherwise use the :doc:`agent_quickstart` to connect the integrated OpenCode agent to a running experiment and have it generate code for you from the UI.
 
 
 Recommended next reading
@@ -185,4 +229,7 @@ Recommended next reading
 Now that you run the classification task and try WeightsLab, you can integrate it into your training script.
 To do so, please read the following:
 
-- ``four_way_approach``: understand model/data/hyperparameters/logger together.
+- :doc:`agent_quickstart`: connect the natural-language agent to a running
+  experiment in four steps.
+- :doc:`usage/good_practice/index`: good coding practices with WeightsLab.
+- :doc:`four_way_approach`: understand WeightsLab's four-way approach to model/data/hyperparameters/logger and their integrations.

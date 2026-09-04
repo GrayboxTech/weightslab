@@ -83,6 +83,156 @@ def _sanitize_for_json(obj):
         return _safe_repr(obj)
 
 
+def _coerce_uid(uid: str):
+    """CLI arguments arrive as text, but sample ids are ints for most datasets.
+
+    Returning the int for a numeric argument is what makes ``discard 7`` update
+    row 7 instead of silently inserting a new ``"7"`` row next to it.
+    """
+    if isinstance(uid, str):
+        try:
+            return int(uid)
+        except ValueError:
+            return uid
+    return uid
+
+
+def _filter_registered(names, get_handle) -> list:
+    """Keep only the names that hold a *real* registration.
+
+    Reading ``get_model()`` / ``get_dataloader()`` / ... inserts an empty
+    placeholder proxy into the registry, so a raw registry listing can advertise a
+    level the user never wrapped. The CLI must not report those.
+    """
+    kept = []
+    for name in names or []:
+        try:
+            handle = get_handle(name)
+        except Exception:
+            continue
+        if Proxy.is_proxy(handle) and not handle.is_set():
+            continue
+        if handle is not None:
+            kept.append(name)
+    return kept
+
+
+def _registered_models() -> list:
+    return _filter_registered(GLOBAL_LEDGER.list_models(), GLOBAL_LEDGER.get_model)
+
+
+def _registered_dataloaders() -> list:
+    return _filter_registered(GLOBAL_LEDGER.list_dataloaders(), GLOBAL_LEDGER.get_dataloader)
+
+
+def _registered_optimizers() -> list:
+    return _filter_registered(GLOBAL_LEDGER.list_optimizers(), GLOBAL_LEDGER.get_optimizer)
+
+
+def _registered_snapshot() -> dict:
+    """``GLOBAL_LEDGER.snapshot()`` with placeholder-only entries removed."""
+    snap = GLOBAL_LEDGER.snapshot()
+    snap['models'] = _filter_registered(snap.get('models'), GLOBAL_LEDGER.get_model)
+    snap['dataloaders'] = _filter_registered(snap.get('dataloaders'),
+                                             GLOBAL_LEDGER.get_dataloader)
+    snap['optimizers'] = _filter_registered(snap.get('optimizers'),
+                                            GLOBAL_LEDGER.get_optimizer)
+    return snap
+
+
+def _unwrap(obj):
+    """Resolve a ledger Proxy to the object it wraps."""
+    if obj is not None and hasattr(obj, 'get') and callable(getattr(obj, 'get')):
+        try:
+            return obj.get()
+        except Exception:
+            return obj
+    return obj
+
+
+def _tracked_dataset(loader):
+    """The sample-tracking wrapper behind a registered loader.
+
+    ``DataLoaderInterface.dataset`` is the *raw* dataset the user handed in;
+    ``wrapped_dataset`` is the WeightsLab wrapper that actually knows about sample
+    ids, tags and the discard flag, so prefer it.
+    """
+    loader = _unwrap(loader)
+    if loader is None:
+        return None
+    for attr in ('wrapped_dataset', 'tracked_dataset', 'dataset'):
+        dataset = getattr(loader, attr, None)
+        if dataset is not None:
+            return _unwrap(dataset)
+    return None
+
+
+def _dataset_uids(dataset) -> list:
+    """Sample ids of a tracked dataset, best-effort across dataset flavors."""
+    for attr in ('get_sample_uids', ):
+        getter = getattr(dataset, attr, None)
+        if callable(getter):
+            try:
+                return list(getter())
+            except Exception:
+                pass
+    for attr in ('unique_ids', 'sample_ids', 'uids'):
+        values = getattr(dataset, attr, None)
+        if values is not None:
+            try:
+                return [v for v in values]
+            except Exception:
+                pass
+    if hasattr(dataset, '__len__'):
+        return list(range(len(dataset)))
+    return []
+
+
+def _sample_state(dataset, uid) -> tuple:
+    """``(discarded, tags)`` for *uid*, read from the tracked sample dataframe."""
+    discarded = False
+    tags: list = []
+
+    getter = getattr(dataset, 'get', None)
+    if callable(getter):
+        try:
+            discarded = bool(dataset.get(uid, 'discarded'))
+        except Exception:
+            discarded = False
+    if not discarded and hasattr(dataset, 'is_discarded'):
+        try:
+            discarded = bool(dataset.is_discarded(uid))
+        except Exception:
+            pass
+    if not discarded and hasattr(dataset, 'discarded_samples'):
+        try:
+            discarded = uid in dataset.discarded_samples
+        except Exception:
+            pass
+
+    if hasattr(dataset, 'get_tags'):
+        try:
+            tags = list(dataset.get_tags(uid) or [])
+        except Exception:
+            tags = []
+    elif callable(getter):
+        # Tags live in one boolean 'tag:<name>' column per tag.
+        try:
+            columns = list(dataset._get_df_view().columns)
+        except Exception:
+            columns = []
+        for column in columns:
+            if not str(column).startswith('tag:'):
+                continue
+            try:
+                if bool(dataset.get(uid, column)):
+                    tags.append(str(column).split(':', 1)[1])
+            except Exception:
+                continue
+
+    return discarded, tags
+
+
 # Globals for the running server
 _server_thread: Optional[threading.Thread] = None
 _server_sock: Optional[socket.socket] = None
@@ -155,6 +305,11 @@ def _handle_command(cmd: str) -> Any:
                         'agent model <MODEL> | agent models | agent reset | agent query <prompt>'
                     ),
                     'query / ask': 'Shortcut for agent query. Syntax: query <prompt> or ask <prompt>',
+                    'report': (
+                        'Generate the experiment HTML report (signal plots, health labels, '
+                        'dataset stats + an agent-written analysis) under <root_log_dir>/reports/. '
+                        'Syntax: report [signal ...] [--signals a,b] [--output PATH] [--no-agent]'
+                    ),
                     'evaluate / eval': (
                         'Pause training and trigger an evaluation pass. '
                         'Syntax: evaluate [split_name] [--steps N] [--tags tag1,tag2]. '
@@ -197,11 +352,17 @@ def _handle_command(cmd: str) -> Any:
                     'restore by sample_id': 'undiscard sample_001',
                     'tag by sample_id': 'add_tag sample_001 difficult sample_002 sample_003',
                 },
+                'report_examples': {
+                    'report on every signal': 'report',
+                    'report on specific signals': 'report train_loss val_loss',
+                    'skip the LLM analysis': 'report --no-agent',
+                    'write to a chosen file': 'report --output /tmp/run.html',
+                },
                 'agent_examples': {
                     'check agent': 'agent status',
-                    'initialize openrouter': 'agent init --api-key sk-or-... --model openai/gpt-4o-mini --timeout 20',
+                    'initialize opencode': 'agent init --model openrouter/anthropic/claude-opus-4.6',
                     'list available models': 'agent models',
-                    'switch model': 'agent model ~google/gemini-flash-latest',
+                    'switch model': 'agent model openrouter/openai/gpt-5',
                     'query the agent': 'agent query discard all samples with loss > 5 and tag them as hard_examples',
                     'query shortcut': 'ask tag train samples with loss > 1.2 as goldset',
                 }
@@ -222,7 +383,7 @@ def _handle_command(cmd: str) -> Any:
             # Provide a compact ledger snapshot in status: models, dataloaders,
             # optimizers and hyperparams. This gives a quick overview of the
             # current registrations without returning full object dumps.
-            snap = GLOBAL_LEDGER.snapshot()
+            snap = _registered_snapshot()
             try:
                 snap['hyperparams'] = GLOBAL_LEDGER.list_hyperparams()
             except Exception:
@@ -242,7 +403,7 @@ def _handle_command(cmd: str) -> Any:
             return {'ok': True, 'snapshot': snap, 'model_age': model_age}
 
         if verb == 'list_models':
-            return {'ok': True, 'models': GLOBAL_LEDGER.list_models()}
+            return {'ok': True, 'models': _registered_models()}
 
         if verb in ('plot_model', 'plot_arch', 'plot'):
             # syntax: plot_model [model_name]
@@ -287,13 +448,13 @@ def _handle_command(cmd: str) -> Any:
                 return {'ok': False, 'error': str(e)}
 
         if verb == 'list_dataloaders':
-            return {'ok': True, 'dataloaders': GLOBAL_LEDGER.list_dataloaders()}
+            return {'ok': True, 'dataloaders': _registered_dataloaders()}
 
         if verb in ('list_loaders', 'loaders'):
-            return {'ok': True, 'loaders': GLOBAL_LEDGER.list_dataloaders()}
+            return {'ok': True, 'loaders': _registered_dataloaders()}
 
         if verb == 'list_optimizers':
-            return {'ok': True, 'optimizers': GLOBAL_LEDGER.list_optimizers()}
+            return {'ok': True, 'optimizers': _registered_optimizers()}
 
         if verb in ('list_uids', 'uids', 'samples'):
             # Syntax: list_uids [loader_name] [--discarded] [--limit N]
@@ -317,76 +478,28 @@ def _handle_command(cmd: str) -> Any:
                 i += 1
 
             try:
-                loaders_to_check = [loader_name] if loader_name else GLOBAL_LEDGER.list_dataloaders()
+                loaders_to_check = [loader_name] if loader_name else _registered_dataloaders()
 
                 result = {'ok': True, 'uids': {}}
 
                 for lname in loaders_to_check:
                     try:
-                        loader = GLOBAL_LEDGER.get_dataloader(lname)
-                        # Unwrap proxy
-                        if hasattr(loader, 'get') and callable(loader.get):
-                            loader = loader.get()
-
-                        if loader is None:
-                            continue
-
-                        # Try to get dataset from loader
-                        dataset = None
-                        if hasattr(loader, 'dataset'):
-                            dataset = loader.dataset
-
+                        dataset = _tracked_dataset(GLOBAL_LEDGER.get_dataloader(lname))
                         if dataset is None:
                             continue
 
-                        # Get UIDs and discard status
                         uids_list = []
-
-                        # Try different methods to get UIDs
-                        if hasattr(dataset, 'get_sample_uids'):
-                            # Method to get all UIDs
-                            all_uids = dataset.get_sample_uids()
-                        elif hasattr(dataset, 'sample_ids'):
-                            all_uids = dataset.sample_ids
-                        elif hasattr(dataset, 'uids'):
-                            all_uids = dataset.uids
-                        elif hasattr(dataset, '__len__'):
-                            # Fallback: generate UIDs from indices
-                            all_uids = [f"sample_{i:06d}" for i in range(len(dataset))]
-                        else:
-                            all_uids = []
-
-                        # Check discard status for each UID
-                        for uid in all_uids:
-                            is_discarded = False
-
-                            # Try to get discard status
-                            if hasattr(dataset, 'is_discarded'):
-                                try:
-                                    is_discarded = dataset.is_discarded(uid)
-                                except Exception:
-                                    pass
-                            elif hasattr(dataset, 'discarded_samples'):
-                                is_discarded = uid in dataset.discarded_samples
+                        for uid in _dataset_uids(dataset):
+                            is_discarded, tags = _sample_state(dataset, uid)
 
                             # Filter based on --discarded flag
                             if show_discarded_only and not is_discarded:
                                 continue
 
-                            # Get tags if available
-                            tags = []
-                            if hasattr(dataset, 'get_tags'):
-                                try:
-                                    tags = dataset.get_tags(uid)
-                                except Exception:
-                                    pass
-                            elif hasattr(dataset, 'sample_tags') and hasattr(dataset.sample_tags, 'get'):
-                                tags = dataset.sample_tags.get(uid, [])
-
                             uids_list.append({
-                                'uid': uid,
+                                'uid': _sanitize_for_json(uid),
                                 'discarded': is_discarded,
-                                'tags': tags
+                                'tags': tags,
                             })
 
                             # Apply limit
@@ -405,7 +518,7 @@ def _handle_command(cmd: str) -> Any:
 
         # Return a lightweight snapshot of all ledger registries
         if verb in ('ledgers', 'ledger', 'snapshot'):
-            snap = GLOBAL_LEDGER.snapshot()
+            snap = _registered_snapshot()
             # include hyperparams names as well
             try:
                 snap['hyperparams'] = GLOBAL_LEDGER.list_hyperparams()
@@ -416,7 +529,7 @@ def _handle_command(cmd: str) -> Any:
         # Dump full ledger contents (may be large). Sanitizes values.
         if verb in ('ledger_dump', 'dump_ledger', 'dump_ledger_all'):
             out = {}
-            snap = GLOBAL_LEDGER.snapshot()
+            snap = _registered_snapshot()
             # models / dataloaders / optimizers
             for k in ('models', 'dataloaders', 'optimizers'):
                 out[k] = {}
@@ -447,7 +560,7 @@ def _handle_command(cmd: str) -> Any:
         if verb == 'dump' or verb == 'd':
             # legacy `dump` now returns the ledger dump (sanitized)
             out = {}
-            snap = GLOBAL_LEDGER.snapshot()
+            snap = _registered_snapshot()
             for k in ('models', 'dataloaders', 'optimizers'):
                 out[k] = {}
                 for name in snap.get(k, []):
@@ -496,39 +609,30 @@ def _handle_command(cmd: str) -> Any:
             if not uids:
                 return {'ok': False, 'error': 'No UIDs specified'}
 
-            discard_status = 1 if verb == 'discard' else 0
+            uids = [_coerce_uid(uid) for uid in uids]
+            discarded = verb == 'discard'
 
             try:
                 if loader_name is None:
                     try:
                         from weightslab.src import discard_samples as _discard_samples
 
-                        if _discard_samples(sample_ids=uids, discarded=bool(discard_status)):
-                            return {'ok': True, 'updated': {'dataframe': uids}}
+                        if _discard_samples(sample_ids=uids, discarded=discarded):
+                            return {'ok': True,
+                                    'updated': {'dataframe': _sanitize_for_json(uids)}}
                     except Exception:
                         pass
 
                 # Get loader(s)
                 if loader_name:
-                    loaders_to_update = {loader_name: GLOBAL_LEDGER.get_dataloader(loader_name)}
+                    loader_names = [loader_name]
                 else:
-                    # Try all loaders
-                    loader_names = GLOBAL_LEDGER.list_dataloaders()
-                    loaders_to_update = {name: GLOBAL_LEDGER.get_dataloader(name) for name in loader_names}
+                    loader_names = _registered_dataloaders()
 
                 results = {'ok': True, 'updated': {}, 'errors': {}}
 
-                for lname, loader in loaders_to_update.items():
-                    # Unwrap proxy
-                    if hasattr(loader, 'get') and callable(loader.get):
-                        loader = loader.get()
-
-                    if loader is None:
-                        continue
-
-                    # Get dataset
-                    dataset = getattr(loader, 'dataset', None) if loader else None
-
+                for lname in loader_names:
+                    dataset = _tracked_dataset(GLOBAL_LEDGER.get_dataloader(lname))
                     if dataset is None:
                         continue
 
@@ -536,32 +640,33 @@ def _handle_command(cmd: str) -> Any:
 
                     for uid in uids:
                         try:
-                            # Try different methods to set discard status
-                            if hasattr(dataset, 'set_discard'):
-                                dataset.set_discard(uid, discard_status)
+                            if hasattr(dataset, 'set') and callable(dataset.set):
+                                dataset.set(sample_id=uid, stat_name='discarded',
+                                            value=discarded)
+                                updated_uids.append(uid)
+                            elif hasattr(dataset, 'set_discard'):
+                                dataset.set_discard(uid, int(discarded))
                                 updated_uids.append(uid)
                             elif hasattr(dataset, 'discard_sample'):
-                                if discard_status == 1:
+                                if discarded:
                                     dataset.discard_sample(uid)
-                                else:
-                                    # undiscard
-                                    if hasattr(dataset, 'undiscard_sample'):
-                                        dataset.undiscard_sample(uid)
+                                elif hasattr(dataset, 'undiscard_sample'):
+                                    dataset.undiscard_sample(uid)
                                 updated_uids.append(uid)
                             elif hasattr(dataset, 'discarded_samples'):
                                 # Direct set manipulation
-                                if discard_status == 1:
+                                if discarded:
                                     dataset.discarded_samples.add(uid)
                                 else:
                                     dataset.discarded_samples.discard(uid)
                                 updated_uids.append(uid)
                             else:
-                                results['errors'][uid] = f'No discard method available in {lname}'
+                                results['errors'][str(uid)] = f'No discard method available in {lname}'
                         except Exception as e:
-                            results['errors'][uid] = str(e)
+                            results['errors'][str(uid)] = str(e)
 
                     if updated_uids:
-                        results['updated'][lname] = updated_uids
+                        results['updated'][lname] = _sanitize_for_json(updated_uids)
 
                 return results
 
@@ -599,6 +704,8 @@ def _handle_command(cmd: str) -> Any:
             if not uids or tag is None:
                 return {'ok': False, 'error': 'usage: add_tag <sample_id> <tag> [sample_id2 ...] [--loader loader_name]'}
 
+            uids = [_coerce_uid(uid) for uid in uids]
+
             try:
                 if loader_name is None:
                     try:
@@ -611,25 +718,14 @@ def _handle_command(cmd: str) -> Any:
 
                 # Get loader(s)
                 if loader_name:
-                    loaders_to_update = {loader_name: GLOBAL_LEDGER.get_dataloader(loader_name)}
+                    loader_names = [loader_name]
                 else:
-                    # Try all loaders
-                    loader_names = GLOBAL_LEDGER.list_dataloaders()
-                    loaders_to_update = {name: GLOBAL_LEDGER.get_dataloader(name) for name in loader_names}
+                    loader_names = _registered_dataloaders()
 
                 results = {'ok': True, 'updated': {}, 'errors': {}}
 
-                for lname, loader in loaders_to_update.items():
-                    # Unwrap proxy
-                    if hasattr(loader, 'get') and callable(loader.get):
-                        loader = loader.get()
-
-                    if loader is None:
-                        continue
-
-                    # Get dataset
-                    dataset = getattr(loader, 'dataset', None) if loader else None
-
+                for lname in loader_names:
+                    dataset = _tracked_dataset(GLOBAL_LEDGER.get_dataloader(lname))
                     if dataset is None:
                         continue
 
@@ -684,12 +780,12 @@ def _handle_command(cmd: str) -> Any:
                     return {
                         'ok': True,
                         'available': available,
-                        'message': 'Agent available.' if available else 'Agent not configured. Use: agent init --api-key KEY [--model MODEL] [--timeout SEC]',
+                        'message': 'Agent available.' if available else 'Agent not configured. Use: agent init [--model MODEL]',
                         'commands': {
                             'agent status': 'Check whether the agent is available',
-                            'agent init': 'Initialize OpenRouter with API key, model, and optional timeout',
-                            'agent model': 'Switch the active OpenRouter model',
-                            'agent models': 'List available OpenRouter models',
+                            'agent init': 'Initialize the OpenCode agent backend, optionally with a model',
+                            'agent model': 'Switch the active OpenCode model',
+                            'agent models': 'List available OpenCode models',
                             'agent reset': 'Clear the active agent connection',
                             'agent query': 'Execute a natural-language query through the agent',
                         },
@@ -709,8 +805,8 @@ def _handle_command(cmd: str) -> Any:
                     'ok': True,
                     'available': available,
                     'preferred_provider': getattr(agent, 'preferred_provider', None),
-                    'openrouter_model': getattr(agent, 'openrouter_model', None),
-                    'openrouter_timeout': getattr(agent, 'openrouter_request_timeout', None),
+                    'opencode_url': getattr(agent, 'opencode_url', None),
+                    'opencode_model': getattr(agent, 'opencode_model', None),
                     'message': 'Agent available. Ready to help you.' if available else 'Agent not configured. Use agent init.',
                 }
 
@@ -718,51 +814,23 @@ def _handle_command(cmd: str) -> Any:
                 if agent is None:
                     return {'ok': False, 'error': 'agent_unavailable', 'message': 'Agent backend is not attached to the CLI.'}
 
-                api_key = None
-                provider = 'openrouter'
                 model = None
-                timeout = None
 
                 i = 0
                 while i < len(agent_parts):
                     token = agent_parts[i]
-                    if token == '--api-key' and i + 1 < len(agent_parts):
-                        api_key = agent_parts[i + 1]
-                        i += 2
-                    elif token == '--provider' and i + 1 < len(agent_parts):
-                        provider = agent_parts[i + 1]
-                        i += 2
-                    elif token == '--model' and i + 1 < len(agent_parts):
+                    if token == '--model' and i + 1 < len(agent_parts):
                         model = agent_parts[i + 1]
                         i += 2
-                    elif token == '--timeout' and i + 1 < len(agent_parts):
-                        timeout = agent_parts[i + 1]
-                        i += 2
                     else:
-                        return {'ok': False, 'error': 'usage: agent init --api-key KEY [--provider openrouter] [--model MODEL] [--timeout SEC]'}
+                        return {'ok': False, 'error': 'usage: agent init [--model MODEL]'}
 
-                api_key = api_key or os.environ.get('OPENROUTER_API_KEY')
-                if not api_key:
-                    return {'ok': False, 'error': 'usage: agent init --api-key KEY [--provider openrouter] [--model MODEL] [--timeout SEC]'}
-
-                if timeout is not None:
-                    try:
-                        timeout_value = float(timeout)
-                    except ValueError:
-                        return {'ok': False, 'error': 'Invalid --timeout value'}
-                    os.environ['OPENROUTER_REQUEST_TIMEOUT'] = str(timeout_value)
-                    try:
-                        agent.openrouter_request_timeout = timeout_value
-                    except Exception:
-                        pass
-
-                success, message = agent.initialize_with_cloud_key(api_key, provider, model)
+                success, message = agent.initialize_with_cloud_key("", "opencode", model)
                 return {
                     'ok': success,
                     'message': message,
-                    'provider': provider,
-                    'model': getattr(agent, 'openrouter_model', model),
-                    'timeout': getattr(agent, 'openrouter_request_timeout', None),
+                    'provider': 'opencode',
+                    'model': getattr(agent, 'opencode_model', model),
                 }
 
             if subverb in ('model', 'set-model'):
@@ -772,7 +840,7 @@ def _handle_command(cmd: str) -> Any:
                     return {'ok': False, 'error': 'usage: agent model <MODEL_NAME>'}
                 model = ' '.join(agent_parts).strip()
                 success, message = agent.change_model(model)
-                return {'ok': success, 'message': message, 'model': getattr(agent, 'openrouter_model', model)}
+                return {'ok': success, 'message': message, 'model': getattr(agent, 'opencode_model', model)}
 
             if subverb in ('models', 'list-models'):
                 if agent is None:
@@ -818,6 +886,61 @@ def _handle_command(cmd: str) -> Any:
                 return {'ok': True, 'message': 'Agent plan generated.', 'operations': operations}
 
             return {'ok': False, 'error': 'unknown_agent_command'}
+
+        # ------------------------------------------------------------------
+        # report — generate the experiment HTML report (same as the Studio
+        # button / the agent's generate_experiment_report action)
+        # ------------------------------------------------------------------
+        if verb in ('report', 'reports'):
+            # Syntax: report [signal ...] [--signals a,b] [--distributions a,b] [--output PATH] [--no-agent]
+            signals: list = []
+            distributions: list = []
+            output_path = None
+            use_agent = True
+
+            i = 1
+            while i < len(parts):
+                token = parts[i]
+                if token == '--no-agent':
+                    use_agent = False
+                elif token in ('--signals', '--signal') and i + 1 < len(parts):
+                    signals += [s for s in parts[i + 1].split(',') if s]
+                    i += 1
+                elif token in ('--distributions', '--distribution') and i + 1 < len(parts):
+                    distributions += [s for s in parts[i + 1].split(',') if s]
+                    i += 1
+                elif token in ('--output', '-o') and i + 1 < len(parts):
+                    output_path = parts[i + 1]
+                    i += 1
+                elif token.startswith('--'):
+                    return {'ok': False, 'error': (
+                        'usage: report [signal ...] [--signals a,b] '
+                        '[--distributions a,b] [--output PATH] [--no-agent]')}
+                else:
+                    signals.append(token)
+                i += 1
+
+            try:
+                from weightslab.src import _ai_report_generation_result
+
+                result = _ai_report_generation_result(
+                    signals=signals or None, output_path=output_path,
+                    use_agent=use_agent, distributions=distributions or None,
+                )
+            except Exception as e:
+                return {'ok': False, 'error': str(e)}
+
+            has_analysis = bool(result.get('narrative'))
+            message = (f"Report written to {result['path']} "
+                       f"({result['n_signals']} signal(s)"
+                       f"{'' if has_analysis else ', no written analysis'}).")
+            return {
+                'ok': True,
+                'path': result['path'],
+                'signals': result['n_signals'],
+                'analysis': has_analysis,
+                'message': message,
+            }
 
         # Hyperparameters: list / show details and set
         if verb in ('hp', 'hyperparams'):
@@ -919,7 +1042,7 @@ def _handle_command(cmd: str) -> Any:
 
             # Default split: first registered dataloader
             if split_name is None:
-                known = GLOBAL_LEDGER.list_dataloaders()
+                known = _registered_dataloaders()
                 split_name = known[0] if known else 'test_loader'
 
             # Pause training first (same as WS trigger)

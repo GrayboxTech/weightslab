@@ -38,6 +38,10 @@ from weightslab.data.point_cloud_utils import (
     POINT_CLOUD_DETECTION_TASK,
     is_point_cloud_detection_task,
 )
+from weightslab.data.video_utils import (
+    describe_clip, is_generation_task, is_video_task,
+)
+from weightslab.data import media_store
 from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview, encode_image_to_raw_bytes
 from weightslab.data.data_utils import load_raw_image_array
 
@@ -65,6 +69,20 @@ _DEFAULT_POINT_CLOUD_CHUNK_BYTES = 1 << 20 # 1 MiB
 # doesn't produce unwieldy per-cell lists. Override with WL_SIGNAL_HISTORY_MAX_POINTS.
 #
 # Parsed defensively so a bad env var can't crash module import.
+def _is_registered(handle) -> bool:
+    """True when a ledger handle actually wraps an object.
+
+    Reading ``get_dataframe()`` & co. inserts an empty placeholder proxy, so a
+    non-``None`` handle is not proof that anything was registered — touching one
+    raises "Proxy target not set".
+    """
+    if handle is None:
+        return False
+    if Proxy.is_proxy(handle):
+        return handle.is_set()
+    return True
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -107,6 +125,72 @@ def _point_cloud_chunk_bytes() -> int:
         )
         return _DEFAULT_POINT_CLOUD_CHUNK_BYTES
     return val
+
+
+# Streamed chunk size for GetMedia. Smaller than the point-cloud chunk because
+# these messages cross grpc-web to a browser, where oversized frames are the
+# usual cause of stalled streams. Override with WL_MEDIA_CHUNK_BYTES.
+_DEFAULT_MEDIA_CHUNK_BYTES = 1 << 18 # 256 KiB
+
+
+def _media_chunk_bytes() -> int:
+    """Read WL_MEDIA_CHUNK_BYTES; non-positive/invalid falls back to the default."""
+    return _env_int("WL_MEDIA_CHUNK_BYTES", _DEFAULT_MEDIA_CHUNK_BYTES)
+
+
+# Task types whose target/prediction is never a spatial mask or box set, and so
+# must skip the RLE/detection interpretation entirely. For generative tasks the
+# target is a caption or a reference clip: RLE-encoding a [T, H, W, C] clip
+# would be both meaningless and ruinously expensive, so they route to the
+# text/scalar branch alongside classification and tabular.
+_NON_MASK_TASKS = ("classification", "tabular")
+
+
+def _is_non_mask_task(task_type) -> bool:
+    """True when labels/predictions for this task must not be read as masks."""
+    return task_type in _NON_MASK_TASKS or is_generation_task(task_type)
+
+
+def _build_media_stats(row) -> list:
+    """DataStats for every ``media:<field>`` column present on this row.
+
+    Emits stat type "media" carrying the descriptor in ``value_string`` and the
+    poster still in ``thumbnail``. Rows whose media has been evicted from the
+    store still get the descriptor, so the column keeps its shape; the frontend
+    just has no still to draw.
+
+    A module-level function, not a method: it needs no instance state, and
+    binding it to the service would force every white-box test stub of
+    _process_sample_row to grow another attribute.
+    """
+    stats = []
+    try:
+        sample_id = row.get(SampleStatsEx.SAMPLE_ID.value) if hasattr(row, "get") else None
+        if sample_id is None:
+            # sample_id is the dataframe INDEX, not a column, on real rows.
+            sample_id = getattr(row, "name", None)
+            if isinstance(sample_id, tuple):
+                sample_id = sample_id[0]
+        keys = row.keys() if hasattr(row, "keys") else []
+        for column in keys:
+            if not media_store.is_media_column(column):
+                continue
+            value = row.get(column)
+            if value is None or (isinstance(value, float) and np.isnan(value)):
+                continue
+            field = media_store.field_from_column(column)
+            stats.append(
+                create_data_stat(
+                    name=str(column),
+                    stat_type="media",
+                    shape=[1],
+                    value_string=str(value),
+                    thumbnail=media_store.get_poster(field, sample_id),
+                )
+            )
+    except Exception as exc:
+        logger.debug("media stat build failed: %r", exc)
+    return stats
 
 
 def peek_is_tabular_sample(dataset, sample_id) -> bool:
@@ -218,6 +302,49 @@ def is_copy_metadata_column_name(column_name: str) -> bool:
     # Copy columns always have the form {base}_{n}@{hash} — the numeric suffix
     # before '@' is mandatory; bare "name@hash" is not a copy column.
     return bool(re.match(r".+_\d+@.+", name))
+
+
+def build_step_snapshot_column_name(signal_name: str, experiment_hash: str, step: int) -> str:
+    """Deterministic column name for a per-sample step snapshot: ``signal@hash@step``.
+
+    Unlike ``build_metadata_copy_column_names``, this never appends a counter
+    -- the (signal, hash, step) triple already identifies the snapshot
+    uniquely, so re-highlighting the same step overwrites the same column
+    instead of piling up copies.
+    """
+    name = str(signal_name or "").strip() or "signal"
+    name = name.replace("@", "_")
+    exp_hash = str(experiment_hash or "current_experiment_hash").strip() or "current_experiment_hash"
+    return f"{name}@{exp_hash}@{int(step)}"
+
+
+def apply_step_snapshot_to_dataframe(df: pd.DataFrame, column_name: str, values_by_sample_id: dict) -> pd.DataFrame:
+    """Write a new metadata column from a ``{sample_id: value}`` map.
+
+    A sample missing from the map (outside this step's batch, or its id
+    couldn't be matched) gets NaN, the same as any other metadata field a
+    sample simply doesn't have.
+
+    Maps by the ``sample_id`` column when present rather than ``df.index``:
+    the caller runs this after ``safe_reset_index``, which promotes
+    (origin, sample_id) out of the index into plain columns and replaces the
+    index with row position. Mapping by ``df.index`` there would silently
+    pair each value with whatever row happens to sit at that position instead
+    of the row that actually owns that sample_id -- correct only by
+    coincidence on a pristine, zero-based, contiguous frame, and wrong (wrong
+    row's value, or NaN) as soon as that alignment is disturbed.
+    """
+    sample_id_col = SampleStatsEx.SAMPLE_ID.value
+    keys = df[sample_id_col] if sample_id_col in df.columns else df.index.to_series()
+    df[column_name] = keys.astype(str).map(values_by_sample_id)
+    return df
+
+
+def is_step_snapshot_column_name(column_name: str) -> bool:
+    """True for a ``signal@hash@step`` column built by build_step_snapshot_column_name."""
+    name = str(column_name or "").strip()
+    parts = name.rsplit("@", 2)
+    return len(parts) == 3 and all(parts[:2]) and parts[2].isdigit()
 
 
 def detect_bbox_format(bboxes: np.ndarray) -> str:
@@ -457,6 +584,10 @@ class DataService:
         )
 
         self._is_filtered = False # Track if the current view is filtered/modified by user
+        # Last known FULL (unfiltered) row count, cached whenever GetDataSamples
+        # serves the unfiltered view, so the subview ribbon can report an accurate
+        # "X of Y" total even while a filter is active. See GetDataSamples.
+        self._last_full_count = 0
         # logger.info("[DataService] Skipping expensive startup computations (aspect ratio, natural sort, signals).")
         # These should be triggered on-demand or run in background to avoid blocking training start.
 
@@ -487,6 +618,15 @@ class DataService:
             ).start()
         else:
             self._preview_cache_ready.set() # No preload → mark immediately ready
+
+        # Encoded-media LRU for GetMedia (insertion-ordered dict). Muxing a clip
+        # costs an ffmpeg round-trip, so opening, closing and re-opening the
+        # same sample — or paging its frames — must not re-encode.
+        # gRPC serves handlers from a thread pool, so concurrent GetMedia calls
+        # share this dict: every read/insert/evict goes through the lock, and
+        # the (expensive) encode always happens outside it.
+        self._media_cache: dict = {}
+        self._media_cache_lock = threading.Lock()
 
         logger.info("DataService initialized.")
 
@@ -575,7 +715,12 @@ class DataService:
                         member_rank = 0
 
                     _pv_np_img, _, _, pil_img = load_raw_image_array(dataset, ds_idx, rank=member_rank)
-                    if looks_like_tabular(_pv_np_img):
+                    if isinstance(_pv_np_img, str):
+                        # Text-generation sample: cache the text itself, no image.
+                        stats.append(create_data_stat(
+                            'raw_data', 'text', shape=[1], value_string=_pv_np_img))
+                        pil_img = None
+                    elif looks_like_tabular(_pv_np_img):
                         # Tabular sample: cache the feature values (lossless) as a
                         # 'vector' raw_data stat + heatmap thumbnail, not an image.
                         stats.append(build_tabular_raw_data_stat(_pv_np_img))
@@ -904,7 +1049,7 @@ class DataService:
 
     def _is_agent_available(self) -> bool:
         """
-        Check if the agent (Ollama) is available for natural language queries.
+        Check if the agent (OpenCode) is available for natural language queries.
 
         Returns:
             bool: True if agent is available, False otherwise
@@ -941,6 +1086,15 @@ class DataService:
         Uses the shared dataframe manager instead of the H5 store and avoids
         blocking on IO. Falls back to last snapshot if retrieval fails.
         """
+        # No tracked dataset (a model-, config- or logger-only integration) means
+        # there is no sample dataframe to pull. That is a normal state, not a
+        # failure, so say so plainly instead of falling into the except below with
+        # the manager proxy's "Proxy target not set".
+        if not _is_registered(self._df_manager):
+            logger.debug("[DataService] No dataframe manager registered yet "
+                         "(no dataset wrapped with flag=\"data\"); data view is empty.")
+            return pd.DataFrame()
+
         try:
             # Load dataframe from the shared dataframe manager with arrays autoloaded from h5 storage
             df = self._df_manager.get_combined_df() if self._df_manager is not None else pd.DataFrame()
@@ -1432,7 +1586,7 @@ class DataService:
 
             # ====== Step 7: Process labels ======
             t_label_convert = 0.0
-            if not skip_label_for_request and task_type not in ("classification", "tabular"):
+            if not skip_label_for_request and not _is_non_mask_task(task_type):
                 t0_gt_conv = time.time()
                 label_raw = row.get(SampleStatsEx.TARGET.value) if label is None else label
                 if label_raw is None and dataset is not None:
@@ -1706,7 +1860,7 @@ class DataService:
             if skip_prediction_for_request:
                 pred = None
 
-            if task_type not in ("classification", "tabular") and pred is not None:
+            if not _is_non_mask_task(task_type) and pred is not None:
                 t0_pmask = time.time()
 
                 # 3D (point cloud) detection predictions: same dual payload as
@@ -1889,10 +2043,22 @@ class DataService:
                 else:
                     np_img, is_volumetric, original_shape, middle_pil = None, False, [], None
 
+                # Text-generation input: the sample's payload IS the text (a
+                # prompt, a conversation turn, ...) — there is no image to
+                # encode at all, lossy or otherwise.
+                if isinstance(np_img, str):
+                    data_stats.append(
+                        create_data_stat(
+                            name='raw_data',
+                            stat_type='text',
+                            shape=[1],
+                            value_string=np_img,
+                        )
+                    )
                 # Tabular input: the model input is a 1-D feature vector, not an
                 # image. Transmit the actual values (lossless) as a 'vector'
                 # raw_data stat instead of a lossy WebP image.
-                if looks_like_tabular(np_img):
+                elif looks_like_tabular(np_img):
                     data_stats.append(build_tabular_raw_data_stat(np_img))
                 elif middle_pil is not None:
                     original_size = middle_pil.size
@@ -1993,11 +2159,34 @@ class DataService:
                         )
                     )
 
+                    # For video samples the bytes above are only the poster
+                    # frame, so advertise the clip's shape here. This lets the
+                    # grid badge the cell and the modal size its player without
+                    # anyone paying for a GetMedia round-trip first.
+                    if is_video_task(task_type):
+                        media_info = describe_clip(dataset)
+                        if media_info:
+                            data_stats.append(
+                                create_data_stat(
+                                    name='media_info',
+                                    stat_type='string',
+                                    shape=[1],
+                                    value_string=json.dumps(media_info),
+                                )
+                            )
+
                     # Eagerly release intermediate image data to reduce peak memory
                     # across concurrent thread-pool workers.
                     del raw_data_bytes, middle_pil
                     if np_img is not None:
                         del np_img
+
+            # ====== Step 9b: Media attached to metadata fields ======
+            # Any column written by wl.save_media becomes its own viewable
+            # column: the poster travels here (so the list can draw a thumbnail
+            # per row) while the payload stays in the store until the user opens
+            # it. This is what lets a generated clip sit beside its target.
+            data_stats.extend(_build_media_stats(row))
 
             # ====== Step 10: Create DataRecord ======
             total_time = time.time() - start_total
@@ -2070,6 +2259,14 @@ class DataService:
                         tag_name = col[len(f"{SampleStatsEx.TAG.value}:"):]
                         if tag_name not in categorical:
                             tags.add(tag_name)
+            # Tags declared through the UI/SDK that no sample wears yet: they have
+            # no column to be discovered from, and dropping them here is what made
+            # a freshly created tag disappear on the next refresh.
+            declared = getattr(getattr(self, "_df_manager", None), "get_declared_boolean_tags", None)
+            if callable(declared):
+                for tag_name in declared():
+                    if tag_name not in categorical:
+                        tags.add(tag_name)
         except Exception as e:
             logger.warning(f"Error collecting unique tags: {e}")
         return sorted(list(tags))
@@ -2452,6 +2649,67 @@ class DataService:
             return None
         return cm
 
+    def _agent_set_training(self, running: bool) -> str:
+        """Agent action: pause or resume the training loop.
+
+        Routed through the SAME pause controller as the UI's play/pause button
+        (``components["trainer"]``, whose ``pause()``/``resume()`` also keep the
+        ledger's ``is_training`` in step) rather than by writing the hyperparameter
+        directly: the controller is what actually blocks the training loop, and
+        the ledger flag alone is only a reflection of its state.
+
+        ``resume()`` can legitimately decline -- it refuses until every module's
+        experiment hash has been computed -- so its return value is reported
+        instead of being assumed to have worked.
+        """
+        self._ctx.ensure_components()
+        components = self._ctx.components
+        trainer = components.get("trainer")
+        if trainer is None:
+            return ("Action: no training controller is registered, so there is "
+                    "nothing to pause or resume yet.")
+        try:
+            if running:
+                resumed = trainer.resume()
+                if resumed is False:
+                    return ("Action: could not resume training yet -- the experiment "
+                            "hash is still being computed for some modules. Try again "
+                            "in a moment.")
+                state = "resumed"
+            else:
+                trainer.pause()
+                state = "paused"
+        except Exception as e:
+            return f"Action: failed to {'resume' if running else 'pause'} training: {e}"
+
+        # pause()/resume() already set the ledger flag; this mirrors what the
+        # restore path does (see _handle_data_edits) so the hyperparams dict the
+        # UI polls agrees even on a ledger that didn't take the write.
+        hp = components.get("hyperparams")
+        if hp is not None:
+            try:
+                hp["is_training"] = bool(running)
+            except Exception:
+                logger.debug("Could not mirror is_training onto hyperparams", exc_info=True)
+
+        self._log_agent_training_state(state)
+        return f"Action: training {state}."
+
+    def _log_agent_training_state(self, state: str) -> None:
+        """Audit the pause/resume the same way the RPC path does, so an
+        agent-driven pause is not invisible in the audit log."""
+        try:
+            log_audit = getattr(self, "_log_audit", None)
+            if callable(log_audit):
+                log_audit(
+                    "resume" if state == "resumed" else "pause",
+                    "success",
+                    {"trainer_state": "running" if state == "resumed" else "paused",
+                     "source": "agent"},
+                )
+        except Exception:
+            logger.debug("Could not write audit entry for agent %s", state, exc_info=True)
+
     def _agent_save_checkpoint(self, include_architecture: bool = False) -> str:
         """Agent action: dump a model-weights checkpoint (and, if requested, the
         model architecture) via the live CheckpointManager. Mirrors the manual
@@ -2814,6 +3072,67 @@ class DataService:
             text = text[:max_len] + "\n... (truncated; ask for a specific key, e.g. 'show the root log dir')"
         return f"Configuration ({hp_name}):\n{text}"
 
+    def _agent_generate_experiment_report(self, signals=None, distributions=None,
+                                           update_existing=False) -> str:
+        """Agent action (READ-ONLY): build an HTML experiment report -- signal
+        trajectory plots + health classification + dataset stats + a written
+        analysis -- saved under the experiment's ``reports/`` directory.
+
+        Thin wrapper over ``reporting.generate_report`` (the shared
+        collect -> narrate -> render path, also used by
+        ``wl.ai_report_generation`` and the CLI console's ``report`` command):
+        this resolves the live experiment's directory, logger and dataframe,
+        and injects the agent's own LLM as the narrative writer -- grounded in
+        the collected numbers, never raw history, see report_prompt.py. A
+        failed/unavailable LLM degrades to a report with no narrative rather
+        than no report at all.
+
+        ``distributions`` (optional column/signal names) adds a Distributions
+        section of value-distribution histograms -- e.g. "generate a report
+        with a histogram of train_loss" -> ``distributions=["train_loss"]``.
+
+        ``update_existing`` (default ``False``) means "update the report" /
+        "add X to the report" -- overwrite the most recently generated report
+        for this experiment instead of writing a new timestamped one. A plain
+        "generate a report" (no reference to an existing one) should leave
+        this ``False`` and always get a fresh file; see intent_prompt.py's
+        `generate_experiment_report` guidance for when the LLM should set it.
+        """
+        from weightslab.backend import ledgers
+        from weightslab import reporting
+
+        cm = self._resolve_checkpoint_manager()
+        root_log_dir = getattr(cm, "root_log_dir", None) or self._root_log_dir
+        if not root_log_dir:
+            return "Action: no experiment directory available; cannot generate a report."
+
+        try:
+            logger_q = ledgers.get_logger()
+        except Exception:
+            logger_q = None
+        if logger_q is None or not hasattr(logger_q, "get_graph_names"):
+            return "Action: no experiment logger available; cannot generate a report."
+
+        try:
+            df = self._df_manager.get_combined_df() if self._df_manager is not None else None
+        except Exception:
+            df = None
+
+        try:
+            result = reporting.generate_report(
+                root_log_dir, logger_q, df, signals=signals,
+                narrative_fn=self._agent.generate_report_narrative,
+                distributions=distributions, update_existing=bool(update_existing),
+                checkpoint_manager=cm,
+            )
+        except Exception as e:
+            return f"Action: failed to generate report: {e}"
+
+        suffix = "" if result["narrative"] else " (no written analysis -- agent LLM unavailable)"
+        verb = "updated" if result["updated_existing"] else "generated"
+        return (f"Action: {verb} experiment report ({result['n_signals']} signal(s)) "
+                f"at {result['path']}{suffix}")
+
     @staticmethod
     def _mask_from_coerced_query(df, expr: str):
         """Best-effort boolean mask for `expr` against `df`, tolerating two
@@ -2889,6 +3208,16 @@ class DataService:
                 msg = self._compute_natural_sort_stats()
                 return f"Action: {msg}"
 
+            # Pause / resume the training loop -- the same controller the UI's
+            # play/pause button drives (components["trainer"], see
+            # ExperimentService's is_training command handling).
+            elif action_name in ("pause_training", "pause", "stop_training", "halt_training"):
+                return self._agent_set_training(running=False)
+
+            elif action_name in ("resume_training", "resume", "start_training",
+                                 "continue_training", "unpause_training"):
+                return self._agent_set_training(running=True)
+
             # Save a model checkpoint (weights; + architecture when requested).
             elif action_name in ("save_checkpoint", "save_model", "checkpoint", "dump_model"):
                 include_arch = bool(params.get("architecture") or params.get("include_architecture"))
@@ -2922,6 +3251,15 @@ class DataService:
                                  "get_hyperparam", "show_hyperparam", "config_info"):
                 return self._agent_show_config(
                     param=params.get("param") or params.get("name") or params.get("key_path")
+                )
+
+            # READ-ONLY: build an HTML experiment report (signal plots + health
+            # classification + dataset stats + a written analysis).
+            elif action_name in ("generate_experiment_report", "experiment_report",
+                                 "create_report", "generate_report", "report"):
+                return self._agent_generate_experiment_report(
+                    signals=params.get("signals"), distributions=params.get("distributions"),
+                    update_existing=bool(params.get("update_existing")),
                 )
 
             return f"Action triggered: {action_name} (Not implemented)"
@@ -3692,8 +4030,16 @@ class DataService:
         # insensitive -> unambiguous substring); the per-sample table keys on the
         # stored name, so a bare query wouldn't match "signals//train-loss".
         resolved = logger_q.resolve_graph_name(signal_name) or signal_name
+        cap = max_points if max_points and max_points > 0 else SIGNAL_TRAJ_MAX_POINTS
         try:
-            rows = logger_q.query_per_sample(resolved, sample_ids=sample_ids)
+            # The primary reduction happens in SQL now: query_per_sample buckets
+            # each sample's own series to ~cap points *inside DuckDB*, so a
+            # sample trained for millions of steps never dumps its whole history
+            # into Python just to be thrown away by _downsample_curve below. A
+            # run with hundreds of millions of per-sample rows would otherwise
+            # make this on-demand plot pull the whole per-sample table.
+            rows = logger_q.query_per_sample(resolved, sample_ids=sample_ids,
+                                             max_points=cap)
         except Exception:
             logger.debug("signal trajectory query skipped for %r", signal_name, exc_info=True)
             return resolved, {}
@@ -3702,11 +4048,15 @@ class DataService:
         for sid, step, val, _ in rows:
             by_sid.setdefault(str(sid), []).append((int(step), float(val)))
 
-        cap = max_points if max_points and max_points > 0 else SIGNAL_TRAJ_MAX_POINTS
         curves = {}
         for sid, pts in by_sid.items():
             if len(pts) < SIGNAL_TRAJ_MIN_POINTS:
                 continue  # not enough history to be worth plotting
+            # SQL bucketing targets ~cap points but (like
+            # get_signal_history_downsampled) can overshoot slightly -- endpoint
+            # rows and per-bucket ties add a few extra. This trims the already-
+            # small (~cap-sized) result to exactly cap via even index selection;
+            # it is a safety net over a bounded array, not a full-series scan.
             curves[sid] = self._downsample_curve(
                 [v for _, v in sorted(pts)], max_points=cap)
         if curves:
@@ -3749,7 +4099,13 @@ class DataService:
         # response to 100s of MB and silently break the histogram fetch.
         if not requested_cols:
             _HEAVY_BLOB_COLS = {"prediction_raw"}
-            requested_cols = [c for c in df_slice.columns if c not in _HEAVY_BLOB_COLS]
+            # media:<field> columns are emitted as their own "media" stat (with a
+            # poster) by _build_media_stats; shipping them here too would add a
+            # second column showing the raw descriptor JSON as text.
+            requested_cols = [
+                c for c in df_slice.columns
+                if c not in _HEAVY_BLOB_COLS and not media_store.is_media_column(c)
+            ]
 
         metadata_cols = [
             col for col in requested_cols
@@ -3873,6 +4229,9 @@ class DataService:
             for col in df.columns:
                 name = str(col)
                 if col in _HEAVY_BLOB_COLS or col in _INTERNAL_COLS:
+                    continue
+                # Media columns are surfaced as "media" stats, not text columns.
+                if media_store.is_media_column(col):
                     continue
                 if name in seen:
                     continue
@@ -4635,7 +4994,31 @@ class DataService:
 
         try:
             # Process the request directly without deduplication logicj
-            return self._process_get_data_samples(request, context)
+            resp = self._process_get_data_samples(request, context)
+            # Stamp the server-authoritative subview state onto EVERY response so
+            # a fresh client (private window, no cached UI state) can render the
+            # "you are viewing a subview" warning ribbon + reset in both grid and
+            # list mode. Mirrors self._is_filtered, which is set on agent
+            # masks/filters/sorts and cleared on @reset.
+            try:
+                is_sub = bool(getattr(self, "_is_filtered", False))
+                resp.is_subview = is_sub
+                view_df = getattr(self, "_all_datasets_df", None)
+                if view_df is not None:
+                    resp.view_count = int(len(view_df))
+                    # Remember the full-dataset size whenever we serve the
+                    # UNfiltered view, so we can still report an accurate total
+                    # (for the "X of Y samples" ribbon) once a filter is applied
+                    # and _all_datasets_df holds only the subview. Survives across
+                    # a fresh client connecting to this same backend, since the
+                    # backend serves the full view at least once at startup.
+                    if not is_sub:
+                        self._last_full_count = int(len(view_df))
+                    full = int(getattr(self, "_last_full_count", 0) or 0)
+                    resp.total_count = full if full else int(len(view_df))
+            except Exception:
+                logger.debug("GetDataSamples: could not stamp subview state", exc_info=True)
+            return resp
 
         except Exception as e:
             logger.error("Error in GetDataSamples: %s", str(e), exc_info=True)
@@ -4772,6 +5155,205 @@ class DataService:
     # configurable via the WL_POINT_CLOUD_CHUNK_BYTES env var (default 1 MiB).
     _POINT_CLOUD_CHUNK_BYTES = _point_cloud_chunk_bytes()
 
+    # Same, for GetMedia (already-compressed MP4/WAV bytes per message).
+    _MEDIA_CHUNK_BYTES = _media_chunk_bytes()
+    # How many encoded clips to keep. Clips are megabytes each, so this only
+    # needs to cover "the sample the user is currently looking at".
+    _MEDIA_CACHE_ENTRIES = 3
+
+    def _locate_sample(self, sample_id: int, origin: str = ""):
+        """Resolve ``sample_id`` to ``(dataset, ds_index, member_rank)``.
+
+        Shared by the media streaming RPCs. When ``origin`` is empty every
+        known loader is scanned, so a sample can still be fetched when the
+        caller does not know which loader owns it.
+        Returns ``(None, None, 0)`` when the sample cannot be located.
+        """
+        origins = [origin] if origin else list(get_dataloaders().keys())
+        for candidate_origin in origins:
+            candidate = self._get_dataset(candidate_origin)
+            if candidate is None:
+                continue
+            try:
+                if hasattr(candidate, "get_physical_location"):
+                    ds_idx, member_rank = candidate.get_physical_location(sample_id)
+                else:
+                    ds_idx = candidate.get_index_from_sample_id(sample_id)
+                    member_rank = 0
+                return candidate, ds_idx, member_rank
+            except (KeyError, ValueError, AttributeError, IndexError):
+                continue
+        return None, None, 0
+
+    def GetMedia(self, request, context):
+        """Stream one sample's playable media (clip or soundtrack) in chunks.
+
+        Used by the studio's modal player for generative media samples
+        (task_type "video_generation" / "audio_generation"). The clip is muxed
+        to MP4 (H.264 + AAC) on demand, capped by request ``max_frames`` /
+        env WL_MAX_VIDEO_FRAMES, and memoized in a small LRU so scrubbing and
+        re-opening the same sample does not re-encode. The first chunk carries
+        the mime type, geometry, fps and duration so the client can size the
+        player before any bytes arrive.
+        """
+        from weightslab.data.data_utils import load_raw_video
+        from weightslab.data import video_utils as vu
+
+        try:
+            sample_id = int(str(request.sample_id))
+            kind = (request.kind or "video").strip().lower()
+            server_cap = int(os.environ.get("WL_MAX_VIDEO_FRAMES", "512"))
+            max_frames = int(request.max_frames) if request.max_frames > 0 else server_cap
+            if server_cap > 0:
+                max_frames = min(max_frames, server_cap)
+
+            # A field request serves media attached to a metadata column by
+            # wl.save_media (e.g. a generated clip); it is already encoded, so
+            # it streams straight out of the store with no re-encode.
+            field = (request.field or "").strip()
+            if field:
+                entry = media_store.get(field, sample_id)
+                if entry is None:
+                    yield pb2.MediaChunk(
+                        success=False,
+                        message=(f"No media stored for field {field!r} on sample "
+                                 f"{request.sample_id}"),
+                    )
+                    return
+                meta = entry.get("meta") or {}
+                cached = {
+                    "data": entry["data"], "mime": entry["mime"],
+                    "frame_count": int(meta.get("frame_count", 0) or 0),
+                    "fps": float(meta.get("fps", 0.0) or 0.0),
+                    "has_audio": bool(meta.get("has_audio", False)),
+                    "width": int(meta.get("width", 0) or 0),
+                    "height": int(meta.get("height", 0) or 0),
+                    "sample_rate": int(meta.get("sample_rate", 0) or 0),
+                    "duration": float(meta.get("duration_seconds", 0.0) or 0.0),
+                }
+                yield from self._stream_media(cached)
+                return
+
+            cache_key = (sample_id, request.origin or "", kind, max_frames)
+            cached = self._media_cache_get(cache_key)
+            if cached is None:
+                dataset, ds_idx, member_rank = self._locate_sample(
+                    sample_id, request.origin)
+                if dataset is None or ds_idx is None:
+                    yield pb2.MediaChunk(
+                        success=False,
+                        message=(f"Sample {request.sample_id} not found "
+                                 f"(origin={request.origin or 'any'})"),
+                    )
+                    return
+
+                frames = load_raw_video(dataset, ds_idx, rank=member_rank)
+                audio, sample_rate = vu.load_sample_audio(dataset, ds_idx)
+
+                if kind == "audio":
+                    if audio is None or not sample_rate:
+                        yield pb2.MediaChunk(
+                            success=False,
+                            message=f"Sample {request.sample_id} has no audio track",
+                        )
+                        return
+                    data = vu.encode_audio_wav(audio, sample_rate)
+                    cached = {
+                        "data": data, "mime": "audio/wav", "frame_count": 0,
+                        "fps": 0.0, "has_audio": True, "width": 0, "height": 0,
+                        "sample_rate": sample_rate,
+                        "duration": (len(audio) / float(sample_rate)) if sample_rate else 0.0,
+                    }
+                else:
+                    if frames is None:
+                        yield pb2.MediaChunk(
+                            success=False,
+                            message=f"Sample {request.sample_id} is not a video",
+                        )
+                        return
+                    # Cap long clips by uniform subsampling so the playback
+                    # still spans the whole clip rather than truncating it.
+                    if max_frames > 0 and frames.shape[0] > max_frames:
+                        picks = np.linspace(
+                            0, frames.shape[0] - 1, max_frames).astype(int)
+                        frames = frames[picks]
+                    fps = vu.get_fps(dataset)
+                    data, mime, has_audio = vu.encode_clip(
+                        frames, fps, audio=audio, sample_rate=sample_rate)
+                    if not data:
+                        yield pb2.MediaChunk(
+                            success=False,
+                            message=("Failed to encode clip — install ffmpeg "
+                                     "(pip install imageio-ffmpeg) for MP4 output"),
+                        )
+                        return
+                    cached = {
+                        "data": data, "mime": mime,
+                        "frame_count": int(frames.shape[0]), "fps": float(fps),
+                        "has_audio": has_audio,
+                        "width": int(frames.shape[2]), "height": int(frames.shape[1]),
+                        "sample_rate": int(sample_rate or 0),
+                        "duration": float(frames.shape[0]) / max(1.0, float(fps)),
+                    }
+                self._media_cache_put(cache_key, cached)
+
+            yield from self._stream_media(cached)
+        except Exception as e:
+            logger.error("Error in GetMedia: %s", str(e), exc_info=True)
+            yield pb2.MediaChunk(
+                success=False,
+                message=f"Failed to retrieve media: {str(e)}",
+            )
+
+    def _stream_media(self, payload: dict):
+        """Chunk one encoded payload out, header on the first chunk only."""
+        data = payload["data"]
+        chunk_size = self._MEDIA_CHUNK_BYTES
+        total_chunks = max(1, (len(data) + chunk_size - 1) // chunk_size)
+        for i in range(total_chunks):
+            chunk = pb2.MediaChunk(
+                success=True,
+                data=data[i * chunk_size:(i + 1) * chunk_size],
+                chunk_index=i,
+                total_chunks=total_chunks,
+            )
+            if i == 0:
+                chunk.mime_type = payload["mime"]
+                chunk.frame_count = payload["frame_count"]
+                chunk.fps = payload["fps"]
+                chunk.has_audio = payload["has_audio"]
+                chunk.width = payload["width"]
+                chunk.height = payload["height"]
+                chunk.total_bytes = len(data)
+                chunk.duration_seconds = payload["duration"]
+                chunk.sample_rate = payload["sample_rate"]
+            yield chunk
+
+    def _media_cache_get(self, key):
+        """Look one entry up in the encoded-media LRU, marking it most recent.
+
+        Returns None on a miss; the caller then encodes *outside* the lock and
+        hands the result back through :meth:`_media_cache_put`.
+        """
+        with self._media_cache_lock:
+            value = self._media_cache.pop(key, None)
+            if value is not None:
+                self._media_cache[key] = value  # re-insert = move to newest
+            return value
+
+    def _media_cache_put(self, key, value) -> None:
+        """Insert into the encoded-media LRU, evicting the oldest entries.
+
+        Encoded clips are large, so this is deliberately tiny — it exists to
+        make re-opening and scrubbing the *same* sample free, not to hold a
+        working set.
+        """
+        with self._media_cache_lock:
+            self._media_cache.pop(key, None)  # keep re-puts from double-counting
+            self._media_cache[key] = value
+            while len(self._media_cache) > self._MEDIA_CACHE_ENTRIES:
+                self._media_cache.pop(next(iter(self._media_cache)))
+
     def GetPointCloud(self, request, context):
         """Stream one sample's raw point cloud as binary float32 chunks.
 
@@ -4788,26 +5370,33 @@ class DataService:
 
         try:
             sample_id = int(str(request.sample_id))
-            origins = [request.origin] if request.origin else []
-            if not origins:
-                # No origin provided: scan known loaders for the sample.
-                origins = list(get_dataloaders().keys())
 
-            dataset, ds_idx, member_rank = None, None, 0
-            for origin in origins:
-                candidate = self._get_dataset(origin)
-                if candidate is None:
-                    continue
-                try:
-                    if hasattr(candidate, "get_physical_location"):
-                        ds_idx, member_rank = candidate.get_physical_location(sample_id)
-                    else:
-                        ds_idx = candidate.get_index_from_sample_id(sample_id)
-                        member_rank = 0
-                    dataset = candidate
-                    break
-                except (KeyError, ValueError, AttributeError, IndexError):
-                    continue
+            # A field request serves a cloud attached to a metadata column by
+            # wl.save_media (e.g. a generated/predicted cloud); it is already
+            # packed, so it streams straight out of the store with no dataset
+            # lookup at all — mirrors GetMedia's field branch.
+            field = (request.field or "").strip()
+            if field:
+                entry = media_store.get(field, sample_id)
+                if entry is None:
+                    yield pb2.PointCloudChunk(
+                        success=False,
+                        message=(f"No point cloud stored for field {field!r} on "
+                                 f"sample {request.sample_id}"),
+                    )
+                    return
+                meta = entry.get("meta") or {}
+                yield from self._stream_point_cloud(
+                    entry["data"],
+                    num_points=int(meta.get("num_points", 0) or 0),
+                    num_features=int(meta.get("num_features", 0) or 0),
+                    pc_range=meta.get("pc_range") or (),
+                    feature_names=meta.get("feature_names") or [],
+                )
+                return
+
+            dataset, ds_idx, member_rank = self._locate_sample(
+                sample_id, request.origin)
 
             if dataset is None or ds_idx is None:
                 yield pb2.PointCloudChunk(
@@ -4834,27 +5423,34 @@ class DataService:
             pc_range = get_pc_range(ds, points) or ()
             feature_names = get_point_feature_names(ds, num_features)
 
-            chunk_size = self._POINT_CLOUD_CHUNK_BYTES
-            total_chunks = max(1, (len(data) + chunk_size - 1) // chunk_size)
-            for i in range(total_chunks):
-                chunk = pb2.PointCloudChunk(
-                    success=True,
-                    data=data[i * chunk_size:(i + 1) * chunk_size],
-                    chunk_index=i,
-                    total_chunks=total_chunks,
-                )
-                if i == 0:
-                    chunk.num_points = num_points
-                    chunk.num_features = num_features
-                    chunk.pc_range.extend(float(v) for v in pc_range)
-                    chunk.feature_names.extend(feature_names)
-                yield chunk
+            yield from self._stream_point_cloud(
+                data, num_points=num_points, num_features=num_features,
+                pc_range=pc_range, feature_names=feature_names)
         except Exception as e:
             logger.error("Error in GetPointCloud: %s", str(e), exc_info=True)
             yield pb2.PointCloudChunk(
                 success=False,
                 message=f"Failed to retrieve point cloud: {str(e)}",
             )
+
+    def _stream_point_cloud(self, data: bytes, num_points: int, num_features: int,
+                            pc_range, feature_names):
+        """Chunk one packed cloud out, header on the first chunk only."""
+        chunk_size = self._POINT_CLOUD_CHUNK_BYTES
+        total_chunks = max(1, (len(data) + chunk_size - 1) // chunk_size)
+        for i in range(total_chunks):
+            chunk = pb2.PointCloudChunk(
+                success=True,
+                data=data[i * chunk_size:(i + 1) * chunk_size],
+                chunk_index=i,
+                total_chunks=total_chunks,
+            )
+            if i == 0:
+                chunk.num_points = num_points
+                chunk.num_features = num_features
+                chunk.pc_range.extend(float(v) for v in pc_range)
+                chunk.feature_names.extend(feature_names)
+            yield chunk
 
     def _set_h5_persistence_enabled(self, enabled: bool) -> bool:
         """Toggle dataframe manager H5 persistence flag when available."""
@@ -4933,6 +5529,57 @@ class DataService:
             message="Data state saved to H5 (JSON snapshot not available).",
         )
 
+    def _register_tag(self, tag_name: str):
+        """Declare a boolean tag that no sample wears yet.
+
+        The painter lets a tag be created before it is painted onto anything. Left
+        to the data alone such a tag has nowhere to live -- ``_get_unique_tags``
+        reads the tag list back out of the dataframe's ``tag:<name>`` columns -- so
+        it would vanish on the next refresh. Registering it here makes the
+        experiment, not the browser, the place a created tag lives.
+        """
+        tag_name = str(tag_name or "").strip()
+        prefix = f"{SampleStatsEx.TAG.value}:"
+        if tag_name.startswith(prefix):
+            tag_name = tag_name[len(prefix):]
+        if not tag_name:
+            return pb2.DataEditsResponse(
+                success=False,
+                message="Missing tag name to register.",
+            )
+
+        if self._df_manager is None:
+            return pb2.DataEditsResponse(
+                success=False,
+                message="Dataframe manager is not available; cannot register tag.",
+            )
+
+        try:
+            registered = self._df_manager.register_boolean_tag(tag_name)
+        except Exception as e:
+            logger.error(f"[EditDataSample] Failed to register tag '{tag_name}': {e}", exc_info=True)
+            return pb2.DataEditsResponse(
+                success=False,
+                message=f"Failed to register tag: {e}",
+            )
+
+        if not registered:
+            return pb2.DataEditsResponse(
+                success=False,
+                message=f"Tag '{tag_name}' could not be registered (it may already exist as a categorical tag).",
+            )
+
+        # Pull the new column into the service's view so the tag is reported by
+        # the very next query rather than one refresh later.
+        self._slowUpdateInternals(force=True)
+
+        self._log_audit("tag_register", "success", {"tag_name": tag_name})
+
+        return pb2.DataEditsResponse(
+            success=True,
+            message=f"Tag '{tag_name}' registered",
+        )
+
     def EditDataSample(self, request, context):
         """
         Edit sample metadata (tags and discarded).
@@ -4947,6 +5594,11 @@ class DataService:
 
         self._ctx.ensure_components()
         components = self._ctx.components
+
+        # Declaring a tag touches no sample, so it must not pause the run --
+        # handled before the pause below.
+        if request.stat_name == "__register_tag__":
+            return self._register_tag(request.string_value)
 
         # Pause training if it's currently running
         trainer = components.get("trainer")
@@ -5036,6 +5688,103 @@ class DataService:
                         message=f"Failed to copy metadata column: {str(e)}",
                     )
 
+        if request.stat_name == "__save_step_signal_snapshot__":
+            # Backs the plot's "Highlight step samples" action: the per-sample
+            # value behind a plotted point lives only in the signal logger's
+            # per_sample table, which the next step overwrites the live
+            # metadata view of -- this freezes that step's values into their
+            # own column so they survive past it, the same way cloning does
+            # for an ordinary metadata field.
+            signal_name = str(request.string_value or "").strip()
+            sample_ids = [str(sid) for sid in request.samples_ids]
+            sample_values = list(request.sample_values)
+            if not signal_name:
+                return pb2.DataEditsResponse(
+                    success=False,
+                    message="Missing signal name for step snapshot.",
+                )
+            if not sample_ids or len(sample_ids) != len(sample_values):
+                return pb2.DataEditsResponse(
+                    success=False,
+                    message="Sample ids and values must be non-empty and equal in length.",
+                )
+
+            with self._watched_lock("_lock[EditDataSample/__save_step_signal_snapshot__]"):
+                try:
+                    self._slowUpdateInternals()
+                    if self._all_datasets_df is None or self._all_datasets_df.empty:
+                        return pb2.DataEditsResponse(
+                            success=False,
+                            message="No dataframe available to save the snapshot into.",
+                        )
+
+                    # The run these values came from -- the caller knows exactly
+                    # which curve was acted on, which the "currently training"
+                    # experiment isn't guaranteed to be (e.g. a board comparing
+                    # several finished runs). Only fall back when the caller
+                    # genuinely doesn't know it.
+                    experiment_hash = str(request.experiment_hash or "").strip()
+                    if not experiment_hash:
+                        checkpoint_manager = components.get("checkpoint_manager")
+                        if checkpoint_manager is not None and hasattr(checkpoint_manager, "get_current_experiment_hash"):
+                            experiment_hash = checkpoint_manager.get_current_experiment_hash()
+                    experiment_hash = str(experiment_hash or "current_experiment_hash")
+
+                    step = int(request.float_value)
+                    column_name = build_step_snapshot_column_name(signal_name, experiment_hash, step)
+                    # NaN entries (a sample id the caller couldn't resolve a
+                    # value for) are dropped rather than written as NaN, so a
+                    # partial batch doesn't clobber a previous, more complete
+                    # snapshot under the same deterministic name.
+                    values_by_id = {
+                        sid: val for sid, val in zip(sample_ids, sample_values)
+                        if val == val  # NaN != NaN
+                    }
+                    if not values_by_id:
+                        return pb2.DataEditsResponse(
+                            success=False,
+                            message="No finite per-sample values to snapshot.",
+                        )
+
+                    self._all_datasets_df = safe_reset_index(self._all_datasets_df)
+                    self._all_datasets_df = apply_step_snapshot_to_dataframe(
+                        self._all_datasets_df, column_name, values_by_id,
+                    )
+
+                    if SampleStatsEx.ORIGIN.value not in self._all_datasets_df.columns:
+                        return pb2.DataEditsResponse(
+                            success=False,
+                            message=f"Cannot save snapshot without '{SampleStatsEx.ORIGIN.value}' column in dataframe.",
+                        )
+
+                    for origin, origin_df in self._all_datasets_df.groupby(SampleStatsEx.ORIGIN.value, sort=False):
+                        update_df = pd.DataFrame(
+                            {
+                                "sample_id": origin_df.index.astype(str),
+                                SampleStatsEx.ORIGIN.value: origin,
+                                column_name: origin_df[column_name].values,
+                            }
+                        ).set_index("sample_id")
+                        self._df_manager.upsert_df(update_df, origin=str(origin), force_flush=True)
+
+                    try:
+                        self._df_manager.flush_if_needed_nonblocking(force=True)
+                    except Exception as flush_error:
+                        logger.warning(f"[EditDataSample] Flush after step snapshot failed: {flush_error}")
+
+                    self._slowUpdateInternals(force=True)
+
+                    return pb2.DataEditsResponse(
+                        success=True,
+                        message=f"Saved '{signal_name}' step {step} snapshot as '{column_name}'.",
+                    )
+                except Exception as e:
+                    logger.error(f"[EditDataSample] Failed to save step snapshot: {e}", exc_info=True)
+                    return pb2.DataEditsResponse(
+                        success=False,
+                        message=f"Failed to save step snapshot: {str(e)}",
+                    )
+
         if request.stat_name == "__delete_metadata__":
             target_column = str(request.string_value or "").strip()
             if not target_column:
@@ -5065,7 +5814,7 @@ class DataService:
                             message=f"Cannot delete protected metadata field: {target_column}",
                         )
 
-                    if not is_copy_metadata_column_name(target_column):
+                    if not is_copy_metadata_column_name(target_column) and not is_step_snapshot_column_name(target_column):
                         return pb2.DataEditsResponse(
                             success=False,
                             message=f"Only copied metadata can be deleted: {target_column}",
@@ -5156,7 +5905,7 @@ class DataService:
         if not request.stat_name or not request.stat_name.startswith(SampleStatsEx.TAG.value) and request.stat_name not in [SampleStatsEx.DISCARDED.value]:
             return pb2.DataEditsResponse(
                 success=False,
-                message="Only 'tags', 'discarded', '__copy_metadata__', '__delete_metadata__', '__save_data_state__', '__force_h5_write_and_save__', and '__discard_by_tag__' edits are supported.",
+                message="Only 'tags', 'discarded', '__copy_metadata__', '__delete_metadata__', '__save_data_state__', '__force_h5_write_and_save__', '__register_tag__', and '__discard_by_tag__' edits are supported.",
             )
 
         # =====================================================================
@@ -5262,6 +6011,12 @@ class DataService:
                             # Delete the column from storage
                             self._df_manager.drop_column(column_name)
 
+                            # ...and from the declared-tag registry, or the tag
+                            # would be reported again on the next query.
+                            unregister = getattr(self._df_manager, "unregister_boolean_tag", None)
+                            if callable(unregister):
+                                unregister(column_name)
+
                             # Remove from in-memory dataframe if it exists
                             if self._all_datasets_df is not None:
                                 if column_name in self._all_datasets_df.columns:
@@ -5352,3 +6107,47 @@ class DataService:
                 success=False,
                 split_names=[]
             )
+
+    # Format enum value -> weightslab.export's string key.
+    _EXPORT_FORMAT_NAMES = {
+        pb2.EXPORT_FORMAT_CVAT: "cvat",
+        pb2.EXPORT_FORMAT_LABEL_STUDIO: "label_studio",
+        pb2.EXPORT_FORMAT_V7_DARWIN: "v7",
+    }
+
+    def ExportAnnotations(self, request, context):
+        """Export bounding-box/segmentation annotations to a relabeling-tool
+        format (CVAT XML, Label Studio JSON, or V7/Darwin JSON) and return the
+        encoded file as bytes for the caller (Weights Studio's Export button,
+        or the `weightslab export` CLI) to write/download.
+        """
+        fmt = self._EXPORT_FORMAT_NAMES.get(request.format)
+        if fmt is None:
+            return pb2.ExportAnnotationsResponse(
+                success=False,
+                message=f"Unknown export format value: {request.format}",
+            )
+
+        try:
+            from weightslab.export.exporter import export_annotations
+
+            payload, filename, mime_type, image_count = export_annotations(
+                fmt,
+                origin=request.origin or None,
+                use_predictions=request.include_predictions,
+                tags=list(request.tags) or None,
+            )
+            return pb2.ExportAnnotationsResponse(
+                success=True,
+                message=f"Exported {image_count} image(s) to {fmt} format.",
+                payload=payload,
+                filename=filename,
+                mime_type=mime_type,
+                image_count=image_count,
+            )
+        except ImportError as e:
+            logger.warning(f"ExportAnnotations missing optional dependency: {e}")
+            return pb2.ExportAnnotationsResponse(success=False, message=str(e))
+        except Exception as e:
+            logger.error(f"ExportAnnotations failed: {e}", exc_info=True)
+            return pb2.ExportAnnotationsResponse(success=False, message=f"Export failed: {e}")

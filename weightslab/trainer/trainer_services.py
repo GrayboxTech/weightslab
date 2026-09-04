@@ -369,6 +369,11 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         # Server-streaming RPC: delegate the generator directly.
         return self._exp_service.data_service.GetPointCloud(request, context)
 
+    def GetMedia(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.GetMedia({request})")
+        # Server-streaming RPC: delegate the generator directly.
+        return self._exp_service.data_service.GetMedia(request, context)
+
     def EditDataSample(self, request, context):
         logger.debug(f"\nExperimentServiceServicer.EditDataSample({request})")
         return self._exp_service.data_service.EditDataSample(request, context)
@@ -376,6 +381,10 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     def GetDataSplits(self, request, context):
         logger.debug(f"\nExperimentServiceServicer.GetDataSplits({request})")
         return self._exp_service.data_service.GetDataSplits(request, context)
+
+    def ExportAnnotations(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.ExportAnnotations({request})")
+        return self._exp_service.data_service.ExportAnnotations(request, context)
 
     def CheckAgentHealth(self, request, context):
         logger.debug(f"\nExperimentServiceServicer.CheckAgentHealth({request})")
@@ -427,6 +436,43 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         return self._exp_service.agent_service.ResetAgent(request, context)
 
     # -------------------------------------------------------------------------
+    # Notebook (shared in-process kernel)
+    # -------------------------------------------------------------------------
+    def RunNotebookCell(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.RunNotebookCell(cell_id={request.cell_id!r})")
+        # Server-streaming RPC: delegate the generator directly.
+        return self._exp_service.notebook_service.RunNotebookCell(request, context)
+
+    def InterruptNotebookCell(self, request, context):
+        logger.debug("\nExperimentServiceServicer.InterruptNotebookCell()")
+        return self._exp_service.notebook_service.InterruptNotebookCell(request, context)
+
+    def GetNotebook(self, request, context):
+        logger.debug("\nExperimentServiceServicer.GetNotebook()")
+        return self._exp_service.notebook_service.GetNotebook(request, context)
+
+    def SaveNotebook(self, request, context):
+        logger.debug("\nExperimentServiceServicer.SaveNotebook()")
+        return self._exp_service.notebook_service.SaveNotebook(request, context)
+
+    def GenerateNotebookCode(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.GenerateNotebookCode(prompt={request.prompt!r})")
+        return self._exp_service.notebook_service.GenerateNotebookCode(request, context)
+
+    def GetStepSamples(self, request, context):
+        """Every sample id behind one plotted step ("Highlight step samples").
+
+        This servicer delegates RPC by RPC, so an implementation that exists on
+        the domain service but has no method here never reaches it: the generated
+        base class answers UNIMPLEMENTED instead. That is what happened to this
+        one -- the studio's highlight action failed on every call and quietly
+        showed only the off-trend samples the plot already had, which reads as
+        "the whole batch is 2 samples" rather than as an error.
+        """
+        logger.debug(f"ExperimentServiceServicer.GetStepSamples({request})")
+        return self._exp_service.GetStepSamples(request, context)
+
+    # -------------------------------------------------------------------------
     # Logger data sync for WeightsStudio
     # -------------------------------------------------------------------------
     def GetLatestLoggerData(self, request, context):
@@ -462,6 +508,21 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         return self._exp_service.RestoreCheckpoint(request, context)
 
     # -------------------------------------------------------------------------
+    # Experiment runs (list / rename / notes)
+    # -------------------------------------------------------------------------
+    def ListExperimentRuns(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.ListExperimentRuns({request})")
+        return self._exp_service.ListExperimentRuns(request, context)
+
+    def RenameExperimentRun(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.RenameExperimentRun({request})")
+        return self._exp_service.RenameExperimentRun(request, context)
+
+    def SetExperimentRunNotes(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.SetExperimentRunNotes({request})")
+        return self._exp_service.SetExperimentRunNotes(request, context)
+
+    # -------------------------------------------------------------------------
     # Evaluation mode
     # -------------------------------------------------------------------------
     def TriggerEvaluation(self, request, context):
@@ -491,19 +552,44 @@ def grpc_serve(
     """Configure trainer services such as gRPC server.
     Args:
         n_workers_grpc (int): Number of threads for the gRPC server.
-        grpc_port (int): Port number for the gRPC server.
+        grpc_host (str): Interface to bind. Defaults to ``$GRPC_BACKEND_HOST``,
+            else ``0.0.0.0``.
+        grpc_port (int): Port number for the gRPC server. Defaults to
+            ``$GRPC_BACKEND_PORT``, else ``50051``.
+        force_parameters (bool): Kept for backward compatibility; explicit
+            ``grpc_host`` / ``grpc_port`` arguments now take precedence over the
+            environment either way.
     """
     import weightslab.trainer.trainer_services as trainer
     from weightslab.trainer.trainer_tools import force_kill_all_python_processes
 
-    grpc_host = os.getenv("GRPC_BACKEND_HOST", "0.0.0.0") if not force_parameters or grpc_host is None else grpc_host
-    grpc_port = int(os.getenv("GRPC_BACKEND_PORT", 50051)) if not force_parameters or grpc_port is None else grpc_port
+    # Explicit arguments win, env vars are the fallback, then the defaults.
+    # (The previous form was `env if not force_parameters or arg is None else arg`,
+    # which parses as `(not force_parameters) or (arg is None)` — so with the
+    # default force_parameters=False the env/default ALWAYS won and an explicit
+    # `wl.serve(grpc_port=...)` was silently ignored.)
+    grpc_host = grpc_host if grpc_host is not None else os.getenv("GRPC_BACKEND_HOST", "0.0.0.0")
+    grpc_port = int(grpc_port) if grpc_port is not None else int(os.getenv("GRPC_BACKEND_PORT", 50051))
     watchdog_threshold_s = float(os.getenv("GRPC_WATCHDOG_STUCK_SECONDS", "180")) # 3 minutes default stuck threshold
     watchdog_interval_s = float(os.getenv("GRPC_WATCHDOG_INTERVAL_SECONDS", "5"))
     watchdog_exit_on_stuck = str(os.getenv("GRPC_WATCHDOG_EXIT_ON_STUCK", "0")).strip().lower() in {"1", "true", "yes", "on"}
     watchdog_restart_threshold = int(os.getenv("GRPC_WATCHDOG_RESTART_THRESHOLD", "3")) # Restart after 3 unhealthy checks
     watchdog_details_limit = int(os.getenv("GRPC_WATCHDOG_INFLIGHT_DETAILS_LIMIT", "10"))
-    watchdog_disabled = str(os.getenv("WEIGHTSLAB_DISABLE_WATCHDOGS", "1")).strip().lower() in {"1", "true", "yes", "on"} # Default state: disabled
+    # Default state: ENABLED. weightslab_rlock's own acquire timeout
+    # (_GRPC_LOCK_TIMEOUT_S in global_monitoring.py) is intentionally -1
+    # (infinite) so a legitimately slow RPC holding the lock is never aborted
+    # mid-work -- the watchdog is what's actually supposed to recover a
+    # GENUINELY stuck holder (one that's dead/looping, not just busy), by
+    # interrupting it after stuck_threshold_s (180s default) so the lock is
+    # released for whoever's waiting. With watchdogs disabled, nothing ever
+    # does that: a stuck holder keeps weightslab_rlock forever, every other
+    # RPC that needs it queues behind it permanently, and (once the small
+    # gRPC thread pool's workers are all parked on that queue) unrelated
+    # RPCs that don't even touch this lock start timing out too. Still
+    # opt-out via WEIGHTSLAB_DISABLE_WATCHDOGS=1 for a debugging session held
+    # on a breakpoint past the threshold, where an async interrupt would be
+    # unwelcome instead of a recovery.
+    watchdog_disabled = str(os.getenv("WEIGHTSLAB_DISABLE_WATCHDOGS", "0")).strip().lower() in {"1", "true", "yes", "on"}
     config = get_hyperparams()
     grpc_tls_enabled = _resolve_bool_setting(config, "grpc_tls_enabled", "GRPC_TLS_ENABLED", "0")
     grpc_tls_key_file = _resolve_grpc_tls_path(
@@ -706,6 +792,16 @@ def grpc_serve(
             "[gRPC] Server started with watchdogs disabled (host=%s port=%d workers=%s)",
             grpc_host, grpc_port, n_workers_grpc,
         )
+
+    # Resource monitoring (CPU/memory/disk/network/GPU/process) runs for the
+    # whole server lifetime, independent of training steps. Enabled by
+    # default; see docs/resource_monitoring.rst for the config file and
+    # env var overrides (WEIGHTSLAB_DISABLE_RESOURCE_MONITORING, etc.).
+    try:
+        from weightslab.monitoring.resource_monitor import start_resource_monitor_from_config
+        start_resource_monitor_from_config()
+    except Exception:
+        logger.exception("[gRPC] Failed to start resource monitor")
 
 if __name__ == "__main__":
     grpc_serve()

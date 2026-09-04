@@ -110,6 +110,24 @@ body[data-theme="dark"] .wl-only-dark {
   background: rgba(120, 120, 120, 0.12);
 }
 
+/* Sandbox CTA -- warm gradient built on the #f0a500 accent used elsewhere in
+   the docs chrome, so the external "try it now" link reads as distinct from
+   the in-docs Quickstart/Examples buttons without leaving the palette. */
+.wl-hero-cta-sandbox,
+.wl-hero-cta-sandbox:link,
+.wl-hero-cta-sandbox:visited,
+.wl-hero-cta-sandbox:active,
+.wl-hero-cta-sandbox:focus {
+  background: linear-gradient(135deg, #f0a500 0%, #e2681c 100%) !important;
+  border-color: #e2871a !important;
+  color: #ffffff !important;
+}
+
+.wl-hero-cta-sandbox:hover {
+  background: linear-gradient(135deg, #ffb61f 0%, #f07a2b 100%) !important;
+  border-color: #f0951f !important;
+}
+
 .wl-version-switcher {
   display: inline-flex;
   align-items: center;
@@ -460,10 +478,14 @@ body[data-theme="dark"] .wl-only-dark {
   height: 2.7rem;
 }
 
-/* The menu: right column, flex-end aligned */
+/* The menu: right column, flex-end aligned. flex: 0 0 auto -- it always
+   renders at its natural content width and never shrinks; .wl-topnav-center
+   is the only flexible item, so it's the one that yields space, by
+   construction, instead of a shrink-weight fight between two flexible
+   siblings (see the tip-vs-menu history in .wl-topnav-center below). */
 .wl-topnav-menu {
   display: flex;
-  flex: 1;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: flex-end;
   gap: 0.4rem;
@@ -561,20 +583,39 @@ body[data-theme="dark"]  .wl-topnav-theme .wl-ti-dark  { display: inline-flex; }
 }
 
 /* ── Topnav center tip ───────────────────────────────────────────────────── */
+
+/* No longer used as a flex spacer -- .wl-topnav-center now sits directly in
+   the row and fills this role itself. Kept in the DOM (wl-topnav.js still
+   creates it) but taken out of layout. */
 .wl-topnav-left {
-  flex: 1;
+  display: none;
 }
 
+/* Two earlier attempts got this wrong by treating the tip and the menu as
+   two independently-flexible siblings (flex:1 each, or later a fixed
+   percentage) -- the browser's flex-shrink weighting favors whichever item
+   has the larger flex-basis, which was the menu, so the tip either got
+   crushed toward zero or had to be hidden by JS collision detection almost
+   constantly (the menu's 7 items routinely need more than half the bar).
+   Making .wl-topnav-menu flex: 0 0 auto (never shrinks, natural width) and
+   this the ONLY flexible item removes the fight entirely: overlap is
+   structurally impossible, and this simply gets narrower -- gracefully,
+   via overflow+ellipsis on the text inside -- as the menu needs more room. */
 .wl-topnav-center {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
   display: flex;
   align-items: center;
   gap: 0.35rem;
-  max-width: 38%;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   pointer-events: none;
+}
+
+/* wl-ribbon.js toggles this when the shrunk box gets too narrow to show
+   anything useful, rather than letting a 1-2 character sliver + ellipsis
+   render. */
+.wl-topnav-center.wl-topnav-center--collides {
+  visibility: hidden;
 }
 
 .wl-topnav-tip-icon {
@@ -610,4 +651,236 @@ body[data-theme="dark"]  .wl-topnav-theme .wl-ti-dark  { display: inline-flex; }
   align-items: center;
   gap: 0.4rem;
   margin: 0.3rem 0 1.4rem;
+}
+
+/* Diff code blocks: highlight removed/added lines clearly. */
+.highlight-diff .gd {
+  display: inline-block;
+  width: calc(100% - 3.5em);
+  vertical-align: top;
+  background: rgba(220, 38, 38, 0.16);
+  color: inherit !important;
+}
+
+.highlight-diff .gi {
+  display: inline-block;
+  width: calc(100% - 3.5em);
+  vertical-align: top;
+  background: rgba(22, 163, 74, 0.18);
+  color: inherit !important;
+}
+
+.highlight-diff .gd *,
+.highlight-diff .gi * {
+  color: inherit !important;
+}
+
+/* Color the row-number cell to match added/removed diff lines. */
+.highlight-diff .linenos:has(+ .gd) {
+  background: rgba(220, 38, 38, 0.16);
+}
+
+.highlight-diff .linenos:has(+ .gi) {
+  background: rgba(22, 163, 74, 0.18);
+}
+
+/* Python/Bash code blocks with explicit + / - row prefixes. */
+.wl-line-segment.wl-line-removed {
+  background: rgba(220, 38, 38, 0.16);
+  color: inherit !important;
+}
+
+.wl-line-segment.wl-line-added {
+  background: rgba(22, 163, 74, 0.18);
+  color: inherit !important;
+}
+
+.wl-line-segment.wl-line-removed *,
+.wl-line-segment.wl-line-added * {
+  color: inherit !important;
+}
+
+.highlight .linenos.wl-line-removed {
+  background: rgba(220, 38, 38, 0.16);
+}
+
+.highlight .linenos.wl-line-added {
+  background: rgba(22, 163, 74, 0.18);
+}
+
+/* Added (kept) lines in wl-diff-lines are emphasized without '+' prefix. */
+.wl-diff-lines .hll {
+  background: rgba(22, 163, 74, 0.18);
+  color: inherit !important;
+}
+
+.wl-diff-lines .hll * {
+  color: inherit !important;
+}
+
+.wl-diff-lines .linenos:has(+ .hll) {
+  background: rgba(22, 163, 74, 0.18);
+}
+
+/* Copy button for code blocks. */
+div.highlight {
+  position: relative;
+}
+
+.wl-copy-btn {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.45rem;
+  z-index: 5;
+  border: 1px solid var(--color-background-border);
+  border-radius: 0.35rem;
+  background: var(--color-background-secondary);
+  color: var(--color-foreground-primary);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.2rem 0.45rem;
+  cursor: pointer;
+}
+
+.wl-copy-btn:hover {
+  background: var(--color-background-hover, rgba(100, 100, 100, 0.12));
+}
+
+
+/* ── Release cluster in the topnav: What's New + version switcher ───────── */
+
+/* These two sit together at the start of the menu: one says what changed, the
+   other picks which version you are reading. Kept as a pair so neither reads
+   as just another nav link. */
+.wl-topnav-version {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 0.25rem;
+}
+
+/* Empty until versions.json resolves (and permanently, on a single-version
+   build) -- no gap should be reserved for a control that never arrives. */
+.wl-topnav-version:empty {
+  display: none;
+}
+
+.wl-topnav-whatsnew {
+  gap: 0.42rem;
+}
+
+/* Small live dot, so the shortcut reads as "there is something to see" without
+   needing a word like "NEW" that would go stale the moment nobody updates it. */
+.wl-topnav-dot {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 50%;
+  background: var(--color-brand-primary, #5f7393);
+  box-shadow: 0 0 0 0.16rem rgba(95, 115, 147, 0.18);
+  flex: none;
+}
+
+/* ── Release cards on the What's New page ───────────────────────────────── */
+.wl-release-card {
+  margin-bottom: 1.15rem;
+  border: 1px solid var(--color-background-border);
+  border-left: 3px solid var(--color-brand-primary, #5f7393);
+}
+
+.wl-release-card .wl-release-date {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--color-foreground-muted);
+}
+
+.wl-release-card .wl-release-version {
+  margin: 0.15rem 0 0.7rem;
+  font-size: 1.45rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  color: var(--color-foreground-primary);
+}
+
+.wl-release-card ul {
+  margin-bottom: 0;
+}
+
+/* ── Version switcher, header-bar variant ───────────────────────────────── */
+
+/* The in-page variant above keeps its own box; in the topnav the control has
+   to match the pill buttons beside it, so the wrapper contributes nothing and
+   the <select> carries the whole appearance. */
+.wl-version-switcher--topnav {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  gap: 0;
+}
+
+/* "Docs version" is useful to a screen reader and redundant next to a control
+   already showing "v1.5.0" -- hidden visually, kept in the accessibility tree. */
+.wl-version-switcher--topnav label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.wl-version-switcher--topnav select {
+  min-width: 0;
+  padding: 0.32rem 1.5rem 0.32rem 0.62rem;
+  border-radius: 0.45rem;
+  border: 1.5px solid var(--color-background-border);
+  background-color: transparent;
+  color: var(--color-foreground-secondary);
+  font-family: "Montserrat", sans-serif;
+  font-size: 0.865rem;
+  font-weight: 600;
+  line-height: 1.35;
+  cursor: pointer;
+  /* Chevron drawn in, since appearance:none removes the native one. Inlined as
+     a data URI: an external asset would be blocked on some doc hosts and the
+     control would silently lose its affordance. */
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%236f83a2' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.45rem center;
+  background-size: 0.7rem;
+}
+
+.wl-version-switcher--topnav select:hover {
+  color: var(--color-foreground-primary);
+  border-color: var(--color-brand-primary, #5f7393);
+}
+
+.wl-version-switcher--topnav select:focus-visible {
+  outline: 2px solid var(--color-brand-primary, #5f7393);
+  outline-offset: 1px;
+}
+
+/* The options themselves are drawn by the OS, so they need real colors --
+   transparent would render as black-on-black in a dark theme. */
+.wl-version-switcher--topnav select option {
+  background: var(--color-background-primary);
+  color: var(--color-foreground-primary);
+  font-weight: 500;
+}
+
+/* The menu now carries seven items; let it wrap rather than overflow when the
+   viewport cannot hold them on one line. */
+@media (max-width: 60em) {
+  .wl-topnav-whatsnew span:not(.wl-topnav-dot) {
+    display: none;
+  }
 }

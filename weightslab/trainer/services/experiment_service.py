@@ -17,6 +17,7 @@ from weightslab.backend.audit_logger import AuditLogger
 from weightslab.trainer.services.model_service import ModelService
 from weightslab.trainer.services.data_service import DataService
 from weightslab.trainer.services.agent_service import AgentService
+from weightslab.trainer.services.notebook_service import NotebookService
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.components.evaluation_controller import eval_controller
 
@@ -60,17 +61,106 @@ def _downsample_uniform(series, max_points: int):
     n = len(series)
     if max_points <= 0 or n <= max_points:
         return series
+    return [series[index] for index in _uniform_indices(n, max_points)]
+
+
+def _uniform_indices(n: int, max_points: int) -> list:
+    """Evenly spaced indices across ``[0, n-1]``, inclusive of both endpoints.
+
+    Factored out of ``_downsample_uniform`` so the outlier-preserving variant can
+    reuse the exact same baseline instead of re-deriving one with a fixed stride —
+    a stride starting at 0 silently drops the tail of a fixed-length run (with
+    10000 points capped to 1000 the last kept index is 9990, so the most recent
+    9 steps never reach the plot).
+    """
     if max_points == 1:
-        return [series[-1]]
-    # Evenly spaced indices across [0, n-1], inclusive of both endpoints.
+        return [n - 1]
     seen = set()
     picked = []
     for i in range(max_points):
-        idx = round(i * (n - 1) / (max_points - 1))
-        if idx not in seen:
-            seen.add(idx)
-            picked.append(series[idx])
+        index = round(i * (n - 1) / (max_points - 1))
+        if index not in seen:
+            seen.add(index)
+            picked.append(index)
     return picked
+
+
+def _outliers_pb(entry) -> list:
+    """Convert a signal entry's stored outliers into ``SignalOutlier`` messages."""
+    raw = entry.get("outliers") or []
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        sample_id = str(item.get("sample_id", ""))
+        if not sample_id:
+            continue
+        try:
+            value = float(item.get("value", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        out.append(pb2.SignalOutlier(sample_id=sample_id, value=value))
+    return out
+
+
+def _logger_point_pb(metric_name: str, entry: dict, sample_id: str = "") -> "pb2.LoggerDataPoint":
+    """Build one ``LoggerDataPoint`` from a logger history/queue entry dict.
+
+    Shared by the full-history and live-queue paths so the two can't drift on
+    which fields they forward.
+    """
+    return pb2.LoggerDataPoint(
+        metric_name=metric_name,
+        model_age=entry.get("model_age", 0),
+        metric_value=entry.get("metric_value", 0.0),
+        experiment_hash=entry.get("experiment_hash", "N.A."),
+        timestamp=int(entry.get("timestamp", time.time())),
+        sample_id=sample_id,
+        is_evaluation_marker=bool(entry.get("is_evaluation_marker", False)),
+        split_name=str(entry.get("split_name", "")),
+        evaluation_tags=[str(tag) for tag in entry.get("evaluation_tags", []) or []],
+        point_note=str(entry.get("point_note", "")),
+        audit_mode=bool(entry.get("audit_mode", False)),
+        outliers=_outliers_pb(entry),
+        outlier_count=int(entry.get("outlier_count", 0) or 0),
+        sample_count=int(entry.get("sample_count", 0) or 0),
+        trend_value=float(entry.get("trend_value") or 0.0),
+        trend_margin=float(entry.get("trend_margin") or 0.0),
+        # Explicit flags: a band of (0, 0) is indistinguishable from "no band" on
+        # the wire, since proto3 scalars have no presence.
+        has_trend_band=entry.get("trend_value") is not None and entry.get("trend_margin") is not None,
+        value_min=float(entry.get("value_min") or 0.0),
+        value_max=float(entry.get("value_max") or 0.0),
+        has_value_range=entry.get("value_min") is not None and entry.get("value_max") is not None,
+    )
+
+
+def _downsample_preserving_outliers(signal_history, max_points: int):
+    """Downsample ``signal_history`` to ~``max_points``, never dropping a spike.
+
+    Uniform sampling is fine for the smooth body of a curve but would throw away
+    exactly the anomalies the plot is meant to surface — an outlier is by nature
+    a single step, so keeping 1 point in 5 loses 4 out of 5 of them. Points
+    carrying outliers are therefore always kept, on top of the uniform baseline.
+
+    The baseline comes from ``_uniform_indices`` rather than a fixed stride so the
+    curve's endpoints survive: the most recent step is what the user is watching,
+    and a stride anchored at index 0 drops the tail of a fixed-length run.
+
+    The result can exceed ``max_points`` on a pathologically spiky run; that is
+    the intended trade (completeness of anomalies over an exact cap).
+    """
+    n = len(signal_history)
+    if max_points <= 0 or n <= max_points:
+        return signal_history
+
+    keep = set(_uniform_indices(n, max_points))
+    keep.update(
+        index for index, entry in enumerate(signal_history) if entry.get("outliers")
+    )
+    return [signal_history[index] for index in sorted(keep)]
 
 
 class ExperimentService(pb2_grpc.ExperimentServiceServicer):
@@ -90,6 +180,9 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         # in-process, reusing the same code path as the ManipulateWeights RPC.
         self.data_service.model_service = self.model_service
         self.agent_service = AgentService(self.data_service)
+        # Shared in-process notebook kernel (studio UI). Reuses the data service
+        # for the live dataframe view and the agent for "> ..." code generation.
+        self.notebook_service = NotebookService(self.data_service, root_log_dir)
         # Per-instance in-flight counter for GetLatestLoggerData
         self._logger_data_in_flight = 0
         self._logger_data_counter_lock = threading.Lock()
@@ -175,6 +268,81 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             _level("GetLatestLoggerData: done elapsed=%.1fms in_flight_peak=%d client_active=%s",
                    elapsed_ms, _in_flight, _active)
 
+    def GetStepSamples(self, request, context):
+        """Return every sample id behind one plotted step.
+
+        The plot's "Highlight step samples" action shows the whole batch for a
+        point, so the answer must come from the per-sample table rather than from
+        the outlier list recorded on the aggregated point.
+        """
+        self._ctx.ensure_components()
+        signal_logger = self._ctx.components.get("signal_logger")
+        if signal_logger is None:
+            return pb2.StepSamplesResponse(
+                success=False, message="Signal logger unavailable")
+
+        metric_name = str(request.metric_name or "")
+        if not metric_name:
+            return pb2.StepSamplesResponse(
+                success=False, message="metric_name is required")
+
+        # The UI asks by the name it displays, which is not always the name the
+        # signal is stored under (see LoggerQueue.resolve_graph_name and the
+        # GetSignalTrajectory RPC, which resolves the same way). Without this a
+        # near-miss spelling reported "no per-sample data" -- indistinguishable
+        # from a signal that genuinely logs only an aggregate.
+        resolved = metric_name
+        try:
+            resolved = signal_logger.resolve_graph_name(metric_name) or metric_name
+        except Exception:
+            logger.debug("GetStepSamples: could not resolve %r, using it as-is",
+                         metric_name, exc_info=True)
+
+        try:
+            sample_ids, total = signal_logger.get_step_sample_ids(
+                resolved,
+                str(request.experiment_hash or ""),
+                int(request.model_age),
+                int(request.max_samples or 0),
+            )
+        except Exception as exc:
+            logger.exception("GetStepSamples failed for %s", metric_name)
+            return pb2.StepSamplesResponse(success=False, message=str(exc))
+
+        if not sample_ids:
+            # Not an error: signals that log only an aggregate have no per-sample
+            # rows, and the UI needs to tell that apart from a failure.
+            return pb2.StepSamplesResponse(
+                success=True,
+                message=f"No per-sample data recorded for {resolved} at step {request.model_age}",
+                sample_ids=[], total_available=0,
+            )
+
+        # Each id's own value at this exact step -- lets the "snapshot this
+        # step" action save real per-sample numbers rather than just the ids.
+        # `""` means "any run" for get_step_sample_ids above but query_per_sample_at_step
+        # takes None for that, hence the conversion.
+        exp_hash = str(request.experiment_hash or "") or None
+        values_by_id = {}
+        try:
+            values_by_id = {
+                str(sid): float(value)
+                for sid, value in signal_logger.query_per_sample_at_step(
+                    resolved, sample_ids, int(request.model_age), exp_hash)
+            }
+        except Exception:
+            logger.debug("GetStepSamples: could not fetch per-sample values for %s",
+                         metric_name, exc_info=True)
+        sample_values = [values_by_id.get(sid, float("nan")) for sid in sample_ids]
+
+        return pb2.StepSamplesResponse(
+            success=True,
+            message=f"{len(sample_ids)} of {total} sample(s)",
+            sample_ids=sample_ids,
+            total_available=total,
+            sample_values=sample_values,
+        )
+
     def _get_latest_logger_data_impl(self, request, context):
         self._ctx.ensure_components()
         components = self._ctx.components
@@ -230,9 +398,13 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
 
             # AGGREGATE: numpy-vectorized mean per (exp_hash, step) over matching samples.
             # aggregate_per_sample_by_step uses np.unique + np.bincount — ~100× faster
-            # than a Python loop for large sample counts.
+            # than a Python loop for large sample counts. Scoped to the requested
+            # hashes (usually just the one curve break-by-slices was asked for) so
+            # this doesn't aggregate every run in the table when one run's worth is
+            # all the client wants.
+            exp_hashes = list(request.experiment_hashes) or None
             per_hash = signal_logger.aggregate_per_sample_by_step(
-                graph_name, sample_ids=sample_ids
+                graph_name, sample_ids=sample_ids, exp_hashes=exp_hashes
             )
             # Normalise None keys that come from experiments with no hash
             per_hash = {(h if h is not None else "N.A."): v for h, v in per_hash.items()}
@@ -261,19 +433,55 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
 
         # Original behavior for non-break_by_slices mode
         if request.request_full_history:
-            # Return full history
-            max_points = request.max_points or 10000
+            # NOTE: "full history" is a misnomer kept for wire compatibility --
+            # the history is NEVER read in full. It is reduced to max_points per
+            # curve inside DuckDB (see LoggerQueue.get_signal_history_downsampled),
+            # optionally scoped to the visible step range and to the signals the
+            # client actually has on screen. A hundred-million-row table must
+            # never become a hundred million Python dicts here.
+            max_points = request.max_points or 1000
+            metric_names = list(request.metric_names) or None
+            exp_hashes = list(request.experiment_hashes) or None
+            x_min = request.x_min if request.has_x_range else None
+            x_max = request.x_max if request.has_x_range else None
+
             # Cancellation guard before the potentially heavy history fetch
             if context and not context.is_active():
                 logger.debug("GetLatestLoggerData: client cancelled before get_signal_history")
                 return pb2.GetLatestLoggerDataResponse(points=[])
+
+            # Per-curve shape is cheap (one grouped aggregate) and lets the
+            # client show true extents/counts behind a decimated curve.
+            curve_index = signal_logger.get_signal_curve_index(
+                metric_names=metric_names, exp_hashes=exp_hashes)
+            curves = [
+                pb2.SignalCurveIndex(
+                    metric_name=m, experiment_hash=h,
+                    first_step=int(info["first_step"]),
+                    last_step=int(info["last_step"]),
+                    point_count=int(info["count"]),
+                    value_min=info["value_min"],
+                    value_max=info["value_max"],
+                )
+                for m, per_hash in curve_index.items()
+                for h, info in per_hash.items()
+            ]
+            if request.index_only:
+                return pb2.GetLatestLoggerDataResponse(
+                    points=[], curves=curves, applied_max_points=max_points)
+
             _th = time.monotonic()
-            history = signal_logger.get_signal_history()
+            history = signal_logger.get_signal_history_downsampled(
+                max_points=max_points, metric_names=metric_names,
+                exp_hashes=exp_hashes, x_min=x_min, x_max=x_max)
             _th_ms = (time.monotonic() - _th) * 1000
             if _th_ms > 500:
-                logger.warning("get_signal_history() took %.1fms (slow — possible lock contention)", _th_ms)
+                logger.warning(
+                    "get_signal_history_downsampled(max_points=%s, range=%s) took "
+                    "%.1fms (slow — possible lock contention)",
+                    max_points, (x_min, x_max), _th_ms)
             else:
-                logger.debug("get_signal_history() took %.1fms", _th_ms)
+                logger.debug("get_signal_history_downsampled() took %.1fms", _th_ms)
 
             # Normalize history to grouped list format:
             # - Legacy: List[signal_entry]
@@ -304,33 +512,19 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                         signal_groups[metric_name] = []
                     signal_groups[metric_name].append(s)
 
-            # Take last max_points_per_signal for each signal and downsample if needed
+            # No second downsample here. DuckDB already reduced to max_points
+            # PER CURVE; re-reducing this flattened per-metric list would cap
+            # all experiment hashes *together* — with 512 runs on one signal
+            # that left each curve roughly max_points/512 points, which is what
+            # made a many-run dashboard unreadable.
             for metric_name, signal_history in signal_groups.items():
-                # Keep deterministic order by model_age before sampling
-                signal_history = sorted(signal_history, key=lambda item: item.get("model_age", 0))
-
-                # Downsample if we have more than 1000 points
-                if len(signal_history) > max_points:
-                    # Calculate step to downsample (e.g., if 5000 points, step=5 to get ~1000)
-                    step = max(1, len(signal_history) // max_points)
-                    signal_history = signal_history[::step]
-
+                signal_history.sort(key=lambda item: (item.get("experiment_hash", ""),
+                                                      item.get("model_age", 0)))
                 for s in signal_history:
-                    points.append(
-                        pb2.LoggerDataPoint(
-                            metric_name=metric_name,
-                            model_age=s.get("model_age", 0),
-                            metric_value=s.get("metric_value", 0.0),
-                            experiment_hash=s.get("experiment_hash", "N.A."),
-                            timestamp=int(s.get("timestamp", time.time())),
-                            sample_id="", # No sample_id in aggregated mode
-                            is_evaluation_marker=bool(s.get("is_evaluation_marker", False)),
-                            split_name=str(s.get("split_name", "")),
-                            evaluation_tags=[str(tag) for tag in s.get("evaluation_tags", []) or []],
-                            point_note=str(s.get("point_note", "")),
-                            audit_mode=bool(s.get("audit_mode", False)),
-                        )
-                    )
+                    points.append(_logger_point_pb(metric_name, s))
+
+            return pb2.GetLatestLoggerDataResponse(
+                points=points, curves=curves, applied_max_points=max_points)
         else:
             # Return only queue (new data since last poll)
             if context and not context.is_active():
@@ -342,21 +536,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             if _tq_ms > 200:
                 logger.warning("get_and_clear_queue() took %.1fms (slow — possible lock contention)", _tq_ms)
             for s in queue_data:
-                points.append(
-                    pb2.LoggerDataPoint(
-                        metric_name=s.get("metric_name", ""),
-                        model_age=s.get("model_age", 0),
-                        metric_value=s.get("metric_value", 0.0),
-                        experiment_hash=s.get("experiment_hash", "N.A."),
-                        timestamp=int(s.get("timestamp", time.time())),
-                        sample_id="", # No sample_id in queue mode
-                        is_evaluation_marker=bool(s.get("is_evaluation_marker", False)),
-                        split_name=str(s.get("split_name", "")),
-                        evaluation_tags=[str(tag) for tag in s.get("evaluation_tags", []) or []],
-                        point_note=str(s.get("point_note", "")),
-                        audit_mode=bool(s.get("audit_mode", False)),
-                    )
-                )
+                points.append(_logger_point_pb(s.get("metric_name", ""), s))
 
         return pb2.GetLatestLoggerDataResponse(points=points)
 
@@ -470,6 +650,91 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                 success=False,
                 message=f"Error: {str(e)}"
             )
+
+    def _get_checkpoint_manager(self):
+        self._ctx.ensure_components()
+        checkpoint_manager = self._ctx.components.get("checkpoint_manager")
+        if checkpoint_manager is None:
+            checkpoint_manager = ledgers.get_checkpoint_manager()
+        return checkpoint_manager
+
+    def ListExperimentRuns(self, request, context):
+        """List every run (experiment hash) recorded under this root_log_dir,
+        each with its stable, renamable experiment_name and notes."""
+        try:
+            checkpoint_manager = self._get_checkpoint_manager()
+            if checkpoint_manager is None:
+                return pb2.ListExperimentRunsResponse(runs=[])
+
+            runs = [
+                pb2.ExperimentRunInfo(
+                    experiment_hash=run.get('hash', ''),
+                    experiment_name=run.get('experiment_name', '') or '',
+                    notes=run.get('notes', '') or '',
+                    created=run.get('created', '') or '',
+                    last_used=run.get('last_used', '') or '',
+                    latest_weight_step=(
+                        run.get('latest_weight_step')
+                        if run.get('latest_weight_step') is not None
+                        else -1
+                    ),
+                    is_current=bool(run.get('is_current', False)),
+                )
+                for run in checkpoint_manager.list_runs()
+            ]
+            return pb2.ListExperimentRunsResponse(runs=runs)
+        except Exception as e:
+            logger.error(f"Error listing experiment runs: {str(e)}")
+            return pb2.ListExperimentRunsResponse(runs=[])
+
+    def RenameExperimentRun(self, request, context):
+        """Rename a run's experiment_name (manifest-only; never changes its hash)."""
+        try:
+            checkpoint_manager = self._get_checkpoint_manager()
+            if checkpoint_manager is None:
+                return pb2.RenameExperimentRunResponse(
+                    success=False, message="Checkpoint manager not initialized"
+                )
+
+            success = checkpoint_manager.rename_run(request.experiment_hash, request.new_name)
+            self._log_audit(
+                "experiment_rename",
+                "success" if success else "failed",
+                {"experiment_hash": request.experiment_hash, "new_name": request.new_name},
+            )
+            return pb2.RenameExperimentRunResponse(
+                success=success,
+                message=(
+                    f"Renamed {request.experiment_hash} to '{request.new_name}'"
+                    if success
+                    else f"Failed to rename {request.experiment_hash}"
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Error renaming experiment run: {str(e)}")
+            return pb2.RenameExperimentRunResponse(success=False, message=f"Error: {str(e)}")
+
+    def SetExperimentRunNotes(self, request, context):
+        """Attach/replace a free-text note for a run (manifest-only)."""
+        try:
+            checkpoint_manager = self._get_checkpoint_manager()
+            if checkpoint_manager is None:
+                return pb2.SetExperimentRunNotesResponse(
+                    success=False, message="Checkpoint manager not initialized"
+                )
+
+            success = checkpoint_manager.set_run_notes(request.experiment_hash, request.notes)
+            return pb2.SetExperimentRunNotesResponse(
+                success=success,
+                message=(
+                    "Notes saved"
+                    if success
+                    else f"Failed to save notes for {request.experiment_hash}"
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Error setting experiment run notes: {str(e)}")
+            return pb2.SetExperimentRunNotesResponse(success=False, message=f"Error: {str(e)}")
 
     # -------------------------------------------------------------------------
     # Evaluation mode RPC handlers
