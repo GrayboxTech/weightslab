@@ -22,12 +22,6 @@ from common import (
 from torch import nn
 
 import weightslab as wl
-from weightslab.backend import ledgers
-from weightslab.components.global_monitoring import (
-    guard_testing_context,
-    guard_training_context,
-    pause_controller,
-)
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,7 +64,7 @@ def train_steps(
     for step in range(steps):
         start = (step * batch_size) % len(features)
         indices = torch.arange(start, start + batch_size) % len(features)
-        with guard_training_context:
+        with wl.guard_training_context:
             optimizer.zero_grad(set_to_none=True)
             logits = model(features[indices])
             loss = criterion(logits, labels[indices])
@@ -96,7 +90,7 @@ def active_neuron_for_batch(
 ) -> tuple[int, float]:
     """Run one ordinary step and return a neuron proven active on that batch."""
     model.train()
-    with guard_training_context:
+    with wl.guard_training_context:
         optimizer.zero_grad(set_to_none=True)
         logits = model(features[:batch_size])
         loss = nn.functional.cross_entropy(logits, labels[:batch_size])
@@ -116,7 +110,7 @@ def active_neuron_for_batch(
 @torch.no_grad()
 def evaluate(model, features: torch.Tensor, labels: torch.Tensor) -> dict[str, float]:
     model.eval()
-    with guard_testing_context:
+    with wl.guard_testing_context:
         logits = model(features)
         loss = nn.functional.cross_entropy(logits, labels)
         accuracy = (logits.argmax(dim=1) == labels).float().mean()
@@ -203,7 +197,7 @@ def main() -> int:
 
         print("[3/7] Wrapping the editable MLP head", flush=True)
         args.output_dir.mkdir(parents=True, exist_ok=True)
-        ledgers.clear_all()
+        wl.clear_all()
         wl.watch_or_edit(
             {
                 "root_log_dir": str(args.output_dir / "weightslab_state"),
@@ -232,7 +226,7 @@ def main() -> int:
         )
         # This is a finite, headless tensor experiment, so no Studio/serve flow
         # exists to resume the training guard for us.
-        pause_controller.resume(force=True)
+        wl.start_training()
 
         graph_before = model.get_model_graph(include_neurons=True)
         print("[4/7] Training the baseline head", flush=True)
@@ -369,7 +363,7 @@ def main() -> int:
         return 1
     finally:
         write_report(report_path, report)
-        ledgers.clear_all()
+        wl.clear_all()
 
 
 if __name__ == "__main__":

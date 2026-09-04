@@ -19,11 +19,6 @@ from common import (
 from torch import nn
 
 import weightslab as wl
-from weightslab.backend import ledgers
-from weightslab.components.global_monitoring import (
-    guard_training_context,
-    pause_controller,
-)
 
 
 def parse_args() -> argparse.Namespace:
@@ -93,7 +88,7 @@ def main() -> int:
             "encoder_blocks": block_count,
         }
 
-        ledgers.clear_all()
+        wl.clear_all()
         args.output_dir.mkdir(parents=True, exist_ok=True)
         wl.watch_or_edit(
             {
@@ -124,9 +119,9 @@ def main() -> int:
             torch.optim.SGD(model.parameters(), lr=1e-3),
             flag="optimizer",
         )
-        pause_controller.resume(force=True)
+        wl.start_training()
         model.freeze_neurons(head["id"], [0])
-        with guard_training_context:
+        with wl.guard_training_context:
             optimizer.zero_grad(set_to_none=True)
             loss = nn.functional.cross_entropy(model(images), labels)
             loss.backward()
@@ -151,7 +146,7 @@ def main() -> int:
         return 0 if args.allow_unsupported else 1
     finally:
         write_report(report_path, report)
-        ledgers.clear_all()
+        wl.clear_all()
 
 
 if __name__ == "__main__":
