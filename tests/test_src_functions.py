@@ -252,5 +252,23 @@ class TestSrcGpuRelease(unittest.TestCase):
         mock_ipc_collect.assert_called_once()
 
 
+class TestSrcStartTraining(unittest.TestCase):
+    def test_start_training_forces_resume_for_model_only_workflows(self):
+        with patch("weightslab.src.ledgers.list_dataloaders", return_value=[]), \
+             patch("weightslab.src._warn_on_signal_cycles"), \
+             patch("weightslab.src.pause_ctrl.resume") as mock_resume:
+            src.start_training()
+
+        mock_resume.assert_called_once_with(force=True)
+
+    def test_start_training_retains_hash_guard_when_data_is_registered(self):
+        with patch("weightslab.src.ledgers.list_dataloaders", return_value=["train"]), \
+             patch("weightslab.src._warn_on_signal_cycles"), \
+             patch("weightslab.src.pause_ctrl.resume") as mock_resume:
+            src.start_training()
+
+        mock_resume.assert_called_once_with(force=False)
+
+
 if __name__ == "__main__":
     unittest.main()

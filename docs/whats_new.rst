@@ -19,6 +19,130 @@ list lives.
    time? Start at :doc:`quickstart`.
 
 .. card::
+   :link: https://github.com/GrayboxTech/weightslab/releases/tag/v2.0.1
+   :class-card: wl-release-card
+
+   .. rst-class:: wl-release-date
+
+   August 26, 2026
+
+   .. rst-class:: wl-release-version
+
+   v2.0.1
+
+   - `PR #300 <https://github.com/GrayboxTech/weightslab/pull/300>`__
+
+     UI Fixes and upgrade docs
+
+   - `PR #299 <https://github.com/GrayboxTech/weightslab/pull/299>`__
+
+     Add Opencode binary forgotten in v2
+
+.. card::
+   :link: https://github.com/GrayboxTech/weightslab/releases/tag/v2.0.0
+   :class-card: wl-release-card
+
+   .. rst-class:: wl-release-date
+
+   August 21, 2026
+
+   .. rst-class:: wl-release-version
+
+   v2.0.0
+
+
+   **What's New ?**
+
+
+   **New Features**
+
+   - **Runs management** — unified UI to browse, organize, rename, and inspect
+     experiment runs.
+
+   - **Error bands & outlier highlighting** — curves now display statistical bands and
+     visually emphasize anomalous steps.
+
+   - **Relabelling export** — export tagged/annotated data to external tools (CVAT,
+     V7, etc.) for downstream relabelling workflows.
+
+   - **Integrated OpenCode Agent** — full agent loop support (code generation,
+     training, monitoring, report creation) directly inside WeightsLab.
+
+   - **Multimodal data support** — unified handling of images, videos, metadata, and
+     structured signals.
+
+   - **Automatic resource monitoring** — GPU/CPU/RAM usage tracked and surfaced during
+     training and agent operations.
+
+   - **Dynamic HTML report generation** — multi‑section experiment reports with plots,
+     dataset analysis, training insights, and test results.
+
+
+   **Fixes & Improvements**
+
+   - **Agent stability improvements** — better token management, reliable process
+     detaching, consistent initialization, and workspace‑safe lifecycle.
+
+   - **Plotting upgrades**
+
+   - Correct zoom behavior across large step ranges
+
+   - Bright color palettes in light mode
+
+   - Outlier visualization improvements
+
+   - Right‑click actions: BBS, highlight, hide curve, step notes, load weights, color
+     changes
+
+   - **Signal pipeline fixes** — improved decimation, preservation of special points,
+     kernel stability, and classification logic.
+
+   - **DB performance improvements** — safer handling of large histories, better
+     compaction, and reduced memory pressure.
+
+   - **Tag painter fixes** — more reliable tagging, discarding, and annotation
+     workflows.
+
+   - **Workspace & session recovery** — restart window reloads ongoing sessions,
+     history, and conversation context.
+
+   - **UI polish**
+
+   - Search bar cleanup
+
+   - Agent input bar sync
+
+   - Regex‑based research plots
+
+   - Updated sandbox modes
+
+   - Improved multimodal previews
+
+   - **Cross‑platform testing** — validated on Windows, Ubuntu, Jupyter, and Google
+     Colab.
+
+
+   **Developer Experience**
+
+   - **Unified configuration** — examples now rely on clean cfg files instead of
+     hardcoded defaults.
+
+   - **Improved CLI** — better agent commands, clearer ``/clear`` and ``/compact``,
+     stable loop behavior.
+
+   - **Changelog & documentation updates** — new “What’s New”, migration notes (W&B /
+     v51 / 3LC), updated examples, and expanded UI documentation.
+
+
+   **Experimental & Advanced**
+
+   - **Video generation workflows** — multi‑input styles, real‑world models, and
+     dataset‑driven video tasks.
+
+   - **Image generation workflows** — PyTorch‑based generation paths integrated with
+     agent prompts.
+
+.. card::
    :link: https://github.com/GrayboxTech/weightslab/releases/tag/v1.5.0
    :class-card: wl-release-card
 
@@ -63,9 +187,8 @@ list lives.
        hasn't finished indexing a fresh upload yet, or a one-off network blip during
        install/import.
 
-     **Test plan**
 
-     Cut a ``-dev`` tag and confirm …
+   **Test plan - [ ] Cut a ``-dev`` tag and confirm `test-install-fr...**
 
 .. card::
    :link: https://github.com/GrayboxTech/weightslab/releases/tag/v1.4.0
@@ -86,16 +209,10 @@ list lives.
 
      **WeightsLab v1.4.0 —**
 
-     - Release Notes ### 🚀 Highlights
-     - **Collab compatibility improvements**
-     - PyTorch notebooks support
-     - UL notebooks integrations
-     - Dependency fixes (notably around ``numpy > 2`` and ``protobuf``)
-     - **Docker dependency cleanup**
-     - Removed Docker-related dependencies/repositories
-     - Updated UI Docker bridge (including rename)
-     - Updated README and docs accordingly
-     - …
+     Release Notes
+
+
+   **🚀 Highlights - **Collab compatibility improvements** - PyTorch notebooks support - UL notebooks integrations - Dependency fixes (notably around ``numpy > 2`` and ``protobuf``) - **Docker dependency cleanup** - Removed Docker-related dependencies/repositories - Updated UI Docker bridge (including rename) - Updated README and docs accordingly - **Model...**
 
 .. card::
    :link: https://github.com/GrayboxTech/weightslab/releases/tag/v1.3.3
@@ -113,18 +230,8 @@ list lives.
 
      ## v1.3.3 Release
 
-     **Features &**
 
-     - Improvements
-     - **Collab Integration**: Bundled examples with Google Collab support, tunnel
-       serving function, and documentation links
-     - **UI Enhancements**: Fix grid size button, add restart action in dev mode,
-       Firefox input arrows fix
-     - **Sorting**: Default decreasing order (high loss values prioritized),
-       configurable sort
-     - **CLI Upgrades**: Match latest features—hyperparameter modification, experiment
-       status check, data tagging/discard, agent queries
-     - **Agent Actions**...
+   **Features & Improvements - **Collab Integration**: Bundled examples with Google Collab support, tunnel serving function, and documentation links - **UI Enhancements**: Fix grid size button, add restart action in dev mode, Firefox input arrows fix - **Sorting**: Default decreasing order (high loss values prioritized), configurable sort - **CLI Upgrades**: Match latest features—hyperparameter modification, experiment status check, data tagging/discard, agent queries - **Agent Actions**...**
 
 .. card::
    :link: https://github.com/GrayboxTech/weightslab/releases/tag/v1.3.2
@@ -198,46 +305,6 @@ list lives.
 
      v1.2.5 — 2026-06-17 Fix EMA Sync. from Ultralytics trainer and evaluate mode
 
-.. card::
-   :link: https://github.com/GrayboxTech/weightslab/releases/tag/v1.2.4
-   :class-card: wl-release-card
-
-   .. rst-class:: wl-release-date
-
-   June 17, 2026
-
-   .. rst-class:: wl-release-version
-
-   v1.2.4
-
-   - `#203 <https://github.com/GrayboxTech/weightslab/pull/203>`__
-
-     - v1.2.4 — 2026-06-17
-     - Fix the evaluation mode issue
-     - Disable the watchdog for threads by default
-     - Fix code quality issues
-
-.. card::
-   :link: https://github.com/GrayboxTech/weightslab/releases/tag/v1.2.3
-   :class-card: wl-release-card
-
-   .. rst-class:: wl-release-date
-
-   June 16, 2026
-
-   .. rst-class:: wl-release-version
-
-   v1.2.3
-
-   - `#201 <https://github.com/GrayboxTech/weightslab/pull/201>`__
-
-     - v1.2.3
-     - Fixes — 2026-06-16
-     - Fixed some bugs around metadata fetching from the UI
-     - Fixed logger spam and TLS format
-     - Add new materials in the weights lab around experiment running inside Docker
-       (DinD, and DoutD)
-
 
 ----
 
@@ -245,4 +312,4 @@ list lives.
 
 .. This page is generated. To refresh it after a release:
 ..     python docs/_scripts/update_whats_new.py
-.. Last generated: 2026-08-21
+.. Last generated: 2026-08-27

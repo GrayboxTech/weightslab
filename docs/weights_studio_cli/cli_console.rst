@@ -161,8 +161,8 @@ sub-verb reference, examples, and setup: see :doc:`../agent`.
 Experiment report
 --------------------
 
-**Syntax**: ``report [signal ...] [--signals a,b] [--output PATH] [--no-agent]``
-(alias: ``reports``)
+**Syntax**: ``report [signal ...] [--signals a,b] [--output PATH] [--no-agent]
+[--distributions a,b]`` (alias: ``reports``)
 
 Generates the HTML experiment report — signal trajectory plots, a health
 label per signal, per-sample outliers, loss-shape tag counts, dataset stats,
@@ -173,10 +173,11 @@ as the Weights Studio report button and :func:`ai_report_generation`; see
 :doc:`../experiment_reports`.
 
 With no arguments it covers every signal with at least 2 logged points. Name
-signals positionally (or with ``--signals``) to restrict it, ``--output`` to
-choose the file, and ``--no-agent`` to skip the LLM call entirely. If no LLM
-provider is configured the report is still written, just without the
-analysis (``"analysis": false`` in the reply).
+signals positionally (or with ``--signals``) to restrict it, ``--distributions``
+to add a histogram section for the named signals, ``--output`` to choose the
+file, and ``--no-agent`` to skip the LLM call entirely. If no LLM provider is
+configured the report is still written, just without the analysis
+(``"analysis": false`` in the reply).
 
 **Examples**
 
