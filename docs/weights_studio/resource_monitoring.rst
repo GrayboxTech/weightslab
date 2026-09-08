@@ -1,4 +1,4 @@
-.. _studio-resource-monitoring:
+.. _legacy-studio-resource-monitoring:
 
 Resource monitoring
 ===================
@@ -18,7 +18,7 @@ This is on by default and needs no setup.
 Finding the signals
 -------------------
 
-Type ``resource/`` into the :ref:`plots board search <studio-plots>` to pull
+Type ``resource/`` into the :ref:`plots board search <legacy-studio-plots>` to pull
 every resource curve to the front of the board. Narrow it from there —
 ``resource/gpu`` for the accelerators, ``resource/process`` for the backend
 process itself, or ``resource/gpu|resource/memory`` to compare both at once
@@ -57,7 +57,7 @@ Sampling runs on a wall-clock cadence, but each sample is logged against the
 **model's age** — the same x axis your loss and metric curves use. That is what
 makes these plots worth having in the same board rather than a separate one:
 
-- :ref:`Merge <studio-plots>` a resource curve with a training signal
+- :ref:`Merge <legacy-studio-plots>` a resource curve with a training signal
   (``resource/gpu/0/memory_allocated_percent <> train_loss``) and read them on
   one chart. A batch-size change that moved GPU memory and a loss that moved at
   the same step line up visually.

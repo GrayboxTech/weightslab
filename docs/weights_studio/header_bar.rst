@@ -1,11 +1,7 @@
-.. _studio-header:
+.. _legacy-studio-header:
 
 Header bar
 ==========
-
-.. figure:: ../_static/screenshots/header-bar.png
-   :alt: Weights Studio header bar
-   :width: 100%
 
 Left to right, the header carries every session-wide control.
 
@@ -82,9 +78,9 @@ Notebook and report buttons
 
 Two buttons sit left of the logo, both disabled until a backend connects:
 
-- **Notebook** — opens the :ref:`embedded-notebook`.
+- **Notebook** — opens the :ref:`legacy-embedded-notebook`.
 - **Report** — generates an experiment report; see
-  :ref:`studio-report-generation`.
+  :ref:`legacy-studio-report-generation`.
 
 A third indicator reports the status of a **local Jupyter** server started
 from the landing page, with a menu to reopen it.

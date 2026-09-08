@@ -1,4 +1,4 @@
-.. _studio-agent:
+.. _legacy-studio-agent:
 
 Agent
 =====
@@ -7,7 +7,7 @@ Agent
 
    The agent is **experimental**, and that applies to every surface on this
    page: the docked chat bar, the Agent Window, ``/loop`` jobs, and
-   :ref:`report generation <studio-report-generation>`. Behaviour and results
+   :ref:`report generation <legacy-studio-report-generation>`. Behaviour and results
    change between releases and vary with the connected model provider. Check
    what it did before relying on it, particularly for actions that modify data
    or the model — all of which are also available by hand through quick
@@ -103,7 +103,7 @@ The ``/init`` flow itself:
 
    On a remote machine, the browser reaches the OpenCode server **directly**
    rather than through the studio's proxy — so its port has to be reachable
-   too. See :ref:`studio-bridging`.
+   too. See :ref:`legacy-studio-bridging`.
 
 History behavior
 ----------------

@@ -1,4 +1,4 @@
-.. _studio-report-generation:
+.. _legacy-studio-report-generation:
 
 Experiment report generation
 ============================

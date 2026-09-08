@@ -1,4 +1,4 @@
-.. _embedded-notebook:
+.. _legacy-embedded-notebook:
 
 Embedded experiment notebook
 ============================

@@ -61,6 +61,15 @@ Everything the studio puts on screen, what it is for, and how to drive it —
 grouped into four parts. Each page below covers its own subsections; see the
 page itself for the details.
 
+.. toctree::
+   :maxdepth: 2
+
+   landing_page
+   agent
+   left_panel
+   main_area
+   more/index
+
 - :doc:`landing_page` — the pre-experiment surface: agent chat, local Jupyter,
   Colab quickstarts, :ref:`report generation <studio-report-generation>`, and
   the :ref:`embedded-notebook`.

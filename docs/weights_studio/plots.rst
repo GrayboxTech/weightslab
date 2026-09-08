@@ -1,4 +1,4 @@
-.. _studio-plots:
+.. _legacy-studio-plots:
 
 Plots board
 ===========
