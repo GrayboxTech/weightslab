@@ -1,3 +1,9 @@
+:orphan:
+
+.. Superseded by weights_studio_ui/ and weights_studio_cli/. Kept for
+.. direct links; labels here are prefixed `legacy-` so the live pages
+.. own the canonical `studio-*` names.
+
 Weights Studio Guide
 ====================
 
@@ -52,7 +58,7 @@ To suppress auto-opening the browser::
 
     weightslab start --no-browser
 
-.. _studio-features:
+.. _legacy-studio-features:
 
 Sections
 --------

@@ -1,3 +1,10 @@
+More
+====
+
+Everything around the studio rather than inside it: how to reach it over
+the network, how to lock it down, what you can configure, how to build and
+deploy it, and what to check when it misbehaves.
+
 Setup and access
 ~~~~~~~~~~~~~~~~
 

@@ -66,7 +66,8 @@
       title: 'Detection — YOLO',
       desc: 'Drop-in WLAwareTrainer for YOLO training. Track mAP, per-image loss, and discard low-quality samples without touching the model.',
       tags: ['detection', 'yolo', 'object detection', 'mAP'],
-      url: 'examples/ultralytics/detection.html'
+      url: 'examples/ultralytics/detection.html',
+      colab: COLAB + 'Ultralytics/wl-how-to-train-ultralytics-yolo-on-kitti-detection-dataset.ipynb'
     },
     {
       badge: 'Usecase', color: 'usecase',

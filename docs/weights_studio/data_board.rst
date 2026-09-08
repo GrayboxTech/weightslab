@@ -1,4 +1,4 @@
-.. _studio-data-board:
+.. _legacy-studio-data-board:
 
 Data exploration board
 ======================
@@ -12,7 +12,7 @@ Grid view
 
 One cell per sample: the image (with whichever overlays are enabled), the
 metadata fields you selected, and a per-sample loss trajectory sparkline.
-Click a cell to open the :ref:`studio-detail-modal`.
+Click a cell to open the :ref:`legacy-studio-detail-modal`.
 
 List view
 ---------
