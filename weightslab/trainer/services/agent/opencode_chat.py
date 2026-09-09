@@ -64,7 +64,7 @@ _MUTATING_TOOLS = ("write", "edit", "patch", "bash")
 # unset -- which is exactly the "OpenCode picks WHATEVER model happens to be
 # configured, arbitrarily" failure this method exists to avoid in the first
 # place.
-_DEFAULT_MODEL = "opencode/deepseek-v4-flash-free"
+_DEFAULT_MODEL = "opencode/big-pickle"
 
 
 class OpenCodeError(RuntimeError):
@@ -79,7 +79,7 @@ class OpenCodeChat:
 
     def __init__(self, base_url: str, model: Optional[str] = None, timeout: float = 60.0,
                  workspace_dir: Optional[str] = None, url_is_explicit: bool = True,
-                 model_is_explicit: bool = True):
+                 model_is_explicit: bool = True, seed_model: Optional[str] = None):
         self.base_url = (base_url or "http://127.0.0.1:4096").rstrip("/")
         self.model = model
         self.timeout = timeout
@@ -105,6 +105,13 @@ class OpenCodeChat:
         # (confirmed live: an image-generation preview model, useless for
         # this class's structured-JSON-reply use case).
         self.model_is_explicit = model_is_explicit
+        # A model from agent_config.yaml SEEDS the shared choice rather than
+        # pinning it: it is what to use when nobody has chosen anything yet
+        # (and it is then published, so the studio shows it), but a model
+        # picked in the UI afterwards wins. It used to pin, so a run started
+        # after picking a model in the studio quietly went back to the yaml
+        # value. OPENCODE_MODEL stays a hard pin -- automation needs one.
+        self.seed_model = (seed_model or "").strip() or None
 
     # -- wire helpers --------------------------------------------------- #
 
@@ -317,7 +324,11 @@ class OpenCodeChat:
         this class's structured-JSON intent-parsing, since it isn't a
         text-reasoning model at all).
 
+        Returns a short source label ("pinned" | "opencode-config" |
+        "config-seed" | "default" | "kept") for the banner/logs.
+
         Resolution order:
+          0. `OPENCODE_MODEL` (model_is_explicit) -- a hard pin, left alone.
           1. `GET /config`'s own `model` field -- the one the model picker
              writes back to opencode.json on every pick (opencodeClient.ts's
              setDefaultModel), so it's "whatever the user last actually
@@ -337,22 +348,116 @@ class OpenCodeChat:
         explicitly chosen, land on the known-good free model" now means
         exactly that, with no provider-reported default able to override it.
 
-        Resolved once and cached on self.model. An explicit model
-        (model_is_explicit=True) is left alone -- deliberately chosen, not
-        a placeholder to override.
+        Re-checked before every turn, NOT cached for the life of the
+        process: the studio's model picker (.wl-ag-model) writes the pick
+        into OpenCode's own config via `PUT /config`, and a backend that
+        latched onto the model it saw at startup went on answering with the
+        old one for the rest of the run. `GET /config` is a local request on
+        the same machine, so following it per turn costs nothing next to the
+        completion it precedes. A failed read keeps the current model instead
+        of falling back.
+
+        An explicit model (model_is_explicit=True -- OPENCODE_MODEL or
+        agent_config.yaml's `opencode_model`) is left alone: deliberately
+        chosen, not a placeholder to override, and NOT overridable from the
+        UI picker either.
         """
-        if self.model_is_explicit or self.model:
-            return
+        if self.model_is_explicit:
+            return "pinned"
+        model_id = self._configured_model()
+        if model_id:
+            if model_id != self.model:
+                _LOGGER.info("[OpenCodeChat] following OpenCode's configured "
+                             "model: %s (was %s)", model_id, self.model or "unset")
+            self.model = model_id
+            return "opencode-config"
+        # Nothing chosen anywhere yet -- fall back to the configured seed
+        # before the built-in default, so a project's agent_config.yaml still
+        # decides which model a fresh setup starts on.
+        if self.seed_model:
+            self.model = self.seed_model
+            return "config-seed"
+        # /config could not be read (or names no model): keep whatever was
+        # resolved on an earlier turn rather than dropping a working model for
+        # the fallback because one local request happened to fail.
+        if not self.model:
+            self.model = _DEFAULT_MODEL
+            return "default"
+        return "kept"
+
+    def publish_model(self, model: Optional[str] = None) -> bool:
+        """Write `model` (default: the resolved one) into OpenCode's own config.
+
+        Same call the studio's model picker makes, so whichever side starts
+        first leaves ONE answer behind for the other to read, and both ends of
+        a session agree on the model without talking to each other.
+
+        GLOBAL scope, with the workspace route as fallback: verified live,
+        PATCH /config echoes the value back but does NOT change what GET
+        /config then reports, while PATCH /global/config
+        (`global.config.update`) does, immediately -- and GET /config is what
+        both sides read.
+
+        Best-effort: a read-only config or an older server must never stop the
+        agent from working with the model it already resolved in-process.
+        """
+        model = model or self.model
+        if not model:
+            return False
+        for path in ("/global/config", "/config"):
+            try:
+                with self._request(path, method="PATCH", body={"model": model}) as resp:
+                    resp.read()
+            except Exception as exc:  # noqa: BLE001 -- advisory write, never fatal
+                _LOGGER.debug("[OpenCodeChat] could not publish model %s via %s: %s",
+                              model, path, exc)
+                continue
+            # Confirm against the effective config rather than trusting the
+            # echo: the workspace route answers 200 for a write it drops.
+            if self._configured_model() == model:
+                _LOGGER.info("[OpenCodeChat] published model %s to OpenCode (%s) at %s",
+                             model, path, self.base_url)
+                return True
+        _LOGGER.debug("[OpenCodeChat] model %s could not be published to %s",
+                      model, self.base_url)
+        return False
+
+    def _configured_model(self) -> Optional[str]:
+        """The model OpenCode itself reports (GET /config) -- the shared choice
+        the studio picker writes and this backend follows."""
         try:
             with self._request("/config") as resp:
                 config = json.loads(resp.read().decode("utf-8"))
-            model_id = (config or {}).get("model")
-            if isinstance(model_id, str) and "/" in model_id:
-                self.model = model_id
-                return
-        except Exception:  # noqa: BLE001 - fall through to the hardcoded default
-            pass
-        self.model = _DEFAULT_MODEL
+        except Exception:  # noqa: BLE001
+            return None
+        model_id = (config or {}).get("model")
+        return model_id if isinstance(model_id, str) and "/" in model_id else None
+
+    def resolve_model(self, publish_default: bool = False):
+        """Resolve the model NOW instead of lazily on the first turn, and say
+        where it came from: ("pinned" | "pinned-published" | "opencode-config"
+        | "default" | "default-published" | "kept").
+
+        Called at agent start-up so the banner states the model actually in
+        use -- it used to print "(server default)" whenever nothing was pinned,
+        which read as "the studio's choice was ignored" even when the first
+        turn would have picked it up correctly.
+
+        With publish_default=True, the model is also written back to
+        OpenCode's config whenever this side is the one deciding it -- a pinned
+        model (OPENCODE_MODEL), a seed from agent_config.yaml, or the built-in
+        fallback. A backend started BEFORE the studio then hands the UI the
+        model it is itself using, instead of the studio showing an unrelated
+        default while every backend query ran on the pinned one.
+
+        A model that CAME from OpenCode's config is never re-published: there
+        is nothing to write, and doing so would fight the picker.
+        """
+        self._ensure_reachable()
+        source = self._ensure_model_resolved()
+        if publish_default and source in ("default", "config-seed", "pinned")                 and self.publish_model():
+            source = f"{source}-published"
+        return self.model, source
 
     def _call(self, prompt_value):
         from langchain_core.messages import AIMessage

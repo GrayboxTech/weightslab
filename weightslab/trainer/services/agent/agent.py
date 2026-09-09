@@ -735,6 +735,12 @@ class DataManipulationAgent:
         # actually chose is exempt from that self-healing.
         self._opencode_model_explicit = "OPENCODE_MODEL" in os.environ
         self.opencode_model = os.environ.get("OPENCODE_MODEL", "")
+        # agent_config.yaml's opencode_model lands here instead of pinning the
+        # model: it SEEDS the shared choice (used when nothing has been chosen
+        # yet, then published so the studio shows it), while a model picked in
+        # the UI afterwards wins. Pinning it meant a run started after picking
+        # a model in the studio silently went back to the yaml value.
+        self._opencode_model_seed = ""
         # The same directory `weightslab start <dir>` roots the browser
         # landing-page agent at (WEIGHTSLAB_ROOT_LOG_DIR) -- the shared key
         # opencode_process.py's lock file is discovered/published under, so
@@ -759,6 +765,9 @@ class DataManipulationAgent:
             inner_pkg / "agent_config.yaml",
             Path.cwd() / "agent_config.yaml"
         ]
+        # Overwritten below only when a file is actually applied, so the banner
+        # can say "none found" instead of naming the last candidate it tried.
+        self._config_source_path = "(no agent config file found)"
         for path in config_paths:
             if not path.exists(): continue
             try:
@@ -771,28 +780,36 @@ class DataManipulationAgent:
                 if a_cfg.get("opencode_url"):
                     self._opencode_url_explicit = True
                 self.opencode_url = a_cfg.get("opencode_url", self.opencode_url)
-                if a_cfg.get("opencode_model"):
-                    self._opencode_model_explicit = True
-                self.opencode_model = a_cfg.get("opencode_model", self.opencode_model)
+                _cfg_model = str(a_cfg.get("opencode_model") or "").strip()
+                if _cfg_model:
+                    # Seed, not pin -- see _opencode_model_seed above.
+                    # OPENCODE_MODEL still wins: it is set per process, on purpose.
+                    self._opencode_model_seed = _cfg_model
 
+                self._config_source_path = path
                 _LOGGER.info(f"Applied agent configuration from {path}")
                 _LOGGER.debug(f"Agent Config: {cfg}")
                 break
             except Exception as e:
                 _LOGGER.warning(f"Error loading config from {path}: {e}")
 
-        # Log the final configuration for transparency
-        _LOGGER.info(
-            "" + "\n" +
-            "\n# #######################################" + "\n" +
-            "# #######################################" + "\n" +
-            f"Agent initialized from configuration {path}: " + "\n" +
-            f"\tOpenCode URL={self.opencode_url}, Model={self.opencode_model or '(server default)'}" + "\n" +
-            "# #######################################" + "\n" +
-            "# #######################################" + "\n" + ""
-        )
+        # The banner itself is emitted by _log_agent_configuration() AFTER
+        # _setup_providers has resolved the model, so it names the model
+        # actually in use instead of the pre-resolution blank -- which printed
+        # "(server default)" and read as "the studio's pick was ignored".
 
-    def _setup_providers(self):
+    def _setup_providers(self, requested_model: Optional[str] = None):
+        """(Re)build the OpenCode provider.
+
+        `requested_model` is a model the USER just chose (CLI `agent model`,
+        `agent init --model`, the SetAgentModel RPC). It must survive this
+        call: the shared-config re-read below exists to follow the studio's
+        picker, and it used to overwrite the very model the caller had just
+        asked for -- `agent model X` answered "Model switched to <the old
+        one>". A user choice is instead PUBLISHED to OpenCode's config, so it
+        becomes the shared choice the studio picker and every other client see
+        too, and is only pinned in-process when that write is refused.
+        """
         self.chain_opencode = None
         self._opencode_chat = None
         initialized = False
@@ -806,17 +823,84 @@ class DataManipulationAgent:
                 workspace_dir=self.opencode_workspace_dir,
                 url_is_explicit=self._opencode_url_explicit,
                 model_is_explicit=self._opencode_model_explicit,
+                seed_model=getattr(self, "_opencode_model_seed", ""),
             )
             self.chain_opencode = self._opencode_chat.as_runnable()
             initialized = True
+            # Resolve up front rather than on the first query: the model is
+            # part of what the start-up banner reports, and a backend started
+            # before the studio publishes its fallback so the UI adopts the
+            # same model (see OpenCodeChat.resolve_model).
+            try:
+                if requested_model:
+                    self._opencode_chat.model = requested_model
+                    self.opencode_model = requested_model
+                    if self._opencode_chat.publish_model(requested_model):
+                        # Shared, not pinned: later turns keep re-reading the
+                        # config, which now names this model -- so a studio
+                        # pick after this still wins, as it should.
+                        self._opencode_model_source = "user-published"
+                    else:
+                        # The config would not take it (read-only, older
+                        # server). Pin it for this process so the switch the
+                        # user asked for still takes effect.
+                        self._opencode_chat.model_is_explicit = True
+                        self._opencode_model_explicit = True
+                        self._opencode_model_source = "user-pinned"
+                else:
+                    resolved, source = self._opencode_chat.resolve_model(publish_default=True)
+                    if resolved:
+                        self.opencode_model = resolved
+                    self._opencode_model_source = source
+                # _ensure_reachable may have moved us to a discovered server.
+                self.opencode_url = self._opencode_chat.base_url
+            except Exception as exc:  # noqa: BLE001 -- server down; lazy path retries
+                _LOGGER.debug("[Agent] deferred OpenCode model resolution: %s", exc)
+                self._opencode_model_source = "unresolved"
             _LOGGER.info(
                 f"[Agent] OpenCode enabled: {self.opencode_url} "
-                f"(model={self.opencode_model or 'server default'})"
+                f"(model={self.opencode_model or 'unresolved'})"
             )
         except Exception as e:
             _LOGGER.error(f"OpenCode error: {e}")
 
+        self._log_agent_configuration()
         return initialized
+
+    # Human-readable provenance for the start-up banner.
+    _MODEL_SOURCE_LABELS = {
+        "pinned": "pinned by OPENCODE_MODEL",
+        "pinned-published": ("pinned by OPENCODE_MODEL, and published to "
+                             "OpenCode's config so the studio shows it"),
+        "config-seed": ("from agent_config.yaml's opencode_model; nothing was "
+                        "chosen in OpenCode's config yet"),
+        "config-seed-published": ("from agent_config.yaml's opencode_model "
+                                  "(nothing chosen yet), published to OpenCode's "
+                                  "config so the studio shows it"),
+        "opencode-config": "from OpenCode's config, which the studio model picker writes",
+        "default": "built-in default; OpenCode's config could not be updated",
+        "default-published": "built-in default, published to OpenCode's config for the studio",
+        "user-published": "chosen here and published to OpenCode's config",
+        "user-pinned": "chosen here; OpenCode's config refused the write, pinned to this backend",
+        "kept": "kept from this session",
+        "unresolved": "unresolved -- OpenCode unreachable, retried on the first query",
+    }
+
+    def _log_agent_configuration(self) -> None:
+        """Start-up banner: the model actually in use, and where it came from."""
+        source = getattr(self, "_opencode_model_source", "unresolved")
+        detail = self._MODEL_SOURCE_LABELS.get(source, source)
+        path = getattr(self, "_config_source_path", "(no agent config file found)")
+        _LOGGER.info(
+            "" + "\n" +
+            "\n# #######################################" + "\n" +
+            "# #######################################" + "\n" +
+            f"Agent initialized from configuration {path}: " + "\n" +
+            f"\tOpenCode URL={self.opencode_url}" + "\n" +
+            f"\tModel={self.opencode_model or '(unresolved)'} ({detail})" + "\n" +
+            "# #######################################" + "\n" +
+            "# #######################################" + "\n" + ""
+        )
 
     def is_available(self) -> bool:
         """Return True if the OpenCode provider is ready to serve requests."""
@@ -843,10 +927,12 @@ class DataManipulationAgent:
         if model is not None and not model.strip():
             return False, "Model cannot be empty."
 
-        self.opencode_model = model.strip() if model and model.strip() else self.opencode_model
+        requested = model.strip() if model and model.strip() else None
+        if requested:
+            self.opencode_model = requested
         self.preferred_provider = "opencode"
 
-        success = self._setup_providers()
+        success = self._setup_providers(requested_model=requested)
         if self.chain_opencode is None or not success:
             return False, "Could not reach the OpenCode server. Please verify OPENCODE_URL and that it is running."
 
@@ -865,11 +951,56 @@ class DataManipulationAgent:
         if not model or not model.strip():
             return False, "Model cannot be empty."
 
-        self.opencode_model = model.strip()
-        success = self._setup_providers()
+        requested = model.strip()
+        self.opencode_model = requested
+        success = self._setup_providers(requested_model=requested)
         if self.chain_opencode is None or not success:
             return False, "Could not reach the OpenCode server. Please verify OPENCODE_URL and that it is running."
-        return True, f"Model switched to {self.opencode_model}. Ready to help you."
+        if self.opencode_model != requested:
+            # Never report a switch that did not happen.
+            return False, (f"Could not switch to {requested}: the model in use is "
+                           f"{self.opencode_model}.")
+        shared = self._opencode_model_source == "user-published"
+        return True, (
+            f"Model switched to {self.opencode_model}. "
+            + ("Published to OpenCode's config, so the studio picker shows it too. "
+               if shared else
+               "OpenCode's config would not take it, so it is pinned to this backend only. ")
+            + "Ready to help you."
+        )
+
+    def current_model(self) -> Optional[str]:
+        """The model the NEXT query will actually use.
+
+        `self.opencode_model` is only what was resolved when the provider was
+        last (re)initialised. A model chosen in the studio afterwards lands in
+        OpenCode's config, which every turn re-reads -- so reporting the
+        snapshot made a UI pick look ignored (`agent status` kept naming the
+        old model while queries already used the new one). Re-resolves here:
+        one local GET, on a command the user typed.
+        """
+        chat = self._opencode_chat
+        if chat is None:
+            return self.opencode_model or None
+        try:
+            model, source = chat.resolve_model()
+            if model:
+                self.opencode_model = model
+            self._opencode_model_source = source
+            if source == "pinned":
+                # A pin wins for this backend, so say plainly when the studio
+                # is showing something else -- otherwise the two surfaces
+                # disagree with no explanation anywhere.
+                chosen = chat._configured_model()
+                if chosen and chosen != self.opencode_model:
+                    _LOGGER.warning(
+                        "[Agent] OpenCode's configured model is %s (the studio's "
+                        "pick), but this backend is pinned to %s by "
+                        "OPENCODE_MODEL. Unset that variable to follow the "
+                        "picker.", chosen, self.opencode_model)
+        except Exception as exc:  # noqa: BLE001 -- report the last known model
+            _LOGGER.debug("[Agent] current_model could not re-resolve: %s", exc)
+        return self.opencode_model or None
 
     def _opencode_base_url(self) -> str:
         """Same self-heal `OpenCodeChat._ensure_reachable` gives every chat

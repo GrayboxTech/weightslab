@@ -245,16 +245,71 @@ If ``OPENCODE_URL`` is set and reachable, the UI server adopts it directly
 instead of spawning a child; the backend SDK agent reads the same variable
 (``agent.py``'s ``_load_config``) — set it once and both sides talk to the one
 server, so a model you authenticate once is available everywhere.
-``OPENCODE_MODEL`` (or ``agent_config.yaml``'s ``agent.opencode_model``) picks
-the default model for the backend SDK agent, as an OpenCode
-``providerID/modelID`` string (e.g. ``openrouter/anthropic/claude-opus-4.6``).
-Leave it unset to fall back, in order, to: whatever model OpenCode's own
-``/config`` was last set to (the model picker's own pick, e.g. from the
-Weights Studio landing page), and otherwise the free-tier
-``opencode/deepseek-v4-flash-free`` automatically — a provider's own
-reported default used to be tried in between, but that could itself be an
-arbitrary, non-text-reasoning model whenever any provider had credentials
-configured, so it no longer overrides this.
+Which model gets used, and how the two sides agree
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**OpenCode's own config is the shared source of truth.** ``GET /config``'s
+``model`` field is read by every client of that server -- the Weights Studio
+model picker, the OpenCode CLI, and the backend SDK agent -- and written by the
+picker (``PATCH /global/config``, ``global.config.update``) whenever you choose
+a model. Neither side has to know the other exists; they meet in that one
+field.
+
+The backend SDK agent resolves its model in this order:
+
+1. ``OPENCODE_MODEL`` -- a hard **pin**, for automation that must force a
+   model regardless of what anyone picked. The UI picker cannot move it; if the
+   two disagree, ``agent status`` logs which model this backend is actually
+   using and why.
+2. ``GET /config``'s ``model`` -- the shared choice above. Re-read **before
+   every turn**, so switching models in the UI mid-run takes effect
+   immediately; it is not latched at start-up.
+3. ``agent_config.yaml``'s ``agent.opencode_model`` -- a **seed**, not a pin:
+   which model to use when nothing has been chosen in OpenCode's config yet.
+   It is published there, so the studio shows it; once anything is chosen (in
+   the UI, by ``agent model``, or by the CLI), that choice wins and the seed
+   goes unused. Pinning the yaml value instead meant a run started *after*
+   picking a model in the studio quietly went back to the yaml one.
+4. ``opencode/big-pickle``, the built-in fallback, when nothing above resolves.
+   Published too, so a backend that started before the UI hands the picker the
+   model it is itself using.
+
+A provider's own reported default used to be tried just before the built-in
+fallback, but that could itself be an arbitrary, non-text-reasoning model
+whenever any provider had credentials configured, so it no longer overrides it.
+
+Whoever chooses last wins, and both surfaces follow: picking in the UI moves
+the backend's next query, and ``agent model <providerID/modelID>`` from the
+CLI moves the UI's picker.
+
+Either start order therefore converges on one model:
+
+.. code-block:: text
+
+   Studio first:      pick a model in the UI  ->  PATCH /global/config
+                      ->  weightslab start    ->  GET /config  ->  same model
+                      (agent_config.yaml's seed is not used: something was chosen)
+
+   weightslab first:  nothing chosen anywhere
+                      ->  agent_config.yaml's opencode_model, else
+                          opencode/big-pickle -- and published
+                      ->  Studio starts       ->  GET /config  ->  same model
+
+The start-up banner states which of the three won:
+
+.. code-block:: text
+
+   Agent initialized from configuration C:\Users\you\wl_agent_config.yaml:
+        OpenCode URL=http://127.0.0.1:4096
+        Model=opencode/muse-spark-1.3-contributor-free (from agent_config.yaml's opencode_model (nothing chosen yet), published to OpenCode's config so the studio shows it)
+
+Other values in the parentheses are ``pinned by OPENCODE_MODEL``, ``from
+OpenCode's config, which the studio model picker writes``, ``chosen here and
+published to OpenCode's config`` (an ``agent model`` switch), ``built-in
+default, published to OpenCode's config for the studio``, and ``unresolved --
+OpenCode unreachable, retried on the first query``. It used to print ``Model=(server default)`` whenever nothing was
+pinned, which read as "my pick was ignored" even when the first query would
+have picked it up.
 
 Credentials and provider setup live in OpenCode itself, never in WeightsLab:
 
@@ -369,7 +424,8 @@ configure ``agent_config.yaml`` and/or environment variables.
    # 3. agent_config.yaml
    agent:
      opencode_url: http://127.0.0.1:4096
-     opencode_model: ""   # empty = use OpenCode's own configured default
+     opencode_model: ""   # empty = follow OpenCode's config (the UI picker);
+                          # a value here PINS the model instead
 
 Then check it from the CLI:
 
