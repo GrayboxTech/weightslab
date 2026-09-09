@@ -83,7 +83,14 @@ def _resolve_configured_root_log_dir(configured):
          actually points at an existing directory; if it's set but stale/typo'd,
          a warning is logged and resolution falls through to (3) instead of
          silently training into a directory the UI never established.
-      3. A throwaway ``tempfile.mkdtemp()`` — last resort so serving never fails
+      3. The directory the most recent ``weightslab start`` established, read
+         from the marker file (see weightslab.utils.active_experiment). The
+         environment variable only reaches processes started FROM that same
+         shell; a training run launched in another terminal (or by
+         ``weightslab start example``) is a different process tree and used to
+         fall straight through to (4), landing in %TEMP% while the UI listed an
+         empty reports/ from the directory it had established.
+      4. A throwaway ``tempfile.mkdtemp()`` — last resort so serving never fails
          for lack of a directory.
     """
     if configured:
@@ -94,9 +101,28 @@ def _resolve_configured_root_log_dir(configured):
             return env_dir
         logger.warning(
             f"WEIGHTSLAB_ROOT_LOG_DIR is set to '{env_dir}', but that directory "
-            "does not exist. Falling back to a temporary directory instead."
+            "does not exist. Falling back to the experiment directory recorded "
+            "by `weightslab start`, then to a temporary directory."
         )
-    return tempfile.mkdtemp()
+    try:
+        from weightslab.utils.active_experiment import ui_experiment_dir
+        marker_dir = ui_experiment_dir()
+    except Exception:  # noqa: BLE001 -- never block serving on the marker
+        marker_dir = None
+    if marker_dir:
+        logger.info(
+            "Using the experiment directory established by `weightslab start`: "
+            "%s (no root_log_dir configured and WEIGHTSLAB_ROOT_LOG_DIR is not "
+            "set in this process).", marker_dir)
+        return marker_dir
+    tmp_dir = tempfile.mkdtemp()
+    logger.warning(
+        "No root_log_dir configured, no WEIGHTSLAB_ROOT_LOG_DIR, and no "
+        "experiment directory recorded by `weightslab start` — this run will "
+        "write to the throwaway directory %s. Checkpoints, reports and the "
+        "notebook will NOT be where the UI looks for them. Start the UI first "
+        "(`weightslab start`), or set root_log_dir in your config.", tmp_dir)
+    return tmp_dir
 
 
 # Get global dataframe proxy (auto-updated when ledger registers real manager)
@@ -1470,6 +1496,14 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 # _resolve_configured_root_log_dir for the resolution order).
                 _hp_cfg['root_log_dir'] = _resolve_configured_root_log_dir(
                     _hp_cfg.get('root_log_dir'))
+                # Publish where training ACTUALLY writes, so the UI lists this
+                # run's reports/notebooks even when the two resolved their
+                # directory by different routes.
+                try:
+                    from weightslab.utils.active_experiment import record_backend_experiment
+                    record_backend_experiment(_hp_cfg['root_log_dir'])
+                except Exception as _exc:  # noqa: BLE001 -- advisory only
+                    logger.debug("Could not record the backend experiment dir: %s", _exc)
                 try:
                     # Check if a checkpoint manager is already registered in ledger
                     try:

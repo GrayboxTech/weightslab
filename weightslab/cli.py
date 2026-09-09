@@ -623,6 +623,31 @@ def example_start(args):
     try:
         env = os.environ.copy()
         env['WEIGHTSLAB_SUPPRESS_BANNER'] = '1'
+        # `weightslab start` runs in its own terminal, so its
+        # WEIGHTSLAB_ROOT_LOG_DIR export never reaches this process -- read the
+        # directory it recorded and hand it to the example, so the run lands in
+        # the experiment the UI is showing instead of a throwaway temp dir.
+        # Anything already set in this shell wins: an explicit choice by the
+        # user must not be overridden by the last UI launch.
+        if not (env.get('WEIGHTSLAB_ROOT_LOG_DIR') or '').strip():
+            try:
+                from weightslab.utils.active_experiment import ui_experiment_dir
+                adopted = ui_experiment_dir()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"Could not read the active experiment directory: {exc}")
+                adopted = None
+            if adopted:
+                env['WEIGHTSLAB_ROOT_LOG_DIR'] = adopted
+                logger.info(f" Using the experiment directory from `weightslab start`: {adopted}")
+            else:
+                logger.warning(
+                    " No experiment directory found (no WEIGHTSLAB_ROOT_LOG_DIR here and no "
+                    "`weightslab start` on record) — this example will write to a temporary "
+                    "directory, and the UI will not find its reports or notebook. Start the UI "
+                    "first with `weightslab start`, or set WEIGHTSLAB_ROOT_LOG_DIR."
+                )
+        else:
+            logger.info(f" Using WEIGHTSLAB_ROOT_LOG_DIR from this shell: {env['WEIGHTSLAB_ROOT_LOG_DIR']}")
         result = subprocess.run([sys.executable, str(main_py)], cwd=str(example_dir), env=env)
     except KeyboardInterrupt:
         logger.info("Example stopped.")
@@ -892,6 +917,17 @@ def ui_start_native(args):
     experiment_dir = _resolve_experiment_dir(getattr(args, "experiment_dir", None))
     os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = str(experiment_dir)
     os.environ["WL_LAST_EXPERIMENT_DIR"] = str(experiment_dir)
+    # An environment variable reaches only THIS process and its children. A
+    # training run started from another terminal is a different process tree,
+    # so also record the directory in the marker file every later weightslab
+    # process reads (weightslab.utils.active_experiment) -- without it, such a
+    # run fell through to a throwaway %TEMP% directory while this UI listed an
+    # empty reports/ from the directory established here.
+    try:
+        from weightslab.utils.active_experiment import record_ui_experiment
+        record_ui_experiment(experiment_dir)
+    except Exception as exc:  # noqa: BLE001 -- advisory record, never fatal
+        logger.debug(f"Could not record the active experiment directory: {exc}")
     _print_experiment_guidance(experiment_dir)
 
     # If the agent has been initialized, provision OpenCode up front (in the

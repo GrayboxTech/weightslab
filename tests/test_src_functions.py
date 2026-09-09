@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 import unittest
 import numpy as np
@@ -6,6 +7,7 @@ import pandas as pd
 import torch as th
 
 import weightslab.src as src
+from weightslab.utils import active_experiment
 
 from unittest.mock import MagicMock, patch
 
@@ -13,16 +15,27 @@ from weightslab.data.sample_stats import SampleStatsEx
 
 
 class TestResolveConfiguredRootLogDir(unittest.TestCase):
-    """root_log_dir resolution: explicit config > WEIGHTSLAB_ROOT_LOG_DIR > temp dir."""
+    """root_log_dir resolution: explicit config > WEIGHTSLAB_ROOT_LOG_DIR >
+    the directory `weightslab start` recorded > temp dir."""
 
     def setUp(self):
         self._env_prev = os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR")
+        # The marker is a real per-user file; point it at a scratch directory so
+        # these tests never read (or write) the developer's own active run.
+        self._state_prev = os.environ.get("WEIGHTSLAB_STATE_DIR")
+        self._state_dir = tempfile.mkdtemp()
+        os.environ["WEIGHTSLAB_STATE_DIR"] = self._state_dir
 
     def tearDown(self):
         if self._env_prev is None:
             os.environ.pop("WEIGHTSLAB_ROOT_LOG_DIR", None)
         else:
             os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = self._env_prev
+        if self._state_prev is None:
+            os.environ.pop("WEIGHTSLAB_STATE_DIR", None)
+        else:
+            os.environ["WEIGHTSLAB_STATE_DIR"] = self._state_prev
+        shutil.rmtree(self._state_dir, ignore_errors=True)
 
     def test_explicit_config_value_wins_over_env(self):
         os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = "/env/dir"
@@ -48,6 +61,89 @@ class TestResolveConfiguredRootLogDir(unittest.TestCase):
         with patch("weightslab.src.tempfile.mkdtemp", return_value="/tmp/generated") as mk:
             self.assertEqual(src._resolve_configured_root_log_dir(None), "/tmp/generated")
             mk.assert_called_once()
+
+    def test_adopts_the_directory_weightslab_start_recorded(self):
+        # `weightslab start` exports WEIGHTSLAB_ROOT_LOG_DIR into its OWN
+        # process only. A training run in another terminal never saw it and
+        # went to a temp dir, so the UI listed an empty reports/ while the run
+        # wrote elsewhere. The recorded directory closes that gap.
+        os.environ.pop("WEIGHTSLAB_ROOT_LOG_DIR", None)
+        with tempfile.TemporaryDirectory() as ui_dir:
+            active_experiment.record_ui_experiment(ui_dir)
+            with patch("weightslab.src.tempfile.mkdtemp", return_value="/tmp/generated") as mk:
+                resolved = src._resolve_configured_root_log_dir(None)
+            mk.assert_not_called()
+            self.assertEqual(os.path.realpath(resolved), os.path.realpath(ui_dir))
+
+    def test_explicit_config_still_wins_over_the_recorded_directory(self):
+        with tempfile.TemporaryDirectory() as ui_dir:
+            active_experiment.record_ui_experiment(ui_dir)
+            self.assertEqual(src._resolve_configured_root_log_dir("/explicit/dir"), "/explicit/dir")
+
+    def test_env_wins_over_the_recorded_directory(self):
+        with tempfile.TemporaryDirectory() as ui_dir, tempfile.TemporaryDirectory() as env_dir:
+            active_experiment.record_ui_experiment(ui_dir)
+            os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = env_dir
+            self.assertEqual(src._resolve_configured_root_log_dir(None), env_dir)
+
+    def test_a_recorded_directory_that_no_longer_exists_is_ignored(self):
+        os.environ.pop("WEIGHTSLAB_ROOT_LOG_DIR", None)
+        gone = tempfile.mkdtemp()
+        active_experiment.record_ui_experiment(gone)
+        shutil.rmtree(gone, ignore_errors=True)
+        with patch("weightslab.src.tempfile.mkdtemp", return_value="/tmp/generated") as mk:
+            self.assertEqual(src._resolve_configured_root_log_dir(None), "/tmp/generated")
+        mk.assert_called_once()
+
+
+class TestActiveExperimentMarker(unittest.TestCase):
+    """The cross-process handoff itself."""
+
+    def setUp(self):
+        self._state_prev = os.environ.get("WEIGHTSLAB_STATE_DIR")
+        self._state_dir = tempfile.mkdtemp()
+        os.environ["WEIGHTSLAB_STATE_DIR"] = self._state_dir
+
+    def tearDown(self):
+        if self._state_prev is None:
+            os.environ.pop("WEIGHTSLAB_STATE_DIR", None)
+        else:
+            os.environ["WEIGHTSLAB_STATE_DIR"] = self._state_prev
+        shutil.rmtree(self._state_dir, ignore_errors=True)
+
+    def test_ui_and_backend_entries_do_not_clobber_each_other(self):
+        with tempfile.TemporaryDirectory() as ui_dir, tempfile.TemporaryDirectory() as be_dir:
+            active_experiment.record_ui_experiment(ui_dir, ui_port=8080)
+            active_experiment.record_backend_experiment(be_dir)
+            self.assertEqual(os.path.realpath(active_experiment.ui_experiment_dir()),
+                             os.path.realpath(ui_dir))
+            self.assertEqual(os.path.realpath(active_experiment.backend_experiment_dir()),
+                             os.path.realpath(be_dir))
+            self.assertEqual(active_experiment.read_state()["ui"]["ui_port"], 8080)
+
+    def test_missing_marker_reads_as_nothing_recorded(self):
+        self.assertEqual(active_experiment.read_state(), {})
+        self.assertIsNone(active_experiment.ui_experiment_dir())
+        self.assertIsNone(active_experiment.backend_experiment_dir())
+
+    def test_a_corrupt_marker_is_ignored_rather_than_raising(self):
+        path = active_experiment.state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json", encoding="utf-8")
+        self.assertEqual(active_experiment.read_state(), {})
+        self.assertIsNone(active_experiment.ui_experiment_dir())
+
+    def test_recording_nothing_is_a_no_op(self):
+        self.assertIsNone(active_experiment.record_ui_experiment(""))
+        self.assertEqual(active_experiment.read_state(), {})
+
+    def test_clear_removes_the_marker(self):
+        with tempfile.TemporaryDirectory() as ui_dir:
+            active_experiment.record_ui_experiment(ui_dir)
+            self.assertTrue(active_experiment.state_path().exists())
+            active_experiment.clear()
+            self.assertFalse(active_experiment.state_path().exists())
+            active_experiment.clear()  # idempotent
 
 
 class TestSrcTagAndDiscardFunctions(unittest.TestCase):
