@@ -120,10 +120,10 @@ the global ledger (`weightslab/weightslab/backend/ledgers.py`,
 
 Conventions that matter for correctness:
 
-- Wrap the train step in `with guard_training_context:` and eval in
-  `with guard_testing_context:` (from
-  `weightslab.components.global_monitoring`). This is how pause/resume and
-  train/test separation work — **skip it and pause/resume or stats will misbehave.**
+- Wrap the train step in `with wl.guard_training_context:` and eval in
+  `with wl.guard_testing_context:` (both re-exported at package level; no deep
+  import). This is how pause/resume and train/test separation work — **skip it
+  and pause/resume or stats will misbehave.**
 - Use `model.get_age()` (steps actually trained; survives checkpoint reloads),
   not the raw loop counter.
 - `task_type` on the dataset/model selects rendering: `classification`,

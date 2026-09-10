@@ -68,7 +68,7 @@ contains two groups of sample IDs.
 
 .. code-block:: python
 
-   with guard_training_context:
+   with wl.guard_training_context:
        [img1, img2], [uid1, uid2], [label1, label2], _ = next(train_loader)
        cls_out, recon_out = model([img1, img2])
 

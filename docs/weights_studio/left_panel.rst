@@ -1,4 +1,4 @@
-.. _studio-left-panel:
+.. _legacy-studio-left-panel:
 
 Left panel
 ==========

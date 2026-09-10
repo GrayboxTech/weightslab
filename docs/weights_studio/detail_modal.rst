@@ -1,4 +1,4 @@
-.. _studio-detail-modal:
+.. _legacy-studio-detail-modal:
 
 Image detail modal
 ==================

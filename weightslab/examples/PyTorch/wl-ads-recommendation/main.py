@@ -29,10 +29,6 @@ import torch.optim as optim
 from torchmetrics.classification import Accuracy
 
 import weightslab as wl
-from weightslab.components.global_monitoring import (
-    guard_training_context,
-    guard_testing_context,
-)
 
 from utils.data import AdsCTRDataset, CATEGORICAL_CARDINALITIES, NUM_NUMERIC
 from utils.model import WideDeepCTR
@@ -47,7 +43,7 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 def train(loader, model, optimizer, criterion_mlt, device):
     """Single training step using the tracked dataloader + watched loss."""
-    with guard_training_context:
+    with wl.guard_training_context:
         (inputs, ids, labels) = next(loader)
         inputs = inputs.to(device)
         labels = labels.to(device)
@@ -75,7 +71,7 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
     losses = torch.tensor(0.0, device=device)
 
     for (inputs, ids, labels) in loader:
-        with guard_testing_context:
+        with wl.guard_testing_context:
             inputs = inputs.to(device)
             labels = labels.to(device)
 

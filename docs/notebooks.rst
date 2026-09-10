@@ -1,8 +1,3 @@
-External Integrations
-=====================
-
-This page groups integration modes outside the core training-loop docs.
-
 Notebook integrations
 ---------------------
 

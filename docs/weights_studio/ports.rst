@@ -1,4 +1,4 @@
-.. _studio-ports:
+.. _legacy-studio-ports:
 
 Ports and remote access
 =======================
@@ -48,9 +48,9 @@ one it actually used::
    directly. If the browser is not on the same machine as ``weightslab start``
    — a remote workstation, a cloud VM, VS Code Remote, a container — both must
    be reachable from wherever the browser is running. See
-   :ref:`studio-bridging` below.
+   :ref:`legacy-studio-bridging` below.
 
-.. _studio-bridging:
+.. _legacy-studio-bridging:
 
 Bridging to a remote server
 ---------------------------
@@ -221,9 +221,9 @@ Troubleshooting a bridged session
        tab points at addresses that no longer exist. Pin ``--port`` and
        ``WEIGHTSLAB_OPENCODE_PORT``, then reload the page.
    * - Only the **backend** is remote, and you run the UI locally
-     - You don't need this section — use :ref:`studio-tunnel` instead.
+     - You don't need this section — use :ref:`legacy-studio-tunnel` instead.
 
-.. _studio-tunnel:
+.. _legacy-studio-tunnel:
 
 Tunnel (remote backend)
 -----------------------
@@ -232,7 +232,7 @@ Tunnel (remote backend)
 
    This forwards a remote **gRPC backend** to a local ``weightslab start``.
    If instead the whole studio runs remotely and only your *browser* is local,
-   see :ref:`studio-bridging`.
+   see :ref:`legacy-studio-bridging`.
 
 If your backend is running remotely (e.g. a Colab notebook behind ``ngrok`` or
 ``bore``), forward it to a local port with::

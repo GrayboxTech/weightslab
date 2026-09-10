@@ -1,4 +1,4 @@
-.. _studio-landing-page:
+.. _legacy-studio-landing-page:
 
 Landing page
 ============
@@ -19,7 +19,7 @@ screen:
   server and opens it. The button also **lists notebooks already in this
   run's** ``notebooks/`` **directory**, so you can reopen one instead of
   creating a new one each time. Distinct from the in-app
-  :ref:`embedded-notebook`, which requires a live backend.
+  :ref:`legacy-embedded-notebook`, which requires a live backend.
 - **Colab quickstarts** — per-topic notebooks that install WeightsLab from
   PyPI and call ``wl.serve(serving_bore=True)``, so a Colab runtime can drive
   a studio on your machine.

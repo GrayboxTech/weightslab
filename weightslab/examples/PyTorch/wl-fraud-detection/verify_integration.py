@@ -37,10 +37,6 @@ from torchmetrics.classification import Precision, Recall, F1Score, AveragePreci
 sys.path.insert(0, os.path.dirname(__file__))
 
 import weightslab as wl  # noqa: E402
-from weightslab.components.global_monitoring import (  # noqa: E402
-    guard_training_context,
-    guard_testing_context,
-)
 
 from utils.data import (  # noqa: E402
     FEATURE_NAMES,
@@ -140,7 +136,7 @@ def main() -> int:
 
     # ---- drive a few real training steps ----
     for _ in range(120):
-        with guard_training_context:
+        with wl.guard_training_context:
             inputs, ids, labels = next(train_loader)
             optimizer.zero_grad()
             out = model(inputs)
@@ -151,7 +147,7 @@ def main() -> int:
 
     # ---- one full eval pass (populates test loss/prediction per sample) ----
     for inputs, ids, labels in test_loader:
-        with guard_testing_context:
+        with wl.guard_testing_context:
             out = model(inputs)
             preds = out.argmax(dim=1, keepdim=True)
             probs = torch.softmax(out, dim=1)[:, 1]

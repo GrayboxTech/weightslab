@@ -2,7 +2,7 @@ Weights Studio UI
 =================
 
 Weights Studio is the visual frontend for WeightsLab experiments.
-It ships **inside the Python package** — no Docker, no Envoy.
+It ships **inside the Python package**.
 Running ``weightslab start`` serves the bundled SPA and proxies gRPC-Web to
 your training backend, all from one Python process.
 
@@ -57,15 +57,12 @@ To suppress auto-opening the browser::
 Sections
 --------
 
-Feature reference
-~~~~~~~~~~~~~~~~~
-
 Everything the studio puts on screen, what it is for, and how to drive it —
 grouped into four parts. Each page below covers its own subsections; see the
 page itself for the details.
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
 
    landing_page
    agent
@@ -84,3 +81,4 @@ page itself for the details.
 - :doc:`main_area` — the Plots Board (search, merged curves, error bands,
   right-click actions, resource monitoring) and the Data Board (grid/list
   modes, quick filters, selection, tagging, the detail modal).
+- :doc:`more/index` — More to know.

@@ -32,6 +32,23 @@ _LAZY_EXPORTS = {
     "seed_everything": (".utils.tools", "seed_everything"),
     "guard_training_context": (".components.global_monitoring", "guard_training_context"),
     "guard_testing_context": (".components.global_monitoring", "guard_testing_context"),
+    # Ultralytics integration, so a YOLO script needs no deep import:
+    #   YOLO(...).train(trainer=wl.WLAwareTrainer, ...)
+    # Laziness is load-bearing here rather than just a speed-up: `ultralytics` is
+    # an optional extra, so importing this eagerly would break `import weightslab`
+    # for every user who does not have it installed. The module is resolved (and
+    # a missing extra reported, see _MISSING_EXTRA) only if a name is touched.
+    "WLAwareTrainer": (".integrations.ultralytics", "WLAwareTrainer"),
+    "WLAwareSegmentationTrainer": (".integrations.ultralytics", "WLAwareSegmentationTrainer"),
+    "WLAwareDataset": (".integrations.ultralytics", "WLAwareDataset"),
+    "WLAwareSegmentationDataset": (".integrations.ultralytics", "WLAwareSegmentationDataset"),
+}
+
+# Lazy exports whose module needs a third-party package weightslab does not
+# depend on. A bare "No module named 'ultralytics'" gives no hint that an extra
+# exists for it, so name the install command instead.
+_MISSING_EXTRA = {
+    ".integrations.ultralytics": ("ultralytics", "weightslab[ultralytics]"),
 }
 # Everything re-exported straight from .src (attribute name == export name).
 for _name in (
@@ -61,7 +78,17 @@ def __getattr__(name):  # PEP 562 module-level lazy attribute access
     if target is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     module_name, attr = target
-    module = importlib.import_module(module_name, __name__)
+    try:
+        module = importlib.import_module(module_name, __name__)
+    except ImportError as error:
+        extra = _MISSING_EXTRA.get(module_name)
+        if extra is None or extra[0] not in str(error):
+            raise
+        package, install = extra
+        raise ImportError(
+            f"weightslab.{name} needs the optional {package!r} package: "
+            f"pip install '{install}'"
+        ) from error
     value = getattr(module, attr)
     globals()[name] = value  # cache so __getattr__ isn't hit again
     return value
@@ -264,6 +291,11 @@ __all__ = [
 
     "pointcloud_thumbnail",
     "pointcloud_boxes",
+
+    "WLAwareTrainer",
+    "WLAwareSegmentationTrainer",
+    "WLAwareDataset",
+    "WLAwareSegmentationDataset",
 
     "_BANNER",
     "__version__",

@@ -11,10 +11,6 @@ import weightslab as wl
 
 from torch import optim
 
-from weightslab.components.global_monitoring import (
-    guard_training_context,
-    guard_testing_context,
-)
 
 from utils.data import Lidar2DDetectionDataset, lidar2d_collate, DEFAULT_PC_RANGE
 from utils.model import Pillars2DLite
@@ -29,7 +25,7 @@ logging.basicConfig(level=logging.ERROR)
 
 
 def train(loader, model, optimizer, sig, device, grid_size, pc_range, conf_thresh):
-    with guard_training_context:
+    with wl.guard_training_context:
         (points, ids, targets, _) = next(loader)
         points = points.to(device)
         targets = [t.to(device) for t in targets]
@@ -47,7 +43,7 @@ def train(loader, model, optimizer, sig, device, grid_size, pc_range, conf_thres
 
 def test(loader, model, sig, device, grid_size, pc_range, conf_thresh, test_loader_len):
     losses = ious = 0.0
-    with guard_testing_context, torch.no_grad():
+    with wl.guard_testing_context, torch.no_grad():
         for points, ids, targets, _ in loader:
             points = points.to(device)
             targets = [t.to(device) for t in targets]

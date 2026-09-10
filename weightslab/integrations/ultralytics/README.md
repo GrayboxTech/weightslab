@@ -14,13 +14,12 @@ changes to the model or to UL's training loop.
 ```python
 import weightslab as wl
 from ultralytics import YOLO
-from weightslab.integrations.ultralytics import WLAwareTrainer  # or WLAwareSegmentationTrainer
 
 wl.watch_or_edit(cfg, flag="hyperparameters", defaults=cfg)
 wl.serve()
 
-YOLO("yolo11n.pt").train(          # yolo11n-seg.pt for segmentation
-    trainer=WLAwareTrainer,        # WLAwareSegmentationTrainer for segmentation
+YOLO("yolo11n.pt").train(             # yolo11n-seg.pt for segmentation
+    trainer=wl.WLAwareTrainer,        # wl.WLAwareSegmentationTrainer for segmentation
     data="my_dataset.yaml", imgsz=640, epochs=100, batch=16,
     project="./logs", name="exp",
     workers=0, amp=False,

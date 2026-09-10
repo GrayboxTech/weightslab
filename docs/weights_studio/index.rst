@@ -1,8 +1,14 @@
+:orphan:
+
+.. Superseded by weights_studio_ui/ and weights_studio_cli/. Kept for
+.. direct links; labels here are prefixed `legacy-` so the live pages
+.. own the canonical `studio-*` names.
+
 Weights Studio Guide
 ====================
 
 Weights Studio is the visual frontend for WeightsLab experiments.
-It ships **inside the Python package** — no Docker, no Envoy.
+It ships **inside the Python package**.
 Running ``weightslab start`` serves the bundled SPA and proxies gRPC-Web to
 your training backend, all from one Python process.
 
@@ -52,7 +58,7 @@ To suppress auto-opening the browser::
 
     weightslab start --no-browser
 
-.. _studio-features:
+.. _legacy-studio-features:
 
 Sections
 --------
