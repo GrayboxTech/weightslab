@@ -146,6 +146,47 @@ def _media_chunk_bytes() -> int:
 _NON_MASK_TASKS = ("classification", "tabular")
 
 
+def is_set_flag(value) -> bool:
+    """True only for a boolean column value that is really SET and true.
+
+    Two traps, both hit in production, both of them "a missing value read as
+    set":
+
+    * ``bool(float("nan")) is True`` in Python, and a nullable flag column is
+      full of NaN -- ``discarded`` for a sample nothing has written yet, or a
+      ``tag:*`` column for every sample that does not carry the tag. Reading it
+      with ``bool()`` / ``astype(bool)`` reported all of them as set: samples
+      greyed out as discarded while the dataframe said False, and every sample
+      wearing every tag.
+    * ``bool("False") is True`` as well, and a boolean column that has been
+      through the H5 store (where these columns become categorical) can come
+      back holding the STRINGS "True"/"False".
+
+    So: missing is false, a string is read as a word, everything else falls
+    back to ``bool()``.
+    """
+    try:
+        if value is None or pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        # pd.isna raises for some array-likes; those are not missing.
+        pass
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y", "t")
+    try:
+        return bool(value)
+    except Exception:  # noqa: BLE001 -- an exotic value is not a set flag
+        return False
+
+
+def set_flag_mask(series) -> "np.ndarray":
+    """``is_set_flag`` over a whole column, as a numpy bool array."""
+    if series is None:
+        return np.zeros(0, dtype=bool)
+    return np.fromiter((is_set_flag(v) for v in series.tolist()),
+                       dtype=bool, count=len(series))
+
+
 def _is_non_mask_task(task_type) -> bool:
     """True when labels/predictions for this task must not be read as masks."""
     return task_type in _NON_MASK_TASKS or is_generation_task(task_type)
@@ -1608,10 +1649,10 @@ class DataService:
             # 'discarded' drives the grayed-out cell rendering, so it rides with the
             # image data as "1"/"0" (not treated as analytical metadata). This keeps
             # the gray-out reliable on every grid (re)fetch / scroll.
-            try:
-                _discarded_str = "1" if bool(row.get(SampleStatsEx.DISCARDED.value)) else "0"
-            except Exception:
-                _discarded_str = "0"
+            # is_set_flag, not bool(): a nullable flag full of NaN read as
+            # set is what greyed out every sample the model had seen.
+            _discarded_str = "1" if is_set_flag(
+                row.get(SampleStatsEx.DISCARDED.value)) else "0"
             data_stats.append(
                 create_data_stat(
                     SampleStatsEx.DISCARDED.value, 'string', shape=[1], value_string=_discarded_str, thumbnail=b""
@@ -4039,9 +4080,34 @@ class DataService:
         sub = dfm.get_source_rows(keep, columns=[c for c in cols if c in view.columns])
         if sub is None or sub.empty:
             return True
+        # Collapse the source's per-annotation rows to ONE row per sample the
+        # same way the view itself was built (see
+        # get_collapse_annotations_to_samples_df): the canonical row is
+        # annotation_id == 0, and sample-level columns live only there.
+        #
+        # This used to keep the LAST annotation row, which for a multi-instance
+        # sample carries NaN in every sample-level column -- so each sample the
+        # trainer touched had its view row's `discarded` / `prediction` /
+        # `target` overwritten with NaN. And `bool(float("nan"))` is True in
+        # Python, so GetDataSamples then reported discarded="1" and the studio
+        # greyed the sample out, progressively, exactly as the model worked
+        # through the dataset -- while the dataframe itself still said False.
         if isinstance(sub.index, pd.MultiIndex):
+            ANNOT = SampleStatsEx.INSTANCE_ID.value
+            names = list(getattr(sub.index, "names", []) or [])
+            if ANNOT in names:
+                annot = sub.index.get_level_values(ANNOT)
+                try:
+                    canonical = np.asarray(annot).astype(int) == 0
+                except (TypeError, ValueError):
+                    canonical = np.array([str(a) in ("0", "0.0") for a in annot])
+                if canonical.any():
+                    sub = sub[canonical]
             sub = sub.droplevel(-1)
-        sub = sub[~sub.index.duplicated(keep="last")]
+        # Whatever is left, one row per sample: prefer the FIRST (the canonical
+        # row when the level was present, the first occurrence otherwise) --
+        # never the last, for the reason above.
+        sub = sub[~sub.index.duplicated(keep="first")]
 
         # Only rows the view actually holds; a structural change (new sample)
         # must still fall back to the full rebuild rather than be invented here.
@@ -4050,17 +4116,30 @@ class DataService:
         view_keys = (view.index.get_level_values(SID)
                      if isinstance(view.index, pd.MultiIndex) and SID in _names
                      else view.index)
-        # Positions via the Index hash engine: vectorised and cached, so this
-        # costs nothing like the O(rows) dict the position map used to rebuild.
-        _pos = pd.Index(view_keys.astype(str)).get_indexer(sub.index.astype(str))
-        _ok = _pos >= 0
-        if not _ok.any():
+        # Looked up the other way round -- `sub` (deduplicated just above, so
+        # unique) is the index being searched, and the VIEW's keys are the
+        # target. Searching the view's keys instead raised
+        # InvalidIndexError("Reindexing only valid with uniquely valued Index
+        # objects") whenever one sample_id appeared under two origins, which
+        # the view's own (origin, sample_id) index exists precisely to allow --
+        # and the differential refresh then failed every time, silently falling
+        # back to the full rebuild. This direction also updates BOTH rows of
+        # such a sample, which is the only thing the source (indexed by
+        # sample_id alone) can mean.
+        _view_keys = pd.Index(view_keys.astype(str))
+        _sub_keys = pd.Index(sub.index.astype(str))
+        _src = _sub_keys.get_indexer(_view_keys)      # sub row per view row, -1 if none
+        _rows = np.flatnonzero(_src >= 0)
+        if _rows.size == 0:
             return True
-        if not _ok.all():
+        # A dirty sample the view does not hold is a structural change (a new
+        # sample): only the full rebuild can add it.
+        if len(set(_sub_keys)) != len(set(_view_keys[_rows])):
             return False
+        _take = _src[_rows]
         for c in sub.columns:
             _ci = view.columns.get_loc(c)
-            view.iloc[_pos, _ci] = sub[c].to_numpy()
+            view.iloc[_rows, _ci] = sub[c].to_numpy()[_take]
         return True
 
     def _slowUpdateInternals(self, force: bool = False, reset_view: bool = False) -> None:
@@ -4455,8 +4534,11 @@ class DataService:
                             _DataStat(name=col, type="string", shape=[1], value_string=v)
                         )
             else:
-                # Boolean tag: presence indicator "1" when True.
-                bools = series.astype(bool).tolist()
+                # Boolean tag: presence indicator "1" when True. is_set_flag,
+                # not astype(bool): a tag column is NaN for every sample that
+                # does not carry the tag, and astype(bool) turns NaN into True
+                # -- which showed every tag on every sample.
+                bools = set_flag_mask(series)
                 for i, b in enumerate(bools):
                     if b:
                         row_stats[i].append(
@@ -5355,7 +5437,8 @@ class DataService:
             _o = _field(df, "origin")
             origin = _o.astype(str).to_numpy() if _o is not None else np.full(n, "")
             _d = _field(df, "discarded")
-            disc = _d.astype(bool).to_numpy() if _d is not None else np.zeros(n, bool)
+            # Same trap as above: NaN in a nullable flag is NOT "discarded".
+            disc = set_flag_mask(_d) if _d is not None else np.zeros(n, bool)
 
             # Detect whether column is categorical (string/object) or numeric.
             # A column is numeric if ANY value coerces to a finite number — even
