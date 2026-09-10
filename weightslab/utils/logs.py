@@ -9,7 +9,7 @@ from datetime import datetime
 
 
 # Define the log format to include timestamp, level, module name, and function name
-FORMAT = '%(asctime)s.%(msecs)03d %(levelname)s:%(name)s:%(funcName)s: %(message)s'
+FORMAT = '%(asctime)s.%(msecs)03d %(levelname)s:%(name)s:%(filename)s:%(lineno)d:%(funcName)s: %(message)s'
 DATE_FORMAT = '%d/%m/%Y-%H:%M:%S'
 
 # Global variables to track the log file path and handler

@@ -398,14 +398,36 @@ class TestEnsureModelResolved(unittest.TestCase):
         request_mock.assert_not_called()
         self.assertEqual(chat.model, "openrouter/anthropic/claude-opus-4.6")
 
-    def test_already_set_non_explicit_model_is_left_alone(self):
-        # Already resolved once (e.g. a prior call) -- don't re-resolve or
-        # re-request every single turn.
+    def test_already_set_non_explicit_model_follows_a_later_ui_pick(self):
+        # The studio's model picker writes the pick into OpenCode's own config
+        # (PUT /config). A backend that kept the model it resolved on its first
+        # turn went on answering with the old one for the rest of the run, so a
+        # NON-explicit model re-checks /config every turn and follows it.
         chat = OpenCodeChat("http://127.0.0.1:4096", model="openrouter/openai/gpt-5", model_is_explicit=False)
+        with mock.patch.object(
+            chat, "_request",
+            return_value=self._fake_response({"model": "opencode/big-pickle"}),
+        ) as request_mock:
+            chat._ensure_model_resolved()
+        request_mock.assert_called_once_with("/config")
+        self.assertEqual(chat.model, "opencode/big-pickle")
+
+    def test_explicit_model_is_never_overridden_by_the_config(self):
+        # OPENCODE_MODEL / agent_config.yaml's opencode_model PIN the model:
+        # no request, and the UI picker cannot move it.
+        chat = OpenCodeChat("http://127.0.0.1:4096", model="openrouter/openai/gpt-5", model_is_explicit=True)
         with mock.patch.object(chat, "_request") as request_mock:
             chat._ensure_model_resolved()
         request_mock.assert_not_called()
         self.assertEqual(chat.model, "openrouter/openai/gpt-5")
+
+    def test_a_failed_config_read_keeps_the_model_already_resolved(self):
+        # One local request failing must not drop a working model for the
+        # fallback mid-run.
+        chat = OpenCodeChat("http://127.0.0.1:4096", model="anthropic/claude-haiku-4.5", model_is_explicit=False)
+        with mock.patch.object(chat, "_request", side_effect=OSError("refused")):
+            chat._ensure_model_resolved()
+        self.assertEqual(chat.model, "anthropic/claude-haiku-4.5")
 
     def test_unset_model_resolves_from_config_own_model_field(self):
         chat = OpenCodeChat("http://127.0.0.1:4096", model=None, model_is_explicit=False)
@@ -425,13 +447,13 @@ class TestEnsureModelResolved(unittest.TestCase):
         with mock.patch.object(chat, "_request", return_value=self._fake_response({})) as request_mock:
             chat._ensure_model_resolved()
         request_mock.assert_called_once_with("/config")
-        self.assertEqual(chat.model, "opencode/deepseek-v4-flash-free")
+        self.assertEqual(chat.model, "opencode/big-pickle")
 
     def test_no_resolvable_model_falls_back_to_the_hardcoded_default(self):
         chat = OpenCodeChat("http://127.0.0.1:4096", model=None, model_is_explicit=False)
         with mock.patch.object(chat, "_request", side_effect=OSError("refused")):
             chat._ensure_model_resolved()  # must not raise
-        self.assertEqual(chat.model, "opencode/deepseek-v4-flash-free")
+        self.assertEqual(chat.model, "opencode/big-pickle")
 
     def test_config_field_that_is_not_provider_slash_model_falls_through(self):
         # A malformed/unexpected `model` field (missing the "/") is treated
@@ -441,7 +463,155 @@ class TestEnsureModelResolved(unittest.TestCase):
         with mock.patch.object(chat, "_request", return_value=self._fake_response({"model": "not-a-provider-model-pair"})) as request_mock:
             chat._ensure_model_resolved()
         request_mock.assert_called_once_with("/config")
-        self.assertEqual(chat.model, "opencode/deepseek-v4-flash-free")
+        self.assertEqual(chat.model, "opencode/big-pickle")
+
+
+
+class PublishModelTests(unittest.TestCase):
+    """publish_model / resolve_model -- how the two sides converge on one model.
+
+    Verified against a live server before these were written: PATCH /config
+    (workspace scope) answers 200 and echoes the value back but does NOT change
+    what GET /config reports, while PATCH /global/config does. GET /config is
+    what both the studio picker and this backend read, so the write has to go
+    to the global scope, and be CONFIRMED rather than trusted.
+    """
+
+    @staticmethod
+    def _resp(payload):
+        return mock.MagicMock(
+            __enter__=mock.MagicMock(
+                return_value=mock.MagicMock(read=lambda: json.dumps(payload).encode())),
+            __exit__=mock.MagicMock(return_value=False),
+        )
+
+    def test_publish_writes_the_global_scope_first(self):
+        chat = OpenCodeChat("http://127.0.0.1:4096", model="opencode/big-pickle",
+                            model_is_explicit=False)
+        calls = []
+
+        def fake_request(path, method="GET", body=None, headers=None):
+            calls.append((path, method, body))
+            if method == "GET":
+                return self._resp({"model": "opencode/big-pickle"})
+            return self._resp({})
+
+        with mock.patch.object(chat, "_request", side_effect=fake_request):
+            self.assertTrue(chat.publish_model())
+        self.assertEqual(calls[0], ("/global/config", "PATCH", {"model": "opencode/big-pickle"}))
+        # Confirmed by reading the effective config back, not by the echo.
+        self.assertIn(("/config", "GET", None), calls)
+
+    def test_publish_falls_back_to_the_workspace_route(self):
+        chat = OpenCodeChat("http://127.0.0.1:4096", model="opencode/big-pickle",
+                            model_is_explicit=False)
+        seen = []
+
+        def fake_request(path, method="GET", body=None, headers=None):
+            seen.append((path, method))
+            if path == "/global/config":
+                raise OSError("no such route")
+            if method == "GET":
+                return self._resp({"model": "opencode/big-pickle"})
+            return self._resp({})
+
+        with mock.patch.object(chat, "_request", side_effect=fake_request):
+            self.assertTrue(chat.publish_model())
+        self.assertIn(("/config", "PATCH"), seen)
+
+    def test_publish_reports_failure_when_the_write_does_not_stick(self):
+        # Exactly the live failure mode: 200 back, effective config unchanged.
+        chat = OpenCodeChat("http://127.0.0.1:4096", model="opencode/big-pickle",
+                            model_is_explicit=False)
+
+        def fake_request(path, method="GET", body=None, headers=None):
+            if method == "GET":
+                return self._resp({})          # no model -- nothing was stored
+            return self._resp({"model": "opencode/big-pickle"})   # echo only
+
+        with mock.patch.object(chat, "_request", side_effect=fake_request):
+            self.assertFalse(chat.publish_model())
+
+    def test_resolve_publishes_the_fallback_so_the_studio_adopts_it(self):
+        # weightslab started FIRST: nothing chosen anywhere, so the built-in
+        # default is resolved AND published for the UI to read.
+        chat = OpenCodeChat("http://127.0.0.1:4096", model="", model_is_explicit=False)
+        with mock.patch.object(chat, "_configured_model", side_effect=[None, "opencode/big-pickle"]),              mock.patch.object(chat, "_request", return_value=self._resp({})),              mock.patch.object(chat, "_ensure_reachable"):
+            model, source = chat.resolve_model(publish_default=True)
+        self.assertEqual(model, "opencode/big-pickle")
+        self.assertEqual(source, "default-published")
+
+    def test_resolve_adopts_the_studio_pick_without_publishing(self):
+        # studio started FIRST: its pick is already in OpenCode's config, so
+        # follow it and write nothing.
+        chat = OpenCodeChat("http://127.0.0.1:4096", model="", model_is_explicit=False)
+        with mock.patch.object(chat, "_configured_model", return_value="openrouter/openai/gpt-5-mini"),              mock.patch.object(chat, "publish_model") as publish,              mock.patch.object(chat, "_ensure_reachable"):
+            model, source = chat.resolve_model(publish_default=True)
+        self.assertEqual((model, source), ("openrouter/openai/gpt-5-mini", "opencode-config"))
+        publish.assert_not_called()
+
+    def test_the_studio_pick_wins_over_a_yaml_seed(self):
+        # The reported bug: pick a model in the UI, then start a run --
+        # agent_config.yaml's opencode_model pinned the backend back to its own
+        # value, ignoring the pick. A yaml model is a SEED, not a pin.
+        chat = OpenCodeChat("http://127.0.0.1:4096", model="", model_is_explicit=False,
+                            seed_model="opencode/muse-spark-1.3-contributor-free")
+        with mock.patch.object(chat, "_configured_model", return_value="openrouter/openai/gpt-5-mini"),              mock.patch.object(chat, "publish_model") as publish,              mock.patch.object(chat, "_ensure_reachable"):
+            model, source = chat.resolve_model(publish_default=True)
+        self.assertEqual((model, source), ("openrouter/openai/gpt-5-mini", "opencode-config"))
+        publish.assert_not_called()
+
+    def test_the_yaml_seed_is_used_and_published_when_nothing_is_chosen(self):
+        chat = OpenCodeChat("http://127.0.0.1:4096", model="", model_is_explicit=False,
+                            seed_model="opencode/muse-spark-1.3-contributor-free")
+        with mock.patch.object(chat, "_configured_model", return_value=None),              mock.patch.object(chat, "publish_model", return_value=True) as publish,              mock.patch.object(chat, "_ensure_reachable"):
+            model, source = chat.resolve_model(publish_default=True)
+        self.assertEqual(
+            (model, source),
+            ("opencode/muse-spark-1.3-contributor-free", "config-seed-published"))
+        publish.assert_called_once()
+
+    def test_the_yaml_seed_beats_the_builtin_default(self):
+        chat = OpenCodeChat("http://127.0.0.1:4096", model="", model_is_explicit=False,
+                            seed_model="openrouter/openai/gpt-5-mini")
+        with mock.patch.object(chat, "_configured_model", return_value=None),              mock.patch.object(chat, "publish_model", return_value=False),              mock.patch.object(chat, "_ensure_reachable"):
+            model, _ = chat.resolve_model(publish_default=True)
+        self.assertEqual(model, "openrouter/openai/gpt-5-mini")
+
+    def test_the_env_pin_still_beats_the_studio_pick(self):
+        # OPENCODE_MODEL is per-process and deliberate: automation must be able
+        # to force a model regardless of what anyone picked in the UI.
+        chat = OpenCodeChat("http://127.0.0.1:4096", model="openrouter/pinned/model",
+                            model_is_explicit=True, seed_model="opencode/seed")
+        with mock.patch.object(chat, "_configured_model", return_value="openrouter/openai/gpt-5-mini"),              mock.patch.object(chat, "publish_model", return_value=True),              mock.patch.object(chat, "_ensure_reachable"):
+            model, source = chat.resolve_model(publish_default=True)
+        self.assertEqual((model, source), ("openrouter/pinned/model", "pinned-published"))
+
+    def test_resolve_publishes_a_pinned_model_so_the_studio_shows_it(self):
+        # A model pinned in agent_config.yaml / OPENCODE_MODEL is a deliberate
+        # choice too. It used to stay invisible to the studio, which then
+        # displayed an unrelated default while every backend query ran on the
+        # pinned model.
+        chat = OpenCodeChat("http://127.0.0.1:4096", model="openrouter/pinned/model",
+                            model_is_explicit=True)
+        with mock.patch.object(chat, "publish_model", return_value=True) as publish,              mock.patch.object(chat, "_ensure_reachable"):
+            model, source = chat.resolve_model(publish_default=True)
+        self.assertEqual((model, source), ("openrouter/pinned/model", "pinned-published"))
+        publish.assert_called_once()
+
+    def test_a_pinned_model_stays_pinned_when_it_cannot_be_published(self):
+        chat = OpenCodeChat("http://127.0.0.1:4096", model="openrouter/pinned/model",
+                            model_is_explicit=True)
+        with mock.patch.object(chat, "publish_model", return_value=False),              mock.patch.object(chat, "_ensure_reachable"):
+            model, source = chat.resolve_model(publish_default=True)
+        self.assertEqual((model, source), ("openrouter/pinned/model", "pinned"))
+
+    def test_a_model_read_from_the_config_is_never_republished(self):
+        chat = OpenCodeChat("http://127.0.0.1:4096", model="", model_is_explicit=False)
+        with mock.patch.object(chat, "_configured_model", return_value="opencode/big-pickle"),              mock.patch.object(chat, "publish_model") as publish,              mock.patch.object(chat, "_ensure_reachable"):
+            model, source = chat.resolve_model(publish_default=True)
+        self.assertEqual((model, source), ("opencode/big-pickle", "opencode-config"))
+        publish.assert_not_called()
 
 
 if __name__ == "__main__":
