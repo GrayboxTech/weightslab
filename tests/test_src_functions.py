@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import tempfile
@@ -60,6 +61,22 @@ class TestResolveConfiguredRootLogDir(unittest.TestCase):
         os.environ.pop("WEIGHTSLAB_ROOT_LOG_DIR", None)
         with patch("weightslab.src.tempfile.mkdtemp", return_value="/tmp/generated") as mk:
             self.assertEqual(src._resolve_configured_root_log_dir(None), "/tmp/generated")
+            mk.assert_called_once()
+
+    def test_a_recorded_directory_whose_ui_has_exited_is_not_adopted(self):
+        # The handoff means "the UI is up over there, join its experiment". A
+        # record left by a `weightslab start` that has since exited must not
+        # redirect an unrelated run -- it did, and this repo's own gRPC tests
+        # resolved into a previous session's experiment and loaded its config.
+        os.environ.pop("WEIGHTSLAB_ROOT_LOG_DIR", None)
+        with tempfile.TemporaryDirectory() as ui_dir:
+            active_experiment.record_ui_experiment(ui_dir)
+            state = active_experiment.read_state()
+            state["ui"]["pid"] = 2 ** 31 - 1          # cannot be running
+            active_experiment.state_path().write_text(json.dumps(state), encoding="utf-8")
+
+            with patch("weightslab.src.tempfile.mkdtemp", return_value="/tmp/generated") as mk:
+                self.assertEqual(src._resolve_configured_root_log_dir(None), "/tmp/generated")
             mk.assert_called_once()
 
     def test_adopts_the_directory_weightslab_start_recorded(self):

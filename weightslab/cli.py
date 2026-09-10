@@ -631,8 +631,8 @@ def example_start(args):
         # user must not be overridden by the last UI launch.
         if not (env.get('WEIGHTSLAB_ROOT_LOG_DIR') or '').strip():
             try:
-                from weightslab.utils.active_experiment import ui_experiment_dir
-                adopted = ui_experiment_dir()
+                from weightslab.utils.active_experiment import live_ui_experiment_dir
+                adopted = live_ui_experiment_dir()
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"Could not read the active experiment directory: {exc}")
                 adopted = None

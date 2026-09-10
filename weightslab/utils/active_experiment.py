@@ -142,16 +142,6 @@ def _section_dir(section: str) -> Optional[str]:
     return value
 
 
-def ui_experiment_dir() -> Optional[str]:
-    """Directory established by the most recent ``weightslab start``, if it still exists."""
-    return _section_dir("ui")
-
-
-def backend_experiment_dir() -> Optional[str]:
-    """Directory the most recent ``wl.serve()`` resolved, if it still exists."""
-    return _section_dir("backend")
-
-
 def _pid_is_running(pid) -> bool:
     try:
         pid = int(pid)
@@ -164,6 +154,35 @@ def _pid_is_running(pid) -> bool:
         return psutil.pid_exists(pid)
     except Exception:  # noqa: BLE001 -- psutil missing/unusable: assume gone
         return False
+
+
+def ui_experiment_dir() -> Optional[str]:
+    """Directory established by the most recent ``weightslab start``, if it still exists.
+
+    Raw record: it outlives the process that wrote it. Callers that REDIRECT a
+    run on this should use :func:`live_ui_experiment_dir` instead.
+    """
+    return _section_dir("ui")
+
+
+def live_ui_experiment_dir() -> Optional[str]:
+    """Directory of a ``weightslab start`` that is *still running*.
+
+    The handoff exists for "the UI is up over there, put this run in its
+    experiment". A record left behind by a UI that has since exited must not
+    silently redirect an unrelated run months later -- which is exactly what
+    happened to this repo's own gRPC tests: they resolved into a previous
+    session's experiment directory and loaded ITS config.
+    """
+    entry = read_state().get("ui")
+    if not isinstance(entry, dict) or not _pid_is_running(entry.get("pid")):
+        return None
+    return _section_dir("ui")
+
+
+def backend_experiment_dir() -> Optional[str]:
+    """Directory the most recent ``wl.serve()`` resolved, if it still exists."""
+    return _section_dir("backend")
 
 
 def live_backend_experiment_dir() -> Optional[str]:

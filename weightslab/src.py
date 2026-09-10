@@ -83,8 +83,10 @@ def _resolve_configured_root_log_dir(configured):
          actually points at an existing directory; if it's set but stale/typo'd,
          a warning is logged and resolution falls through to (3) instead of
          silently training into a directory the UI never established.
-      3. The directory the most recent ``weightslab start`` established, read
-         from the marker file (see weightslab.utils.active_experiment). The
+      3. The directory a RUNNING ``weightslab start`` established, read from
+         the marker file (see weightslab.utils.active_experiment). Only while
+         that UI is alive: a record left by one that has since exited must not
+         redirect an unrelated run. The
          environment variable only reaches processes started FROM that same
          shell; a training run launched in another terminal (or by
          ``weightslab start example``) is a different process tree and used to
@@ -105,8 +107,8 @@ def _resolve_configured_root_log_dir(configured):
             "by `weightslab start`, then to a temporary directory."
         )
     try:
-        from weightslab.utils.active_experiment import ui_experiment_dir
-        marker_dir = ui_experiment_dir()
+        from weightslab.utils.active_experiment import live_ui_experiment_dir
+        marker_dir = live_ui_experiment_dir()
     except Exception:  # noqa: BLE001 -- never block serving on the marker
         marker_dir = None
     if marker_dir:
