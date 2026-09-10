@@ -504,15 +504,22 @@ class TestConfigLevelCli(StandaloneCliTestCase):
         self.assertEqual(shown["name"], name)
         self.assertEqual(shown["hyperparams"]["experiment_name"], "standalone_config")
 
+    # `set_hp` refuses to guess when the process holds more than one
+    # hyperparam set ("Multiple hyperparam sets present; provide hp_name
+    # explicitly"), and the ledger is global: the sets registered by the other
+    # levels in this file (and by any test module that ran earlier in the same
+    # process) are still there. Name the set, exactly as test_hp_lists_and_shows
+    # already does for `hp` -- the alternative, asserting on whichever set the
+    # CLI happens to pick, is what made these two order-dependent.
     def test_set_hp_updates_the_live_config(self):
-        answer = self.cli("set_hp optimizer.lr 0.0005")
+        answer = self.cli(f"set_hp {resolve_hp_name()} optimizer.lr 0.0005")
         self.assertTrue(answer["ok"], answer)
         self.assertEqual(answer["key"], "optimizer.lr")
         self.assertEqual(answer["value"], 0.0005)
         self.assertEqual(self.hp["optimizer"]["lr"], 0.0005)
 
     def test_set_hp_updates_a_nested_data_key(self):
-        answer = self.cli("set_hp data.train_loader.batch_size 32")
+        answer = self.cli(f"set_hp {resolve_hp_name()} data.train_loader.batch_size 32")
         self.assertTrue(answer["ok"], answer)
         self.assertEqual(self.hp["data"]["train_loader"]["batch_size"], 32)
 
