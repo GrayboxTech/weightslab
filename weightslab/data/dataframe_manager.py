@@ -910,6 +910,20 @@ class LedgeredDataFrameManager:
                 if df_norm[col].dtype == bool:
                     self._df[col] = self._df[col].fillna(False).astype(bool)
 
+            # Columns SampleStatsEx documents a boolean default for must never
+            # hold NaN ("None are not accepted by PD H5 storage" -- see its
+            # DEFAULTS). Two ways they did anyway, and the loop above catches
+            # neither: it only visits columns being ADDED by this upsert, and
+            # only when the incoming slice's dtype is already bool -- which it
+            # is not precisely when the slice carries missing values. So a
+            # sample registered without the flag, and every per-annotation row
+            # (sample-level values live on annotation 0 only), kept a NaN.
+            #
+            # That is not cosmetic: bool(float("nan")) is True in Python, so a
+            # NaN flag read as a set one -- samples served to the studio as
+            # discarded while the dataframe said nothing was.
+            self._fill_documented_flag_defaults()
+
             # Auto-register any string-valued tag: columns as categorical tags
             # (e.g. dataset metadata declaring tag:weather = "rainy"/"sunny").
             self._auto_register_categorical_tags(df_norm)
@@ -2583,6 +2597,44 @@ class LedgeredDataFrameManager:
             )
 
         return df
+
+    def _fill_documented_flag_defaults(self) -> None:
+        """Give every boolean column SampleStatsEx documents a default its default.
+
+        Only the columns with a ``bool`` default in
+        ``SampleStatsEx.DEFAULTS`` (today: ``discarded``) -- a ``tag:*`` column
+        is deliberately left sparse, where NaN and False mean the same thing
+        and NaN costs nothing to store, and a *categorical* tag's NaN means
+        "unset", which is not a default at all.
+
+        Cheap by design: an ``isna().any()`` short-circuit per flag column, so
+        the common case (nothing missing) touches no rows.
+        """
+        if self._df is None or self._df.empty:
+            return
+        # DEFAULTS lives on SampleStats, the outer class -- SampleStatsEx is
+        # only its `Ex` enum, so reading it off that is a silent no-op.
+        from weightslab.data.sample_stats import SampleStats
+        defaults = getattr(SampleStats, "DEFAULTS", {}) or {}
+        for col, default in defaults.items():
+            if not isinstance(default, bool) or col not in self._df.columns:
+                continue
+            try:
+                series = self._df[col]
+                if not series.isna().any():
+                    continue
+                if isinstance(series.dtype, pd.CategoricalDtype):
+                    # fillna on a Categorical raises unless the value is a
+                    # known category; widen first, then let the memory pass
+                    # re-apply the dtype.
+                    series = series.astype(object)
+                self._df[col] = series.fillna(default)
+                logger.debug(
+                    "[LedgeredDataFrameManager] filled missing %r with its "
+                    "documented default %r", col, default)
+            except Exception as exc:  # noqa: BLE001 -- never fail an upsert on this
+                logger.debug(
+                    "[LedgeredDataFrameManager] could not default %r: %s", col, exc)
 
     def get_collapse_annotations_to_samples_df(self, df: pd.DataFrame | None = None) -> pd.DataFrame:
         """Collapse a (sample_id, annotation_id) multi-index df to one row per sample.

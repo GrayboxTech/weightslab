@@ -237,5 +237,72 @@ class TestFastViewSyncAddressing(unittest.TestCase):
         self.assertEqual(view["last_seen"].tolist(), [1])
 
 
+class TestDocumentedFlagDefaults(unittest.TestCase):
+    """`discarded` should never be NaN in the first place.
+
+    SampleStats.DEFAULTS documents it as False, right under the comment "None
+    are not accepted by PD H5 storage". It held NaN anyway: the existing
+    normalisation only visits columns an upsert ADDS, and only when the
+    incoming slice's dtype is already bool -- which it is not exactly when the
+    slice carries missing values. So a sample registered without the flag, and
+    every per-annotation row (sample-level values live on annotation 0), kept a
+    NaN, which `bool()` then read as True.
+
+    Belt and braces with the read-side fix above: the flag is defaulted at the
+    source, AND a NaN that reaches a reader anyway is read as not-set.
+    """
+
+    def _manager(self, frame):
+        from weightslab.data.dataframe_manager import LedgeredDataFrameManager
+        manager = LedgeredDataFrameManager.__new__(LedgeredDataFrameManager)
+        manager._df = frame
+        return manager
+
+    def test_missing_discarded_becomes_false(self):
+        frame = pd.DataFrame(
+            {DISCARDED: [True, np.nan, np.nan, False, np.nan]},
+            index=pd.MultiIndex.from_tuples(
+                [("0", 0), ("0", 1), ("0", 2), ("1", 0), ("1", 1)], names=[SID, ANNOT]),
+        )
+        manager = self._manager(frame)
+        manager._fill_documented_flag_defaults()
+
+        self.assertEqual(frame[DISCARDED].tolist(), [True, False, False, False, False])
+        self.assertFalse(frame[DISCARDED].isna().any())
+
+    def test_a_categorical_flag_column_is_widened_rather_than_raising(self):
+        # fillna on a Categorical raises unless the value is a known category,
+        # and the H5 store hands these columns back as categorical.
+        # NB: build the frame first, THEN cast -- handing a Series with its own
+        # RangeIndex to DataFrame(index=[...]) reindexes it to all-NaN.
+        frame = pd.DataFrame({DISCARDED: [True, None]}, index=pd.Index(["0", "1"], name=SID))
+        frame[DISCARDED] = frame[DISCARDED].astype("category")
+        self.assertIsInstance(frame[DISCARDED].dtype, pd.CategoricalDtype)
+        manager = self._manager(frame)
+        manager._fill_documented_flag_defaults()
+        self.assertEqual(frame[DISCARDED].tolist(), [True, False])
+
+    def test_sparse_tag_columns_are_left_alone(self):
+        # NaN and False mean the same thing for a boolean tag, and NaN is
+        # cheaper; for a CATEGORICAL tag, NaN means "unset", not a default.
+        frame = pd.DataFrame({"tag:hard": [True, np.nan], DISCARDED: [False, np.nan]},
+                             index=pd.Index(["0", "1"], name=SID))
+        manager = self._manager(frame)
+        manager._fill_documented_flag_defaults()
+        self.assertTrue(pd.isna(frame["tag:hard"].iloc[1]))
+        self.assertIs(bool(frame[DISCARDED].iloc[1]), False)
+
+    def test_a_column_with_nothing_missing_is_not_rewritten(self):
+        frame = pd.DataFrame({DISCARDED: [True, False]}, index=pd.Index(["0", "1"], name=SID))
+        before = frame[DISCARDED].dtype
+        manager = self._manager(frame)
+        manager._fill_documented_flag_defaults()
+        self.assertEqual(frame[DISCARDED].dtype, before)
+
+    def test_an_empty_frame_is_a_no_op(self):
+        frame = pd.DataFrame()
+        self._manager(frame)._fill_documented_flag_defaults()   # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()
