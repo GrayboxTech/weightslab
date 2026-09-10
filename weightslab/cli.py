@@ -928,6 +928,7 @@ def ui_start_native(args):
         record_ui_experiment(experiment_dir)
     except Exception as exc:  # noqa: BLE001 -- advisory record, never fatal
         logger.debug(f"Could not record the active experiment directory: {exc}")
+    # Re-recorded below with the resolved ports, once they are known.
     _print_experiment_guidance(experiment_dir)
 
     # If the agent has been initialized, provision OpenCode up front (in the
@@ -991,6 +992,15 @@ def ui_start_native(args):
         ui_port = actual_port
     logger.info(f"UI port source: {ui_port_source} (preferred {preferred_ui_port}, using {ui_port})")
     os.environ["WL_LAST_UI_PORT"] = str(ui_port)
+    # Now that the ports are settled, stamp them on this UI's record: the
+    # backend port is what lets this UI ask for the experiment directory of
+    # ITS backend rather than of whichever backend started last -- the
+    # difference that matters when two experiments run side by side.
+    try:
+        from weightslab.utils.active_experiment import record_ui_experiment
+        record_ui_experiment(experiment_dir, ui_port=ui_port, backend_port=backend_port)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"Could not record the UI ports: {exc}")
 
     ui_server.serve_ui(
         ui_host=ui_host,

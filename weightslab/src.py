@@ -1798,6 +1798,25 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
         _notebook_service.configure_embedded_kernel(embed_kernel_decision)
 
     if serving_grpc:
+        # Stamp the gRPC port on this backend's active-experiment record, so a
+        # UI proxying to that port finds THIS experiment's directory rather
+        # than whichever backend happened to start last (see
+        # active_experiment._sole_live_dir). Advisory: never fail serving on it.
+        try:
+            from weightslab.utils.active_experiment import record_backend_experiment
+            _grpc_port = (kwargs.get("grpc_port")
+                          or int(os.getenv("GRPC_BACKEND_PORT", 50051)))
+            _root_log_dir = None
+            try:
+                _hp = ledgers.get_hyperparams()
+                _root_log_dir = _hp["root_log_dir"] if _hp is not None else None
+            except Exception:  # noqa: BLE001 -- no hyperparameters registered
+                _root_log_dir = None
+            if _root_log_dir:
+                record_backend_experiment(_root_log_dir, grpc_port=int(_grpc_port))
+        except Exception as _exc:  # noqa: BLE001
+            logger.debug("Could not record the backend gRPC port: %s", _exc)
+
         grpc_serve(**kwargs)
 
     if embed_kernel_decision:

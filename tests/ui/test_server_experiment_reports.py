@@ -145,7 +145,7 @@ class TestReportsFollowTheRunningBackend(_ServerTestCase):
         active_experiment.record_backend_experiment(backend_dir)
         # Rewrite the record with a pid that cannot be running.
         state = active_experiment.read_state()
-        state["backend"]["pid"] = 2 ** 31 - 1
+        state["backend"][-1]["pid"] = 2 ** 31 - 1
         active_experiment.state_path().write_text(json.dumps(state), encoding="utf-8")
 
         self._write_report("mine.html")

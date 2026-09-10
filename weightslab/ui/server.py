@@ -1577,6 +1577,9 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
     grpc_auth_token: Optional[str] = None
     rpc_timeout: float = 300.0
     experiment_dir: Optional[str] = None
+    # The gRPC port this server proxies to; used to pick the right backend's
+    # experiment directory out of the active-experiment marker.
+    backend_port: Optional[int] = None
 
     # -- logging: quiet by default, honour WEIGHTSLAB_UI_VERBOSE ------------- #
     def log_message(self, fmt, *args):  # noqa: D401
@@ -1851,7 +1854,10 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         """
         try:
             from weightslab.utils.active_experiment import live_backend_experiment_dir
-            backend_dir = live_backend_experiment_dir()
+            # By PORT: with two experiments up, "the live backend" is ambiguous
+            # and picking the wrong one shows the other experiment's reports.
+            backend_dir = live_backend_experiment_dir(
+                getattr(self, "backend_port", None))
         except Exception:  # noqa: BLE001 -- never break a listing on the marker
             backend_dir = None
         return (backend_dir
@@ -2567,6 +2573,7 @@ def serve_ui(
         {
             "static_root": root,
             "channel": channel,
+            "backend_port": backend_port,
             "api_prefix": "/api",
             "grpc_auth_token": grpc_auth_token,
             "experiment_dir": experiment_dir,

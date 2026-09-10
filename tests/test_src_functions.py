@@ -72,7 +72,7 @@ class TestResolveConfiguredRootLogDir(unittest.TestCase):
         with tempfile.TemporaryDirectory() as ui_dir:
             active_experiment.record_ui_experiment(ui_dir)
             state = active_experiment.read_state()
-            state["ui"]["pid"] = 2 ** 31 - 1          # cannot be running
+            state["ui"][-1]["pid"] = 2 ** 31 - 1      # cannot be running
             active_experiment.state_path().write_text(json.dumps(state), encoding="utf-8")
 
             with patch("weightslab.src.tempfile.mkdtemp", return_value="/tmp/generated") as mk:
@@ -128,6 +128,63 @@ class TestActiveExperimentMarker(unittest.TestCase):
             os.environ["WEIGHTSLAB_STATE_DIR"] = self._state_prev
         shutil.rmtree(self._state_dir, ignore_errors=True)
 
+    def test_two_uis_are_recorded_side_by_side(self):
+        # Two experiments at once (a cls UI and a seg UI) is supported; with one
+        # slot per side the second `weightslab start` erased the first.
+        with tempfile.TemporaryDirectory() as cls_dir, tempfile.TemporaryDirectory() as seg_dir:
+            active_experiment.record_ui_experiment(cls_dir, ui_port=8080, backend_port=50051)
+            # A second UI, standing in for another process.
+            state = active_experiment.read_state()
+            state["ui"].append({
+                "root_log_dir": seg_dir, "pid": os.getpid(),
+                "ui_port": 8081, "backend_port": 50052,
+            })
+            active_experiment.state_path().write_text(json.dumps(state), encoding="utf-8")
+
+            recorded = {e["root_log_dir"] for e in active_experiment.entries("ui")}
+            self.assertEqual(len(recorded), 2)
+
+    def test_two_live_uis_are_not_guessed_between(self):
+        with tempfile.TemporaryDirectory() as a_dir, tempfile.TemporaryDirectory() as b_dir:
+            active_experiment.record_ui_experiment(a_dir)
+            state = active_experiment.read_state()
+            state["ui"].append({"root_log_dir": b_dir, "pid": os.getpid()})
+            active_experiment.state_path().write_text(json.dumps(state), encoding="utf-8")
+
+            # Adopting either would put the run in the wrong experiment.
+            self.assertIsNone(active_experiment.live_ui_experiment_dir())
+
+    def test_a_backend_is_found_by_the_port_the_caller_talks_to(self):
+        with tempfile.TemporaryDirectory() as cls_dir, tempfile.TemporaryDirectory() as seg_dir:
+            state = {"backend": [
+                {"root_log_dir": cls_dir, "pid": os.getpid(), "grpc_port": 50051},
+                {"root_log_dir": seg_dir, "pid": os.getpid(), "grpc_port": 50052},
+            ]}
+            active_experiment.state_path().parent.mkdir(parents=True, exist_ok=True)
+            active_experiment.state_path().write_text(json.dumps(state), encoding="utf-8")
+
+            self.assertEqual(
+                os.path.realpath(active_experiment.live_backend_experiment_dir(50051)),
+                os.path.realpath(cls_dir))
+            self.assertEqual(
+                os.path.realpath(active_experiment.live_backend_experiment_dir(50052)),
+                os.path.realpath(seg_dir))
+            # No port, two candidates: no guess.
+            self.assertIsNone(active_experiment.live_backend_experiment_dir())
+            # A port nobody serves: no guess either.
+            self.assertIsNone(active_experiment.live_backend_experiment_dir(50099))
+
+    def test_the_older_single_object_marker_is_still_readable(self):
+        with tempfile.TemporaryDirectory() as ui_dir:
+            active_experiment.state_path().parent.mkdir(parents=True, exist_ok=True)
+            active_experiment.state_path().write_text(
+                json.dumps({"ui": {"root_log_dir": ui_dir, "pid": os.getpid()}}),
+                encoding="utf-8")
+            self.assertEqual(os.path.realpath(active_experiment.ui_experiment_dir()),
+                             os.path.realpath(ui_dir))
+            self.assertEqual(os.path.realpath(active_experiment.live_ui_experiment_dir()),
+                             os.path.realpath(ui_dir))
+
     def test_ui_and_backend_entries_do_not_clobber_each_other(self):
         with tempfile.TemporaryDirectory() as ui_dir, tempfile.TemporaryDirectory() as be_dir:
             active_experiment.record_ui_experiment(ui_dir, ui_port=8080)
@@ -136,7 +193,7 @@ class TestActiveExperimentMarker(unittest.TestCase):
                              os.path.realpath(ui_dir))
             self.assertEqual(os.path.realpath(active_experiment.backend_experiment_dir()),
                              os.path.realpath(be_dir))
-            self.assertEqual(active_experiment.read_state()["ui"]["ui_port"], 8080)
+            self.assertEqual(active_experiment.entries("ui")[-1]["ui_port"], 8080)
 
     def test_missing_marker_reads_as_nothing_recorded(self):
         self.assertEqual(active_experiment.read_state(), {})
