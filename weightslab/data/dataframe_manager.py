@@ -31,6 +31,84 @@ pd.set_option('future.no_silent_downcasting', True)
 logger = logging.getLogger(__name__) # Set up logger
 
 
+def label_is_empty(value) -> bool:
+    """True when a label cell carries nothing: None, NaN, or an empty sequence.
+
+    Kept deliberately narrow — a scalar, a populated list and a populated array
+    are all "present", so a merge never overwrites a label a writer put there.
+    """
+    if value is None:
+        return True
+    if isinstance(value, float) and value != value:  # NaN
+        return True
+    if isinstance(value, (list, tuple, np.ndarray, dict)):
+        return len(value) == 0
+    return False
+
+
+def merge_instance_labels(values, sample_ids, annotation_ids) -> Dict[Any, list]:
+    """Group per-annotation label values back into one list per sample.
+
+    ``_expand_records_to_multi_index`` splits a multi-instance label (N boxes,
+    N masks) across annotation rows 1..N and leaves the SAMPLE row's own value
+    empty — "reconstructed by the UI collapse", as its convention comment says.
+    This is that reconstruction: ``{sample_id: [inst_1, inst_2, ...]}`` ordered
+    by annotation_id, so a sample-centric consumer gets the whole list of boxes
+    rather than the first one (or, since the sample row is empty, none at all).
+
+    Instances carrying no value are skipped; a sample with no instance value at
+    all is absent from the result, so callers can treat the mapping as "samples
+    that have something to merge".
+    """
+    if values is None or len(values) == 0:
+        return {}
+    annots = np.asarray(annotation_ids)
+    try:
+        order = np.argsort(annots.astype(np.int64), kind="stable")
+    except (TypeError, ValueError):
+        order = np.arange(len(values))
+
+    merged: Dict[Any, list] = {}
+    for i in order:
+        value = values[i]
+        if label_is_empty(value):
+            continue
+        merged.setdefault(sample_ids[i], []).append(
+            value.tolist() if isinstance(value, np.ndarray) else value
+        )
+    return merged
+
+
+def fill_missing_labels(frame: pd.DataFrame, column: str, merged: Dict[Any, list]) -> bool:
+    """Write ``merged`` lists into ``frame[column]`` wherever the cell is empty.
+
+    Only empty cells are filled: a sample row that already holds a label (the
+    single-instance layout, or a per-sample aggregate written after expansion)
+    keeps it. Returns True when anything was written. Touches only the rows
+    named in ``merged`` — never the whole frame.
+    """
+    if not merged or column not in frame.columns or frame.empty:
+        return False
+    try:
+        keys = [k for k in merged if k in frame.index]
+        if not keys:
+            return False
+        positions = frame.index.get_indexer(pd.Index(keys))
+        cells = frame[column].to_numpy(dtype=object, copy=True)
+        wrote = False
+        for key, pos in zip(keys, positions):
+            if pos < 0 or not label_is_empty(cells[pos]):
+                continue
+            cells[pos] = merged[key]
+            wrote = True
+        if wrote:
+            frame[column] = cells
+        return wrote
+    except Exception as exc:  # noqa: BLE001 -- a merge must never fail a refresh
+        logger.debug("[merge_instance_labels] fill skipped for %r: %s", column, exc)
+        return False
+
+
 def _safe_update(target: pd.DataFrame, source: pd.DataFrame) -> None:
     """In-place update of ``target`` from ``source``, immune to the pandas
     internal AssertionError that ``DataFrame.update()`` raises when the source
@@ -1490,7 +1568,15 @@ class LedgeredDataFrameManager:
             self._view_pending.clear()
 
     def get_source_rows(self, sample_ids, columns=None):
-        """Rows for *sample_ids* straight from the source frame. O(len(ids))."""
+        """Rows for *sample_ids* straight from the source frame. O(len(ids)).
+
+        ``columns`` is a request, not an assertion: a caller asking for a column
+        the source does not hold (a view-only column such as the natural-sort
+        ``signals.defaults.natural``) gets the columns that DO exist rather than
+        a KeyError. A column the source lacks has nothing to sync anyway, and
+        raising here failed the caller's whole request — GetDataSamples returned
+        `success=false` and the studio's modal came up empty.
+        """
         with self._lock:
             if self._df.empty or not len(sample_ids):
                 return None
@@ -1499,7 +1585,16 @@ class LedgeredDataFrameManager:
             want = set(str(s) for s in sample_ids)
             mask = keys.astype(str).isin(want)
             sub = self._df.loc[mask]
-            return sub[columns] if columns else sub
+            if not columns:
+                return sub
+            present = [c for c in columns if c in sub.columns]
+            if len(present) != len(columns):
+                logger.debug(
+                    "[LedgeredDataFrameManager] get_source_rows: ignoring %d column(s) "
+                    "absent from the source frame: %s",
+                    len(columns) - len(present),
+                    [c for c in columns if c not in sub.columns])
+            return sub[present]
 
     def get_origin_revision(self, origin: str) -> int:
         # No lock: a dict read is atomic under the GIL, and this is polled from
@@ -2737,6 +2832,28 @@ class LedgeredDataFrameManager:
                 sub = df.iloc[inst_pos]
                 sub_sid = sid_arr[inst_mask]
                 sub_annot = annot_int[inst_mask]
+
+                # Multi-instance labels (one box / mask per annotation row) are
+                # merged back into a single list-of-lists on the sample row.
+                # `_expand_records_to_multi_index` deliberately leaves the sample
+                # row's target EMPTY for these samples and puts each instance on
+                # rows 1..N, so without this the sample-centric view carries no
+                # label at all for every multi-instance sample -- the studio drew
+                # zero boxes on exactly the samples that have several.
+                sub_sid_labels = sub_sid.tolist()
+                sub_annot_labels = sub_annot.tolist()
+                for label_col in (SampleStatsEx.TARGET.value,
+                                  SampleStatsEx.PREDICTION.value):
+                    if label_col not in df.columns or label_col not in base.columns:
+                        continue
+                    # Vectorized skip: a column no instance row writes (predictions
+                    # today) costs an O(n) C-level scan here instead of a .tolist()
+                    # plus a Python pass over every annotation row.
+                    if not bool(sub[label_col].notna().any()):
+                        continue
+                    merged_labels = merge_instance_labels(
+                        sub[label_col].tolist(), sub_sid_labels, sub_annot_labels)
+                    fill_missing_labels(base, label_col, merged_labels)
 
                 # Per-instance signal columns: numeric columns that carry any value on the
                 # instance rows (written by enqueue_instance_batch). Array/io/meta excluded.

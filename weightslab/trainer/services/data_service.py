@@ -27,6 +27,8 @@ except ImportError:
     DictConfig = dict # type: ignore
 
 from weightslab.data.sample_stats import SampleStatsEx
+from weightslab.data.dataframe_manager import (
+    merge_instance_labels, fill_missing_labels)
 from weightslab.utils.tools import safe_reset_index
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.proto.experiment_service_pb2 import SampleEditType
@@ -4092,6 +4094,7 @@ class DataService:
         # Python, so GetDataSamples then reported discarded="1" and the studio
         # greyed the sample out, progressively, exactly as the model worked
         # through the dataset -- while the dataframe itself still said False.
+        merged_labels: dict = {}
         if isinstance(sub.index, pd.MultiIndex):
             ANNOT = SampleStatsEx.INSTANCE_ID.value
             names = list(getattr(sub.index, "names", []) or [])
@@ -4101,6 +4104,27 @@ class DataService:
                     canonical = np.asarray(annot).astype(int) == 0
                 except (TypeError, ValueError):
                     canonical = np.array([str(a) in ("0", "0.0") for a in annot])
+                # Multi-instance labels: the annotation rows about to be dropped
+                # hold one box/mask each, and the canonical row's own label is
+                # EMPTY by construction (_expand_records_to_multi_index). Merge
+                # them exactly as get_collapse_annotations_to_samples_df does --
+                # otherwise this differential write puts that empty value straight
+                # over the merged list the rebuild had placed in the view, and the
+                # sample loses its boxes again on the next refresh.
+                inst = ~canonical
+                if inst.any():
+                    inst_sids = sub.index.get_level_values(0).to_numpy()[inst].tolist()
+                    inst_annot = np.asarray(annot).tolist()
+                    inst_annot = [a for a, keep in zip(inst_annot, inst) if keep]
+                    for label_col in (SampleStatsEx.TARGET.value,
+                                      SampleStatsEx.PREDICTION.value):
+                        if label_col not in sub.columns:
+                            continue
+                        merged = merge_instance_labels(
+                            sub[label_col].to_numpy(dtype=object)[inst].tolist(),
+                            inst_sids, inst_annot)
+                        if merged:
+                            merged_labels[label_col] = merged
                 if canonical.any():
                     sub = sub[canonical]
             sub = sub.droplevel(-1)
@@ -4108,6 +4132,10 @@ class DataService:
         # row when the level was present, the first occurrence otherwise) --
         # never the last, for the reason above.
         sub = sub[~sub.index.duplicated(keep="first")]
+        if merged_labels:
+            sub = sub.copy()
+            for label_col, merged in merged_labels.items():
+                fill_missing_labels(sub, label_col, merged)
 
         # Only rows the view actually holds; a structural change (new sample)
         # must still fall back to the full rebuild rather than be invented here.
