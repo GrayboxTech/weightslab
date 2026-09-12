@@ -67,6 +67,9 @@ MEDIA_KIND_ATTRS = ("media_kind", "wl_media_kind")
 FPS_ATTRS = ("fps", "frame_rate")
 AUDIO_HOOK = "get_audio"
 POSTER_HOOK = "render_video_poster"
+# Optional: return the grid's still directly, so the clip is never decoded
+# just to throw all but one frame away (see load_poster_frame_direct).
+POSTER_FRAME_HOOK = "get_poster_frame"
 
 # Global decorator registry (set via wl.video_poster).
 _REGISTERED_POSTER_FN = None
@@ -102,6 +105,46 @@ def is_video_task(task_type) -> bool:
 def is_audio_task(task_type) -> bool:
     """True when the task type denotes audio-only output."""
     return str(task_type or "").strip().lower() == AUDIO_GENERATION_TASK
+
+
+def load_poster_frame_direct(dataset, index):
+    """Ask the dataset for a poster frame WITHOUT decoding the whole clip.
+
+    The grid draws one frame per sample, but the only way to get it used to be
+    to load the sample — which for a video dataset means decoding every frame
+    of the clip just to throw all but one away. Measured on a 40 s 720p corpus:
+    283 ms to decode a 16-frame window against 158 ms for a single frame, so
+    roughly half the grid's image time was spent on frames nobody looks at.
+
+    A dataset opts in by defining ``get_poster_frame(index)`` returning an
+    ``[H, W, C]`` array or a PIL image (None to decline, e.g. when it cannot
+    cheaply seek). Datasets that don't are unaffected — the caller falls back
+    to decoding the clip.
+    """
+    wrapped = getattr(dataset, "wrapped_dataset", dataset)
+    for source in (wrapped, dataset):
+        hook = getattr(source, POSTER_FRAME_HOOK, None)
+        if not callable(hook):
+            continue
+        try:
+            frame = hook(int(index))
+        except Exception as exc:
+            logger.warning("Dataset %s hook failed: %r", POSTER_FRAME_HOOK, exc)
+            return None
+        if frame is None:
+            return None
+        if isinstance(frame, Image.Image):
+            return np.asarray(frame)
+        arr = np.asarray(frame)
+        # Reject anything that is not a single frame rather than guessing:
+        # a wrong-shaped poster would be drawn, not raise.
+        if arr.ndim == 2 or (arr.ndim == 3 and arr.shape[-1] in _VIDEO_CHANNELS):
+            return _frames_to_uint8(arr[None])[0]
+        logger.warning(
+            "%s returned shape %s, expected [H, W] or [H, W, C]; ignoring",
+            POSTER_FRAME_HOOK, arr.shape)
+        return None
+    return None
 
 
 def poster_frame_index(num_frames: int) -> int:
@@ -465,16 +508,35 @@ def encode_video_mp4(frames, fps: float, audio=None, sample_rate: int = 0,
             "-movflags", "+faststart",
             out_path,
         ]
-        proc = subprocess.run(
-            cmd, input=arr.tobytes(), stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, check=False)
-        if proc.returncode != 0 or not os.path.exists(out_path):
+        payload = arr.tobytes()
+        # One retry. The first exec of the ffmpeg binary in a process can fail
+        # on Windows (AV/SmartScreen inspecting it, or a slow package shim)
+        # with a non-zero status and NO stderr at all — observed once, on the
+        # first GetMedia of a run. Without a retry that transient downgrades
+        # the clip to GIF, and because the encoded clip is then cached, the
+        # sample stays GIF for the life of the process.
+        for attempt in (1, 2):
+            proc = subprocess.run(
+                cmd, input=payload, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, check=False)
+            if proc.returncode == 0 and os.path.exists(out_path):
+                with open(out_path, "rb") as handle:
+                    return handle.read()
+
+            stderr = proc.stderr.decode("utf-8", "replace").strip()
             logger.warning(
-                "ffmpeg failed to encode %d frames: %s",
-                frame_count, proc.stderr.decode("utf-8", "replace")[:400])
-            return b""
-        with open(out_path, "rb") as handle:
-            return handle.read()
+                "ffmpeg attempt %d/2 failed to encode %d frames "
+                "(returncode=%s, output_exists=%s, %d input bytes): %s",
+                attempt, frame_count, proc.returncode,
+                os.path.exists(out_path), len(payload),
+                stderr[:400] or "<no stderr>")
+            if attempt == 1:
+                # Do not leave a partial file behind for the exists() check.
+                try:
+                    os.remove(out_path)
+                except OSError:
+                    pass
+        return b""
     except Exception as exc:
         logger.warning("MP4 encoding failed: %r", exc)
         return b""

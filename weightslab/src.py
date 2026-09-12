@@ -3395,6 +3395,61 @@ def _unpack_batch(batch, device=None):
 # EVALUATION MODE PUBLIC API
 # ##############################################################################################################
 
+def _resolve_module_device(module):
+    """Where a module's tensors live: parameters, else buffers, else the GPU.
+
+    Returns None only when there is genuinely nothing to go on (no torch, no
+    tensors, no accelerator) — in which case leaving the batch where it is, is
+    the only honest option.
+    """
+    try:
+        import torch as _th
+    except Exception:
+        return None
+
+    for getter in ("parameters", "buffers"):
+        try:
+            fn = getattr(module, getter, None)
+            if fn is None:
+                continue
+            for tensor in fn():
+                return tensor.device
+        except Exception:
+            continue
+
+    # A module with neither (or a proxy that forwards neither) still has to
+    # meet its batch somewhere: prefer the accelerator, since a CPU batch
+    # reaching a CUDA model is the failure this exists to prevent.
+    try:
+        if _th.cuda.is_available():
+            return _th.device("cuda")
+    except Exception:
+        pass
+    return None
+
+
+def _move_to_device(value, device):
+    """Move tensors to ``device``, descending into tuples/lists/dicts.
+
+    Anything that is not a tensor (ids, strings, metadata dicts) is returned
+    unchanged, and a failure to move is not fatal — the caller still reports
+    the forward error, which is more informative than a half-moved batch.
+    """
+    if device is None or value is None:
+        return value
+    if hasattr(value, "to") and hasattr(value, "device"):
+        try:
+            return value.to(device)
+        except Exception:
+            return value
+    if isinstance(value, dict):
+        return {k: _move_to_device(v, device) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        moved = [_move_to_device(v, device) for v in value]
+        return type(value)(moved) if isinstance(value, list) else tuple(moved)
+    return value
+
+
 def _make_default_eval_fn(model):
     """Return a default evaluation callable that uses all registered ledger signals.
 
@@ -3429,11 +3484,28 @@ def _make_default_eval_fn(model):
             no_grad_ctx = None
 
         try:
-            device = None
-            try:
-                device = next(model.parameters()).device
-            except (StopIteration, Exception):
-                pass
+            # Resolve where the model actually lives, and put the batch there.
+            #
+            # This used to read the first parameter and swallow every failure,
+            # leaving device=None — and a None device means the batch is never
+            # moved, so a CUDA model meets a CPU batch and every forward dies
+            # with "found at least two devices". Fall back through buffers (a
+            # model can be all-buffers) and then to the accelerator, so the
+            # answer is CUDA whenever CUDA is in play.
+            device = _resolve_module_device(model)
+
+            # Re-home the module onto that device. Non-persistent buffers are
+            # absent from a state_dict, so a checkpoint restore can leave them
+            # behind on CPU while the parameters are on CUDA; .to() is a no-op
+            # for anything already there and fixes exactly that case.
+            if device is not None:
+                try:
+                    model.to(device)
+                except Exception:
+                    pass
+
+            # Signals retired mid-pass because they raised (see below).
+            _failed_signals = set()
 
             # Resolve registered signals once before the loop.
             signal_names = []
@@ -3449,22 +3521,19 @@ def _make_default_eval_fn(model):
                     if inputs is None:
                         continue
 
-                    if device is not None and hasattr(inputs, "to"):
-                        try:
-                            inputs = inputs.to(device)
-                        except Exception:
-                            pass
-                    if targets is not None and device is not None and hasattr(targets, "to"):
-                        try:
-                            targets = targets.to(device)
-                        except Exception:
-                            pass
+                    # Move recursively: a model can take a tuple/list/dict of
+                    # tensors, and a top-level hasattr(x, "to") check silently
+                    # leaves every one of those on the CPU.
+                    inputs = _move_to_device(inputs, device)
+                    targets = _move_to_device(targets, device)
 
                     preds = model(inputs) # infer predictions
 
                     # Call each registered signal so its wrapped forward/compute
                     # fires and feeds into the evaluation-mode logger buffer.
                     for sig_name in signal_names:
+                        if sig_name in _failed_signals:
+                            continue
                         try:
                             sig = get_signal(sig_name)
                             if sig is None:
@@ -3498,12 +3567,43 @@ def _make_default_eval_fn(model):
                             if not attempted:
                                 sig(preds)
                         except Exception as _se:
-                            logger.debug(
-                                "[wl.default_eval] signal '%s' failed: %s\nAre you sure signal {%s} is compatible with weightslab?", sig_name, _se, sig_name
+                            # Retire the signal for the rest of this pass.
+                            #
+                            # These calls hand a signal the model's RAW output,
+                            # which not every metric accepts: a binary metric
+                            # given [B, num_classes] indexes out of bounds. On
+                            # CPU that is the IndexError we just caught; on
+                            # CUDA the same index is a device-side assert that
+                            # poisons the context for the WHOLE process, so the
+                            # next training step dies somewhere unrelated.
+                            # Repeating it once per batch turns one bad
+                            # contract into a guaranteed kill.
+                            _failed_signals.add(sig_name)
+                            logger.warning(
+                                "[wl.default_eval] signal '%s' failed and is "
+                                "skipped for this evaluation: %s | preds=%s "
+                                "targets=%s. Signals are called with the "
+                                "model's raw output — a metric that needs a "
+                                "different shape must adapt it in update().",
+                                sig_name, _se,
+                                tuple(getattr(preds, "shape", ())) or "n/a",
+                                tuple(getattr(targets, "shape", ())) or "n/a",
                             )
 
                 except Exception as _be:
-                    logger.debug("[wl.default_eval] batch forward failed: %s", _be)
+                    # A device mismatch here used to surface as a bare debug
+                    # line repeated once per batch, with nothing saying WHICH
+                    # tensor was where. Name the devices so the next one is
+                    # diagnosable from the log alone.
+                    _where = ""
+                    if "two devices" in str(_be):
+                        try:
+                            _where = (f" (model on {_resolve_module_device(model)}, "
+                                      f"inputs on {getattr(inputs, 'device', 'n/a')})")
+                        except Exception:
+                            pass
+                    logger.warning(
+                        "[wl.default_eval] batch forward failed: %s%s", _be, _where)
         finally:
             if no_grad_ctx is not None:
                 try:

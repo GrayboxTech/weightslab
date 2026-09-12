@@ -633,6 +633,15 @@ def load_raw_image_array(dataset, index, rank: int = 0) -> tuple:
     """
     wrapped = getattr(dataset, "wrapped_dataset", dataset)
 
+    # Cheapest path first: a video dataset that can seek a single frame should
+    # never be asked to decode a whole clip for a thumbnail nobody plays. Only
+    # datasets defining get_poster_frame() take this branch.
+    from weightslab.data.video_utils import load_poster_frame_direct
+    poster = load_poster_frame_direct(wrapped, index)
+    if poster is not None:
+        poster_pil = Image.fromarray(poster) if poster.ndim == 3 else Image.fromarray(poster, mode="L")
+        return poster, False, tuple(poster.shape), poster_pil
+
     if hasattr(wrapped, '__getitem__'):
         np_img, is_volumetric, original_shape = _get_image_array_and_metadata(wrapped, index, rank=rank)
 

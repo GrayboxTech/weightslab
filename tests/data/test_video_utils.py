@@ -392,3 +392,58 @@ class TestHasPlayableMedia:
     def test_plain_image_dataset_is_not_playable(self):
         assert not vu.has_playable_media(self._Image(), "classification")
         assert not vu.has_playable_media(self._Image(), "segmentation")
+
+
+class TestPosterFrameHook:
+    """A dataset may supply the grid's still without decoding a clip.
+
+    Measured on a 40 s 720p corpus: 283 ms to decode a 16-frame window vs
+    158 ms for one frame, so roughly half the grid's image time went on
+    frames nobody looks at.
+    """
+
+    class _WithHook:
+        media_kind = "video"
+        num_frames = 8
+
+        def get_poster_frame(self, index):
+            return np.full((4, 6, 3), int(index), dtype=np.uint8)
+
+    class _Declining:
+        media_kind = "video"
+
+        def get_poster_frame(self, index):
+            return None            # cannot cheaply seek — caller falls back
+
+    class _Broken:
+        media_kind = "video"
+
+        def get_poster_frame(self, index):
+            raise RuntimeError("boom")
+
+    class _WrongShape:
+        media_kind = "video"
+
+        def get_poster_frame(self, index):
+            return np.zeros((8, 4, 6, 3), dtype=np.uint8)   # a whole clip
+
+    class _NoHook:
+        media_kind = "video"
+
+    def test_returns_the_frame_the_dataset_supplies(self):
+        got = vu.load_poster_frame_direct(self._WithHook(), 3)
+        assert got is not None and got.shape == (4, 6, 3)
+        assert int(got[0, 0, 0]) == 3
+
+    def test_dataset_without_the_hook_falls_back(self):
+        assert vu.load_poster_frame_direct(self._NoHook(), 0) is None
+
+    def test_declining_falls_back(self):
+        assert vu.load_poster_frame_direct(self._Declining(), 0) is None
+
+    def test_a_raising_hook_falls_back_instead_of_propagating(self):
+        assert vu.load_poster_frame_direct(self._Broken(), 0) is None
+
+    def test_a_wrong_shaped_poster_is_refused(self):
+        # Drawn, not raised, if accepted — so refuse rather than guess.
+        assert vu.load_poster_frame_direct(self._WrongShape(), 0) is None
