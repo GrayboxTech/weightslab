@@ -41,7 +41,7 @@ from weightslab.data.point_cloud_utils import (
     is_point_cloud_detection_task,
 )
 from weightslab.data.video_utils import (
-    describe_clip, is_generation_task, is_video_task,
+    describe_clip, has_playable_media, is_generation_task, is_video_task,
 )
 from weightslab.data import media_store
 from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview, encode_image_to_raw_bytes
@@ -133,6 +133,21 @@ def _point_cloud_chunk_bytes() -> int:
 # these messages cross grpc-web to a browser, where oversized frames are the
 # usual cause of stalled streams. Override with WL_MEDIA_CHUNK_BYTES.
 _DEFAULT_MEDIA_CHUNK_BYTES = 1 << 18 # 256 KiB
+
+
+def _media_entry_bytes(value) -> int:
+    """Payload size of a cached media entry, for the media cache byte budget.
+
+    Entries are dicts whose "data" holds the encoded container; ``len()`` on
+    the dict itself would count keys, not bytes. Module-level rather than a
+    method so anything reusing ``_media_cache_put`` (the gRPC test stubs bind
+    it onto their own class) keeps working.
+    """
+    payload = value.get("data") if isinstance(value, dict) else value
+    try:
+        return len(payload)
+    except TypeError:
+        return 0
 
 
 def _media_chunk_bytes() -> int:
@@ -2322,7 +2337,14 @@ class DataService:
                     # frame, so advertise the clip's shape here. This lets the
                     # grid badge the cell and the modal size its player without
                     # anyone paying for a GetMedia round-trip first.
-                    if is_video_task(task_type):
+                    # Keyed on the dataset's media kind, not just the task
+                    # type: a video *classification* dataset declares
+                    # media_kind="video" and keeps its own task type, and its
+                    # poster already routes through is_video_sample. Gating
+                    # this on video_generation alone left those samples
+                    # playable over GetMedia but never advertised as such, so
+                    # the UI rendered them as stills.
+                    if has_playable_media(dataset, task_type):
                         media_info = describe_clip(dataset)
                         if media_info:
                             data_stats.append(
@@ -5597,9 +5619,16 @@ class DataService:
 
     # Same, for GetMedia (already-compressed MP4/WAV bytes per message).
     _MEDIA_CHUNK_BYTES = _media_chunk_bytes()
-    # How many encoded clips to keep. Clips are megabytes each, so this only
-    # needs to cover "the sample the user is currently looking at".
-    _MEDIA_CACHE_ENTRIES = 3
+    # How many encoded clips to keep, and how many bytes they may occupy.
+    #
+    # This used to be 3, sized for "the sample the user is looking at". That
+    # made the studio's modal prefetch window (6 neighbours) evict its own
+    # entries before they could be used, and re-muxing a clip costs an ffmpeg
+    # round-trip on the training process. Sized now to cover a browsing window;
+    # the byte budget is what actually bounds memory, since clip sizes vary by
+    # orders of magnitude between datasets.
+    _MEDIA_CACHE_ENTRIES = _env_int("WL_MEDIA_CACHE_ENTRIES", 32)
+    _MEDIA_CACHE_BYTES = _env_int("WL_MEDIA_CACHE_MB", 512) * 1024 * 1024
 
     def _locate_sample(self, sample_id: int, origin: str = ""):
         """Resolve ``sample_id`` to ``(dataset, ds_index, member_rank)``.
@@ -5784,15 +5813,23 @@ class DataService:
     def _media_cache_put(self, key, value) -> None:
         """Insert into the encoded-media LRU, evicting the oldest entries.
 
-        Encoded clips are large, so this is deliberately tiny — it exists to
-        make re-opening and scrubbing the *same* sample free, not to hold a
-        working set.
+        Bounded by BOTH entry count and total bytes: the count keeps a
+        browsing window resident so the studio's prefetch is not wasted, and
+        the byte budget is what stops a dataset of large clips from pinning
+        the training process's memory. The newest entry is never evicted —
+        someone is about to stream it.
         """
         with self._media_cache_lock:
             self._media_cache.pop(key, None)  # keep re-puts from double-counting
             self._media_cache[key] = value
-            while len(self._media_cache) > self._MEDIA_CACHE_ENTRIES:
-                self._media_cache.pop(next(iter(self._media_cache)))
+            total = sum(_media_entry_bytes(v) for v in self._media_cache.values())
+            while len(self._media_cache) > 1 and (
+                    len(self._media_cache) > self._MEDIA_CACHE_ENTRIES
+                    or total > self._MEDIA_CACHE_BYTES):
+                oldest = next(iter(self._media_cache))
+                if oldest == key:
+                    break
+                total -= _media_entry_bytes(self._media_cache.pop(oldest))
 
     def GetPointCloud(self, request, context):
         """Stream one sample's raw point cloud as binary float32 chunks.

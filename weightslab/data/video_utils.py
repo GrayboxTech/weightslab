@@ -104,6 +104,24 @@ def is_audio_task(task_type) -> bool:
     return str(task_type or "").strip().lower() == AUDIO_GENERATION_TASK
 
 
+def has_playable_media(dataset, task_type=None) -> bool:
+    """True when GetMedia can stream this sample's own content.
+
+    Deliberately wider than :func:`is_video_task`: a clip is playable because
+    of what it *is*, not because of what the model does with it. A video
+    classification or detection dataset declares ``media_kind = "video"`` and
+    keeps its own task type, and must still get the grid badge and the modal
+    player — which is exactly what this module's header promises.
+
+    Pair it with :func:`is_video_sample` (which additionally inspects the
+    array) wherever the frames are actually in hand; this predicate is for
+    the metadata paths, where they are not.
+    """
+    if is_video_task(task_type) or is_audio_task(task_type):
+        return True
+    return get_media_kind(dataset) in ("video", "audio")
+
+
 def get_media_kind(dataset) -> str:
     """Return the dataset's declared media kind ("" when it declares none)."""
     wrapped = getattr(dataset, "wrapped_dataset", dataset)
