@@ -42,6 +42,7 @@ from weightslab.data.point_cloud_utils import (
 )
 from weightslab.data.video_utils import (
     describe_clip, has_playable_media, is_generation_task, is_video_task,
+    select_frame_annotation,
 )
 from weightslab.data import media_store
 from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview, encode_image_to_raw_bytes
@@ -202,6 +203,44 @@ def set_flag_mask(series) -> "np.ndarray":
         return np.zeros(0, dtype=bool)
     return np.fromiter((is_set_flag(v) for v in series.tolist()),
                        dtype=bool, count=len(series))
+
+
+def _boxes_to_bbox_payload(boxes):
+    """``[N, >=4]`` rows -> the JSON payload the 2-D box renderer reads.
+
+    Shared by the full record path and the preview-cache path, which used to
+    disagree: the preview path had no plain-detection branch at all, so a
+    box array fell through to the segmentation encoder and was PIL-resized
+    into a 64x64 RLE "mask". The first fetch of a sample looked right (it came
+    from the full path) and every fetch after it was served from the poisoned
+    cache.
+    """
+    arr = to_numpy_safe(boxes)
+    if arr is None:
+        try:
+            arr = np.asarray(boxes, dtype=np.float32)
+        except Exception:
+            return None
+    if arr.ndim == 1 and arr.size >= 4:
+        arr = arr.reshape(1, -1)
+    if arr.size == 0 or arr.ndim != 2 or arr.shape[-1] < 4:
+        return None
+    return {"bboxes": arr.tolist(), "format": detect_bbox_format(arr[..., :4])}
+
+
+def _video_frame_count(dataset, task_type=None) -> int:
+    """Frames in this dataset's clips, or 0 when it is not a video dataset.
+
+    Read from the dataset's declared attributes (never by decoding), because
+    this runs per rendered row. 0 means "do not treat annotations as
+    per-frame", which is the right answer for every image dataset.
+    """
+    if dataset is None or not has_playable_media(dataset, task_type):
+        return 0
+    try:
+        return int(describe_clip(dataset).get("frame_count") or 0)
+    except Exception:
+        return 0
 
 
 def _is_non_mask_task(task_type) -> bool:
@@ -847,7 +886,21 @@ class DataService:
                                         value_string=json.dumps(payload)))
                             except Exception as exc:
                                 logger.debug("[PreviewCache] detection_pointcloud target skipped: %s", exc)
+                    elif label is not None and _early_task == "detection":
+                        payload = _boxes_to_bbox_payload(select_frame_annotation(
+                            label, _video_frame_count(dataset, _early_task)))
+                        if payload:
+                            stats.append(create_data_stat(
+                                'target', 'string', shape=[1],
+                                value_string=json.dumps(payload)))
                     elif label is not None:
+                        # Video segmentation annotates every frame. Reduce to
+                        # the poster frame FIRST: the ndim>2 branch below reads
+                        # a 3-D array as [H, W, C] and takes [:, :, 0], which
+                        # on a [T, H, W] mask stack is a frames x height strip
+                        # — a silently wrong overlay, not an error.
+                        label = select_frame_annotation(
+                            label, _video_frame_count(dataset, _early_task))
                         label_arr = to_numpy_safe(label)
                         if label_arr is None:
                             try:
@@ -879,7 +932,17 @@ class DataService:
                                         value_string=json.dumps(payload)))
                             except Exception as exc:
                                 logger.debug("[PreviewCache] detection_pointcloud pred skipped: %s", exc)
+                    elif pred is not None and _early_task == "detection":
+                        payload = _boxes_to_bbox_payload(select_frame_annotation(
+                            pred, _video_frame_count(dataset, _early_task)))
+                        if payload:
+                            stats.append(create_data_stat(
+                                'pred', 'string', shape=[1],
+                                value_string=json.dumps(payload)))
                     elif pred is not None:
+                        # Same poster-frame reduction as the GT above.
+                        pred = select_frame_annotation(
+                            pred, _video_frame_count(dataset, _early_task))
                         pred_arr = to_numpy_safe(pred)
                         if pred_arr is None:
                             try:
@@ -961,6 +1024,13 @@ class DataService:
         _task = next((st.value_string for st in rec.data_stats if st.name == "task_type"), "")
         if is_point_cloud_detection_task(_task):
             return self._refresh_preview_boxes_3d_from_row(rec, row)
+        # Plain 2-D detection carries box rows, which are no more rasterizable
+        # than point-cloud boxes are. Without this they fell through to the
+        # mask encoder below and a [N, 6] box array was PIL-resized into a
+        # 64x64 RLE "mask" — so a detection sample rendered correctly on its
+        # first fetch and as garbage from the preview cache thereafter.
+        if str(_task).strip().lower() == "detection":
+            return self._refresh_preview_boxes_2d_from_row(rec, row)
 
         # Infer preview dimensions from cached raw_data shape; fallback to 64x64.
         target_h, target_w = 64, 64
@@ -1011,6 +1081,41 @@ class DataService:
         pred_rle, pred_shape = _encode_row_mask(row.get(SampleStatsEx.PREDICTION.value))
         _upsert_mask_stat('pred_mask', pred_rle, pred_shape)
 
+        return rec
+
+    def _refresh_preview_boxes_2d_from_row(self, rec: "pb2.DataRecord", row: pd.Series) -> "pb2.DataRecord":
+        """Refresh GT/pred box JSON of a plain (2-D) detection preview record.
+
+        Video detection annotates every frame, so the rows are reduced to the
+        poster frame first — the same frame the cached thumbnail shows.
+        """
+        origin = next((st.value_string for st in rec.data_stats if st.name == "origin"), None)
+        dataset = self._get_dataset(origin) if origin else None
+        frames = _video_frame_count(dataset, "detection")
+
+        def _upsert_box_stat(stat_name: str, value_like) -> None:
+            payload = _boxes_to_bbox_payload(
+                select_frame_annotation(value_like, frames))
+            if not payload:
+                return
+            new_stat = create_data_stat(
+                stat_name, 'string', shape=[1], value_string=json.dumps(payload))
+            for i, st in enumerate(rec.data_stats):
+                if st.name == stat_name:
+                    rec.data_stats[i].CopyFrom(new_stat)
+                    return
+            rec.data_stats.append(new_stat)
+
+        # A stale mask stat from an earlier encode would otherwise sit next to
+        # the boxes and be drawn as an overlay.
+        for name in ("target", "pred_mask"):
+            for i, st in enumerate(rec.data_stats):
+                if st.name == name and st.type == "rle_mask":
+                    del rec.data_stats[i]
+                    break
+
+        _upsert_box_stat('target', row.get(SampleStatsEx.TARGET.value))
+        _upsert_box_stat('pred', row.get(SampleStatsEx.PREDICTION.value))
         return rec
 
     def _refresh_preview_boxes_3d_from_row(self, rec: "pb2.DataRecord", row: pd.Series) -> "pb2.DataRecord":
@@ -1689,6 +1794,13 @@ class DataService:
                 if label_raw is None and dataset is not None:
                     label_raw = load_label(dataset, sample_id)
 
+                # Video segmentation/detection annotates every frame, but the
+                # grid and the modal's still view draw exactly one — the
+                # poster. Take that frame's annotation, or the renderer gets a
+                # 3-D stack RLE'd into a stat it reads as 2-D.
+                label_raw = select_frame_annotation(
+                    label_raw, _video_frame_count(dataset, task_type))
+
                 # Handle 3D (point cloud) detection: metric boxes are sent both
                 # as raw 3D rows (for the interactive viewer) and projected to
                 # the BEV image frame (legacy 'bboxes' key, so the existing 2D
@@ -1959,6 +2071,11 @@ class DataService:
 
             if not _is_non_mask_task(task_type) and pred is not None:
                 t0_pmask = time.time()
+                # Same poster-frame rule as the ground truth above: a
+                # prediction drawn on the still must describe the frame the
+                # still actually shows.
+                pred = select_frame_annotation(
+                    pred, _video_frame_count(dataset, task_type))
 
                 # 3D (point cloud) detection predictions: same dual payload as
                 # the GT path (BEV-projected 'bboxes' + raw 'bboxes_3d').

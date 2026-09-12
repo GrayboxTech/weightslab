@@ -314,3 +314,81 @@ def test_encode_empty_clip_is_safe():
     empty = np.zeros((0, 8, 8, 3), dtype=np.uint8)
     assert vu.encode_video_mp4(empty, fps=8) == b""
     assert vu.encode_video_gif(empty, fps=8) == b""
+
+
+# ---------------------------------------------------------------------------
+# Per-frame annotations (video segmentation / detection)
+# ---------------------------------------------------------------------------
+class TestSelectFrameAnnotation:
+    """A clip's annotation must be reduced to the frame the poster shows.
+
+    The grid and the modal's still view draw exactly one frame. Sending the
+    whole [T, H, W] stack instead does not fail loudly — it gets RLE'd into a
+    stat the renderer reads as 2-D, i.e. a plausible-looking wrong overlay.
+    """
+
+    def test_poster_index_is_the_middle_frame(self):
+        # video_poster_frame() renders arr[T // 2]; anything drawn on it has
+        # to come from the same index or the overlay describes another moment.
+        assert vu.poster_frame_index(8) == 4
+        assert vu.poster_frame_index(16) == 8
+        assert vu.poster_frame_index(1) == 0
+
+    def test_slices_a_per_frame_mask_stack(self):
+        masks = np.arange(8 * 4 * 4).reshape(8, 4, 4)
+        got = vu.select_frame_annotation(masks, 8)
+        assert got.shape == (4, 4)
+        assert (got == masks[4]).all()
+
+    def test_leaves_a_single_2d_mask_alone(self):
+        mask = np.zeros((4, 4))
+        assert vu.select_frame_annotation(mask, 8).shape == (4, 4)
+
+    def test_does_not_slice_a_colour_mask(self):
+        """[H, W, C] is 3-D but NOT per-frame — slicing it would take a row."""
+        colour = np.zeros((4, 4, 3))
+        assert vu.select_frame_annotation(colour, 8).shape == (4, 4, 3)
+
+    def test_slices_per_frame_box_arrays(self):
+        boxes = np.stack([np.full((1, 6), t) for t in range(8)])   # [T, N, 6]
+        got = vu.select_frame_annotation(boxes, 8)
+        assert got.shape == (1, 6)
+        assert int(got[0, 0]) == 4
+
+    def test_slices_a_per_frame_list(self):
+        boxes = [np.full((2, 6), t) for t in range(8)]
+        assert int(vu.select_frame_annotation(boxes, 8)[0, 0]) == 4
+
+    def test_image_datasets_are_untouched(self):
+        """T == 0 is how an image dataset reports itself; nothing may change."""
+        arr = np.arange(8 * 4 * 4).reshape(8, 4, 4)
+        assert vu.select_frame_annotation(arr, 0).shape == arr.shape
+        assert vu.select_frame_annotation(arr, 1).shape == arr.shape
+
+    def test_none_and_mismatched_lengths_pass_through(self):
+        assert vu.select_frame_annotation(None, 8) is None
+        # A list that is not length T is not per-frame.
+        other = [1, 2, 3]
+        assert vu.select_frame_annotation(other, 8) is other
+
+
+class TestHasPlayableMedia:
+    """media_kind must be enough; task_type is not the only way to be video."""
+
+    class _VideoCls:
+        media_kind = "video"
+        task_type = "classification"
+
+    class _Image:
+        task_type = "classification"
+
+    def test_media_kind_makes_a_classifier_playable(self):
+        assert vu.has_playable_media(self._VideoCls(), "classification")
+
+    def test_generation_task_is_playable_without_media_kind(self):
+        assert vu.has_playable_media(self._Image(), "video_generation")
+        assert vu.has_playable_media(self._Image(), "audio_generation")
+
+    def test_plain_image_dataset_is_not_playable(self):
+        assert not vu.has_playable_media(self._Image(), "classification")
+        assert not vu.has_playable_media(self._Image(), "segmentation")

@@ -104,6 +104,54 @@ def is_audio_task(task_type) -> bool:
     return str(task_type or "").strip().lower() == AUDIO_GENERATION_TASK
 
 
+def poster_frame_index(num_frames: int) -> int:
+    """Index of the frame :func:`video_poster_frame` renders.
+
+    Kept as its own function because anything drawn ON the poster — a
+    segmentation mask, a set of boxes — has to be taken from the same frame,
+    or the overlay describes a moment the picture does not show.
+    """
+    return max(0, int(num_frames) // 2)
+
+
+def select_frame_annotation(annotation, num_frames: int):
+    """Reduce a per-frame annotation to the one the poster shows.
+
+    Video segmentation hands us a ``[T, H, W]`` mask and video detection a
+    length-T sequence of box arrays, but the grid and the modal's still view
+    draw exactly one frame. Encoding the whole stack instead would RLE a 3-D
+    array into a stat the renderer reads as 2-D, i.e. garbage.
+
+    Anything that is not clearly per-frame is returned untouched, so image
+    datasets and single-mask video datasets are unaffected.
+
+    Args:
+        annotation: ``[T, H, W]`` / ``[T, H, W, C]`` array, or a sequence of
+            length T whose elements are that frame's annotation.
+        num_frames: T, the clip's frame count.
+
+    Returns:
+        The annotation for the poster frame, or ``annotation`` unchanged.
+    """
+    if annotation is None or num_frames is None or int(num_frames) <= 1:
+        return annotation
+
+    index = poster_frame_index(num_frames)
+
+    shape = getattr(annotation, "shape", None)
+    if shape is not None:
+        # A [T, H, W] mask; [H, W] stays as it is. A 4-D [T, H, W, C] is also
+        # per-frame, but a 3-D [H, W, C] colour mask must not be sliced, hence
+        # the leading-dimension check against T rather than rank alone.
+        if len(shape) >= 3 and shape[0] == int(num_frames):
+            return annotation[index]
+        return annotation
+
+    if isinstance(annotation, (list, tuple)) and len(annotation) == int(num_frames):
+        return annotation[index]
+    return annotation
+
+
 def has_playable_media(dataset, task_type=None) -> bool:
     """True when GetMedia can stream this sample's own content.
 
