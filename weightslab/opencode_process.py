@@ -223,6 +223,25 @@ def lock_path(workspace_dir: str) -> Path:
     return Path(workspace_dir) / LOCK_FILENAME
 
 
+def machine_lock_path() -> Path:
+    """Machine-wide fallback lock, for sides that do NOT share a workspace.
+
+    The per-workspace lock is the rendezvous when both halves agree on a
+    directory — `weightslab start <dir>` and a backend whose
+    WEIGHTSLAB_ROOT_LOG_DIR is that same dir. They frequently do not: the UI
+    server generates its own workspace when started without one, while the
+    training backend falls back to its cwd. Each then found no lock, spawned
+    its OWN OpenCode, and the two sides ran different models with no error
+    anywhere — the studio's model picker wrote one server's config while the
+    backend read the other's.
+
+    Machine-wide rather than per-user-per-project on purpose: OpenCode is a
+    single local server by design, and OPENCODE_URL still overrides for anyone
+    who genuinely wants several.
+    """
+    return Path.home() / ".weightslab" / LOCK_FILENAME
+
+
 def read_lock(workspace_dir: str) -> Optional[dict]:
     try:
         with open(lock_path(workspace_dir), "r", encoding="utf-8") as f:
@@ -234,11 +253,33 @@ def read_lock(workspace_dir: str) -> Optional[dict]:
     return data
 
 
+def read_machine_lock() -> Optional[dict]:
+    """The machine-wide lock, or None when absent/unreadable."""
+    try:
+        with open(machine_lock_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not data.get("url"):
+        return None
+    return data
+
+
 def write_lock(workspace_dir: str, url: str, pid: Optional[int] = None) -> None:
+    payload = {"url": url, "pid": pid}
+    # Publish machine-wide too, so a side that does not share this workspace
+    # can still find this server instead of spawning a second one.
+    try:
+        machine = machine_lock_path()
+        os.makedirs(machine.parent, exist_ok=True)
+        with open(machine, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+    except OSError:
+        _LOGGER.debug("Could not write the machine-wide OpenCode lock")
     try:
         os.makedirs(workspace_dir, exist_ok=True)
         with open(lock_path(workspace_dir), "w", encoding="utf-8") as f:
-            json.dump({"url": url, "pid": pid}, f)
+            json.dump(payload, f)
     except OSError:
         # Best-effort: a later caller simply won't find this server via the
         # lock file and will spawn its own instead. Not worth failing the
@@ -431,6 +472,20 @@ def resolve_or_spawn_opencode(workspace_dir: str, origin: Optional[str] = None,
             lock["url"], workspace_dir,
         )
         return {"ok": True, "url": lock["url"], "source": "lockfile"}
+
+    # Nothing for THIS workspace: before spawning a second server, adopt one
+    # already running on this machine. Without this the UI and the training
+    # backend — which routinely disagree about the workspace — each ran their
+    # own, so a model chosen in one was invisible to the other.
+    shared = read_machine_lock()
+    if shared and opencode_healthy(shared["url"]):
+        _LOGGER.info(
+            "OpenCode: adopting the server at %s (machine-wide lock) for "
+            "workspace %s.", shared["url"], workspace_dir,
+        )
+        # Re-publish under this workspace so the next lookup here is direct.
+        write_lock(workspace_dir, shared["url"], shared.get("pid"))
+        return {"ok": True, "url": shared["url"], "source": "machine-lockfile"}
 
     argv = resolve_opencode_argv()
     if argv is None:
