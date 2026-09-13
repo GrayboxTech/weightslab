@@ -755,6 +755,10 @@ message DataSplitsResponse {
 message AgentHealthResponse {
   bool available = 1;
   string message = 2;
+  // The model the NEXT query will use, re-resolved from OpenCode's config.
+  // Health is polled, so this is how the studio notices a model chosen from
+  // the CLI (or by another client) instead of only knowing what it set itself.
+  string current_model = 3;
 }
 
 // --- Agent Onboarding ---
@@ -794,6 +798,9 @@ message GetAgentModelsResponse {
   bool success = 1;
   repeated string models = 2;
   string message = 3;
+  // Which of `models` is active right now, so the picker can preselect it
+  // rather than opening on whatever the client last set.
+  string current_model = 4;
 }
 
 message ResetAgentResponse {
