@@ -38,6 +38,14 @@ from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
 from weightslab.backend.ledgers import register_signal
 from weightslab.components.global_monitoring import pause_controller as pause_ctrl, get_active_origin
+from weightslab.projection import (
+    attach_projection as _attach_projection,
+    detach_projection as _detach_projection,
+    get_tracker as _projection_tracker,
+    observe_batch as _projection_observe_batch,
+    project_dataset,
+    projection_enabled as _projection_enabled,
+)
 
 
 def _rebind_caller_local(original_obj: Any, new_obj: Any) -> None:
@@ -890,6 +898,12 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
     # User parameters
     batch_ids = wl_kw.get('batch_ids')
+    # Snapshot the SAMPLE-level ids now. The per_instance branch below rebinds
+    # batch_ids to one entry per annotation (detection/segmentation), which is
+    # the right thing for save_instance_signals but would silently break the
+    # projection's positional feature<->id pairing, since the forward hook saw
+    # one feature row per SAMPLE.
+    sample_batch_ids = batch_ids
     group_ids = wl_kw.get('group_id')
     batch_scalar = wl_kw.get('signals')
     preds = wl_kw.get('preds')
@@ -979,6 +993,13 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
             logger.debug(f"Per-instance signal save failed for {reg_name}: {e}")
     else:
         _log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
+
+    # Live 3-D projection. The forward hook captured this batch's penultimate
+    # features but cannot see sample ids; we have the ids but not the
+    # activations. Both describe the same batch in the same order, so this is
+    # where they get paired -- the same arrangement ctx.logits already uses.
+    # No-op (one attribute read) unless a projection is attached.
+    _projection_observe_batch(sample_batch_ids, step)
 
     # CHECK FOR SUBSCRIBERS (Dynamic Signals)
     # Allows @wl.signal(subscribe_to="metric_name")
@@ -1261,6 +1282,11 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             if key in kwargs
         }
 
+        # Live 3-D projection options, popped for the same reason: it is a hook
+        # ON a wrapped model, not part of what wrapping means. False opts out;
+        # a dict steers layer/dim/cadence; absent means "the env var decides".
+        projection_opts = kwargs.pop('projection', None)
+
         # Now construct the wrapper and let it register into the ledger.
         wrapper = ModelInterface(obj, **kwargs) if forced_model_wrapping or _model == None else _model
 
@@ -1287,6 +1313,19 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 # script fails to start -- the run is still fully usable
                 # without these curves.
                 logger.warning(f"Could not install model signal tracking: {exc}")
+
+        # Live parametric-UMAP projection of the penultimate features. On by
+        # default (WEIGHTSLAB_PROJECTION=0 removes the hook entirely); pass
+        # projection={'layer': 'backbone.fc', ...} to steer it, or
+        # projection=False to opt this one model out. Same failure contract as
+        # the signal tracking above: a projection that cannot install is a lost
+        # view, never a failed run.
+        if projection_opts is not False:
+            try:
+                opts = dict(projection_opts) if isinstance(projection_opts, dict) else {}
+                _attach_projection(obj, layer=opts.pop('layer', None), **opts)
+            except Exception as exc:
+                logger.warning(f"Could not install live projection: {exc}")
 
         # Prefer returning the proxy (if one exists) so external callers hold
         # a stable reference that will see updates. If no proxy was
@@ -2439,11 +2478,20 @@ def save_signals(
     Shapes / formats:
         - ``signals`` values: shape ``(B,)`` (one scalar per sample) or
           ``(B, ...)`` — extra dims are mean-reduced to ``(B,)`` before storage.
+          Accepted types are ``th.Tensor``, ``np.ndarray``, ``list`` and scalar
+          numbers; anything else raises ``TypeError`` rather than creating a
+          column that is never written to.
         - ``batch_ids``: length ``B``; the i-th entry names the sample the i-th
           row of every other array belongs to. Coerced to ``str`` internally.
         - ``preds`` / ``preds_raw`` / ``targets``: array of length ``B`` (or a
           ``dict`` of such arrays, or a ``list`` of length ``B`` for
           inhomogeneous per-sample shapes). 1-D arrays get a trailing axis.
+
+    Raises:
+        TypeError: a value in *signals* is of a type that cannot be turned into
+            one number per sample. This is deliberately loud: such a value used
+            to be silently dropped, leaving a column in the dataframe that stayed
+            empty forever with nothing anywhere saying why.
 
     Args:
         signals (dict | th.Tensor): ``{name: values}`` where ``values`` is a
@@ -2550,26 +2598,56 @@ def save_signals(
             return [to_numpy(t) for t in x]
         if isinstance(x, th.Tensor):
             return to_numpy(x)
+        # A bare numpy array is as ordinary an input as a tensor -- half of
+        # WeightsLab's own signal helpers compute in numpy. Returning None for
+        # it (as this used to) created the column and then wrote nothing into
+        # it, which surfaces as a metric that silently stays empty forever.
+        if isinstance(x, np.ndarray):
+            return to_numpy(x)
+        # Scalars, so a caller who computed one value per sample in a Python
+        # list-comprehension is not silently dropped either.
+        if isinstance(x, (int, float, np.number)):
+            return to_numpy(np.asarray(x))
         return None
 
     preds_np = normalize(preds)
     preds_raw_np = normalize(preds_raw)
     target_np = normalize(targets)
 
+    def _reduce_signal(arr):
+        """Collapse a per-sample signal to one value per sample."""
+        if isinstance(arr, np.ndarray) and arr.ndim > 1:
+            return arr.mean(axis=tuple(range(1, arr.ndim)))
+        return arr
+
+    def _coerce_signal(name, value):
+        """Normalize one signal value, and REFUSE to write nothing.
+
+        Anything ``normalize`` cannot make sense of used to come back as
+        ``None``, which ``enqueue_batch`` happily accepted: the column appeared
+        in the dataframe, held no values, and nothing anywhere said why. That
+        is the worst possible failure for an observability feature -- the user
+        sees a column and concludes the metric is broken, not the call. Fail
+        loudly at the call site that can still be fixed instead.
+        """
+        coerced = value.detach().cpu().numpy() if hasattr(value, 'detach') else normalize(value)
+        if coerced is None:
+            raise TypeError(
+                f"save_signals: signal {name!r} has unsupported type "
+                f"{type(value).__name__}. Pass a torch.Tensor, a numpy array, a "
+                f"list, or a scalar -- one value per sample, aligned with "
+                f"batch_ids. (A value of None would create the column and never "
+                f"write to it.)"
+            )
+        return _reduce_signal(coerced)
+
     # Processing signals
     if isinstance(signals, dict):
         losses_data = {
-            'signals//' + k: (lambda arr: arr.mean(axis=tuple(range(1, arr.ndim))) if isinstance(arr, np.ndarray) and arr.ndim > 1 else arr)(
-                v.detach().cpu().numpy() if hasattr(v, 'detach') else normalize(v)
-            )
-            for k, v in signals.items()
+            'signals//' + k: _coerce_signal(k, v) for k, v in signals.items()
         }
     elif signals is not None and isinstance(signals, (th.Tensor, np.ndarray, list)):
-        losses_data = {
-            "signals//default": (lambda arr: arr.mean(axis=tuple(range(1, arr.ndim))) if isinstance(arr, np.ndarray) and arr.ndim > 1 else arr)(
-                signals.detach().cpu().numpy() if hasattr(signals, 'detach') else normalize(signals)
-            )
-        }
+        losses_data = {"signals//default": _coerce_signal("default", signals)}
     else:
         losses_data = None
 
@@ -2582,6 +2660,14 @@ def save_signals(
         losses=losses_data,
         step=step
     )
+
+    # Live 3-D projection, for the usecases that never register a flag="loss"
+    # criterion and write their per-sample values straight here (YOLO/Ultralytics
+    # wrappers, custom eval loops, anything hand-rolled). Between this and the
+    # loss wrapper, every supported way of producing a per-sample value feeds
+    # the projection. Re-entrancy safe: the projection's own coordinate
+    # write-back lands in this same function and is guarded there.
+    _projection_observe_batch(batch_ids, step)
 
     # Reactive signals: these just-logged signals may satisfy an inputs=[...]
     # signal. Only logged (queryable) signals can be inputs. _react=False on the

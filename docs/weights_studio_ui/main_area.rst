@@ -361,3 +361,77 @@ frame slider, so you can land on the exact frame a signal spiked on.
 
 **Volumetric images** get a Z-slice slider, and **text samples** render as
 text rather than as an image.
+
+.. _studio-projection-board:
+
+Projection Board
+----------------
+
+.. figure:: ../_static/screenshots/projection-board.png
+   :alt: Projection board showing the 3-D parametric-UMAP cloud
+   :width: 100%
+
+A navigable 3-D view of the representation the model is learning: one point per
+sample, placed by the live parametric-UMAP encoder (see :doc:`../projection`
+for the training-side half). The board appears only when a run has a
+projection, and reveals itself as soon as the first fit lands — no reload
+needed.
+
+Navigating
+~~~~~~~~~~
+
+- **Drag** to orbit the cloud.
+- **ctrl+scroll** to zoom toward the cursor — the same gesture the plots use.
+  Plain scroll is left to the page, so the board never traps your wheel.
+- **Fit** re-frames the whole cloud.
+
+The axes are unlabelled on purpose: UMAP coordinates carry no units, so they
+are an orientation cue only.
+
+Selecting samples
+~~~~~~~~~~~~~~~~~
+
+Click a point, or switch on **Lasso** and drag a loop around a region (hold
+Shift to add to the selection). Either way the selected sample ids are pushed
+into the :ref:`studio-data-board` as an ordinary ``sample_id`` filter, so the
+grid, the list view and every existing affordance work on the result.
+
+The projection itself is **never** filtered by that selection — it always draws
+the whole dataset, with the selection highlighted. Following its own filter
+would collapse the cloud to the points just selected, leaving nothing to select
+from next.
+
+Colour
+~~~~~~
+
+Points follow the **split** by default, using the same palette as the grid, so
+a sample is the same colour everywhere in Studio. The picker recolours by any
+metadata column — numeric columns get a ramp, categorical ones a palette.
+
+Level of detail
+~~~~~~~~~~~~~~~
+
+The board never downloads the whole dataset. It asks for the points inside the
+box its camera frames, up to a render budget, and the server decimates to that
+budget; zooming in narrows the box, so the same budget buys finer detail.
+
+Two properties follow from the sampling being deterministic rather than random:
+repeated requests pick the same points (the cloud does not boil when you nudge
+the camera), and zooming in only *adds* points. The sample is also
+**stratified** — every cluster keeps at least 10% of its own points, so a small
+cluster cannot be sampled out of existence and read as noise.
+
+The status line says plainly when the view is decimated, e.g.
+``4,812 pts (of 61,004 in view) · 70,000 projected``.
+
+Arranging the boards
+--------------------
+
+Every board in the main area — Plots, Data, Projection, and any added later —
+is dragged by its header title:
+
+- drop on the **top or bottom half** of another board to stack above or below it;
+- drop on a **left or right edge** to sit alongside it, splitting the width.
+
+The board you are dragging over highlights the exact edge you will land
+against, and the arrangement is remembered between sessions.

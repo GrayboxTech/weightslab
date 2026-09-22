@@ -198,9 +198,44 @@ def is_set_flag(value) -> bool:
 
 
 def set_flag_mask(series) -> "np.ndarray":
-    """``is_set_flag`` over a whole column, as a numpy bool array."""
+    """``is_set_flag`` over a whole column, as a numpy bool array.
+
+    Vectorised for the dtypes that actually turn up, and only those; anything
+    else still goes through ``is_set_flag`` one value at a time, so the rules
+    that function documents keep holding exactly.
+
+    Worth the branching: this is called once per point on every projection
+    refresh, and the per-element path was the single largest cost of that RPC
+    -- about 15 ms of a 34 ms response over 17k points, repeated every time the
+    camera settles and every ten seconds besides.
+    """
     if series is None:
         return np.zeros(0, dtype=bool)
+
+    dtype = getattr(series, "dtype", None)
+
+    # pandas nullable boolean: NA is not set, everything else is itself.
+    if isinstance(dtype, pd.BooleanDtype):
+        return series.fillna(False).to_numpy(dtype=bool)
+
+    if dtype is not None and not isinstance(dtype, pd.CategoricalDtype):
+        kind = getattr(dtype, "kind", None)
+        # Plain numpy bool: no missing value is representable.
+        if kind == "b":
+            return series.to_numpy(dtype=bool)
+        # Numeric: NaN is missing (NOT True, which is what bool() would say),
+        # and zero is false.
+        if kind in ("i", "u"):
+            return series.to_numpy() != 0
+        if kind == "f":
+            values = series.to_numpy(dtype=np.float64)
+            return np.isfinite(values) & (values != 0)
+        # pandas nullable Int64/Float64 and friends.
+        if isinstance(dtype, pd.api.extensions.ExtensionDtype) and \
+                pd.api.types.is_numeric_dtype(dtype):
+            values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=np.float64)
+            return np.isfinite(values) & (values != 0)
+
     return np.fromiter((is_set_flag(v) for v in series.tolist()),
                        dtype=bool, count=len(series))
 
@@ -5554,6 +5589,45 @@ class DataService:
                 message=f"Failed to retrieve samples: {str(e)}",
                 data_records=[]
             )
+
+    def GetProjection(self, request, context):
+        """Points of the live 3-D projection inside the client's view box.
+
+        Follows the data board's filter when ``request.follow_view`` is set,
+        which is the ordinary case: filtering the view (by hand or via the
+        agent) narrows the projection with it.
+
+        The exception is a filter the projection itself produced. A lasso
+        pushes a sample_id query into the data board; re-reading that here
+        would collapse the cloud to the points just selected and leave nothing
+        to select from next, so the client clears the flag for that one
+        refresh and the whole dataset is served instead.
+
+        All the slicing/decimation lives in projection_service; this is the RPC
+        shell around it.
+        """
+        try:
+            from weightslab.trainer.services import projection_service
+            if self._all_datasets_df is None:
+                self._initialize_data_service()
+            with self._watched_lock("_lock[GetProjection]"):
+                if not self._fastUpdateInternals():
+                    self._slowUpdateInternals()
+                frame = self._all_datasets_df
+                if self._is_filtered and not getattr(request, "follow_view", False):
+                    # The projection's OWN selection produced this filter, so
+                    # serve the whole dataset instead of the subview -- see the
+                    # docstring. Any other filter (a data-board query, the
+                    # agent) is followed, because "where do the samples I just
+                    # filtered to live in the representation" is the question
+                    # the board exists to answer.
+                    pulled = self._pull_into_all_data_view_df()
+                    if pulled is not None and not getattr(pulled, "empty", True):
+                        frame = pulled
+            return projection_service.build_projection_response(frame, request)
+        except Exception as e:
+            logger.error("Error in GetProjection: %s", str(e), exc_info=True)
+            return pb2.ProjectionResponse(success=False, message=str(e))
 
     def GetHistogram(self, request, context):
         """Server-side histogram binning of one column (typed RPC).

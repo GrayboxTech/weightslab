@@ -422,6 +422,21 @@ Logging
      - *(training script dir)*
      - Root directory where training log snapshots are saved.
        Defaults to a ``root_log_dir/`` folder next to your training script.
+   * - ``WEIGHTSLAB_PROJECTION``
+     - *(on)*
+     - Live 3-D parametric-UMAP projection of the model's representation
+       (see :doc:`projection`). On by default; set ``0``, ``false``, ``no`` or
+       ``off`` to remove it entirely — no hook, no encoder, no cost.
+   * - ``WEIGHTSLAB_PROJECTION_EVERY``
+     - ``50``
+     - Training steps between projection fits. Raise it to make the projection
+       cheaper, lower it to make it track a fast-moving representation.
+   * - ``WEIGHTSLAB_PROJECTION_DIM``
+     - ``3``
+     - Projection output dimensions. ``2`` is drawn on the ``z = 0`` plane.
+   * - ``WEIGHTSLAB_PROJECTION_NEIGHBORS``
+     - ``15``
+     - UMAP ``n_neighbors`` for the per-batch graph. Clamped to ``batch_size - 1``.
    * - ``AUDIT_LOG_FORMAT``
      - ``json``
      - Output format for audit logs tracking all user interactions through gRPC.

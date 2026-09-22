@@ -67,7 +67,7 @@ for _name in (
     "auto_loss_shape_signal_names",
     "signal_classifier", "resolve_signal_classifier",
     "LOSS_SHAPES", "get_current_experiment_hash", "pointcloud_thumbnail",
-    "pointcloud_boxes", "ai_report_generation",
+    "pointcloud_boxes", "ai_report_generation", "project_dataset",
 ):
     _LAZY_EXPORTS[_name] = (".src", _name)
 del _name
@@ -277,6 +277,7 @@ __all__ = [
     "write_dataframe",
     "export_annotations",
     "ai_report_generation",
+    "project_dataset",
     "classify_loss_shape",
     "write_loss_shapes",
     "write_signal_shapes",

@@ -258,6 +258,37 @@ def hardness(loss_vals, entropy_vals): ...
 - No custom classifier needed? Pass `loss_shape_signal=<name>` to
   `wl.write_dataframe(...)` (§3.7) to compute the built-in tag at dump time.
 
+### 3.6b Live 3-D projection (parametric UMAP)
+
+On by default, no code: `wl.watch_or_edit(model, flag="model")` hooks the
+**input of the last parameterised layer** (last `nn.Linear`, else last conv —
+i.e. the representation feeding the head, never its class-logit output), trains a small `features → R³`
+encoder on the UMAP objective alongside your model, and writes
+`signals//umap_{x,y,z}` per sample. Features are detached and the encoder has
+its own optimizer — it cannot perturb training. Studio shows a **Projection**
+board (3-D scatter, zoom = server-side level-of-detail, click/lasso selection →
+`sample_id` filter on the data board).
+
+- Off: `WEIGHTSLAB_PROJECTION=0` (removes the hook; zero cost), or
+  `wl.watch_or_edit(model, flag="model", projection=False)` per model.
+- Steer: `projection={"layer": "backbone.fc", "every_n_steps": 20, "min_dist": 0.05}`.
+- Works for every supervised task — it only needs a forward pass plus a
+  per-sample write carrying `batch_ids` (a `flag="loss"` criterion **or** a
+  direct `wl.save_signals`). Detection/segmentation `per_instance=True` is
+  handled: the projection gets the sample-level ids, one point per image.
+- Eval batches are placed but never fit on (no eval leakage into the layout).
+- Fully dynamic: layer, reduction, feature width and device are all discovered
+  from the first batch. A live architecture edit (prune/grow) rebuilds the
+  encoder — the cloud re-lays-out, `stats()["rebuilds"]` counts it.
+- Debug: `wl.projection.get_tracker().stats()`. `fits == 0` while training means
+  the auto-picked layer never ran — pass `projection={"layer": ...}`.
+- **Wrong layer after the fact?** `wl.project_dataset(model, loader, layer="backbone.layer3",
+  prefix="umap_layer3", epochs=20)` re-projects offline from a restored checkpoint —
+  no training step, weights/mode untouched. Different `prefix` values coexist as
+  separate columns; the board's picker (fed by `available_prefixes`) switches between them.
+- Full page: `weightslab/docs/projection.rst`; example:
+  `examples/Usecases/wl-parametric-umap/`.
+
 ### 3.7 Persisting & inspecting history
 
 - `wl.write_history()` / `wl.write_dataframe(path=, format="csv", columns=[...], loss_shape_signal=)` —
@@ -317,6 +348,7 @@ Authoritative reference: `weightslab/docs/configuration.rst`. High-signal ones:
 | `GRPC_AUTH_TOKEN` | unset | Optional token auth on top of mTLS. |
 | `GRPC_MAX_MESSAGE_BYTES` | `268435456` | Raise if large tensors/images fail to transfer. |
 | `WEIGHTSLAB_DISABLE_WATCHDOGS` | `0` | Set `1` when breakpoint-debugging (§5). |
+| `WEIGHTSLAB_PROJECTION` | on | Live 3-D parametric-UMAP projection. `0`/`false`/`no`/`off` removes the hook entirely. Also `_EVERY` (50), `_DIM` (3), `_NEIGHBORS` (15). |
 | `GRPC_WATCHDOG_STUCK_SECONDS` | `60` | Lock/RPC stuck threshold + lock-acquire timeout. |
 
 **Frontend — runtime `window.*` globals (injected at `weightslab start` time; restart+reload to apply):**
@@ -389,6 +421,7 @@ around here.
 - `components/` — `global_monitoring.py` (locks, `guard_*`, pause), `checkpoint_manager.py`, `evaluation_controller.py`.
 - `data/` — `dataframe_manager.py`, `data_samples_with_ops.py`, `sample_stats.py`, H5 storage (`h5_dataframe_store.py`, `h5_array_store.py`, `array_proxy.py`).
 - `backend/` — `ledgers.py` (`GLOBAL_LEDGER`), `logger.py`, `audit_logger.py`, `cli.py`.
+- `projection/parametric_umap.py` — live 3-D projection (§3.6b): feature hook, UMAP encoder, coordinate write-back; served by `trainer/services/projection_service.py` (`GetProjection`).
 - `security/` (`CertAuthManager`), `proto/`, `docs/`.
 - `integrations/ultralytics/` — `WLAwareTrainer`/`WLAwareSegmentationTrainer` (§3.9) — the only wiring done outside a user script.
 - `examples/{PyTorch,Lightning,Ultralytics,Usecases}/<usecase>/main.py` (+`config.yaml`, `utils/`) — the integration cookbook (§3); `examples/Notebooks/` mirrors most as notebooks, same wiring; `examples/utils/baseline_models/` is a plain model zoo (only the two `wl-classification` examples use it).
@@ -397,6 +430,8 @@ around here.
 - `main.ts` — bootstrap, builds grpc-web transport from `WS_SERVER_*`.
 - `experiment_service.client.ts`/`experiment_service.ts` — generated client (regen via `npm run generate-proto:data`; don't hand-edit).
 - `grid_data/` — grid/modal rendering (`GridCell.ts`, `DataImageService.ts`, `gridDataManager.ts`, `BboxRenderer.ts`, `SegmentationRenderer.ts`, `PointCloudViewer.ts`).
+- `projection/` — the Projection board (§3.6b): `ProjectionViewer.ts` (three.js scatter, raycast + lasso picking), `projectionBoard.ts` (toolbar, zoom→refetch); `main_area/projectionResizer.ts` sizes it as a third board.
+- `main_area/boardRegistry.ts` + `boardLayout.ts` — the main-area boards. **Adding a board = one `BOARDS` entry** (id, label, selector, title selector) plus a header carrying that title element; drag-to-reorder, stacking and side-by-side rows all come for free. Layout is `string[][]` (rows of board ids) in `main-area-layout-v2`; a row with one board is left unwrapped so the per-board resizers keep working, multi-board rows get a `.board-row` flex wrapper. `boardVerticalResizers.ts` still owns per-board heights/collapse; its old two-section DnD is superseded and unwired.
 - `ui/` — `server.py` (HTTP + gRPC-Web proxy), `static/` (bundled SPA), `utils/` (cert scripts, sync-frontend helper).
 
 **Docs:** `weightslab/docs/` — `configuration.rst`, `weights_studio.rst`, `quickstart.rst`, `grpc/`.

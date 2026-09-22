@@ -49,6 +49,12 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       Understand the 4-level workflow and each part independently.
 
+   .. grid-item-card:: Live 3-D Projection
+      :link: projection
+      :link-type: doc
+
+      Watch the representation your model is learning, and select samples in it.
+
    .. grid-item-card:: Notebooks
       :link: notebooks
       :link-type: doc
@@ -120,6 +126,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
    four_way_approach
    signal_trajectory_classification
+   projection
    custom_evaluation
 
 

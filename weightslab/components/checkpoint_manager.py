@@ -1206,6 +1206,83 @@ class CheckpointManager:
         # rest of the state (cheap CHECKPOINT; replaces the old JSON snapshot).
         self.flush_logger_to_disk()
 
+    @staticmethod
+    def projection_sidecar_path(checkpoint_file) -> "Path":
+        """Where a checkpoint's projection encoder lives.
+
+        In a ``projection/`` SUBDIRECTORY, not beside the checkpoint. The
+        weight-checkpoint scanner globs ``<hash>_step_*.pt`` over the model
+        directory, and a sibling named ``<ckpt>.projection.pt`` matches that
+        glob -- it was picked up as a weight checkpoint, its step failed to
+        parse, and checkpoint selection returned None. A subdirectory cannot
+        collide with that glob however the sidecar is named.
+        """
+        from pathlib import Path as _Path
+        path = _Path(checkpoint_file)
+        return path.parent / "projection" / (path.stem + ".pt")
+
+    def _save_projection_sidecar(self, checkpoint_file) -> None:
+        """Write the live projection encoder next to *checkpoint_file*.
+
+        Best-effort and silent on failure: a checkpoint that saved the model is
+        a successful checkpoint whether or not a projection happened to exist.
+        """
+        try:
+            from weightslab.projection import get_tracker, save_projection
+            tracker = get_tracker()
+            if tracker is None or tracker._encoder is None:
+                return
+            import torch as _th
+            target = self.projection_sidecar_path(checkpoint_file)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _th.save({
+                "state_dict": tracker._encoder.state_dict(),
+                "in_dim": tracker._encoder_dim,
+                "out_dim": tracker.out_dim,
+                "prefix": tracker.signal_prefix,
+                "fits": tracker.steps_trained,
+                "a": tracker.a,
+                "b": tracker.b,
+            }, target)
+            # Also refresh the run-level copy, which is what a plain restart
+            # (no explicit checkpoint restore) picks up.
+            save_projection(tracker)
+        except Exception as exc:
+            logger.debug(f"Could not save projection sidecar: {exc}")
+
+    def _load_projection_sidecar(self, checkpoint_file) -> bool:
+        """Restore the encoder saved beside *checkpoint_file*, if there is one."""
+        try:
+            from weightslab.projection import get_tracker, ProjectionEncoder
+            import torch as _th
+            path = self.projection_sidecar_path(checkpoint_file)
+            tracker = get_tracker()
+            if tracker is None or not path.exists():
+                return False
+            blob = _th.load(path, map_location="cpu", weights_only=False)
+            in_dim = int(blob.get("in_dim") or 0)
+            if in_dim <= 0 or int(blob.get("out_dim") or 0) != tracker.out_dim:
+                return False
+            encoder = ProjectionEncoder(in_dim, tracker.out_dim)
+            encoder.load_state_dict(blob["state_dict"])
+            tracker._encoder = encoder
+            tracker._encoder_dim = in_dim
+            tracker._previous_dim = in_dim
+            tracker._optimizer = _th.optim.Adam(encoder.parameters(), lr=tracker.lr)
+            tracker.steps_trained = int(blob.get("fits", 0))
+            tracker.a = float(blob.get("a", tracker.a))
+            tracker.b = float(blob.get("b", tracker.b))
+            # Buffered features came from the model we just replaced.
+            tracker._clear_buffer()
+            logger.info(
+                f"Restored projection encoder from {path.name} "
+                f"({in_dim} -> {tracker.out_dim}); the projection matches the "
+                f"restored weights")
+            return True
+        except Exception as exc:
+            logger.debug(f"Could not load projection sidecar: {exc}")
+            return False
+
     def save_model_checkpoint(
         self,
         model: Optional[th.nn.Module] = None,
@@ -1300,6 +1377,14 @@ class CheckpointManager:
         try:
             th.save(checkpoint, checkpoint_file)
             logger.info(f"Saved model checkpoint: {checkpoint_file.name}")
+
+            # The projection encoder rides ALONGSIDE the checkpoint, in a
+            # sibling file -- never inside it, so a weights file stays a
+            # weights file. Pairing them per checkpoint is what makes a restore
+            # coherent: rolling the model back to step 1000 while the encoder
+            # is still the step-5000 one would place old features through a
+            # newer map and silently draw a layout that never existed.
+            self._save_projection_sidecar(checkpoint_file)
 
             # Update manifest with latest weight checkpoint for this experiment
             if update_manifest:
@@ -2075,6 +2160,13 @@ class CheckpointManager:
                     )
                     result['loaded_components'].add('weights')
                     step = result['weights'].get('step', 0)
+
+                    # Bring the projection back to the same moment as these
+                    # weights (see _save_projection_sidecar). Without it the
+                    # restored model's features would be read through an
+                    # encoder trained on a later one.
+                    if self._load_projection_sidecar(checkpoint_file_to_load):
+                        result['loaded_components'].add('projection')
 
                     # Extract RNG state from model checkpoint if available
                     checkpoint_rng_state = result['weights'].get('rng_state')
