@@ -826,6 +826,9 @@ def _read_example_main(usecase: str) -> Optional[str]:
 # "/loop 30s ..." hammering the model every few seconds.
 _LOOP_MIN_INTERVAL_SECONDS = 30.0
 
+# Best-effort abort/delete when a loop is stopped: short, because the stop
+# button waits on it and a wedged OpenCode must not hang the UI.
+_LOOP_STOP_TIMEOUT_SECONDS = float(os.environ.get("WL_LOOP_STOP_TIMEOUT_S", "5"))
 # Caps a single check-in's wall-clock time (_opencode_send_and_collect's own
 # default is 600s, generous for the SDK/landing chat's own interactive use).
 # 150s was tried first and was wrong: it was sized for "what's the last loss
@@ -1381,6 +1384,17 @@ class _LoopRegistry:
             timer.start()
 
     def stop(self, job_id: str) -> dict:
+        """Stop a loop: cancel its next tick AND kill the one it is running now.
+
+        Cancelling the timer only prevents FUTURE ticks. A check-in already
+        inside _opencode_send_and_collect keeps going until
+        _LOOP_CHECKIN_TIMEOUT_SECONDS, so closing a loop's tab used to leave
+        the agent working -- burning tokens on an answer whose tab no longer
+        exists, and holding the session open. Aborting the session ends that
+        turn; deleting it releases the session the registry used to leak here.
+        Both are best-effort with short timeouts: a wedged OpenCode must not
+        make the stop button hang.
+        """
         with self._lock:
             job = self._jobs.pop(job_id, None)
             if job is not None:
@@ -1389,6 +1403,18 @@ class _LoopRegistry:
             return {"ok": False, "error": f"No loop job {job_id}."}
         if job.timer is not None:
             job.timer.cancel()
+
+        if job.session_id:
+            for path, method in ((f"/session/{job.session_id}/abort", "POST"),
+                                 (f"/session/{job.session_id}", "DELETE")):
+                try:
+                    _opencode_json_request(job.base_url, path, method=method,
+                                           timeout=_LOOP_STOP_TIMEOUT_SECONDS)
+                except Exception as exc:
+                    # An in-flight turn that refuses to abort still stops
+                    # mattering: the job is gone from the registry, so its
+                    # result is dropped and no further tick is scheduled.
+                    logger.debug("loop %s: %s %s failed: %s", job_id, method, path, exc)
         return {"ok": True}
 
     def update(self, job_id: str, prompt: Optional[str] = None, interval_seconds: Optional[float] = None) -> dict:
