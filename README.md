@@ -8,8 +8,8 @@
 
 </div>
 <div align="center">
-  <h1>Built for AI Engineers working with messy real-world data</h1>
-  <p>Pause training, mine live loss signals to surface mislabels, class imbalance & outliers,<br>then curate your image, video & LiDAR data, without restarting.</p>
+  <h1>Built for ML Teams working with messy real-world data</h1>
+  <p>Pause training, mine live loss signals to surface mislabels, class imbalance & outliers,<br>then curate your image, video, text & LiDAR data, without restarting.</p>
 </div>
 
 <br>
@@ -41,7 +41,7 @@
 
 WeightsLab hooks into your existing PyTorch training loop and exposes a live UI where you can inspect per-sample signals, edit the dataset, and steer training. Without restarting.
 
-## Weightslab in Motion
+## WeightsLab in Motion
 <div align="center">
   <img width="960" height="540" alt="Image" src="https://github.com/user-attachments/assets/2e8f8846-efcd-4188-9d60-fee0674d1105" />
   <!-- <sub><a href="https://youtu.be/GBBDDaJQLWk">▶ Watch full demo</a></sub> -->
