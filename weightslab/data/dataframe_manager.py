@@ -10,7 +10,8 @@ import pandas as pd
 import torch
 
 from datetime import datetime
-from typing import Dict, Sequence, Any, List
+from pathlib import Path
+from typing import Dict, Sequence, Any, List, Iterable, Optional
 
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.data.h5_array_store import H5ArrayStore
@@ -852,6 +853,85 @@ class LedgeredDataFrameManager:
                         self._df = self._df.sort_index()
             else:
                 logger.warning(f"[LedgeredDataFrameManager] Loaded data missing 'sample_id' column for origin={origin}. Skipping load.")
+
+    def import_from_store(self, store: H5DataFrameStore | str | Path, origins: Optional[Iterable[str]] = None) -> int:
+        """Replace this ledger's per-sample stats with the ones persisted in
+        another root's H5 store -- e.g. a sibling experiment restored from a
+        multi-root viewer: last signal values, predictions, nb_seen, tags,
+        discarded. ``store`` is only read.
+
+        Only origins already registered here are imported, and only for samples
+        this ledger knows. Signal and tag columns this ledger holds but
+        ``store`` lacks belong to another run, so they are cleared on the
+        imported rows, and dropped once no row holds a value. Array references
+        are skipped: their arrays live in the other root's arrays.h5. Returns
+        the number of rows imported.
+        """
+        if not isinstance(store, H5DataFrameStore):
+            store = H5DataFrameStore(Path(store))
+        if not store.exists():
+            return 0
+
+        with self._lock:
+            if self._df.empty or SampleStats.Ex.ORIGIN.value not in self._df.columns:
+                return 0
+            registered = {str(o) for o in self._df[SampleStats.Ex.ORIGIN.value].dropna().unique()}
+            known_samples = set(self._df.index.get_level_values(0))
+        wanted = registered if origins is None else registered & {str(o) for o in origins}
+
+        # Bring the full category sets of categorical tags along.
+        registry = store.load_tag_registry()
+        if registry:
+            with self._lock:
+                for name, cats in registry.items():
+                    self._merge_categories(name, cats)
+
+        run_column_prefixes = ("signals", "SIGNALS", f"{SampleStats.Ex.TAG.value}:", "TAG:")
+        stale_columns = set()
+        imported = 0
+        for origin in sorted(wanted):
+            loaded = store.load(origin)  # read-only, unlike load_all()
+            if loaded.empty or "sample_id" not in loaded.columns:
+                continue
+            if "annotation_id" in loaded.columns:
+                loaded = loaded.set_index(['sample_id', 'annotation_id'])
+            else:
+                loaded = self._expand_dataframe_with_annotations(loaded.set_index("sample_id"))
+            loaded.index = pd.MultiIndex.from_arrays(
+                [pd.Index([self._normalize_sample_id(v) for v in loaded.index.get_level_values(0)]),
+                 loaded.index.get_level_values(1)],
+                names=['sample_id', 'annotation_id'],
+            )
+            loaded = loaded[loaded.index.get_level_values(0).isin(known_samples)]
+            if loaded.empty:
+                continue
+
+            for col in [c for c in self._array_columns if c in loaded.columns]:
+                if loaded[col].dtype == object and loaded[col].map(lambda v: isinstance(v, str) and '.h5:/' in v).any():
+                    loaded = loaded.drop(columns=col)
+
+            with self._lock:
+                stale = [c for c in self._df.columns
+                         if c not in loaded.columns and str(c).startswith(run_column_prefixes)]
+                for col in stale:
+                    loaded[col] = False if pd.api.types.is_bool_dtype(self._df[col].dtype) else np.nan
+            stale_columns.update(stale)
+
+            self.upsert_df(loaded, origin=origin, force_flush=True)
+            imported += len(loaded)
+
+        # Drop the other run's columns that no row holds anymore (a cleared tag holds False)
+        with self._lock:
+            for col in stale_columns:
+                if col not in self._df.columns:
+                    continue
+                values = self._df[col].astype(object)
+                held = values.notna()
+                if not str(col).startswith(("signals", "SIGNALS")):
+                    held &= values != False
+                if not held.any():
+                    self._df.pop(col)
+        return imported
 
     def upsert_df(self, df_local: List | pd.DataFrame, origin: str = None, force_flush: bool = False):
         if df_local is None or (isinstance(df_local, pd.DataFrame) and df_local.empty) or len(df_local) == 0:
