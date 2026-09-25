@@ -90,7 +90,7 @@ IoU as a distribution overlaid on each image.
 
 .. code-block:: python
 
-   with guard_training_context:
+   with wl.guard_training_context:
        outputs = model(inputs)
        preds   = decode_predictions(outputs.detach(), grid_size, conf_thresh)
 

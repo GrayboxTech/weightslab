@@ -1577,6 +1577,9 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
     grpc_auth_token: Optional[str] = None
     rpc_timeout: float = 300.0
     experiment_dir: Optional[str] = None
+    # The gRPC port this server proxies to; used to pick the right backend's
+    # experiment directory out of the active-experiment marker.
+    backend_port: Optional[int] = None
 
     # -- logging: quiet by default, honour WEIGHTSLAB_UI_VERBOSE ------------- #
     def log_message(self, fmt, *args):  # noqa: D401
@@ -1612,6 +1615,9 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         if path == "/agent-server/status":
             self._send_json(HTTPStatus.OK, _opencode_session.status())
             return
+        if path == "/agent-server/model":
+            self._get_shared_model()
+            return
         if path == "/agent-server/loop/list":
             self._send_json(HTTPStatus.OK, {"loops": _loop_registry.list()})
             return
@@ -1645,6 +1651,8 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
             self._start_local_notebook()
         elif path == "/agent-server/start":
             self._start_agent_server()
+        elif path == "/agent-server/model":
+            self._set_shared_model()
         elif path == "/agent-server/loop/start":
             self._start_loop()
         elif path.startswith("/agent-server/loop/") and path.endswith("/stop"):
@@ -1745,9 +1753,120 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------ #
     # Local Jupyter Notebook launcher (landing-page button)
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # Shared agent model, proxied SAME-ORIGIN
+    # ------------------------------------------------------------------ #
+    # OpenCode's own config holds the one model every client of that server
+    # agrees on: the studio's picker, the OpenCode CLI, `weightslab agent
+    # model`, and the backend SDK agent (which reads it to choose the model for
+    # its own queries). The browser could call OpenCode directly -- but only
+    # while OpenCode's --cors allowlist happens to contain the exact origin the
+    # page is served from, which quietly fails for a LAN address, a tunnel
+    # hostname, or an OpenCode somebody started by hand with no --cors at all.
+    # The page then showed a model nobody else was using, and picking one
+    # changed nothing outside the tab.
+    #
+    # Same-origin here means no preflight and no allowlist: this server talks
+    # to OpenCode over plain HTTP on the machine they share.
+    def _opencode_base_url(self) -> Optional[str]:
+        status = _opencode_session.status()
+        url = status.get("url") if isinstance(status, dict) else None
+        if isinstance(url, str) and url.strip():
+            return url.rstrip("/")
+        env_url = (os.environ.get("OPENCODE_URL") or "").strip()
+        return env_url.rstrip("/") if env_url else None
+
+    def _opencode_json(self, path: str, method: str = "GET", body: Optional[dict] = None,
+                       timeout: float = 10.0):
+        """One request to the local OpenCode server; (status, parsed-json-or-None)."""
+        base = self._opencode_base_url()
+        if not base:
+            return None, None
+        import urllib.error
+        import urllib.request
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        headers = {"Content-Type": "application/json"} if data is not None else {}
+        req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+                try:
+                    return resp.status, json.loads(raw or "null")
+                except ValueError:
+                    return resp.status, None
+        except urllib.error.HTTPError as exc:
+            return exc.code, None
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[ui] OpenCode %s %s failed: %s", method, path, exc)
+            return None, None
+
+    def _get_shared_model(self):
+        status, payload = self._opencode_json("/config")
+        # A transport failure AND an error status both mean "we do not know
+        # which model is configured" -- reporting ok:True with model=None there
+        # would tell the page "nothing is configured", and it would then show
+        # its own default over whatever the backend is really using.
+        if status is None or not (200 <= int(status) < 300):
+            self._send_json(HTTPStatus.OK, {"ok": False, "model": None,
+                                            "error": "OpenCode server is not reachable"})
+            return
+        model = (payload or {}).get("model") if isinstance(payload, dict) else None
+        if not (isinstance(model, str) and "/" in model):
+            model = None
+        self._send_json(HTTPStatus.OK, {"ok": True, "model": model})
+
+    def _set_shared_model(self):
+        body = self._read_json_body()
+        model = str((body or {}).get("model") or "").strip()
+        if "/" not in model:
+            self._send_json(HTTPStatus.BAD_REQUEST,
+                            {"ok": False, "error": "model must be \"providerID/modelID\""})
+            return
+        # Global scope first: PATCH /config (workspace scope) answers 200 and
+        # echoes the value back without changing what GET /config reports.
+        for target in ("/global/config", "/config"):
+            status, _ = self._opencode_json(target, method="PATCH", body={"model": model})
+            if status is None or not (200 <= int(status) < 300):
+                continue
+            _, payload = self._opencode_json("/config")
+            if isinstance(payload, dict) and payload.get("model") == model:
+                self._send_json(HTTPStatus.OK, {"ok": True, "model": model, "via": target})
+                return
+        self._send_json(HTTPStatus.OK, {
+            "ok": False, "model": None,
+            "error": "OpenCode did not accept the model (config may be read-only)"})
+
+    def _experiment_dir_path(self) -> str:
+        """The experiment directory to browse for this run's own files.
+
+        A RUNNING training backend's own resolved root_log_dir comes first: it
+        is where reports and notebooks are actually written, and it is not
+        always the directory this UI established -- training may have been
+        pointed elsewhere by a config file's `root_log_dir:`, or (before the
+        marker existed) have fallen through to a temp directory. Listing this
+        server's own directory then showed an empty reports/ right after a
+        report had been generated.
+
+        Only a LIVE backend counts: the marker outlives the process that wrote
+        it, and a finished run's directory must never hijack the listing of a
+        UI that was given an experiment directory of its own. Falls back to the
+        UI's own directory, the environment, then the working directory.
+        """
+        try:
+            from weightslab.utils.active_experiment import live_backend_experiment_dir
+            # By PORT: with two experiments up, "the live backend" is ambiguous
+            # and picking the wrong one shows the other experiment's reports.
+            backend_dir = live_backend_experiment_dir(
+                getattr(self, "backend_port", None))
+        except Exception:  # noqa: BLE001 -- never break a listing on the marker
+            backend_dir = None
+        return (backend_dir
+                or self.experiment_dir
+                or os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR")
+                or os.getcwd())
+
     def _notebooks_dir_path(self) -> str:
-        experiment_dir = self.experiment_dir or os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR") or os.getcwd()
-        return os.path.join(experiment_dir, "notebooks")
+        return os.path.join(self._experiment_dir_path(), "notebooks")
 
     def _read_json_body(self) -> dict:
         try:
@@ -2088,13 +2207,12 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
     # (ApplyDataQuery -> the "generate_experiment_report" action, see
     # data_service.py) -- these two endpoints only browse what's already on
     # disk under <experiment_dir>/reports/, exactly like the local-notebook
-    # endpoints above browse <experiment_dir>/notebooks/. Same assumption:
-    # this UI server and the connected training backend share a filesystem
-    # (the documented `weightslab start` usage), so root_log_dir resolved
-    # here is the same directory the backend wrote reports into.
+    # endpoints above browse <experiment_dir>/notebooks/. The one assumption
+    # left is a shared filesystem (the documented `weightslab start` usage):
+    # WHICH directory is resolved by _experiment_dir_path(), which prefers the
+    # backend's own recorded root_log_dir over this server's.
     def _agent_history_dir_path(self) -> str:
-        experiment_dir = self.experiment_dir or os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR") or os.getcwd()
-        return os.path.join(experiment_dir, "agent")
+        return os.path.join(self._experiment_dir_path(), "agent")
 
     def _dump_agent_history(self):
         """Write the agent conversation to the experiment directory.
@@ -2138,8 +2256,7 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.OK, {"ok": True, "path": path})
 
     def _reports_dir_path(self) -> str:
-        experiment_dir = self.experiment_dir or os.environ.get("WEIGHTSLAB_ROOT_LOG_DIR") or os.getcwd()
-        return os.path.join(experiment_dir, "reports")
+        return os.path.join(self._experiment_dir_path(), "reports")
 
     def _list_experiment_reports(self):
         reports_dir = self._reports_dir_path()
@@ -2456,6 +2573,7 @@ def serve_ui(
         {
             "static_root": root,
             "channel": channel,
+            "backend_port": backend_port,
             "api_prefix": "/api",
             "grpc_auth_token": grpc_auth_token,
             "experiment_dir": experiment_dir,

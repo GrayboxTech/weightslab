@@ -62,7 +62,7 @@ still dump its run arguments.
 .. code-block:: python
 
    YOLO(cfg["model"]["name"]).train(
-       trainer=WLAwareTrainer,      # the whole integration
+       trainer=wl.WLAwareTrainer,      # the whole integration
        data=str(cfg["data_root"]),
        imgsz=cfg["image_size"],
        epochs=1000,
@@ -73,12 +73,12 @@ still dump its run arguments.
        optimizer="SGD", lr0=0.001,
    )
 
-``trainer=WLAwareTrainer`` is the entire integration — the model is untouched
+``trainer=wl.WLAwareTrainer`` is the entire integration — the model is untouched
 and YOLO's loop is untouched. ``project``/``name`` become Ultralytics'
 ``save_dir``, which the WeightsLab logger then reuses as its own
 ``log_dir``/``name``, so both tools write under the same run directory.
 
-For segmentation, swap in ``WLAwareSegmentationTrainer``; everything below
+For segmentation, swap in ``wl.WLAwareSegmentationTrainer``; everything below
 applies unchanged.
 
 4. Two mandatory kwargs

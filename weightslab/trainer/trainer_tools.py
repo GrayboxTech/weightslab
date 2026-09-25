@@ -434,10 +434,15 @@ def _get_input_tensor_for_sample(dataset, sample_id, device):
 
 def process_sample(sid, dataset, do_resize, resize_dims, experiment):
     try:
-        if hasattr(dataset, "_getitem_raw"):
-            tensor, idx, label = dataset._getitem_raw(id=sid)
-        else:
-            tensor, idx, label = dataset[sid]
+        # _getitem_raw returns (data, id, target, *metadata) by contract -- datasets
+        # implementing get_items() with metadata yield 4+ elements, so a fixed
+        # 3-way unpack raises "too many values to unpack" and kills every
+        # thumbnail. Unpack positionally instead.
+        _res = dataset._getitem_raw(id=sid) if hasattr(dataset, "_getitem_raw") else dataset[sid]
+        if not isinstance(_res, (tuple, list)):
+            _res = (_res, sid, None)
+        tensor = _res[0]
+        label = _res[2] if len(_res) > 2 else None
 
         if isinstance(tensor, torch.Tensor):
             img = tensor.detach().cpu()

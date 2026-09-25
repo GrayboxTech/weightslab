@@ -39,10 +39,6 @@ import tqdm
 import yaml
 
 import weightslab as wl
-from weightslab.components.global_monitoring import (
-    guard_training_context,
-    guard_testing_context,
-)
 
 from utils.data import VideoGenerationDataset, AUDIO_SAMPLE_RATE
 from utils.model import FlowMatchingLoss, VideoFlowUNet, sample_clip
@@ -191,7 +187,7 @@ def evaluate(loader, model, criterion, mode, device, cfg=None, attach=False,
     """
     losses, count = 0.0, 0
     for inputs, ids, labels, metadata in loader:
-        with guard_testing_context:
+        with wl.guard_testing_context:
             uids = list(metadata["uid"])
             captions = list(metadata["caption"])
             target, source = unpack_batch(inputs, mode, device)
@@ -326,7 +322,7 @@ if __name__ == "__main__":
     for train_step in train_range:
         age = model.get_age() if hasattr(model, "get_age") else train_step
 
-        with guard_training_context:
+        with wl.guard_training_context:
             try:
                 inputs, ids, labels, metadata = next(train_loader)
             except StopIteration:

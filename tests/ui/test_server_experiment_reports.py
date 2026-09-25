@@ -17,6 +17,7 @@ that's awkward to instantiate directly outside a real request.
 
 import json
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -25,6 +26,7 @@ import urllib.error
 import urllib.request
 
 from weightslab.ui import server as ui_server
+from weightslab.utils import active_experiment
 
 
 class _ServerTestCase(unittest.TestCase):
@@ -33,6 +35,14 @@ class _ServerTestCase(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        # The active-experiment marker is a real per-user file, and a LIVE
+        # backend recorded in it redirects these listings on purpose (see
+        # _experiment_dir_path). Point it at a scratch directory so the tests
+        # exercise the explicit experiment_dir below instead of whatever run
+        # the developer happens to have going.
+        self._state_prev = os.environ.get("WEIGHTSLAB_STATE_DIR")
+        self._state_dir = tempfile.mkdtemp()
+        os.environ["WEIGHTSLAB_STATE_DIR"] = self._state_dir
         self.httpd = ui_server.serve_ui(
             ui_host="127.0.0.1", ui_port=0,
             backend_host="localhost", backend_port=50051,
@@ -47,6 +57,11 @@ class _ServerTestCase(unittest.TestCase):
     def tearDown(self):
         self.httpd.shutdown()
         self.thread.join(timeout=5)
+        if self._state_prev is None:
+            os.environ.pop("WEIGHTSLAB_STATE_DIR", None)
+        else:
+            os.environ["WEIGHTSLAB_STATE_DIR"] = self._state_prev
+        shutil.rmtree(self._state_dir, ignore_errors=True)
 
     def _get(self, path):
         return urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}", timeout=5)
@@ -94,6 +109,49 @@ class TestListExperimentReports(_ServerTestCase):
         self.assertEqual(entry["name"], "r.html")
         self.assertEqual(os.path.normcase(entry["path"]), os.path.normcase(full_path))
         self.assertIsInstance(entry["modified_at"], (int, float))
+
+
+class TestReportsFollowTheRunningBackend(_ServerTestCase):
+    """The listing follows where the RUNNING backend actually writes.
+
+    Regression: `weightslab start` and a training run started in another
+    terminal resolved different directories (the run fell through to %TEMP%),
+    so right-clicking "Generate report" listed nothing even though reports had
+    just been generated.
+    """
+
+    def _write_report_in(self, directory, name):
+        reports_dir = os.path.join(directory, "reports")
+        os.makedirs(reports_dir, exist_ok=True)
+        with open(os.path.join(reports_dir, name), "w", encoding="utf-8") as f:
+            f.write("<html/>")
+
+    def test_a_live_backend_directory_is_listed_instead_of_the_uis_own(self):
+        backend_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, backend_dir, ignore_errors=True)
+        self._write_report_in(backend_dir, "experiment_report_20260909_193124.html")
+        # This test process stands in for the running backend.
+        active_experiment.record_backend_experiment(backend_dir)
+
+        with self._get("/experiment-report/list") as r:
+            data = json.loads(r.read().decode())
+        self.assertEqual([e["name"] for e in data["reports"]],
+                         ["experiment_report_20260909_193124.html"])
+
+    def test_a_finished_backend_does_not_hijack_the_listing(self):
+        backend_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, backend_dir, ignore_errors=True)
+        self._write_report_in(backend_dir, "stale.html")
+        active_experiment.record_backend_experiment(backend_dir)
+        # Rewrite the record with a pid that cannot be running.
+        state = active_experiment.read_state()
+        state["backend"][-1]["pid"] = 2 ** 31 - 1
+        active_experiment.state_path().write_text(json.dumps(state), encoding="utf-8")
+
+        self._write_report("mine.html")
+        with self._get("/experiment-report/list") as r:
+            data = json.loads(r.read().decode())
+        self.assertEqual([e["name"] for e in data["reports"]], ["mine.html"])
 
 
 class TestServeExperimentReport(_ServerTestCase):

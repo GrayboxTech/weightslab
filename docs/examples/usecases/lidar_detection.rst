@@ -84,7 +84,7 @@ WeightsLab integration (identical to image detection)
    }
 
    # Training loop
-   with guard_training_context:
+   with wl.guard_training_context:
        points, ids, targets, _ = next(train_loader)
        outputs = model(points.to(device))
        preds   = decode_3d_predictions(outputs.detach())

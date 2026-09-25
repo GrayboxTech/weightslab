@@ -37,10 +37,6 @@ import torch.optim as optim
 from torchmetrics.classification import Precision, Recall, F1Score, AveragePrecision
 
 import weightslab as wl
-from weightslab.components.global_monitoring import (
-    guard_training_context,
-    guard_testing_context,
-)
 
 from utils.data import load_creditcard_fraud, compute_class_weights, NUM_FEATURES
 from utils.model import FraudMLP
@@ -60,7 +56,7 @@ def train(loader, model, optimizer, criterion_mlt, metrics, device):
     curves and per-sample signals as eval — logged under ``train-metric-*`` and
     ``train_metric/*`` — instead of only the loss.
     """
-    with guard_training_context:
+    with wl.guard_training_context:
         (inputs, ids, labels) = next(loader)
         inputs = inputs.to(device)
         labels = labels.to(device)
@@ -125,7 +121,7 @@ def test(loader, model, criterion_mlt, metrics, device, test_loader_len):
     losses = torch.tensor(0.0, device=device)
 
     for (inputs, ids, labels) in loader:
-        with guard_testing_context:
+        with wl.guard_testing_context:
             inputs = inputs.to(device)
             labels = labels.to(device)
 

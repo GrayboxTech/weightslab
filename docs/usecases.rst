@@ -98,7 +98,7 @@ Why ``reduction="none"``:
 
 .. code-block:: python
 
-   with guard_training_context:
+   with wl.guard_training_context:
        inputs, ids, labels = next(loader)
        outputs = model(inputs.to(device))
        preds = outputs.argmax(dim=1, keepdim=True)

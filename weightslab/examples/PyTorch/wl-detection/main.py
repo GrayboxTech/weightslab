@@ -13,11 +13,6 @@ import weightslab as wl
 from torch import optim
 
 
-from weightslab.components.global_monitoring import (
-    guard_training_context,
-    guard_testing_context,
-)
-
 from utils.data import PennFudanDetectionDataset, det_collate
 from utils.model import SmallDetector
 from utils.criterions import (
@@ -43,7 +38,7 @@ def train(loader, model, optimizer, sig, device, grid_size, conf_thresh):
     DataSampleTrackingWrapper. `targets` is per sample a [N, 6] tensor of boxes
     ([x1, y1, x2, y2, class_id, confidence]); see utils/data.det_collate.
     """
-    with guard_training_context:
+    with wl.guard_training_context:
         (inputs, ids, targets, _) = next(loader)
         inputs = inputs.to(device)
         targets = [t.to(device) for t in targets]
@@ -73,7 +68,7 @@ def test(loader, model, sig, device, grid_size, conf_thresh, test_loader_len):
     """Full evaluation pass over the val loader."""
     losses = 0.0
     ious = 0.0
-    with guard_testing_context, torch.no_grad():
+    with wl.guard_testing_context, torch.no_grad():
         for inputs, ids, targets, _ in loader:
             inputs = inputs.to(device)
             targets = [t.to(device) for t in targets]

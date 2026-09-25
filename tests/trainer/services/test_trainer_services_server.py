@@ -1,3 +1,4 @@
+import sys
 import unittest
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from unittest.mock import MagicMock, patch
@@ -6,7 +7,15 @@ import weightslab.trainer.trainer_services as trainer_services
 
 # Default per-test timeout in seconds. Override with WL_TEST_TIMEOUT env var.
 import os
-_TEST_TIMEOUT = int(os.getenv("WL_TEST_TIMEOUT", "30"))
+
+# 60s, not 30s. These tests are pure-mock and finish in milliseconds locally,
+# so the cap exists only to stop a genuinely stuck gRPC thread from hanging CI
+# -- it was never meant to be a performance assertion. At 30s it became one:
+# commit ac405334 timed out here on its PR run (35738307562) and passed on the
+# push run (35738302340) with identical code, purely on runner contention.
+# Doubling keeps the runaway-thread protection while leaving room for a loaded
+# 2-core runner. pytest's own --timeout=600 is still the outer backstop.
+_TEST_TIMEOUT = int(os.getenv("WL_TEST_TIMEOUT", "60"))
 
 
 class _TimeoutMixin:
@@ -20,10 +29,26 @@ class _TimeoutMixin:
             fut.result(timeout=_TEST_TIMEOUT)
         except FuturesTimeoutError:
             if result is not None:
-                result.addError(self, (TimeoutError, TimeoutError(
-                    f"Test timed out after {_TEST_TIMEOUT}s"), None))
+                result.addError(self, self._timeout_exc_info())
         finally:
             pool.shutdown(wait=False)
+
+    @staticmethod
+    def _timeout_exc_info():
+        """Build a real (type, value, traceback) triple for the timeout.
+
+        Passing ``None`` as the traceback -- which this did -- is what turned a
+        timeout into an unreadable CI failure: pytest tries to walk the
+        traceback to render the entry, raises "'NoneType' object is not
+        iterable" doing it, and falls back to "NOTE: Incompatible Exception
+        Representation", so the report says only that something timed out and
+        nothing about where. Raising and catching gives us a genuine traceback
+        object, so the failure renders normally.
+        """
+        try:
+            raise TimeoutError(f"Test timed out after {_TEST_TIMEOUT}s")
+        except TimeoutError:
+            return sys.exc_info()
 
 
 class TestExperimentServiceServicerDelegation(_TimeoutMixin, unittest.TestCase):
@@ -304,7 +329,36 @@ class TestGrpcServe(_TimeoutMixin, unittest.TestCase):
 
     def _run_grpc_serve_capturing_bind(self, bound_port, **serve_kwargs):
         """Run grpc_serve with the same scaffolding as the tests above and return
-        the fake server, so a caller can assert which address was bound."""
+        the fake server, so a caller can assert which address was bound.
+
+        The module logger is stubbed along with everything else, and that stub
+        is what makes these two tests survive a full-suite run. They assert on
+        ``add_insecure_port`` -- they have no interest in log output -- but
+        ``serving_thread_callback`` logs its way through the bind, and by the
+        time pytest reaches this file (late: ``tests/trainer/`` sorts after
+        backend, components, data, export, gRPC, general, integrations, model,
+        modules, monitoring) the process is full of background threads that
+        earlier tests started and never stopped -- the embedded ipykernel's
+        tornado/zmq loop, dataframe_manager's flush threads and their constant
+        DEBUG chatter. They hold the logging lock often enough that a single
+        ``logger.info`` starts taking SECONDS:
+
+            00:35:29.215  [gRPC] Thread callback started
+            00:35:39.294  [gRPC] Creating ThreadPoolExecutor   <- +10.1s
+            00:35:44.893  [gRPC] Server object created         <- +5.6s
+
+        Three log lines, 15 seconds. Nothing is deadlocked and the assertions
+        would all pass -- the test just never gets to them before _TimeoutMixin
+        fires, which is why it dies with a timeout rather than a failure, and
+        why it passes in isolation and on a rerun. That is the CI flake:
+        commit ac405334 failed this on its PR run (35738307562) and passed on
+        its push run (35738302340).
+
+        Raising the timeout only buys time against an unbounded queue; removing
+        the dependency on real logging fixes it. The leaked threads themselves
+        are a separate (real) problem -- see tests/conftest.py's resource
+        monitor note for one of them.
+        """
         fake_server = MagicMock()
         fake_server.add_insecure_port.return_value = bound_port
 
@@ -349,7 +403,8 @@ class TestGrpcServe(_TimeoutMixin, unittest.TestCase):
              patch("weightslab.trainer.trainer_services.WeighlabsWatchdog", return_value=fake_watchdog), \
              patch("weightslab.trainer.trainer_services.time.sleep", side_effect=_sleep_stop), \
              patch("weightslab.trainer.trainer_services.ExperimentServiceServicer"), \
-             patch("weightslab.trainer.trainer_services.get_hyperparams", return_value={}):
+             patch("weightslab.trainer.trainer_services.get_hyperparams", return_value={}), \
+             patch("weightslab.trainer.trainer_services.logger"):
             trainer_services.grpc_serve(**serve_kwargs)
 
         return fake_server

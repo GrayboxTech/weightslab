@@ -55,7 +55,7 @@ so the module receives already-tracked objects:
            self.metric          = metric
 
        def training_step(self, batch, batch_idx):
-           with guard_training_context:
+           with wl.guard_training_context:
                x, ids, y, _ = batch
                logits = self.model(x)
                preds  = torch.argmax(logits, dim=1)
@@ -64,7 +64,7 @@ so the module receives already-tracked objects:
                return loss.mean()
 
        def validation_step(self, batch, batch_idx):
-           with guard_testing_context:
+           with wl.guard_testing_context:
                x, ids, y, _ = batch
                logits = self.model(x)
                preds  = torch.argmax(logits, dim=1)

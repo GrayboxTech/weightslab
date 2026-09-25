@@ -24,16 +24,47 @@ from torchvision import datasets, transforms
 from torch.utils.data import Dataset
 
 import weightslab as wl
-from weightslab.examples.utils.baseline_models.pytorch.models import FashionCNN as CNN
-from weightslab.components.global_monitoring import (
-    guard_training_context,
-    guard_testing_context
-)
 
 
 # Setup logging
 logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
+
+
+
+# =============================================================================
+# Model and recipe
+# =============================================================================
+class CNN(nn.Module):
+    """2 conv + 2 fc layers (1.2M parameters), raw logits out, optional dropout.
+
+    Raw logits, not a softmax: `nn.CrossEntropyLoss` applies its own log-softmax.
+    A softmax here would be applied twice, which still trains but squashes the
+    per-sample loss values -- and those values are what you sort and filter on
+    in the Studio.
+    """
+
+    def __init__(self, dropout=False):
+        super().__init__()
+        self.input_shape = (1, 1, 28, 28)
+        self.conv1 = nn.Conv2d(1, 32, 3)
+        self.relu1 = nn.ReLU()
+        self.conv2 = nn.Conv2d(32, 64, 3)
+        self.relu2 = nn.ReLU()
+        self.pool = nn.MaxPool2d(2)
+        self.drop1 = nn.Dropout(0.25 if dropout else 0.0)
+        self.flatten = nn.Flatten()
+        self.fc1 = nn.Linear(64 * 12 * 12, 128)
+        self.relu3 = nn.ReLU()
+        self.drop2 = nn.Dropout(0.5 if dropout else 0.0)
+        self.fc2 = nn.Linear(128, 10)
+
+    def features(self, x):
+        x = self.drop1(self.pool(self.relu2(self.conv2(self.relu1(self.conv1(x))))))
+        return self.relu3(self.fc1(self.flatten(x)))
+
+    def forward(self, x):
+        return self.fc2(self.drop2(self.features(x)))
 
 
 # =============================================================================
@@ -129,7 +160,7 @@ class MNISTCustomDataset(Dataset):
 def train(loader, model, optimizer, criterion_mlt, device):
     """Single training step using the tracked dataloader + watched loss."""
 
-    with guard_training_context:
+    with wl.guard_training_context:
         (inputs, ids, labels) = next(loader)
         inputs = inputs.to(device)
         labels = labels.to(device)
@@ -165,7 +196,7 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
     losses = torch.tensor(0.0, device=device)
 
     for (inputs, ids, labels) in loader:
-        with guard_testing_context:
+        with wl.guard_testing_context:
             inputs = inputs.to(device)
             labels = labels.to(device)
 
@@ -264,7 +295,10 @@ if __name__ == "__main__":
 
     # Model
     _model = CNN().to(device)
-    model = wl.watch_or_edit(_model, flag="model", device=device)
+    model = wl.watch_or_edit(_model, flag="model", device=device,
+            compute_dependencies=True,
+            forced_model_wrapping=True,
+            skip_previous_auto_load=True)
 
     # Optimizer
     lr = parameters.get("optimizer", {}).get("lr", 0.01)

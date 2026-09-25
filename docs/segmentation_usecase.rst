@@ -133,7 +133,7 @@ lists so ordering lines up:
            dtype=torch.long,
        )
 
-   with guard_training_context:
+   with wl.guard_training_context:
        inputs, ids, labels, _ = next(loader)
        outputs = model(inputs)            # [B, C, H, W]
        batch_idx = _instance_batch_idx(labels)

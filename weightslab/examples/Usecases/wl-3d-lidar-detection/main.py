@@ -12,10 +12,6 @@ import weightslab as wl
 
 from torch import optim
 
-from weightslab.components.global_monitoring import (
-    guard_training_context,
-    guard_testing_context,
-)
 
 from utils.data import Lidar3DDetectionDataset, lidar_collate, DEFAULT_PC_RANGE
 from utils.model import PointPillarsLite
@@ -99,7 +95,7 @@ def train(loader, model, optimizer, sig, device, grid_size, pc_range, conf_thres
     `targets` is per sample a [N, 9] tensor of 3D boxes
     ([cx, cy, cz, dx, dy, dz, yaw, class_id, confidence]); see utils/data.
     """
-    with guard_training_context:
+    with wl.guard_training_context:
         (points, ids, targets, _) = next(loader)
         points = points.to(device)
         targets = [t.to(device) for t in targets]
@@ -129,7 +125,7 @@ def test(loader, model, sig, device, grid_size, pc_range, conf_thresh, test_load
     """Full evaluation pass over the val loader."""
     losses = 0.0
     ious = 0.0
-    with guard_testing_context, torch.no_grad():
+    with wl.guard_testing_context, torch.no_grad():
         for points, ids, targets, _ in loader:
             points = points.to(device)
             targets = [t.to(device) for t in targets]

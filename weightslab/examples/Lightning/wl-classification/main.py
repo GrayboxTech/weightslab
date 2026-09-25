@@ -14,10 +14,6 @@ from torch.utils.data import Dataset
 from torchmetrics.classification import Accuracy
 
 from weightslab.examples.utils.baseline_models.pytorch.models import FashionCNN as CNN
-from weightslab.components.global_monitoring import (
-    guard_training_context,
-    guard_testing_context
-)
 
 
 # =============================================================================
@@ -109,7 +105,7 @@ class LitMNIST(pl.LightningModule):
         return self.model(x)
 
     def training_step(self, batch):
-        with guard_training_context:
+        with wl.guard_training_context:
             x, ids, y = batch
             logits = self(x) # forward pass
             preds = torch.argmax(logits, dim=1)
@@ -127,7 +123,7 @@ class LitMNIST(pl.LightningModule):
             return loss
 
     def validation_step(self, batch):
-        with guard_testing_context:
+        with wl.guard_testing_context:
             x, ids, y = batch
             logits = self(x)
             preds = torch.argmax(logits, dim=1)

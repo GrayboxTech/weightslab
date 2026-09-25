@@ -49,7 +49,9 @@ from .signals import install_per_sample_signals, install_per_sample_val_signals
 
 
 # ─── per-task wiring config ─────────────────────────────────────────────
-# `loss_items` order per task (drives both channel names and index mapping):
+# `loss_items` per task — a dict keyed "<name>_loss" on UL >= 8.4.15x, a
+# flat tensor in this same order before that (drives channel names, and the
+# index mapping on the tensor path):
 #   detect : (box, cls, dfl)
 #   segment: (box, seg, cls, dfl, sem)  ← we ship the first four; sem is 0 for
 #            models without a semantic head.
@@ -163,9 +165,18 @@ class _WLTrainerMixin:
             ch = state["channels"]
             li = getattr(trainer, "loss_items", None)
             if li is not None and ch:
-                for i, n in enumerate(train_loss_names):
-                    if i < li.numel():
-                        ch[f"train/{n}"](li[i:i+1].detach())
+                # UL >= 8.4.15x hands back a {name: 0-dim tensor} dict keyed
+                # "box_loss"/"cls_loss"/...; older versions a flat tensor in
+                # the same order. Take names when we have them, index when we
+                # do not.
+                if isinstance(li, dict):
+                    values = [li.get(f"{n}_loss", li.get(n)) for n in train_loss_names]
+                else:
+                    values = [li[i:i+1] if i < li.numel() else None
+                              for i in range(len(train_loss_names))]
+                for n, v in zip(train_loss_names, values):
+                    if v is not None:
+                        ch[f"train/{n}"](v.detach().reshape(1))
             wl.guard_training_context.__exit__(None, None, None)
 
         def _on_val_batch_start(validator):

@@ -244,8 +244,6 @@ the exact samples causing them — so you can fix your data, not just log it.
 
 -import wandb
 +import weightslab as wl
-+from weightslab.components.global_monitoring import (
-+    guard_training_context, guard_testing_context)
 +
 +@wl.signal(name="byte_adjusted_loss", subscribe_to="loss/CE")
 +def byte_adjusted_loss(ctx): return ctx.subscribed_value / ctx.image_bytes
@@ -285,7 +283,7 @@ the exact samples causing them — so you can fix your data, not just log it.
      for epoch in range(1, args.epochs + 1):
          model.train()
          for x, y in train_loader:
-+            with guard_training_context:
++            with wl.guard_training_context:
                  logits = model(x.to(device))
                  loss   = criterion(logits, y.to(device))
                  optimizer.zero_grad(); loss.backward(); optimizer.step()
@@ -298,7 +296,7 @@ the exact samples causing them — so you can fix your data, not just log it.
          model.eval()
          with torch.no_grad():
              for x, y in test_loader:
-+                with guard_testing_context:
++                with wl.guard_testing_context:
                      accuracy.update(model(x.to(device)), y)
 -        wandb.log({"test/acc": accuracy.compute().item(), "epoch": epoch})
 +                wl.save_signals(preds_raw=logits, targets=y,

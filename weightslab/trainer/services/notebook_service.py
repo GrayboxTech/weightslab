@@ -28,8 +28,10 @@ import io
 import os
 import re
 import ast
+import sys
 import json
 import time
+import atexit
 import ctypes
 import queue
 import shutil
@@ -299,11 +301,61 @@ _EMBED_LOCK = threading.Lock()
 # "done" -- keying off "started" makes them give up the instant the attempt is
 # launched, before the kernel has had any chance to write its connection file.
 _EMBED_STATE = {"started": False, "connection_file": None, "kernel_thread_id": None,
-                "done": threading.Event()}
+                "done": threading.Event(), "thread": None}
 # Rebound on every NotebookService construction (i.e. every watchdog restart)
 # so the one long-lived embedded kernel thread always refreshes df/root_log_dir
 # against whichever data_service/root_log_dir is currently live.
 _ACTIVE_BINDING = {"data_service": None, "root_log_dir": None}
+
+
+def _shutdown_embedded_kernel(timeout: float = 5.0) -> None:
+    """Stop the embedded kernel's event loop and wait for its thread to finish.
+
+    Registered with ``atexit`` when the kernel starts, because the thread is a
+    daemon running ``app.start()`` -- a tornado/zmq loop that never returns on
+    its own. Without this, the thread is still live when CPython begins
+    finalizing, and the shutdown sequence races itself: the interpreter closes
+    the zmq sockets, tornado's zmqstream notices ("Got events for stream ...
+    attached to closed socket") and calls ``gen_log.warning``, and logging then
+    writes to a stderr whose buffer lock is already being torn down. That is a
+    hard abort, not an exception::
+
+        Fatal Python error: _enter_buffered_busy: could not acquire lock for
+        <_io.BufferedWriter name='<stderr>'> at interpreter shutdown, possibly
+        due to daemon threads
+        ... Aborted (core dumped)
+
+    It killed a CI run whose tests had all passed -- the suite finished, the
+    process died on the way out, and the job failed on the exit code. It is not
+    test-only: any script that enables the notebook takes the same risk at
+    exit, which is why this lives here and not in tests/conftest.py.
+
+    atexit runs before interpreter finalization, so stopping the loop here lets
+    app.start() return and the thread exit while logging still works.
+    """
+    thread = _EMBED_STATE.get("thread")
+    if thread is None or not thread.is_alive():
+        return
+
+    # Stop the loop app.start() is ACTUALLY blocked on, which is not the one
+    # this module creates: _run_embedded_kernel sets up an asyncio loop for the
+    # thread, but ipykernel builds its own AsyncIOMainLoop underneath
+    # app.io_loop, and that is what runs. Stopping the loop we made is a no-op
+    # -- measured: stored loop id ...692880 vs app's ...181904, and the thread
+    # stayed alive through a 10s join. IOLoop.add_callback is documented
+    # thread-safe, which is what lets us reach into it from here.
+    try:
+        from ipykernel.kernelapp import IPKernelApp
+        io_loop = getattr(IPKernelApp.instance(), "io_loop", None)
+        if io_loop is not None:
+            io_loop.add_callback(io_loop.stop)
+    except Exception:
+        # ipykernel missing, never initialized, or already torn down.
+        pass
+
+    # Bounded: a kernel that refuses to stop must not hang the process on the
+    # way out. Worst case we are back to the old behaviour.
+    thread.join(timeout=timeout)
 
 
 def configure_embedded_kernel(enabled: bool) -> None:
@@ -370,10 +422,17 @@ def ensure_embedded_kernel(data_service, root_log_dir: Path) -> None:
             _EMBED_STATE["done"].set()
             return
         connection_file = _ACTIVE_BINDING["root_log_dir"] / "notebook_kernel.json"
-        threading.Thread(
+        _kernel_thread = threading.Thread(
             target=_run_embedded_kernel, args=(connection_file,),
             name="WL-Embedded-Jupyter-Kernel", daemon=True,
-        ).start()
+        )
+        _EMBED_STATE["thread"] = _kernel_thread
+        # Registered only once the kernel actually starts, and only here --
+        # this is the one place that creates the thread. See
+        # _shutdown_embedded_kernel() for why a daemon thread left running into
+        # interpreter finalization aborts the process.
+        atexit.register(_shutdown_embedded_kernel)
+        _kernel_thread.start()
         try:
             if _wait_for_connection_file(connection_file, timeout=15.0):
                 _EMBED_STATE["connection_file"] = connection_file
@@ -409,6 +468,87 @@ def get_embedded_kernel_connection_file(wait_timeout: float = 8.0):
     return _EMBED_STATE["connection_file"]
 
 
+# Ident of the thread currently running a notebook cell, or None while the
+# kernel is idle. Set/cleared by the pre_execute/post_execute hooks, which run
+# on the kernel's own execution thread -- so this needs no assumption about
+# which thread ipykernel picked for the shell channel.
+_CELL_THREAD = {"ident": None}
+
+
+class _ThreadRoutedStream:
+    """stdout/stderr proxy that lets only the *cell's own* thread reach the
+    notebook; every other thread keeps writing to the real console.
+
+    The embedded kernel shares its process with the trainer, and ipykernel's
+    ``init_io()`` swaps ``sys.stdout``/``sys.stderr`` process-wide for an
+    OutStream that ships everything to iopub. So a training loop's tqdm bar --
+    another thread entirely, writing continuously -- landed in whichever cell
+    was last executed ("Training: 193497 steps ... train_loss=..." showing up
+    in a cell that never asked for it). Routing happens per write instead:
+    while a cell runs, its own thread reaches the kernel stream; anything else,
+    at any time, goes to the stream the process would have had without a
+    kernel.
+    """
+
+    def __init__(self, kernel_stream, console_stream):
+        self._kernel = kernel_stream
+        self._console = console_stream
+
+    def _target(self):
+        ident = _CELL_THREAD["ident"]
+        if ident is not None and ident == threading.get_ident():
+            return self._kernel
+        return self._console if self._console is not None else self._kernel
+
+    def write(self, s):
+        return self._target().write(s)
+
+    def writelines(self, lines):
+        target = self._target()
+        for line in lines:
+            target.write(line)
+
+    def flush(self):
+        for stream in (self._kernel, self._console):
+            if stream is None:
+                continue
+            try:
+                stream.flush()
+            except Exception:  # noqa: BLE001 -- a closed console must not break a cell
+                pass
+
+    # Routed too, not delegated: tqdm asks isatty() once, when it is built, and
+    # a bar built on the training thread must get the console's answer (
+    # refreshes) rather than the kernel OutStream's flat False.
+    def isatty(self):
+        try:
+            return bool(self._target().isatty())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def fileno(self):
+        return self._target().fileno()
+
+    def writable(self):
+        return True
+
+    def __getattr__(self, name):
+        # encoding, errors, buffer, _original_stdstream_copy, ... -- whatever
+        # ipykernel or a library reaches for beyond the file protocol above.
+        return getattr(self._kernel, name)
+
+
+def _install_thread_routed_streams(console_stdout, console_stderr) -> None:
+    """Wrap ipykernel's OutStreams so only cell threads publish to the notebook.
+
+    Call after ``IPKernelApp.initialize()`` (which installs the OutStreams) and
+    before ``app.start()``.
+    """
+    import sys as _sys
+    _sys.stdout = _ThreadRoutedStream(_sys.stdout, console_stdout)
+    _sys.stderr = _ThreadRoutedStream(_sys.stderr, console_stderr)
+
+
 def _run_embedded_kernel(connection_file: Path) -> None:
     import asyncio
     from ipykernel.kernelapp import IPKernelApp
@@ -418,13 +558,28 @@ def _run_embedded_kernel(connection_file: Path) -> None:
     # execute_interactive() and blocks waiting for it).
     _EMBED_STATE["kernel_thread_id"] = threading.get_ident()
 
-    # ipykernel's IOLoop needs a running asyncio loop on THIS thread.
+    # ipykernel's IOLoop needs a running asyncio loop on THIS thread. Note this
+    # is NOT the loop app.start() ends up blocked on -- ipykernel builds its own
+    # AsyncIOMainLoop under app.io_loop -- so _shutdown_embedded_kernel() goes
+    # through the app, not through this.
     asyncio.set_event_loop(asyncio.new_event_loop())
 
     ns = build_notebook_namespace(
         _ACTIVE_BINDING["data_service"], _ACTIVE_BINDING["root_log_dir"])
 
+    # The real console streams, grabbed before initialize() swaps them for
+    # ipykernel's OutStream -- _ThreadRoutedStream hands every non-cell thread
+    # back to these.
+    console_stdout, console_stderr = sys.stdout, sys.stderr
+
     app = IPKernelApp.instance(connection_file=str(connection_file), matplotlib="inline")
+    # Without this, ipykernel replaces fd 1/2 with a pipe it forwards to iopub,
+    # which would swallow the console writes _ThreadRoutedStream routes back to
+    # the terminal (and re-publish the trainer's output into a cell anyway).
+    # The cost is that output written straight to the fds by C extensions no
+    # longer reaches the notebook -- for an in-process kernel sharing a
+    # terminal with the trainer, that is the better trade.
+    app.capture_fd_output = False
     # IPKernelApp.initialize() installs a SIGINT handler, and signal handlers
     # can only be installed on the main thread -- which an embedded kernel is
     # never on. ipykernel catches the resulting ValueError but logs it as
@@ -482,6 +637,8 @@ def _run_embedded_kernel(connection_file: Path) -> None:
             if hasattr(_stream, "flush_interval"):
                 _stream.flush_interval = 0.05
         _install_kernel_hooks(app.shell)
+        # After initialize() (OutStreams exist), before start() (cells run).
+        _install_thread_routed_streams(console_stdout, console_stderr)
         logger.info("Embedded Jupyter kernel connection file: %s", connection_file)
         app.start()  # blocks this thread forever (event loop)
     except Exception:
@@ -496,6 +653,9 @@ def _install_kernel_hooks(shell) -> None:
     box = {"guard_cm": None}
 
     def _pre_execute():
+        # This hook runs on the thread that executes the cell -- the one
+        # _ThreadRoutedStream lets through to the notebook.
+        _CELL_THREAD["ident"] = threading.get_ident()
         try:
             shell.user_ns["df"] = get_df(_ACTIVE_BINDING["data_service"])
         except Exception:
@@ -505,6 +665,7 @@ def _install_kernel_hooks(shell) -> None:
         box["guard_cm"] = cm
 
     def _post_execute():
+        _CELL_THREAD["ident"] = None
         cm = box.pop("guard_cm", None)
         if cm is not None:
             cm.__exit__(None, None, None)
@@ -639,19 +800,46 @@ class _LiveStream:
     """Write-only file-like object that forwards each write directly to
     ``emit(kind, text)`` instead of buffering into a StringIO -- lets stdout/
     stderr reach the gRPC client as the cell actually prints, rather than only
-    after the whole cell finishes."""
+    after the whole cell finishes.
 
-    def __init__(self, kind: str, emit):
+    Only writes from the kernel worker thread are forwarded. redirect_stdout()
+    swaps ``sys.stdout`` for the whole process, and this kernel shares its
+    process with the trainer -- so without the thread check a training loop's
+    tqdm bar ends up in the output of whatever cell happens to be running.
+    Other threads keep writing to ``console``, the stream that was in place
+    before the redirect.
+    """
+
+    def __init__(self, kind: str, emit, console=None, owner=None):
         self._kind = kind
         self._emit = emit
+        self._console = console
+        self._owner = owner if owner is not None else threading.get_ident()
 
     def write(self, s):
-        if s:
-            self._emit(self._kind, _capped(self._kind, s))
+        if not s:
+            return 0
+        if threading.get_ident() != self._owner:
+            if self._console is not None:
+                return self._console.write(s)
+            return len(s)
+        self._emit(self._kind, _capped(self._kind, s))
         return len(s)
 
     def flush(self):
-        pass
+        if self._console is not None:
+            try:
+                self._console.flush()
+            except Exception:  # noqa: BLE001 -- a closed console must not break a cell
+                pass
+
+    def isatty(self):
+        if threading.get_ident() != self._owner and self._console is not None:
+            try:
+                return bool(self._console.isatty())
+            except Exception:  # noqa: BLE001
+                return False
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -771,10 +959,18 @@ class NotebookKernel:
             except Exception:
                 pass
 
+        # Captured before the redirect so _LiveStream can hand other
+        # threads' writes (the trainer's, typically) back to the console
+        # instead of publishing them into this cell's output.
+        console_stdout, console_stderr = sys.stdout, sys.stderr
+        owner = threading.get_ident()
+
         try:
             with _WriteGuard.enforce(self._root_log_dir):
-                with contextlib.redirect_stdout(_LiveStream("stdout", emit)), \
-                     contextlib.redirect_stderr(_LiveStream("stderr", emit)):
+                with contextlib.redirect_stdout(
+                        _LiveStream("stdout", emit, console_stdout, owner)), \
+                     contextlib.redirect_stderr(
+                        _LiveStream("stderr", emit, console_stderr, owner)):
                     result_repr = self._exec_with_last_expr(code)
         except BaseException:  # noqa: BLE001 -- surface any user error (incl. an
             # interrupt() -injected KeyboardInterrupt) as a cell error, not a crash.

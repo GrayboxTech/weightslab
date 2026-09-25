@@ -14,10 +14,6 @@ from torchvision import transforms
 from torchmetrics.classification import BinaryAccuracy
 
 import weightslab as wl
-from weightslab.components.global_monitoring import (
-    guard_training_context,
-    guard_testing_context
-)
 
 # Setup logging
 logging.basicConfig(level=logging.DEBUG)
@@ -244,7 +240,7 @@ def flatten_lists(arr):
 
 def train_step(loader, model, optimizer, cls_criterion, contrastive_criterion, device, recon_weight, contrastive_weight):
     total_loss = None
-    with guard_training_context:
+    with wl.guard_training_context:
         try:
             images, ids, labels, metadata = next(loader)
         except StopIteration:
@@ -327,7 +323,7 @@ def evaluate_all(loader, model, cls_criterion, contrastive_criterion, metric, de
     num_batches = 0
     metric.reset()
 
-    with guard_testing_context, torch.no_grad():
+    with wl.guard_testing_context, torch.no_grad():
         for images, ids, labels, metadata in loader:
             inputs_flat = torch.cat([img.float() for img in images], dim=0).to(device)
             labels_flat = torch.cat([torch.tensor(l).float() if not isinstance(l, torch.Tensor) else l.float() for l in labels], dim=0).view(-1, 1).to(device)
