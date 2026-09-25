@@ -1,5 +1,7 @@
 import itertools
+import math
 import os
+import random
 import ssl
 import time
 import logging
@@ -14,8 +16,12 @@ except ssl.SSLError:
 
 import yaml
 import tqdm
+import json
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
 from torchvision import datasets, transforms
@@ -24,7 +30,6 @@ from torchvision import datasets, transforms
 from torch.utils.data import Dataset
 
 import weightslab as wl
-from weightslab.examples.utils.baseline_models.pytorch.models import FashionCNN as CNN
 
 
 # Setup logging
@@ -119,16 +124,125 @@ class MNISTCustomDataset(Dataset):
         return image, idx, label
 
 
+# =============================================================================
+# Model and recipe
+# =============================================================================
+class CNN(nn.Module):
+    """2 conv + 2 fc layers (1.2M parameters), raw logits out, optional dropout.
+
+    Raw logits, not a softmax: `nn.CrossEntropyLoss` applies its own log-softmax.
+    A softmax here would be applied twice, which still trains but squashes the
+    per-sample loss values -- and those values are what you sort and filter on
+    in the Studio.
+    """
+
+    def __init__(self, dropout=False):
+        super().__init__()
+        self.input_shape = (1, 1, 28, 28)
+        self.conv1 = nn.Conv2d(1, 32, 3)
+        self.relu1 = nn.ReLU()
+        self.conv2 = nn.Conv2d(32, 64, 3)
+        self.relu2 = nn.ReLU()
+        self.pool = nn.MaxPool2d(2)
+        self.drop1 = nn.Dropout(0.25 if dropout else 0.0)
+        self.flatten = nn.Flatten()
+        self.fc1 = nn.Linear(64 * 12 * 12, 128)
+        self.relu3 = nn.ReLU()
+        self.drop2 = nn.Dropout(0.5 if dropout else 0.0)
+        self.fc2 = nn.Linear(128, 10)
+
+    def features(self, x):
+        x = self.drop1(self.pool(self.relu2(self.conv2(self.relu1(self.conv1(x))))))
+        return self.relu3(self.fc1(self.flatten(x)))
+
+    def forward(self, x):
+        return self.fc2(self.drop2(self.features(x)))
+
+
+def gpu_augment(x, rot_deg=10.0, shift=0.1, scale=(0.9, 1.1)):
+    """Random affine per image (rotation, shift, scale), on the batch, on the GPU."""
+    b = x.size(0)
+    ang = (torch.rand(b, device=x.device) * 2 - 1) * rot_deg * math.pi / 180
+    s = torch.empty(b, device=x.device).uniform_(*scale)
+    tx = (torch.rand(b, device=x.device) * 2 - 1) * shift * 2
+    ty = (torch.rand(b, device=x.device) * 2 - 1) * shift * 2
+    cos, sin = torch.cos(ang) / s, torch.sin(ang) / s
+    theta = torch.stack([torch.stack([cos, -sin, tx], 1), torch.stack([sin, cos, ty], 1)], 1)
+    grid = F.affine_grid(theta, x.shape, align_corners=False)
+    return F.grid_sample(x, grid, align_corners=False, padding_mode="zeros")
+
+
+def lr_at(step, total_steps, base_lr, sched):
+    """const, or warmcos: linear warmup over 15% of the steps, then cosine decay to ~0."""
+    if sched == "const":
+        return base_lr
+    warm = max(1, int(0.15 * total_steps))
+    if step <= warm:
+        return base_lr * (0.04 + 0.96 * step / warm)
+    p = (step - warm) / max(1, total_steps - warm)
+    return 1e-6 + base_lr * 0.5 * (1 + math.cos(math.pi * p))
+
+
+def get_val_ids(targets, path):
+    """Fixed validation split: 500 train images per class, never trained on.
+
+    Fixed RNG seed, so the split is identical on every machine and every rerun.
+    Delete the file to draw a new one.
+    """
+    if path and os.path.exists(path):
+        return sorted(int(l) for l in open(path) if l.strip())
+    y = targets.numpy() if hasattr(targets, "numpy") else np.asarray(targets)
+    rng = np.random.RandomState(2026)
+    ids = []
+    for c in range(10):
+        ids += rng.choice(np.where(y == c)[0], 500, replace=False).tolist()
+    ids = sorted(int(i) for i in ids)
+    if path:
+        open(path, "w").write("\n".join(map(str, ids)) + "\n")
+    return ids
+
+
+class SubsetWithIds(Dataset):
+    """A view over `base` restricted to `ids`, in the order given.
+
+    WeightsLab numbers each split's samples contiguously, so a sample id is a
+    position within the split, not an MNIST index. `ids` is the lookup back:
+    the n-th sample of this loader is `ids[n]` in MNIST, which is also the n-th
+    line of the matching train_ids.txt / val_ids.txt.
+    """
+
+    def __init__(self, base, ids):
+        self.base = base
+        self.ids = list(ids)
+
+    def __len__(self):
+        return len(self.ids)
+
+    def __getitem__(self, i):
+        return self.base[self.ids[i]]
+
+
 # -----------------------------------------------------------------------------
 # Train / Test functions
 # -----------------------------------------------------------------------------
-def train(loader, model, optimizer, criterion_mlt, device):
-    """Single training step using the tracked dataloader + watched loss."""
+def train(loader, model, optimizer, criterion_mlt, device, step, recipe):
+    """Single training step using the tracked dataloader + watched loss.
+
+    `recipe` carries the run's knobs: augmentation and the LR schedule.
+    """
 
     with wl.guard_training_context:
         (inputs, ids, labels) = next(loader)
         inputs = inputs.to(device)
         labels = labels.to(device)
+
+        # Augment on the GPU, on the batch
+        if recipe["augment"]:
+            inputs = gpu_augment(inputs)
+
+        # LR schedule is applied per step, from the model's age
+        for g in optimizer.param_groups:
+            g["lr"] = lr_at(step, recipe["total_steps"], recipe["lr"], recipe["schedule"])
 
         # Infer
         optimizer.zero_grad()
@@ -140,7 +254,9 @@ def train(loader, model, optimizer, criterion_mlt, device):
         else:
             preds = preds_raw.argmax(dim=1, keepdim=True)
 
-        # Loss is a watched object => pass metadata for logging/stats
+        # Loss is a watched object => pass metadata for logging/stats.
+        # per_sample=True on the criterion keeps one loss value per digit per
+        # visit, so each sample has a loss history you can inspect in the Studio.
         loss_batch_mlt = criterion_mlt(
             preds_raw.float(),
             labels.long(),
@@ -156,9 +272,16 @@ def train(loader, model, optimizer, criterion_mlt, device):
     return total_loss.detach().cpu().item()
 
 
-def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
-    """Full evaluation pass over the test loader."""
+def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len, split="test"):
+    """Full evaluation pass over one evaluation loader.
+
+    The metric is reset first: torchmetrics accumulates across `update` calls,
+    so without this each evaluation would report a running average over every
+    previous evaluation instead of the current one -- and the val and test
+    loaders would pollute each other's number.
+    """
     losses = torch.tensor(0.0, device=device)
+    metric_mlt.reset()
 
     for (inputs, ids, labels) in loader:
         with wl.guard_testing_context:
@@ -191,8 +314,8 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
 
             # Log per-sample metric alongside signals; persists via the storer
             signals = {
-                "test_metric/Accuracy_per_sample": acc_per_sample,
-                "test_metric/Inverse_Accuracy_per_sample": acc_reversed_per_sample,
+                f"{split}_metric/Accuracy_per_sample": acc_per_sample,
+                f"{split}_metric/Inverse_Accuracy_per_sample": acc_reversed_per_sample,
             }
             wl.save_signals(
                 preds_raw=outputs,
@@ -206,6 +329,298 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
     metric = metric_mlt.compute() * 100
 
     return loss.detach().cpu().item(), metric.detach().cpu().item()
+
+
+def _set_dropout(model, enabled: bool) -> None:
+    """Toggle dropout between phases without rebuilding the model.
+
+    Rebuilding would create a NEW watched model (new hash, new checkpoint
+    lineage) and lose the step-0 weights we are about to restore, so the rates
+    are set in place on the existing modules instead.
+    """
+    for name, p in (("drop1", 0.25), ("drop2", 0.5)):
+        mod = getattr(model, name, None)
+        if mod is not None:
+            mod.p = p if enabled else 0.0
+
+
+def _reload_initial_weights(wl, model, optimizer, init_state, log_dir) -> dict:
+    """Put the model back to its step-0 random initialisation.
+
+    Prefers WeightsLab's own step-0 checkpoint (what "reload at model age 0"
+    means from the Studio); falls back to the in-memory snapshot taken before
+    phase A. Either way the result is verified against that snapshot, so the
+    number reported is a measurement and not a claim.
+    """
+    source = "in-memory snapshot"
+    try:
+        from weightslab.backend.ledgers import get_checkpoint_manager
+        cm = get_checkpoint_manager()
+        exp_hash = getattr(cm, "current_exp_hash", None) or cm.get_latest_hash()
+        cm.load_checkpoint(exp_hash=exp_hash, load_model=False, load_weights=True,
+                           load_config=False, load_data=False, target_step=0, force=True)
+        source = "step-0 checkpoint"
+    except Exception as exc:
+        print(f"[reset] step-0 checkpoint reload unavailable ({exc}); using the snapshot", flush=True)
+
+    def _drift():
+        cur = model.state_dict()
+        return max((cur[k].float() - v.float()).abs().max().item()
+                   for k, v in init_state.items() if k in cur and torch.is_tensor(cur[k]))
+
+    worst = _drift()
+    if worst > 0:
+        model.load_state_dict(init_state, strict=False)   # snapshot is authoritative
+        after = _drift()
+        source += f" + snapshot (checkpoint differed by {worst:.3g})"
+        worst = after
+
+    # Adam moments must go too: keeping them would carry phase A's gradient
+    # history into a run that is supposed to start from scratch.
+    optimizer.state = type(optimizer.state)()
+    return {"source": source, "max_abs_diff": worst}
+
+
+def _fmt_si(n: float, unit: str) -> str:
+    """1199882 -> '1.2M'. Model cards quote these rounded, so match that."""
+    for div, suf in ((1e9, "G"), (1e6, "M"), (1e3, "K")):
+        if n >= div:
+            return f"{n / div:.1f}{suf}{unit}"
+    return f"{n:.0f}{unit}"
+
+
+def _card(title, acc, params, n_data) -> None:
+    """The four-field summary, one per experiment.
+
+    Parameters and FLOPs are identical for both runs by construction -- same
+    architecture, same input size. That is the point: only NumberTrainingData
+    moves, so any accuracy difference is attributable to the data, not capacity.
+    """
+    print(f"  {title}")
+    print(f"    Accuracy:           {acc:.2f}%")
+    print(f"    Parameters:         {_fmt_si(params, '')}")
+    print(f"    NumberTrainingData: {n_data:,}")
+
+
+
+def _summarise(results, n_train, goldset_size) -> None:
+    """Print the comparison the experiment exists to produce."""
+    a, b = results["signal"], results["goldset"]
+    macs = results["flops_fwd_per_sample"]
+    params = results["model_params"]
+    fpv = macs * 3          # fwd + bwd, per sample-visit, in MACs
+
+    print("\n" + "=" * 74)
+    print(" MODEL CARDS")
+    print("=" * 74)
+    _card("full trainset  (phase A: signal run)",
+          a["best"].get("test_acc", float("nan")), params, n_train)
+    print()
+    _card("goldset        (phase B: retrained from step-0 weights)",
+          b["best"].get("test_acc", float("nan")), params, goldset_size)
+
+    print("\n" + "=" * 74)
+    print(" TRAINING COST (what actually differs)")
+    print("=" * 74)
+    print(f"{'':24s}{'full trainset':>18s}{'goldset':>18s}")
+    rows = [
+        ("training digits", f"{n_train:,}", f"{goldset_size:,}"),
+        ("steps x batch", f"{a['steps']:,} x {a['batch_size']}", f"{b['steps']:,} x {b['batch_size']}"),
+        ("sample visits", f"{a['sample_visits']:,}", f"{b['sample_visits']:,}"),
+        ("epochs over own set", f"{a['sample_visits'] / max(1, n_train):.1f}",
+                                f"{b['sample_visits'] / max(1, goldset_size):.1f}"),
+        ("train TFLOPs", f"{a['sample_visits'] * fpv * 2 / 1e12:.2f}",
+                         f"{b['sample_visits'] * fpv * 2 / 1e12:.2f}"),
+        ("TFLOPs to best val", f"{a['best'].get('tflops', 0) * 2:.2f}",
+                               f"{b['best'].get('tflops', 0) * 2:.2f}"),
+        ("train seconds", f"{a['train_seconds']:.1f}", f"{b['train_seconds']:.1f}"),
+        ("eval seconds", f"{a['eval_seconds']:.1f}", f"{b['eval_seconds']:.1f}"),
+        ("wall seconds", f"{a['wall_seconds']:.1f}", f"{b['wall_seconds']:.1f}"),
+        ("best val acc %", f"{a['best'].get('val_acc', float('nan')):.2f}",
+                           f"{b['best'].get('val_acc', float('nan')):.2f}"),
+        ("test @ best val %", f"{a['best'].get('test_acc', float('nan')):.2f}",
+                              f"{b['best'].get('test_acc', float('nan')):.2f}"),
+        ("step of best val", f"{a['best'].get('step', 0):,}", f"{b['best'].get('step', 0):,}"),
+    ]
+    for label, av, bv in rows:
+        print(f"{label:24s}{av:>18s}{bv:>18s}")
+
+    ep_a = n_train * fpv * 2 / 1e12
+    ep_b = goldset_size * fpv * 2 / 1e12
+    saved = f"{(1 - ep_b / ep_a) * 100:.1f}% less per epoch" if ep_a > 0 else "n/a"
+    print("\n one epoch over its own training set:")
+    print(f"   full trainset: {ep_a:.3f} TFLOPs over {n_train:,} digits")
+    print(f"   goldset:       {ep_b:.3f} TFLOPs over {goldset_size:,} digits   ({saved})")
+    print(" Same architecture, same per-sample FLOPs -- training cost scales purely")
+    print(" with sample-visits, so the saving is in the data, not the model.")
+    print("=" * 74)
+
+
+# ============================================================================
+# Experiment phases: signal run -> goldset -> retrain from the initial weights
+# ============================================================================
+def model_flops_per_sample(model, device) -> int:
+    """Forward MACs for one sample, counted from the conv/linear layers.
+
+    The model is identical in both phases, so this is a constant; what differs
+    between the phases is only how many sample-visits each one pays for.
+    """
+    macs = {"n": 0}
+    hooks = []
+
+    def conv_hook(mod, inp, out):
+        macs["n"] += out.numel() * mod.in_channels // mod.groups * mod.kernel_size[0] * mod.kernel_size[1]
+
+    def lin_hook(mod, inp, out):
+        macs["n"] += out.numel() * mod.in_features
+
+    for m in model.modules():
+        if isinstance(m, nn.Conv2d):
+            hooks.append(m.register_forward_hook(conv_hook))
+        elif isinstance(m, nn.Linear):
+            hooks.append(m.register_forward_hook(lin_hook))
+    was_training = model.training
+    model.eval()
+    with torch.no_grad():
+        model(torch.zeros(1, 1, 28, 28, device=device))
+    model.train(was_training)
+    for h in hooks:
+        h.remove()
+    if macs["n"] == 0:
+        raise RuntimeError(
+            "FLOPs count came back 0 -- no Conv2d/Linear was visited. Pass the "
+            "UNWRAPPED model (the object built before wl.watch_or_edit): a watched "
+            "model is a ModelInterface whose .modules() yields only itself.")
+    return int(macs["n"])
+
+
+def build_goldset(wl, steps_per_pass, labels_by_id, pool_ids, gcfg):
+    """Per class, the digits with the highest mean loss over passes 2..N, minus
+    the noisy ones (median loss over all passes above the threshold).
+
+    Reads the per-sample loss history WeightsLab recorded during the signal run
+    -- no second inference pass, no extra bookkeeping of our own.
+    """
+    wl.drain_signals()
+    rows = wl.query_signal_history("train-loss-CE")
+    hist = pd.DataFrame(rows, columns=["sample_id", "step", "loss", "run"][:len(rows[0])]) if rows else pd.DataFrame()
+    if hist.empty:
+        raise SystemExit("[goldset] no train-loss-CE history recorded; cannot build the goldset")
+    hist["sample_id"] = hist["sample_id"].astype(int)
+    hist["loss"] = hist["loss"].astype(float)
+    # "Pass n" is the n-th time THIS digit was seen, taken from its own visit
+    # order rather than from step arithmetic: the recorded step numbering is not
+    # guaranteed to start at 1, and a uniform shuffle is what makes the two
+    # equivalent in the first place.
+    hist = hist.sort_values(["sample_id", "step"], kind="stable")
+    hist["pass"] = hist.groupby("sample_id").cumcount()
+    per_pass = hist.groupby(["sample_id", "pass"])["loss"].last().unstack()
+
+    noisy = per_pass.median(axis=1, skipna=True) > float(gcfg.get("noisy_median_loss", 1.0))
+    first = 1 if gcfg.get("skip_first_pass", True) else 0
+    n_passes = int(per_pass.shape[1])
+    if n_passes <= first:
+        raise SystemExit(
+            f"[goldset] only {n_passes} pass(es) recorded; the rule scores passes "
+            f"{first + 1}..N, so it needs at least {first + 2}. Per-sample loss over "
+            f"fewer passes measures batch placement, not difficulty.")
+    score = per_pass.iloc[:, first:].mean(axis=1, skipna=True)
+
+    pool = set(int(i) for i in pool_ids)
+    cand = pd.DataFrame({"score": score, "noisy": noisy.reindex(score.index, fill_value=False)})
+    cand = cand[cand.index.map(lambda i: int(i) in pool) & ~cand["noisy"] & cand["score"].notna()]
+    cand["label"] = [labels_by_id[int(i)] for i in cand.index]
+
+    k = int(gcfg.get("per_class", 360))
+    gold, per_class_got = [], {}
+    for c in sorted(cand["label"].unique()):
+        g = cand[cand["label"] == c].sort_values("score", ascending=False, kind="stable")
+        picked = [int(i) for i in g.head(k).index]
+        gold += picked
+        per_class_got[int(c)] = len(picked)
+
+    # A goldset that is empty, or short of its per-class quota, means the rule or
+    # the history is wrong -- stop rather than retrain on a malformed subset.
+    if not gold:
+        raise SystemExit("[goldset] selection is empty; refusing to continue")
+    short = {c: n for c, n in per_class_got.items() if n < k}
+    if short:
+        raise SystemExit(f"[goldset] classes below the {k}/class quota: {short}")
+    if len(set(gold)) != len(gold):
+        raise SystemExit("[goldset] duplicate ids in the selection")
+
+    return sorted(gold), {"noisy": int(noisy.sum()), "scored": int(len(cand)),
+                          "passes": int(per_pass.shape[1]), "per_class": per_class_got}
+
+
+def run_phase(name, total_steps, recipe, eval_every, ctx):
+    """Train one phase, evaluating validation on a cadence and TEST ONLY when
+    validation reaches a new maximum.
+
+    Test accuracy is therefore never used to steer anything -- it is read at
+    exactly the points where validation says the model just got better, which
+    is the only honest moment to look at it.
+    """
+    wl, model, optimizer = ctx["wl"], ctx["model"], ctx["optimizer"]
+    train_loader, val_loader, test_loader = ctx["train_loader"], ctx["val_loader"], ctx["test_loader"]
+    device = ctx["device"]
+
+    flops_per_visit = ctx["flops_fwd_per_sample"] * 3  # fwd + bwd ~= 3x fwd
+    bs = recipe["batch_size"]
+
+    best_val, best = -1.0, {}
+    train_seconds = eval_seconds = 0.0
+    visits = 0
+    history = []
+    t_phase = time.perf_counter()
+
+    for step in range(1, total_steps + 1):
+        t0 = time.perf_counter()
+        loss = train(train_loader, model, optimizer, ctx["train_criterion"], device, step, recipe)
+        train_seconds += time.perf_counter() - t0
+        visits += bs
+
+        if step % eval_every == 0 or step == total_steps:
+            t0 = time.perf_counter()
+            val_loss, val_acc = test(val_loader, model, ctx["val_criterion"], ctx["val_metric"],
+                                     device, ctx["val_loader_len"], split="val")
+            row = {"phase": name, "step": step, "train_loss": round(loss, 5),
+                   "val_acc": round(val_acc, 4), "test_acc": None,
+                   "visits": visits, "tflops": round(visits * flops_per_visit / 1e12, 4),
+                   "train_s": round(train_seconds, 1)}
+            signals = {"val/accuracy": val_acc}
+
+            if val_acc > best_val:          # new best validation -> read test once
+                best_val = val_acc
+                _, test_acc = test(test_loader, model, ctx["test_criterion"], ctx["test_metric"],
+                                   device, ctx["test_loader_len"], split="test")
+                row["test_acc"] = round(test_acc, 4)
+                signals["test/accuracy"] = test_acc
+                best = {"step": step, "val_acc": val_acc, "test_acc": test_acc,
+                        "visits": visits, "tflops": row["tflops"],
+                        "train_s": round(train_seconds, 1)}
+            eval_seconds += time.perf_counter() - t0
+
+            wl.save_model_signals(signals)
+            history.append(row)
+            mark = "  <- new best val, test read" if row["test_acc"] is not None else ""
+            print(f"[{name}] step {step:5d}/{total_steps}  loss {loss:.4f}  "
+                  f"val {val_acc:6.2f}%  test {row['test_acc'] if row['test_acc'] is not None else '   -  '}"
+                  f"  {row['tflops']:.2f} TFLOPs{mark}", flush=True)
+
+    return {
+        "phase": name,
+        "steps": total_steps,
+        "batch_size": bs,
+        "sample_visits": visits,
+        "train_seconds": round(train_seconds, 1),
+        "eval_seconds": round(eval_seconds, 1),
+        "wall_seconds": round(time.perf_counter() - t_phase, 1),
+        "flops_fwd_per_sample": ctx["flops_fwd_per_sample"],
+        "train_tflops": round(visits * flops_per_visit / 1e12, 4),
+        "best": best,
+        "history": history,
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -227,6 +642,20 @@ if __name__ == "__main__":
     parameters.setdefault("device", "auto")
     parameters.setdefault("training_steps_to_do", 1000000)
     parameters.setdefault("eval_full_to_steps_ratio", 50)
+    parameters.setdefault("seed", 0)
+    parameters.setdefault("augment", False)
+    parameters.setdefault("dropout", False)
+    parameters.setdefault("optimizer", {}).setdefault("schedule", "const")
+    parameters["optimizer"].setdefault("weight_decay", 0.0)
+
+    # Deterministic seeding: a rerun reproduces the same shuffle, and therefore
+    # the same per-digit visit order.
+    seed = int(parameters["seed"])
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     # Experiment name
     exp_name = parameters["experiment_name"]
@@ -259,12 +688,14 @@ if __name__ == "__main__":
     enable_h5_persistence = parameters.get("enable_h5_persistence", True)
 
     # Model
-    _model = CNN().to(device)
+    _model = CNN(dropout=bool(parameters["dropout"])).to(device)
     model = wl.watch_or_edit(_model, flag="model", device=device)
 
     # Optimizer
-    lr = parameters.get("optimizer", {}).get("lr", 0.01)
-    _optimizer = optim.Adam(model.parameters(), lr=lr)
+    opt_cfg = parameters["optimizer"]
+    lr = opt_cfg.get("lr", 0.001)
+    _optimizer = optim.Adam(
+        model.parameters(), lr=lr, weight_decay=float(opt_cfg["weight_decay"]))
     optimizer = wl.watch_or_edit(
         _optimizer,
         flag="optimizer",
@@ -286,9 +717,10 @@ if __name__ == "__main__":
 
     # Read data config for all loaders
     train_cfg = parameters.get("data", {}).get("train_loader", {})
+    val_cfg = parameters.get("data", {}).get("val_loader", {})
     test_cfg = parameters.get("data", {}).get("test_loader", {})
 
-    _train_dataset = MNISTCustomDataset(
+    _full_train = MNISTCustomDataset(
         root=data_root,
         train=True,
         download=should_download,
@@ -311,7 +743,35 @@ if __name__ == "__main__":
         max_samples=test_cfg.get("max_samples", None)
     )
 
-    # Create tracked loaders for train, test, and test
+    # Split the 60,000 MNIST train images into the training pool and a held-out
+    # validation set BEFORE anything is registered: the two loaders then own
+    # disjoint images, so nothing has to be discarded afterwards and no image is
+    # registered twice.
+    #
+    # WeightsLab numbers each split's samples contiguously from where the
+    # previous one ended, so a sample id here is a position in the split, not an
+    # MNIST index. Both index lists are written next to this config, in loader
+    # order, so the mapping back is a lookup:
+    #
+    #     mnist_index = train_ids[wl_sample_id]                 (train split)
+    #     mnist_index = val_ids[wl_sample_id - len(train_ids)]  (val split)
+    val_ids_path = parameters.get("val_ids")
+    if val_ids_path and not os.path.isabs(val_ids_path):
+        val_ids_path = os.path.join(os.path.dirname(__file__), val_ids_path)
+    val_ids = get_val_ids(_full_train.mnist.targets, val_ids_path)
+    held_out = set(val_ids)
+    train_ids = [i for i in range(len(_full_train)) if i not in held_out]
+    assert not (set(train_ids) & held_out), "train ids overlap the validation split"
+
+    if val_ids_path:  # same order the loader serves them in
+        with open(os.path.join(os.path.dirname(val_ids_path), "train_ids.txt"), "w") as fh:
+            fh.write("\n".join(map(str, train_ids)) + "\n")
+
+    _train_dataset = SubsetWithIds(_full_train, train_ids)
+    _val_dataset = SubsetWithIds(_full_train, val_ids)
+    n_train = len(_train_dataset)
+
+    # Create tracked loaders for train, val and test
     train_loader = wl.watch_or_edit(
         _train_dataset,
         flag="data",
@@ -319,6 +779,18 @@ if __name__ == "__main__":
         batch_size=train_cfg.get("batch_size", 16),
         shuffle=train_cfg.get("shuffle", True),
         is_training=True,
+        compute_hash=False,
+        preload_labels=True,
+        preload_metadata=False,
+        enable_h5_persistence=enable_h5_persistence
+    )
+    val_loader = wl.watch_or_edit(
+        _val_dataset,
+        flag="data",
+        loader_name="val_loader",
+        batch_size=val_cfg.get("batch_size", 500),
+        shuffle=val_cfg.get("shuffle", False),
+        is_training=False,
         compute_hash=False,
         preload_labels=True,
         preload_metadata=False,
@@ -337,104 +809,142 @@ if __name__ == "__main__":
         enable_h5_persistence=enable_h5_persistence
     )
 
+    # 8 passes over 55,000 digits at batch 64 = 8 x 860 = 6,880 steps.
+    batch_size = train_cfg.get("batch_size", 16)
+    steps_per_pass = -(-n_train // batch_size)
+    if parameters.get("epochs"):
+        parameters["training_steps_to_do"] = int(parameters["epochs"]) * steps_per_pass
+    total_steps = int(parameters["training_steps_to_do"])
+    recipe = {
+        "augment": bool(parameters["augment"]),
+        "lr": float(lr),
+        "schedule": opt_cfg["schedule"],
+        "total_steps": total_steps,
+    }
+
     # Losses & metrics (watched objects – they log themselves)
     train_criterion = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
-        flag="loss", signal_name="train-loss-CE", log=True)
+        flag="loss", signal_name="train-loss-CE", per_sample=True, log=True)
     test_criterion = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss", signal_name="test-loss-CE", log=True)
 
+    val_criterion = wl.watch_or_edit(
+        nn.CrossEntropyLoss(reduction="none"),
+        flag="loss", signal_name="val-loss-CE", log=True)
+
     metric = wl.watch_or_edit(
         Accuracy(task="multiclass", num_classes=10).to(device),
         flag="metric", signal_name="metric-ACC", log=True)
+    val_metric = wl.watch_or_edit(
+        Accuracy(task="multiclass", num_classes=10).to(device),
+        flag="metric", signal_name="metric-ACC-val", log=True)
 
     # Start WeightsLab services (gRPC only, no CLI)
     wl.serve(
         serving_grpc=parameters.get("serving_grpc", False)
     )
 
-    print("=" * 60)
-    print(" STARTING TRAINING")
-    print(f" Evaluation every {eval_full_to_train_steps_ratio} steps")
-    print(f" Dataset splits: train={len(_train_dataset)}, test={len(_test_dataset)}")
-    print(f" Logs will be saved to: {log_dir}")
-    print("=" * 60 + "\n")
+    # ---- constants shared by both phases -------------------------------------
+    val_loader_len = len(val_loader)
+    test_loader_len = len(test_loader)
+    flops_fwd = model_flops_per_sample(_model, device)   # unwrapped: see the docstring
+    labels_by_id = {i: int(_full_train.mnist.targets[m]) for i, m in enumerate(train_ids)}
+    gcfg = parameters.get("goldset", {}) or {}
 
-    # Setup clean progress bar with custom format
-    # Training runs until YOU stop it -- from the studio's pause button, the CLI,
-    # or Ctrl+C. itertools.count() rather than range(training_steps_to_do): a
-    # predefined step budget ends the process mid-experiment, which is the
-    # opposite of how WeightsLab is used (inspect the curves, edit the data or
-    # the architecture, keep going). `training_steps_to_do` remains a live
-    # hyperparameter for the UI's own "run N more steps" control; it is not a
-    # ceiling on this loop.
-    if tqdm_display:
-        train_range = tqdm.tqdm(
-            itertools.count(),
-            desc="Training",
-            bar_format="{desc}: {n} steps [{elapsed}, {rate_fmt}] {bar} | {postfix}",
-            ncols=140,
-            position=0,
-            leave=True
-        )
-    else:
-        train_range = itertools.count()
+    ctx = dict(wl=wl, model=model, optimizer=optimizer, device=device,
+               train_loader=train_loader, val_loader=val_loader, test_loader=test_loader,
+               train_criterion=train_criterion, val_criterion=val_criterion,
+               test_criterion=test_criterion, val_metric=val_metric, test_metric=metric,
+               val_loader_len=val_loader_len, test_loader_len=test_loader_len,
+               flops_fwd_per_sample=flops_fwd)
 
-    # =============
-    # Training Loop
-    wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+    p_sig = parameters["phases"]["signal"]
+    p_gold = parameters["phases"]["goldset"]
+    sig_steps = int(p_sig["epochs"]) * (-(-n_train // int(p_sig["batch_size"])))
 
-    train_loss = None
-    test_loss, test_metric = None, None
-    test_loader_len = len(test_loader) # Store length before wrapping with tqdm
-    for train_step in train_range:
-        age = model.get_age() if hasattr(model, "get_age") else train_step # Get model age in steps (not necessarily equal to train_step if model was reloaded or has seen more data than training steps)
+    print("=" * 72)
+    print(" TWO-PHASE EXPERIMENT (one process, one experiment directory)")
+    print(f" splits: train={n_train}  val={len(_val_dataset)}  test={len(_test_dataset)}")
+    print(f" model: {sum(p.numel() for p in model.parameters()):,} params, "
+          f"{flops_fwd / 1e6:.2f} MFLOPs forward per sample ({flops_fwd * 3 / 1e6:.2f} incl. backward)")
+    print(f" phase A (signal):  {sig_steps} steps x batch {p_sig['batch_size']} "
+          f"= {p_sig['epochs']} passes over {n_train} digits")
+    print(f" phase B (goldset): {p_gold['training_steps_to_do']} steps x batch {p_gold['batch_size']}")
+    print(f" logs: {log_dir}")
+    print("=" * 72 + "\n")
 
-        # Train one step
-        train_loss = train(train_loader, model, optimizer, train_criterion, device)
+    # Hand control to WeightsLab before the first guarded step: without this the
+    # training guard never opens and the loop stalls with the process alive.
+    wl.start_training(timeout=int(parameters.get("start_training_timeout", 1)))
 
-        # Periodic test evaluation
-        if age > 0 and age % eval_full_to_train_steps_ratio == 0:
-            # Test (no nested progress bar)
-            test_loss, test_metric = test(
-                test_loader,
-                model,
-                test_criterion,
-                metric,
-                device,
-                test_loader_len
-            )
+    results = {"splits": {"train": n_train, "val": len(_val_dataset), "test": len(_test_dataset)},
+               "model_params": int(sum(p.numel() for p in model.parameters())),
+               "flops_fwd_per_sample": flops_fwd}
+    t_all = time.perf_counter()
 
-        # Verbose
-        if verbose and not tqdm_display:
-            import sys
-            # Build compact progress message
-            msg = f"Step {train_step} (Age {age}): Loss={train_loss:.4f}"
-            if test_loss is not None:
-                msg += f" | Test={test_loss:.4f} ({test_metric:.1f}%)"
+    # ---- the initial random weights, kept so phase B can start from them ------
+    # Tensors only: a watched model's state_dict also carries scalar bookkeeping
+    # (the age counter), which has nothing to clone or compare.
+    init_state = {k: v.detach().clone() for k, v in model.state_dict().items()
+                  if torch.is_tensor(v)}
 
-            # Clear line completely and print (pad to 100 chars to overwrite previous content)
-            sys.stdout.write(f"\r{msg:<100}")
-            sys.stdout.flush()
-        elif tqdm_display:
-            # Build compact postfix string
-            postfix_parts = [f"train_loss={train_loss:.4f}"]
-            if test_loss is not None:
-                postfix_parts.append(f"test_loss={test_loss:.4f}")
-            if test_metric is not None:
-                postfix_parts.append(f"test_acc={test_metric:.1f}%")
+    # ---- PHASE A: signal run over the whole training pool ---------------------
+    recipe_sig = {"augment": bool(p_sig["augment"]), "lr": float(p_sig["lr"]),
+                  "schedule": p_sig["schedule"], "total_steps": sig_steps,
+                  "batch_size": int(p_sig["batch_size"])}
+    train_loader.set_batch_size(int(p_sig["batch_size"]))
+    _set_dropout(model, bool(p_sig["dropout"]))
+    for g in optimizer.param_groups:
+        g["lr"] = float(p_sig["lr"])
+    results["signal"] = run_phase("signal", sig_steps, recipe_sig, int(p_sig["eval_every"]), ctx)
 
-            train_range.set_postfix_str(" | ".join(postfix_parts))
+    # ---- build the goldset from what phase A recorded -------------------------
+    t0 = time.perf_counter()
+    steps_per_pass = -(-n_train // int(p_sig["batch_size"]))
+    goldset, ginfo = build_goldset(wl, steps_per_pass, labels_by_id, range(n_train), gcfg)
+    wl.tag_samples(goldset, "goldset")
+    results["goldset_build"] = {**ginfo, "size": len(goldset),
+                                "seconds": round(time.perf_counter() - t0, 1)}
+    mnist_ids = sorted(int(train_ids[i]) for i in goldset)
+    with open(os.path.join(log_dir, "goldset_ids_mnist.txt"), "w") as fh:
+        fh.write("\n".join(map(str, mnist_ids)) + "\n")
+    print(f"\n[goldset] {len(goldset)} digits ({len(goldset) / n_train:.2%} of the pool) "
+          f"from {ginfo['passes']} passes; {ginfo['noisy']} noisy excluded; "
+          f"tagged 'goldset'; MNIST ids -> goldset_ids_mnist.txt\n", flush=True)
 
-    print("\n" + "=" * 60)
-    print(f" Training completed in {time.time() - start_time:.2f} seconds")
-    print(f" Logs saved to: {log_dir}")
-    print("=" * 60)
+    # ---- reload the INITIAL weights (model age 0), then train on the goldset ---
+    reload_info = _reload_initial_weights(wl, model, optimizer, init_state, log_dir)
+    results["reload"] = reload_info
+    print(f"[reset] restored the step-0 weights ({reload_info['source']}); "
+          f"max|w - w0| = {reload_info['max_abs_diff']}\n", flush=True)
 
-    # Final export of signal history and data grid to root_log_dir
+    keep = set(int(i) for i in goldset)
+    wl.discard_samples([i for i in range(n_train) if i not in keep])
+
+    recipe_gold = {"augment": bool(p_gold["augment"]), "lr": float(p_gold["lr"]),
+                   "schedule": p_gold["schedule"], "total_steps": int(p_gold["training_steps_to_do"]),
+                   "batch_size": int(p_gold["batch_size"])}
+    train_loader.set_batch_size(int(p_gold["batch_size"]))
+    _set_dropout(model, bool(p_gold["dropout"]))
+    results["goldset"] = run_phase("goldset", int(p_gold["training_steps_to_do"]),
+                                   recipe_gold, int(p_gold["eval_every"]), ctx)
+
+    # ---- report ---------------------------------------------------------------
+    results["wall_seconds_total"] = round(time.perf_counter() - t_all, 1)
+    _summarise(results, n_train, len(goldset))
+    with open(os.path.join(log_dir, "experiment_results.json"), "w") as fh:
+        json.dump(results, fh, indent=1)
+    print(f"\n results -> {os.path.join(log_dir, 'experiment_results.json')}")
+
     wl.write_history()
     wl.write_dataframe()
 
-    # Keep the main thread alive to allow background serving threads to run
-    wl.keep_serving()
+    # Keep the main thread alive so the Studio stays attached. Set
+    # keep_serving: false to exit once the results are written -- a batch sweep
+    # runs these back to back and must not block on the last one.
+    if parameters.get("keep_serving", True):
+        wl.keep_serving()
+    else:
+        print(" keep_serving: false -> exiting", flush=True)
