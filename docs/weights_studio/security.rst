@@ -7,15 +7,26 @@ The default is plain HTTP (no cert files required, easiest for local dev). Do th
 
      weightslab se
 
-   Certificates are placed in ``~/.weightslab-certs``
-   (or ``$WEIGHTSLAB_CERTS_DIR``).
+   Certificates are placed in ``$WEIGHTSLAB_CERTS_DIR``, else
+   ``~/.weightslab-certs``.
    Follow the printed instructions to export ``WEIGHTSLAB_CERTS_DIR`` globally.
+
+   On Windows, ``weightslab se`` runs the PowerShell script with the Windows
+   ``openssl`` and adds the dev CA to your user's trusted root certificates
+   (Windows asks you to confirm). To generate the certificates through WSL
+   (Ubuntu) instead, run::
+
+     weightslab se --force-ubuntu
+
+   The WSL path does not install the CA into the Windows trust store.
 
 2. Start the UI in secure mode::
 
      weightslab start --certs
 
-   ``--certs`` reads ``$WEIGHTSLAB_CERTS_DIR`` (single source of truth) and:
+   ``--certs`` reads ``$WEIGHTSLAB_CERTS_DIR`` (single source of truth). When
+   the variable is unset, or its directory has no certs,
+   ``~/.weightslab-certs`` is used instead. It then:
 
    - Serves HTTPS using ``ui-server.crt`` / ``ui-server.key``
    - Presents ``ui-client.crt`` / ``ui-client.key`` to the backend (mTLS)

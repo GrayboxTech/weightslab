@@ -101,7 +101,9 @@ Working starting points live in
 
 UI deployment details (port, TLS, certs) are documented in
 `weightslab/docs/weights_studio.rst`. TLS is opt-in: run `weightslab se` once,
-then `weightslab start --certs`.
+then `weightslab start --certs`. On Windows `se` uses the PowerShell script and
+the Windows `openssl`; `weightslab se --force-ubuntu` uses the bash script
+through WSL instead.
 
 ---
 
@@ -179,7 +181,7 @@ ones when debugging:
 | `GRPC_BACKEND_HOST` / `GRPC_BACKEND_PORT` | `0.0.0.0` / `50051` | Backend gRPC bind address. |
 | `GRPC_TLS_ENABLED` | `0` | TLS on the gRPC socket. Set `1` with `weightslab start --certs`. |
 | `GRPC_TLS_REQUIRE_CLIENT_AUTH` | `0` | mTLS. Must match what `weightslab start --certs` presents. |
-| `WEIGHTSLAB_CERTS_DIR` | `~/.weightslab-certs` | Where cert files are looked up (single source of truth). |
+| `WEIGHTSLAB_CERTS_DIR` | `~/.weightslab-certs` | Where cert files are looked up (single source of truth). Falls back to `~/.weightslab-certs` when unset, not an absolute path, or holding no certs. |
 | `GRPC_AUTH_TOKEN` | *(unset)* | Optional metadata-token auth on top of mTLS. |
 | `GRPC_MAX_MESSAGE_BYTES` | `268435456` (256 MB) | Raise it if large tensors/image batches fail. |
 | `WEIGHTSLAB_DISABLE_WATCHDOGS` | `0` | Set `1` when debugging with breakpoints (see §5). |
@@ -219,6 +221,13 @@ serving on `0.0.0.0:50051`; (2) `weightslab start` is running and the browser
 can reach it on `:8080`; (3) **TLS mismatch** if using `--certs` — run
 `weightslab se` first and export `WEIGHTSLAB_CERTS_DIR`. For local debugging
 drop TLS entirely (omit `--certs`; `GRPC_TLS_ENABLED=0`).
+
+**`weightslab se` hangs with no output (Windows).**
+Only the WSL path can do this: `--force-ubuntu`, or the fallback after the
+PowerShell script fails. There `bash` is the WSL launcher, the script's output
+is captured, and there is no timeout, so a stuck WSL distro blocks forever.
+Confirm with `wsl -e echo ok` (it hangs too). Fix with `wsl --shutdown`, or drop
+`--force-ubuntu` so the PowerShell script runs.
 
 **Changed an env var, restarted, but the UI still uses the old value.**
 - `VITE_*` is build-time → you must **rebuild** the frontend, not just restart.

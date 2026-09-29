@@ -339,9 +339,11 @@ Security & TLS
      - Default
      - Description
    * - ``WEIGHTSLAB_CERTS_DIR``
-     - *(auto-generated)*
-     - Directory for TLS certificates and the gRPC auth token.
-       Auto-created under the user home dir when unset.
+     - ``~/.weightslab-certs``
+     - Directory for TLS certificates and the gRPC auth token. Read first;
+       ``~/.weightslab-certs`` is used instead when it is unset, is not an
+       absolute path (ignored with a warning), or holds no certs while
+       ``~/.weightslab-certs`` does.
    * - ``GRPC_TLS_ENABLED``
      - ``true``
      - Enable TLS for the gRPC backend server. Set to ``false`` for

@@ -17,7 +17,8 @@ Backend environment variables (set before starting ``wl.serve()``)
 +----------------------------------+-------------------------+----------------------------------------------------+
 | ``GRPC_TLS_REQUIRE_CLIENT_AUTH`` | ``0``                   | ``1`` = require client mTLS certificate            |
 +----------------------------------+-------------------------+----------------------------------------------------+
-| ``WEIGHTSLAB_CERTS_DIR``         | ``~/.weightslab-certs`` | Directory containing cert/key files                |
+| ``WEIGHTSLAB_CERTS_DIR``         | ``~/.weightslab-certs`` | Directory containing cert/key files; when it       |
+|                                  |                         | holds none, ``~/.weightslab-certs`` is used        |
 +----------------------------------+-------------------------+----------------------------------------------------+
 | ``GRPC_AUTH_TOKEN``              | *(unset)*               | Optional metadata-token auth (on top of mTLS)      |
 +----------------------------------+-------------------------+----------------------------------------------------+
@@ -40,7 +41,8 @@ UI server environment variables (set before ``weightslab start``)
 +---------------------------+-------------------------+--------------------------------------------------+
 | ``GRPC_BACKEND_PORT``     | ``50051``               | Backend gRPC port to proxy to                    |
 +---------------------------+-------------------------+--------------------------------------------------+
-| ``WEIGHTSLAB_CERTS_DIR``  | ``~/.weightslab-certs`` | Certs dir (read when ``--certs``)                |
+| ``WEIGHTSLAB_CERTS_DIR``  | ``~/.weightslab-certs`` | Certs dir (read when ``--certs``); when it       |
+|                           |                         | holds none, ``~/.weightslab-certs`` is used      |
 +---------------------------+-------------------------+--------------------------------------------------+
 | ``WEIGHTSLAB_OPENCODE_PORT`` | ``4096``             | Port the agent (OpenCode) server is started on;  |
 |                           |                         | falls back to a free port if taken               |

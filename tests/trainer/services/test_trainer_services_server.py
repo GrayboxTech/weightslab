@@ -410,9 +410,13 @@ class TestGrpcServe(_TimeoutMixin, unittest.TestCase):
         return fake_server
 
     def _with_grpc_env(self, host, port, fn):
-        saved = {k: os.environ.get(k) for k in ("GRPC_BACKEND_HOST", "GRPC_BACKEND_PORT")}
+        # Pin plaintext: `import weightslab` sets GRPC_TLS_ENABLED=1 when the
+        # machine has certs in $WEIGHTSLAB_CERTS_DIR / ~/.weightslab-certs.
+        saved = {k: os.environ.get(k)
+                 for k in ("GRPC_BACKEND_HOST", "GRPC_BACKEND_PORT", "GRPC_TLS_ENABLED")}
         os.environ["GRPC_BACKEND_HOST"] = host
         os.environ["GRPC_BACKEND_PORT"] = port
+        os.environ["GRPC_TLS_ENABLED"] = "0"
         try:
             return fn()
         finally:

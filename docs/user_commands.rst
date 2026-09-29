@@ -41,13 +41,39 @@ weightslab se
 
 .. code-block:: bash
 
-   weightslab se [certs_dir] [--force-certs]
+   weightslab se [certs_dir] [--force-certs] [--force-ubuntu]
 
 Generates TLS certificates and a gRPC auth token into a certs directory, then
 tells you to export ``WEIGHTSLAB_CERTS_DIR`` — the **single source of
 truth** the training backend, ``weightslab start --certs``, and any new
 shell all read to decide whether TLS/auth is on (derived purely from whether
 cert files exist in that directory).
+
+The certificates come from a bundled script that needs ``openssl`` on
+``PATH``. Which script runs depends on the OS:
+
+- **Linux / macOS:** the bash script (``generate-certs-auth-token.sh``).
+- **Windows:** the PowerShell script (``generate-certs-auth-token.ps1``), using
+  the Windows ``openssl``. It also adds the dev CA to your user's trusted root
+  certificates, and Windows asks you to confirm. If the script fails,
+  ``weightslab se`` falls back to the bash script through WSL.
+
+Options:
+
+- ``certs_dir`` — directory for the certs and token (default:
+  ``$WEIGHTSLAB_CERTS_DIR``, else ``~/.weightslab-certs``). A
+  ``WEIGHTSLAB_CERTS_DIR`` that isn't an absolute path is ignored with a
+  warning.
+- ``--force-certs`` — regenerate the certificates even if they already exist.
+- ``--force-ubuntu`` — Windows only. Skip PowerShell and run the bash script
+  in your default WSL distribution (for example Ubuntu; ``wsl -l -v`` shows
+  which one is the default), with no fallback. Use it when you want the WSL
+  ``openssl``. This path does not add the CA to the Windows trust store. It
+  has no effect on Linux/macOS, where bash is already used.
+
+If ``weightslab se --force-ubuntu`` hangs with no output, WSL itself is not
+responding (``wsl -e echo ok`` hangs too). Run ``wsl --shutdown`` and retry,
+or drop ``--force-ubuntu`` to use PowerShell.
 
 weightslab start
 ~~~~~~~~~~~~~~~~
@@ -58,22 +84,43 @@ weightslab start
                     [--backend-host HOST] [--backend-port PORT]
                     [--no-browser] [--certs]
 
-Runs the UI natively from Python.
+Runs the UI natively from Python: one process serves the bundled Weights
+Studio page and proxies gRPC-Web to the training backend. Unsecured HTTP by
+default.
 
-``DIR`` *(positional, optional)* — establishes the experiment directory (its
-checkpoints, logs, and ``notebook.ipynb`` live there). UI-only; it does not
-start training on its own.
+**Arguments**
+
+- ``DIR`` *(positional, optional)* — establishes the experiment directory (its
+  checkpoints, logs, and ``notebook.ipynb`` live there); created if missing.
+  Omit it to create a fresh ``./wl-<adjective>-<noun>`` directory. UI-only; it
+  does not start training on its own.
+- ``--port`` *(int)* — UI HTTP port; see the resolution order below.
+- ``--config`` *(file)* — experiment config (YAML) to read the UI port from.
+- ``--host`` *(str)* — interface the UI binds to. Default:
+  ``$WEIGHTSLAB_UI_HOST``, else **0.0.0.0**.
+- ``--backend-host`` *(str)* — backend gRPC host to proxy to. Default:
+  ``$GRPC_BACKEND_HOST``, else **localhost**.
+- ``--backend-port`` *(int)* — backend gRPC port to proxy to. Default:
+  ``$GRPC_BACKEND_PORT``, else **50051**.
+- ``--no-browser`` — don't open a browser tab.
+- ``--certs`` — serve HTTPS, and use mTLS to the backend, with the certificates
+  in ``$WEIGHTSLAB_CERTS_DIR``, else ``~/.weightslab-certs`` (run
+  ``weightslab se`` first). ``~/.weightslab-certs`` is also used when the
+  variable points at a directory without certs. If no valid certificates are
+  found it logs a warning and serves plain HTTP.
 
 Port resolution order:
 
 1. --port
-2. ui_port from --config / WEIGHTSLAB_EXPERIMENT_CONFIG config file
+2. ui_port from the config file: --config, else WEIGHTSLAB_EXPERIMENT_CONFIG,
+   else ./config.yaml, ./config.yml, ./experiment_config.yaml or
+   ./experiment_config.yml in the current directory
 3. WL_LAST_UI_PORT
 4. WEIGHTSLAB_UI_PORT (compatibility)
 5. 8080
 
-If the chosen port is already in use, weightslab start falls back to a random
-available port and logs it.
+If the chosen port is already in use, or is the backend's gRPC port,
+weightslab start picks a free port instead and logs it.
 
 Examples:
 
@@ -117,7 +164,7 @@ the documented form.
    * - ``--clus``
      - Clustering
    * - ``--gen``
-     - Generation
+     - Image generation (reconstruction + contrastive, anomaly detection)
    * - ``--3d_det``
      - 3D LiDAR point-cloud detection
    * - ``--2d_det``
@@ -149,9 +196,9 @@ One-level-at-a-time MNIST demos (four-way SDK approach — see
    weightslab start example --3d_det       # 3D LiDAR detection
    weightslab example start --det          # tolerant alias, same as `start example --det`
 
-Then, in another terminal: ``weightslab start`` and open
-``http://localhost:5173``. See :doc:`examples/index` for what each example
-demonstrates.
+Then, in another terminal, run ``weightslab start`` and open the URL it
+prints (``http://localhost:8080`` by default). See :doc:`examples/index` for
+what each example demonstrates.
 
 weightslab cli
 ~~~~~~~~~~~~~~
@@ -160,7 +207,15 @@ weightslab cli
 
    weightslab cli [--port PORT] [--host HOST]
 
-Connects to a running experiment CLI server.
+Opens an interactive console attached to a running experiment's CLI server.
+The experiment must serve it (``wl.serve(serving_cli=True)``).
+
+- ``--port`` *(int)* — CLI server port. Default: auto-discover the running
+  experiment (it advertises its port on startup), else ``$CLI_PORT``.
+- ``--host`` *(str)* — CLI server host. Default: the host the experiment
+  advertised, else ``$CLI_HOST``, else **localhost**.
+
+The console commands are listed under `Interactive CLI console`_ below.
 
 weightslab agent
 ~~~~~~~~~~~~~~~~
@@ -184,14 +239,15 @@ weightslab tunnel
    weightslab tunnel [ENDPOINT] [--listen-port N] [--listen-host H] [--remote-port N]
 
 Forwards a **remote** gRPC training backend to a **local** TCP port so the
-Weights Studio UI — whose Envoy proxy dials ``localhost:50051`` — connects to
-it as if it were local. This is what lets you **train on a remote machine (e.g.
-Google Colab) and watch it live in Studio running on your laptop**: Colab has no
-Docker daemon, so you run the UI locally and bridge the remote backend to it.
+Weights Studio UI — whose ``weightslab start`` proxy dials ``localhost:50051``
+by default — connects to it as if it were local. This is what lets you **train
+on a remote machine (e.g. Google Colab) and watch it live in Studio running on
+your laptop**: you run the UI locally and bridge the remote backend to it.
 
 It is a raw byte forwarder (no protocol parsing) because the browser speaks
-gRPC-Web to Envoy and Envoy speaks native HTTP/2 gRPC to its upstream — those
-HTTP/2 frames must pass through untouched. Two consequences:
+gRPC-Web to the ``weightslab start`` server, which speaks native HTTP/2 gRPC to
+its upstream — those HTTP/2 frames must pass through untouched. Two
+consequences:
 
 - The remote tunnel must be **raw TCP**, *not* an HTTP/gRPC-Web tunnel. A
   zero-signup option is `bore <https://github.com/ekzhang/bore>`_ with its free
@@ -207,12 +263,12 @@ HTTP/2 frames must pass through untouched. Two consequences:
   stripped. Default: the ``WEIGHTSLAB_TUNNEL_ENDPOINT`` environment variable, so
   a bare ``weightslab tunnel`` works once that is exported.
 - ``--listen-port``, ``-p`` *(int)* — local port to expose. Default: **50051**
-  (the port the bundled Envoy upstream dials — leave it unless you changed
-  ``GRPC_BACKEND_PORT``).
+  (the port ``weightslab start`` proxies to by default — leave it unless you
+  pass ``--backend-port`` or set ``GRPC_BACKEND_PORT``).
 - ``--listen-host`` *(str)* — interface to bind. Default: **auto** —
-  ``127.0.0.1`` on Windows/macOS (Docker Desktop reaches host loopback via
-  ``host.docker.internal``), ``0.0.0.0`` on Linux (compose ``host-gateway``
-  resolves to the bridge IP, which cannot reach a loopback-only listener).
+  ``127.0.0.1`` on Windows/macOS, ``0.0.0.0`` (all interfaces) on Linux. With
+  the UI on the same machine, ``--listen-host 127.0.0.1`` works on Linux too
+  and keeps the tunnel private.
 - ``--remote-port`` *(int)* — the remote port, when ``ENDPOINT`` has only a
   host and no ``:port``.
 
@@ -237,7 +293,8 @@ HTTP/2 frames must pass through untouched. Two consequences:
    weightslab start                           # plaintext HTTP (default)
    weightslab tunnel bore.pub:12345               # the host:port bore printed
 
-   # 3) Open http://localhost:5173 — Studio streams live from Colab.
+   # 3) Open the URL `weightslab start` printed (http://localhost:8080 by
+   #    default) — Studio streams live from Colab.
 
 .. note::
 

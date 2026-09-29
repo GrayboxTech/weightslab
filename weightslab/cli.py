@@ -9,6 +9,8 @@ Docker-free. Commands:
                                       gRPC auth token) in $WEIGHTSLAB_CERTS_DIR.
   * ``weightslab cli``              — attach a terminal to a running experiment.
   * ``weightslab tunnel``           — forward a remote gRPC backend to a local port.
+  * ``weightslab export``           — export annotations to CVAT / Label Studio / V7.
+  * ``weightslab agent init``       — provision and sign in to the OpenCode assistant.
 """
 
 import argparse
@@ -22,7 +24,7 @@ from typing import Optional, Sequence
 
 import yaml
 
-from weightslab.security import CertAuthManager
+from weightslab.security import CertAuthManager, env_certs_dir
 from weightslab.tunnel import DEFAULT_LISTEN_PORT
 from weightslab.components.experiment_naming import generate_experiment_name as _generate_experiment_name
 
@@ -120,7 +122,7 @@ def _resolve_ui_port(args) -> tuple[int, str]:
     if compat_env_port is not None:
         return compat_env_port, "WEIGHTSLAB_UI_PORT"
 
-    return 50051, "default"
+    return 8080, "default"
 
 
 def _persist_certs_dir(certs_dir_str: str) -> None:
@@ -131,6 +133,9 @@ def _persist_certs_dir(certs_dir_str: str) -> None:
     Linux/macOS — appends an export line to ~/.bashrc (idempotent) and prints the
                source command for the current session.
     """
+    if not Path(certs_dir_str).is_absolute():
+        logger.warning(f"Not persisting WEIGHTSLAB_CERTS_DIR={certs_dir_str!r}: not an absolute path.")
+        return
     export_line = f'export WEIGHTSLAB_CERTS_DIR="{certs_dir_str}"'
     if _is_windows():
         result = subprocess.run(
@@ -176,12 +181,16 @@ _DESCRIPTION = (
 
 _EPILOG = """\
 commands:
-  se                       Set up the secure environment: generate TLS
-                           certificates + a gRPC auth token in
-                           ~/.weightslab-certs. Then set WEIGHTSLAB_CERTS_DIR
+  se [CERTS_DIR]           Set up the secure environment: generate TLS
+                           certificates + a gRPC auth token in CERTS_DIR
+                           (default: $WEIGHTSLAB_CERTS_DIR, else
+                           ~/.weightslab-certs). Then set WEIGHTSLAB_CERTS_DIR
                            (the single source of truth) so the backend + new
                            shells find them.
                              --force-certs   regenerate even if certs exist
+                             --force-ubuntu  Windows only: generate with the
+                                             bash script through WSL/Ubuntu
+                                             instead of PowerShell (default)
 
   start [DIR]              Start the Weights Studio UI natively — no Docker.
                            Serves the bundled SPA and proxies gRPC-Web to a
@@ -193,12 +202,14 @@ commands:
                            fresh randomly-named dir under the current folder.
                            (UI-only: run training separately with a main.py that
                            points its root_log_dir at the same directory.)
-                              --port PORT           UI HTTP port (default 8080)
+                             --port PORT           UI HTTP port (default 8080)
                              --config FILE         experiment config file used to read ui_port
+                             --host HOST           UI bind host (default 0.0.0.0)
                              --backend-port PORT   backend gRPC port (default 50051)
                              --backend-host HOST   backend gRPC host (default localhost)
                              --no-browser          don't open a browser
-                             --certs               HTTPS + mTLS from $WEIGHTSLAB_CERTS_DIR
+                             --certs               HTTPS + mTLS from $WEIGHTSLAB_CERTS_DIR,
+                                                   else ~/.weightslab-certs
 
   start example            Run a bundled PyTorch example (foreground; stop with
                            Ctrl+C). Installs the example's requirements first,
@@ -207,7 +218,7 @@ commands:
                              --seg      segmentation example
                              --det      detection example
                              --clus     clustering example
-                             --gen      generation example
+                             --gen      image-generation example
                              --3d_det   3D LiDAR point-cloud detection example
                              --2d_det   2D LiDAR point-cloud detection example
                            One-level-at-a-time MNIST demos (four-way SDK approach):
@@ -247,9 +258,15 @@ commands:
                              --host H          backend host (default: 127.0.0.1)
                              --port N          backend gRPC port (default: 50051)
 
+  agent init               Provision the OpenCode AI assistant (downloads the
+                           binary, no Node.js needed), then run its interactive
+                           sign-in so the Weights Studio agent is ready to use.
+                             --provision-only  download/verify only; skip sign-in
+
 examples:
   weightslab se                       # one-time secure setup (then export WEIGHTSLAB_CERTS_DIR)
   weightslab se --force-certs         # regenerate the certs
+  weightslab se --force-ubuntu        # Windows: generate through WSL instead of PowerShell
   weightslab start                    # launch the UI (unsecured HTTP, default) at :8080
                                       # (creates a fresh ./wl-<name> experiment dir)
   weightslab start ./exp/mnist_opt/   # use (or create) this experiment directory
@@ -267,6 +284,7 @@ examples:
   weightslab export --format cvat     # export all annotations to CVAT XML in "."
   weightslab export -f v7 out/ --origin val_loader   # V7/Darwin, val split only, into out/
   weightslab export -f cvat --tag ToReview            # only samples tagged ToReview, for relabeling
+  weightslab agent init               # set up the AI assistant (OpenCode) once
 """
 
 
@@ -430,15 +448,13 @@ def _run_shell_script(script_path: str, args: list = None, env_vars: dict = None
         return 1
 
 
-def _generate_certs_with_fallback(force_certs: bool = False, certs_dir=None) -> int:
-    """Try shell script first, fall back to PowerShell on Windows if it fails.
+def _generate_certs_bash(force_certs: bool, certs_dir) -> int:
+    """Run generate-certs-auth-token.sh (through WSL when on Windows)."""
+    cert_script = str(_get_cert_script())
+    if not Path(cert_script).exists():
+        logger.error(f"Shell script not found: {cert_script}")
+        return 1
 
-    ``certs_dir`` is forwarded to the generation scripts as ``WEIGHTSLAB_CERTS_DIR``
-    so certs land in the single source-of-truth directory (the scripts default to
-    ``~/.weightslab-certs`` when it is not provided). The shell script receives a
-    POSIX absolute path (``/mnt/c/...`` on Windows/WSL); PowerShell receives the
-    host-native path (``C:/...``).
-    """
     env_vars = None
     if certs_dir is not None:
         # Shell scripts (bash/WSL) need a POSIX-style absolute path.
@@ -448,37 +464,51 @@ def _generate_certs_with_fallback(force_certs: bool = False, certs_dir=None) -> 
             bash_certs_dir = str(certs_dir)
         env_vars = {'WEIGHTSLAB_CERTS_DIR': bash_certs_dir}
 
-    cert_script = str(_get_cert_script())
-    if not Path(cert_script).exists():
-        logger.warning(f"Shell script not found: {cert_script}")
-    else:
-        script_args = []
-        if force_certs:
-            script_args.append('--force-create-certs')
+    script_args = ['--force-create-certs'] if force_certs else []
+    logger.info("Attempting certificate generation with shell script...")
+    return _run_shell_script(cert_script, script_args, env_vars)
 
-        logger.info("Attempting certificate generation with shell script...")
-        exit_code = _run_shell_script(cert_script, script_args, env_vars)
+
+def _generate_certs_powershell(force_certs: bool, certs_dir) -> int:
+    """Run generate-certs-auth-token.ps1 with the host openssl (Windows only)."""
+    cert_script_ps1 = str(_get_cert_script_ps1())
+    if not Path(cert_script_ps1).exists():
+        logger.error(f"PowerShell script not found: {cert_script_ps1}")
+        return 1
+
+    # Host-native path: PowerShell would resolve the /mnt/c/... form to C:\mnt\c\...
+    env_vars = {'WEIGHTSLAB_CERTS_DIR': str(certs_dir)} if certs_dir is not None else None
+    script_args = ['-ForceCreateCerts'] if force_certs else []
+    logger.info("Attempting certificate generation with PowerShell script...")
+    return _run_powershell_script(cert_script_ps1, script_args, env_vars)
+
+
+def _generate_certs_with_fallback(force_certs: bool = False, certs_dir=None,
+                                  force_ubuntu: bool = False) -> int:
+    """Generate the dev certs with the script native to this OS.
+
+    On Windows the PowerShell script runs first (host openssl, no WSL) and the
+    bash script is only a fallback if it fails. ``force_ubuntu`` skips PowerShell
+    and runs only the bash script, i.e. through WSL/Ubuntu on Windows. Elsewhere
+    only the bash script applies, so ``force_ubuntu`` changes nothing.
+
+    ``certs_dir`` is forwarded to the generation scripts as ``WEIGHTSLAB_CERTS_DIR``
+    so certs land in the single source-of-truth directory (the scripts default to
+    ``~/.weightslab-certs`` when it is not provided). The shell script receives a
+    POSIX absolute path (``/mnt/c/...`` on Windows/WSL); PowerShell receives the
+    host-native path (``C:/...``).
+    """
+    if _is_windows() and not force_ubuntu:
+        exit_code = _generate_certs_powershell(force_certs, certs_dir)
         if exit_code == 0:
             return 0
+        logger.warning(f"PowerShell script failed (exit code {exit_code})")
+        logger.info("Falling back to bash (WSL) for certificate generation...")
+
+    exit_code = _generate_certs_bash(force_certs, certs_dir)
+    if exit_code != 0:
         logger.warning(f"Shell script failed (exit code {exit_code})")
-
-    # Fallback to PowerShell on Windows
-    if _is_windows():
-        logger.info("Falling back to PowerShell for certificate generation...")
-        cert_script_ps1 = str(_get_cert_script_ps1())
-        if not Path(cert_script_ps1).exists():
-            logger.error(f"PowerShell script not found: {cert_script_ps1}")
-            return 1
-
-        script_args = []
-        if force_certs:
-            script_args.append('-ForceCreateCerts')
-
-        exit_code = _run_powershell_script(cert_script_ps1, script_args, env_vars)
-        return exit_code
-    else:
-        logger.error("Neither shell nor PowerShell script could generate certificates")
-        return 1
+    return exit_code
 
 
 def ui_secure_environment(args):
@@ -495,17 +525,24 @@ def ui_secure_environment(args):
     _ensure_scripts_executable()
 
     force_certs = getattr(args, "force_certs", False)
+    force_ubuntu = getattr(args, "force_ubuntu", False)
     no_auth = getattr(args, "no_auth", False)
     certs_dir = getattr(args, "certs_dir", None)
     if certs_dir:
         # Absolute path so Windows Python, WSL bash and the server agree on location.
         certs_dir = str(Path(certs_dir).resolve())
+    else:
+        # No CERTS_DIR: honour $WEIGHTSLAB_CERTS_DIR -- the directory `start --certs`
+        # and the backend read -- before CertAuthManager's ~/.weightslab-certs
+        # default. An unusable value (empty, relative) falls back with a warning.
+        certs_dir = env_certs_dir()
 
     # Resolve the target directory first (no filesystem work in __init__), so we
     # can point the generation scripts at it via WEIGHTSLAB_CERTS_DIR.
     manager = CertAuthManager(certs_dir=certs_dir, enable_auth=not no_auth)
 
-    exit_code = _generate_certs_with_fallback(force_certs=force_certs, certs_dir=manager.certs_dir)
+    exit_code = _generate_certs_with_fallback(
+        force_certs=force_certs, certs_dir=manager.certs_dir, force_ubuntu=force_ubuntu)
     if exit_code != 0:
         logger.error("Certificate generation failed")
         sys.exit(1)
@@ -516,6 +553,7 @@ def ui_secure_environment(args):
     # Export ONLY the single source of truth for this process.
     os.environ["WEIGHTSLAB_CERTS_DIR"] = str(manager.certs_dir)
 
+    logger.info("====================================================================")
     logger.info(" Certificates generated successfully")
     logger.info(" gRPC auth token created")
     logger.info(f" Certs and token stored in: {manager.certs_dir}")
@@ -527,6 +565,7 @@ def ui_secure_environment(args):
                    "and the training backend find these certs (single source of truth):")
     logger.warning(f" (bash) echo 'export WEIGHTSLAB_CERTS_DIR=\"{manager.certs_dir}\"' >> ~/.bashrc && source ~/.bashrc")
     logger.warning(f" (Windows) setx WEIGHTSLAB_CERTS_DIR \"{manager.certs_dir}\"")
+    logger.info("====================================================================")
 
 
 # Bundled PyTorch examples, keyed by the CLI flag (e.g. --cls -> wl-classification).
@@ -536,7 +575,7 @@ _EXAMPLES = {
     "seg": ("wl-segmentation", "segmentation", "PyTorch"),
     "det": ("wl-detection", "detection", "PyTorch"),
     "clus": ("wl-clustering", "clustering", "PyTorch"),
-    "gen": ("wl-generation", "generation", "PyTorch"),
+    "gen": ("wl-image-generation", "image generation", "PyTorch"),
     "3d_det": ("wl-3d-lidar-detection", "3D LiDAR detection", "Usecases"),
     "2d_det": ("wl-2d-lidar-detection", "2D LiDAR detection", "Usecases"),
     # One-level-at-a-time MNIST demos behind the four-way SDK approach docs.
@@ -581,7 +620,7 @@ def _install_example_requirements(example_dir: Path) -> None:
 
 
 def example_start(args):
-    """`weightslab start example [--cls|--seg|--clus|--gen]`: run a bundled example.
+    """`weightslab start example [--cls|--seg|--det|...]`: run a bundled example.
 
     Defaults to the classification (cls) example. First installs the example's
     requirements (if a requirements file is present) without prompting, then runs
@@ -894,7 +933,8 @@ def ui_start_native(args):
     server — like ``tensorboard``, the UI ships in the wheel.
 
     Unsecured HTTP by default. Pass ``--certs`` to serve HTTPS + mTLS to the
-    backend, derived solely from cert-file presence in $WEIGHTSLAB_CERTS_DIR.
+    backend, derived solely from cert-file presence in $WEIGHTSLAB_CERTS_DIR
+    (else ~/.weightslab-certs; see CertAuthManager.from_env_or_default).
     """
     try:
         from weightslab.ui import server as ui_server
@@ -939,8 +979,6 @@ def ui_start_native(args):
 
     ui_host = getattr(args, "host", None) or os.getenv("WEIGHTSLAB_UI_HOST", "0.0.0.0")
     preferred_ui_port, ui_port_source = _resolve_ui_port(args)
-    if ui_port_source == "default":
-        preferred_ui_port = 8080
     ui_port = preferred_ui_port
     backend_host = (getattr(args, "backend_host", None)
                     or os.getenv("GRPC_BACKEND_HOST", "localhost"))
@@ -1018,21 +1056,23 @@ def ui_start_native(args):
 def _add_ui_server_flags(p: argparse.ArgumentParser) -> None:
     """Attach flags for the native UI server."""
     p.add_argument('--port', type=int, default=None,
-                   help='UI HTTP port (default: config ui_port, else $WL_LAST_UI_PORT, else 50051)')
+                   help='UI HTTP port (default: ui_port from --config / $WEIGHTSLAB_EXPERIMENT_CONFIG, '
+                        'else $WL_LAST_UI_PORT, else $WEIGHTSLAB_UI_PORT, else 8080). '
+                        'A busy port falls back to a free one.')
     p.add_argument('--config', default=None,
                    help='Experiment config file to read ui_port from (yaml/yml)')
     p.add_argument('--host', default=None,
-                   help='UI bind host (default: 0.0.0.0)')
+                   help='UI bind host (default: $WEIGHTSLAB_UI_HOST, else 0.0.0.0)')
     p.add_argument('--backend-host', dest='backend_host', default=None,
-                   help='Backend gRPC host to proxy to (default: localhost)')
+                   help='Backend gRPC host to proxy to (default: $GRPC_BACKEND_HOST, else localhost)')
     p.add_argument('--backend-port', dest='backend_port', type=int, default=None,
-                   help='Backend gRPC port to proxy to (default: 50051)')
+                   help='Backend gRPC port to proxy to (default: $GRPC_BACKEND_PORT, else 50051)')
     p.add_argument('--no-browser', dest='no_browser', action='store_true',
                    help='Do not open the web browser automatically')
     p.add_argument('--certs', action='store_true',
                    help='Serve HTTPS + mTLS to the backend using TLS certs from '
-                        '$WEIGHTSLAB_CERTS_DIR (default: unsecured HTTP). '
-                        'Run `weightslab se` first to generate them.')
+                        '$WEIGHTSLAB_CERTS_DIR, else ~/.weightslab-certs (default: '
+                        'unsecured HTTP). Run `weightslab se` first to generate them.')
 
 
 def _add_example_kind_flags(p: argparse.ArgumentParser) -> None:
@@ -1047,7 +1087,7 @@ def _add_example_kind_flags(p: argparse.ArgumentParser) -> None:
     group.add_argument("--clus", action="store_const", dest="example_kind", const="clus",
                        help="Run the clustering example")
     group.add_argument("--gen", action="store_const", dest="example_kind", const="gen",
-                       help="Run the generation example")
+                       help="Run the image-generation example")
     group.add_argument("--3d_det", action="store_const", dest="example_kind", const="3d_det",
                        help="Run the 3D LiDAR point-cloud detection example")
     group.add_argument("--2d_det", action="store_const", dest="example_kind", const="2d_det",
@@ -1108,12 +1148,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     The CLI is intentionally minimal — exactly these commands:
         weightslab --help | -h | help
-        weightslab se [--force-certs]
-        weightslab start [--port PORT] [--config FILE] [--backend-port PORT] [--certs]
-        weightslab start example [--cls|--seg|--det|--clus|--gen|--3d_det|--2d_det]
+        weightslab se [CERTS_DIR] [--force-certs] [--force-ubuntu]
+        weightslab start [DIR] [--port PORT] [--config FILE] [--host HOST]
+                         [--backend-host HOST] [--backend-port PORT] [--no-browser] [--certs]
+        weightslab start example [--cls|--seg|--det|--clus|--gen|--3d_det|--2d_det
+                                  |--model|--data|--config|--logger]
         weightslab cli [--port PORT] [--host HOST]
-        weightslab tunnel ENDPOINT
-        weightslab export --format {cvat,label_studio,v7} [OUTPUT]
+        weightslab tunnel [ENDPOINT] [--listen-port N] [--listen-host H] [--remote-port N]
+        weightslab export --format {cvat,label_studio,v7} [OUTPUT] [--origin O]
+                          [--predictions] [--tag TAG ...] [--host H] [--port N]
+        weightslab agent init [--provision-only]
     """
     parser = argparse.ArgumentParser(
         prog="weightslab",
@@ -1123,9 +1167,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", metavar="{se,start,cli,tunnel,export,agent,help}")
 
-    # weightslab se [--force-certs] [certs_dir]
+    # weightslab se [--force-certs] [--force-ubuntu] [certs_dir]
     se_parser = sub.add_parser("se", help="Set up the secure environment (TLS certs + gRPC auth token)")
     se_parser.add_argument('--force-certs', action='store_true', help='Regenerate certificates even if they already exist')
+    se_parser.add_argument('--force-ubuntu', action='store_true',
+                           help='Windows only: generate certs with the bash script through WSL/Ubuntu '
+                                'instead of the default PowerShell script (no effect on Linux/macOS)')
     se_parser.add_argument('certs_dir', nargs='?', default=None,
                            help='Custom directory for certs/token (default: $WEIGHTSLAB_CERTS_DIR or ~/.weightslab-certs)')
 
@@ -1204,8 +1251,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Tolerate the swapped order: `weightslab example start [flags]` (and bare
     # `weightslab example`) behave exactly like `weightslab start example`. Hidden
-    # from --help on purpose (argparse.SUPPRESS) — a forgiving fallback.
-    example_alias = sub.add_parser("example", help=argparse.SUPPRESS)
+    # from --help on purpose — a forgiving fallback. No help= at all: argparse
+    # lists every subparser given one, and help=SUPPRESS prints "==SUPPRESS==".
+    example_alias = sub.add_parser("example")
     example_alias_sub = example_alias.add_subparsers(dest="example_action")
     example_alias_start = example_alias_sub.add_parser(
         "start", help="Start a bundled PyTorch example (default: classification)")

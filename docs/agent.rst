@@ -532,22 +532,27 @@ backend SDK agent directly.
 
 - **Syntax**: ``/loop <N>m|<N>h <prompt>`` to start (minimum interval: 60s),
   ``/loop list`` to see running jobs, ``/loop stop <id>`` to cancel one.
-- **What it can do**: the loop's OpenCode session is told about the local
-  ``weightslab`` CLI, reachable over bash against the live training process:
+- **What it can do**: the loop's OpenCode session controls the live training
+  process through the ``weightslab cli`` console. The console is interactive,
+  so the loop pipes in one line per bash call (EOF ends the session), e.g.
+  ``echo "status" | weightslab cli``. The lines its system prompt calls out:
 
-  - ``weightslab pause`` / ``weightslab resume`` — freeze/resume weight updates
-  - ``weightslab discard <sample_id>`` — discard a sample by id
-  - ``weightslab agent query "<natural language>"`` — hands the request to the
-    **backend SDK agent's** own intent pipeline, e.g. ``weightslab agent
-    query "discard samples where loss > 5 and tag them hard_examples"``. This
-    is how the loop reaches back into the database/history: it can't ask the
-    backend agent directly, but it can drive it through the CLI.
-  - ``weightslab status`` — a snapshot of hyperparameters/model/training state
+  - ``pause`` / ``resume`` — freeze/resume weight updates
+  - ``discard <sample_id>`` — discard a sample by id
+  - ``agent query "<natural language>"`` — hands the request to the
+    **backend SDK agent's** own intent pipeline, e.g. ``agent query "discard
+    samples where loss > 5 and tag them hard_examples"``. This is how the loop
+    reaches back into the database/history: it can't ask the backend agent
+    directly, but it can drive it through the console. The same verb builds
+    the experiment report (``agent query "Generate an experiment report."``);
+    later check-ins ask it to *update* that report rather than make a new one.
+  - ``status`` — component names and model age only (no metric or
+    hyperparameter values; ask ``agent query`` for those)
 
-  These four are what the loop's system prompt explicitly calls out, but bash
-  access means any other ``weightslab`` CLI verb is reachable too — e.g.
-  ``weightslab report`` to generate a narrative report for the loop to read
-  and act on. It may also read/edit training code directly and attempt to
+  These are console lines, not shell commands: there is no ``weightslab
+  status`` or ``weightslab pause``. Bash access means any other console verb
+  (see :doc:`weights_studio_cli/cli_console`) is reachable the same way. It
+  may also read/edit training code directly and attempt to
   restart a crashed process via bash — this is best-effort (no supervisor or
   PID handoff): it looks for the process, stops it if still running, and
   re-launches from whatever it can determine (shell history, a run script,
