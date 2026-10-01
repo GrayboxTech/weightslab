@@ -220,7 +220,6 @@ def _write_section(section: str, root_log_dir, **meta) -> Optional[Path]:
         logger.debug("[active-experiment] could not record %s dir in %s: %s",
                      section, path, exc)
         return None
-    logger.debug("[active-experiment] recorded %s root_log_dir=%s", section, entry["root_log_dir"])
     return path
 
 

@@ -233,7 +233,7 @@ class ExperimentHashGenerator:
         # Remove random state from config, i.e., root log dir as can be generated randomly
         # TODO (GP): Config from weightslab for experiment state should be in a cfg['exp_state'] or something not wrote and considered.
         config_cp = config.copy()
-        config_cp.pop('root_log_dir', None)
+        # config_cp.pop('root_log_dir', None)  # Ensure a new root_log_dir change the hash: we continue the experiment with new hash
         config_cp.pop('is_training', None)
         config_cp.pop('pause_at_step', None)
         # experiment_name is a user-facing label managed by WeightsLab (see
