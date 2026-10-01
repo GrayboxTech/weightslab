@@ -125,6 +125,16 @@ def _resolve_ui_port(args) -> tuple[int, str]:
     return 8080, "default"
 
 
+def _tls_allowed_by_env() -> bool:
+    """False when GRPC_TLS_ENABLED explicitly turns TLS off (0/false/no/off).
+
+    Unset means allowed, matching the backend's import-time check, which
+    enables TLS whenever it finds certs unless the variable says otherwise.
+    """
+    value = os.environ.get("GRPC_TLS_ENABLED", "true").strip().lower()
+    return value not in ("0", "false", "no", "off")
+
+
 def _persist_certs_dir(certs_dir_str: str) -> None:
     """Persist WEIGHTSLAB_CERTS_DIR so future terminals and the training backend find it.
 
@@ -195,7 +205,9 @@ commands:
   start [DIR]              Start the Weights Studio UI natively — no Docker.
                            Serves the bundled SPA and proxies gRPC-Web to a
                            running backend, all from one Python process.
-                           UNSECURED (HTTP) by default.
+                           HTTPS + mTLS when TLS certs are found
+                           ($WEIGHTSLAB_CERTS_DIR, else ~/.weightslab-certs,
+                           as the backend does), plain HTTP otherwise.
                            DIR is the experiment directory (created if missing)
                            used as root_log_dir — where this run's checkpoints,
                            logs and notebook.ipynb live. Omit DIR to create a
@@ -208,8 +220,8 @@ commands:
                              --backend-port PORT   backend gRPC port (default 50051)
                              --backend-host HOST   backend gRPC host (default localhost)
                              --no-browser          don't open a browser
-                             --certs               HTTPS + mTLS from $WEIGHTSLAB_CERTS_DIR,
-                                                   else ~/.weightslab-certs
+                             --certs               require TLS (warn if no certs are found)
+                             --no-certs            force plain HTTP, even with certs
 
   start example            Run a bundled PyTorch example (foreground; stop with
                            Ctrl+C). Installs the example's requirements first,
@@ -267,10 +279,10 @@ examples:
   weightslab se                       # one-time secure setup (then export WEIGHTSLAB_CERTS_DIR)
   weightslab se --force-certs         # regenerate the certs
   weightslab se --force-ubuntu        # Windows: generate through WSL instead of PowerShell
-  weightslab start                    # launch the UI (unsecured HTTP, default) at :8080
+  weightslab start                    # launch the UI at :8080 (HTTPS if certs exist)
                                       # (creates a fresh ./wl-<name> experiment dir)
   weightslab start ./exp/mnist_opt/   # use (or create) this experiment directory
-  weightslab start --certs            # launch the UI over HTTPS (needs `weightslab se` first)
+  weightslab start --no-certs         # plain HTTP even when certs exist
   weightslab start --port 9000        # launch the UI on a custom port
   weightslab start --backend-port 50052   # proxy to a backend on a custom gRPC port
   weightslab start example            # run the classification demo (default)
@@ -932,9 +944,10 @@ def ui_start_native(args):
     running backend (started by ``wl.serve()``), all from one pure-Python HTTP
     server — like ``tensorboard``, the UI ships in the wheel.
 
-    Unsecured HTTP by default. Pass ``--certs`` to serve HTTPS + mTLS to the
-    backend, derived solely from cert-file presence in $WEIGHTSLAB_CERTS_DIR
-    (else ~/.weightslab-certs; see CertAuthManager.from_env_or_default).
+    Serves HTTPS + mTLS to the backend when TLS certs are found in
+    $WEIGHTSLAB_CERTS_DIR (else ~/.weightslab-certs; see
+    CertAuthManager.from_env_or_default) -- the same rule the backend applies --
+    and plain HTTP otherwise. ``--no-certs`` / GRPC_TLS_ENABLED=0 force HTTP.
     """
     try:
         from weightslab.ui import server as ui_server
@@ -996,11 +1009,17 @@ def ui_start_native(args):
         )
         ui_port = 0
 
-    # TLS/auth: single source of truth is cert-file presence in the certs dir.
-    # Only consulted when the user explicitly opts in with --certs.
+    # TLS/auth: single source of truth is cert-file presence in the certs dir
+    # ($WEIGHTSLAB_CERTS_DIR, else ~/.weightslab-certs) -- the same rule the
+    # backend applies at import, so both ends agree: a backend that found certs
+    # serves TLS and would reject a plaintext UI. GRPC_TLS_ENABLED=0/false or
+    # --no-certs force plain HTTP; --certs only makes missing certs a warning.
     certs_dir = None
     grpc_auth_token = None
-    if getattr(args, "certs", False):
+    want_certs = getattr(args, "certs", False)
+    if getattr(args, "no_certs", False):
+        logger.info("--no-certs: serving plain HTTP and dialing the backend without TLS.")
+    elif want_certs or _tls_allowed_by_env():
         manager = CertAuthManager.from_env_or_default()
         if manager.has_valid_certs():
             certs_dir = str(manager.certs_dir)
@@ -1008,11 +1027,18 @@ def ui_start_native(args):
                 grpc_auth_token = manager.get_or_create_auth_token()
             except Exception:
                 grpc_auth_token = None
-        else:
+            if not want_certs:
+                logger.info(
+                    f"TLS certs found in {certs_dir}: serving HTTPS and using mTLS to the "
+                    "backend. Pass --no-certs for plain HTTP."
+                )
+        elif want_certs:
             logger.warning(
                 f"--certs requested but no valid certs in {manager.certs_dir}. "
                 "Run `weightslab se` first. Falling back to unsecured HTTP."
             )
+    else:
+        logger.info("GRPC_TLS_ENABLED is off: serving plain HTTP.")
 
     if not ui_server.has_static_assets():
         logger.warning(
@@ -1069,10 +1095,15 @@ def _add_ui_server_flags(p: argparse.ArgumentParser) -> None:
                    help='Backend gRPC port to proxy to (default: $GRPC_BACKEND_PORT, else 50051)')
     p.add_argument('--no-browser', dest='no_browser', action='store_true',
                    help='Do not open the web browser automatically')
-    p.add_argument('--certs', action='store_true',
-                   help='Serve HTTPS + mTLS to the backend using TLS certs from '
-                        '$WEIGHTSLAB_CERTS_DIR, else ~/.weightslab-certs (default: '
-                        'unsecured HTTP). Run `weightslab se` first to generate them.')
+    tls = p.add_mutually_exclusive_group()
+    tls.add_argument('--certs', action='store_true',
+                     help='Require TLS: warn if no certs are found. Without either flag, '
+                          'HTTPS + mTLS to the backend are used automatically when certs '
+                          'exist in $WEIGHTSLAB_CERTS_DIR, else ~/.weightslab-certs '
+                          '(generate them with `weightslab se`).')
+    tls.add_argument('--no-certs', dest='no_certs', action='store_true',
+                     help='Force plain HTTP and a plaintext backend connection, even '
+                          'when certs exist (e.g. for a plaintext or tunnelled backend).')
 
 
 def _add_example_kind_flags(p: argparse.ArgumentParser) -> None:
@@ -1150,7 +1181,8 @@ def _build_parser() -> argparse.ArgumentParser:
         weightslab --help | -h | help
         weightslab se [CERTS_DIR] [--force-certs] [--force-ubuntu]
         weightslab start [DIR] [--port PORT] [--config FILE] [--host HOST]
-                         [--backend-host HOST] [--backend-port PORT] [--no-browser] [--certs]
+                         [--backend-host HOST] [--backend-port PORT] [--no-browser]
+                         [--certs | --no-certs]
         weightslab start example [--cls|--seg|--det|--clus|--gen|--3d_det|--2d_det
                                   |--model|--data|--config|--logger]
         weightslab cli [--port PORT] [--host HOST]
