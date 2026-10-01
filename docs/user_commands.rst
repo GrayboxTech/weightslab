@@ -45,9 +45,9 @@ weightslab se
 
 Generates TLS certificates and a gRPC auth token into a certs directory, then
 tells you to export ``WEIGHTSLAB_CERTS_DIR`` — the **single source of
-truth** the training backend, ``weightslab start --certs``, and any new
-shell all read to decide whether TLS/auth is on (derived purely from whether
-cert files exist in that directory).
+truth** the training backend, ``weightslab start``, and any new shell all
+read to decide whether TLS/auth is on (derived purely from whether cert files
+exist in that directory).
 
 The certificates come from a bundled script that needs ``openssl`` on
 ``PATH``. Which script runs depends on the OS:
@@ -82,11 +82,15 @@ weightslab start
 
    weightslab start [DIR] [--port PORT] [--config FILE] [--host HOST]
                     [--backend-host HOST] [--backend-port PORT]
-                    [--no-browser] [--certs]
+                    [--no-browser] [--certs | --no-certs]
 
 Runs the UI natively from Python: one process serves the bundled Weights
-Studio page and proxies gRPC-Web to the training backend. Unsecured HTTP by
-default.
+Studio page and proxies gRPC-Web to the training backend. It serves HTTPS, and
+uses mTLS to the backend, whenever TLS certificates are found in
+``$WEIGHTSLAB_CERTS_DIR`` (else ``~/.weightslab-certs``, also used when the
+variable points at a directory without certs) — the same rule the backend
+applies at startup, so both ends agree. Without certificates, or with
+``GRPC_TLS_ENABLED=0``, it serves plain HTTP.
 
 **Arguments**
 
@@ -103,11 +107,10 @@ default.
 - ``--backend-port`` *(int)* — backend gRPC port to proxy to. Default:
   ``$GRPC_BACKEND_PORT``, else **50051**.
 - ``--no-browser`` — don't open a browser tab.
-- ``--certs`` — serve HTTPS, and use mTLS to the backend, with the certificates
-  in ``$WEIGHTSLAB_CERTS_DIR``, else ``~/.weightslab-certs`` (run
-  ``weightslab se`` first). ``~/.weightslab-certs`` is also used when the
-  variable points at a directory without certs. If no valid certificates are
-  found it logs a warning and serves plain HTTP.
+- ``--certs`` — require TLS: if no valid certificates are found it logs a
+  warning (then serves plain HTTP). Run ``weightslab se`` first.
+- ``--no-certs`` — force plain HTTP and a plaintext backend connection, even
+  when certificates exist (e.g. for a plaintext or tunnelled backend).
 
 Port resolution order:
 
@@ -129,7 +132,7 @@ Examples:
    weightslab start
    weightslab start --port 9000
    weightslab start --backend-port 50052
-   weightslab start --certs
+   weightslab start --no-certs
 
 weightslab start example
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -253,8 +256,9 @@ consequences:
   zero-signup option is `bore <https://github.com/ekzhang/bore>`_ with its free
   public relay: ``bore local 50051 --to bore.pub`` (prints ``bore.pub:<port>``).
   ``ngrok tcp 50051`` also works but now requires a credit card on the free tier.
-- The backend must run **plaintext** — the default ``weightslab start``
-  (no ``--certs``) — so no TLS terminates mid-path.
+- The backend must run **plaintext**, so no TLS terminates mid-path. If you
+  have certificates locally, start the UI with ``weightslab start
+  --no-certs`` so it dials the tunnel without TLS.
 
 **Arguments**
 
@@ -290,7 +294,7 @@ consequences:
    #    !bore local 50051 --to bore.pub
 
    # 2) On your machine, in two terminals:
-   weightslab start                           # plaintext HTTP (default)
+   weightslab start --no-certs                # plaintext, to match the backend
    weightslab tunnel bore.pub:12345               # the host:port bore printed
 
    # 3) Open the URL `weightslab start` printed (http://localhost:8080 by

@@ -177,13 +177,16 @@ Use Weightslab Studio (UI)
 For a full visual experiment monitoring workflow (agent, samples, tags, discard/restore, plots), deploy the
 Weights Studio web app with the bundled CLI.
 
-**By default the UI runs unsecured (HTTP, no gRPC auth) — no certificates are generated.**
-Pass ``--certs`` to generate (if missing) and use TLS certificates + a gRPC auth token:
+**Without certificates the UI runs unsecured (HTTP, no gRPC auth).** Once you have
+generated them with ``weightslab se``, ``weightslab start`` finds them in
+``$WEIGHTSLAB_CERTS_DIR`` (else ``~/.weightslab-certs``) and serves HTTPS + gRPC auth
+automatically — the same rule the training backend applies, so both sides agree:
 
 .. code-block:: bash
 
-   weightslab start              # unsecured HTTP (default)
-   weightslab start --certs      # secured HTTPS + gRPC auth (run `weightslab se` first)
+   weightslab se                 # once: generate TLS certificates + a gRPC auth token
+   weightslab start              # HTTPS + gRPC auth when certs exist, HTTP otherwise
+   weightslab start --no-certs   # force plain HTTP even when certs exist
 
 .. important::
 
