@@ -22,7 +22,7 @@ Architecture
 Runtime path:
 
 1. Browser (served from ``weightslab start``)
-2. ``weightslab start`` — pure-Python HTTP server that:
+2. ``weightslab start``, pure-Python HTTP server that:
 
    - Serves the pre-built Weights Studio SPA (vendored in ``weightslab/ui/static/``)
    - Translates gRPC-Web (browser) to raw gRPC (backend) via an embedded proxy

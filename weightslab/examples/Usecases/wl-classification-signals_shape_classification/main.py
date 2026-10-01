@@ -40,7 +40,6 @@ import weightslab as wl
 
 from collections import Counter
 
-from weightslab import guard_training_context, guard_testing_context
 
 from utils.model import SmallCNN
 from utils.data import MNISTIdx
@@ -134,7 +133,7 @@ def train(loader, model, opt, crit, dev, sync):
     for img, ids, lab in loader:
         img, lab = img.to(dev), lab.to(dev)
         sync(); ts = time.perf_counter()
-        with guard_training_context:
+        with wl.guard_training_context:
             opt.zero_grad()
             logits = model(img)
             crit(logits, lab, batch_ids=ids, preds=logits.argmax(1, keepdim=True)).mean().backward()
@@ -151,7 +150,7 @@ def test(test_loader, model, crit, dev):
     with torch.no_grad():
         for tb in test_loader:
             ti, tid, tl = tb[0].to(dev), tb[1], tb[2].to(dev)
-            with guard_testing_context:
+            with wl.guard_testing_context:
                 tlg = model(ti)
                 crit(tlg, tl, batch_ids=tid, preds=tlg.argmax(1, keepdim=True))
 

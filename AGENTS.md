@@ -100,8 +100,11 @@ Working starting points live in
 (each is a `main.py` + `config.yaml`) — find the closest example and mirror it.
 
 UI deployment details (port, TLS, certs) are documented in
-`weightslab/docs/weights_studio.rst`. TLS is opt-in: run `weightslab se` once,
-then `weightslab start --certs`.
+`weightslab/docs/weights_studio.rst`. TLS turns on once certs exist: run
+`weightslab se` once, and `weightslab start` and the backend then use them
+automatically (`weightslab start --no-certs` forces HTTP). On Windows `se` uses the PowerShell script and
+the Windows `openssl`; `weightslab se --force-ubuntu` uses the bash script
+through WSL instead.
 
 ---
 
@@ -120,10 +123,10 @@ the global ledger (`weightslab/weightslab/backend/ledgers.py`,
 
 Conventions that matter for correctness:
 
-- Wrap the train step in `with guard_training_context:` and eval in
-  `with guard_testing_context:` (from
-  `weightslab.components.global_monitoring`). This is how pause/resume and
-  train/test separation work — **skip it and pause/resume or stats will misbehave.**
+- Wrap the train step in `with wl.guard_training_context:` and eval in
+  `with wl.guard_testing_context:` (both re-exported at package level; no deep
+  import). This is how pause/resume and train/test separation work — **skip it
+  and pause/resume or stats will misbehave.**
 - Use `model.get_age()` (steps actually trained; survives checkpoint reloads),
   not the raw loop counter.
 - `task_type` on the dataset/model selects rendering: `classification`,
@@ -175,11 +178,13 @@ ones when debugging:
 
 | Variable | Default | Why you touch it |
 |---|---|---|
-| `WEIGHTSLAB_LOG_LEVEL` | `INFO` | Set `DEBUG` to see what's happening. (`WATCHDOG` level sits between WARNING/ERROR.) |
+| `WEIGHTSLAB_LOG_LEVEL` | `INFO` | **Terminal only.** Set `DEBUG` to see what's happening. (`WATCHDOG` level sits between WARNING/ERROR.) |
+| `WEIGHTSLAB_LOG_FILE_LEVEL` | *(unset = all)* | The session log file keeps every record whatever the terminal shows; set this to cap the file too. Log lives in `<root_log_dir>/weightslab_logs/`. |
+| `WEIGHTSLAB_TQDM_LOG_INTERVAL` | `30` | Seconds between snapshots of live `tqdm` bars into the log (`0` disables). tqdm never goes through `logging`, so without this the file has no record of training progress. |
 | `GRPC_BACKEND_HOST` / `GRPC_BACKEND_PORT` | `0.0.0.0` / `50051` | Backend gRPC bind address. |
-| `GRPC_TLS_ENABLED` | `0` | TLS on the gRPC socket. Set `1` with `weightslab start --certs`. |
-| `GRPC_TLS_REQUIRE_CLIENT_AUTH` | `0` | mTLS. Must match what `weightslab start --certs` presents. |
-| `WEIGHTSLAB_CERTS_DIR` | `~/.weightslab-certs` | Where cert files are looked up (single source of truth). |
+| `GRPC_TLS_ENABLED` | `0` | TLS on the gRPC socket. Set to `1` automatically when certs are found; `0`/`false` forces plaintext (also for `weightslab start`). |
+| `GRPC_TLS_REQUIRE_CLIENT_AUTH` | `0` | mTLS. Must match what `weightslab start` presents when it uses certs. |
+| `WEIGHTSLAB_CERTS_DIR` | `~/.weightslab-certs` | Where cert files are looked up (single source of truth). Falls back to `~/.weightslab-certs` when unset, not an absolute path, or holding no certs. |
 | `GRPC_AUTH_TOKEN` | *(unset)* | Optional metadata-token auth on top of mTLS. |
 | `GRPC_MAX_MESSAGE_BYTES` | `268435456` (256 MB) | Raise it if large tensors/image batches fail. |
 | `WEIGHTSLAB_DISABLE_WATCHDOGS` | `0` | Set `1` when debugging with breakpoints (see §5). |
@@ -216,9 +221,18 @@ distilled from issues hit in development).
 **UI loads but the sample grid is empty / "failed to fetch" / gRPC errors.**
 The wire path (§1) is broken somewhere. Check in order: (1) backend actually
 serving on `0.0.0.0:50051`; (2) `weightslab start` is running and the browser
-can reach it on `:8080`; (3) **TLS mismatch** if using `--certs` — run
-`weightslab se` first and export `WEIGHTSLAB_CERTS_DIR`. For local debugging
-drop TLS entirely (omit `--certs`; `GRPC_TLS_ENABLED=0`).
+can reach it on `:8080`; (3) **TLS mismatch** — the UI and the backend each
+turn TLS on when they find certs, so both must see the same
+`WEIGHTSLAB_CERTS_DIR` (the browser console prints `TLS: ENABLED/DISABLED`).
+For local debugging drop TLS on both sides (`weightslab start --no-certs`;
+`GRPC_TLS_ENABLED=0` for the backend).
+
+**`weightslab se` hangs with no output (Windows).**
+Only the WSL path can do this: `--force-ubuntu`, or the fallback after the
+PowerShell script fails. There `bash` is the WSL launcher, the script's output
+is captured, and there is no timeout, so a stuck WSL distro blocks forever.
+Confirm with `wsl -e echo ok` (it hangs too). Fix with `wsl --shutdown`, or drop
+`--force-ubuntu` so the PowerShell script runs.
 
 **Changed an env var, restarted, but the UI still uses the old value.**
 - `VITE_*` is build-time → you must **rebuild** the frontend, not just restart.

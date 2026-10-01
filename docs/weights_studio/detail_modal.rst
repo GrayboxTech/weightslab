@@ -25,8 +25,8 @@ Overlays
 Independent toggles for **raw**, **ground truth**, **prediction**, plus two
 comparison modes:
 
-- **diff** — ground truth against prediction in one image.
-- **split** — the two side by side.
+- **diff**, ground truth against prediction in one image.
+- **split**, the two side by side.
 
 For detection runs, a bounding-box info control reports what is drawn; the
 number of boxes rendered is capped by ``BB_MODAL_RENDER`` (and
@@ -41,7 +41,7 @@ The modal adapts to the sample's modality.
    :alt: Interactive 3D point cloud viewer
    :width: 100%
 
-**Point clouds** open in an interactive 3D viewer — orbit, zoom, and expand it
+**Point clouds** open in an interactive 3D viewer, orbit, zoom, and expand it
 to fill the screen. Cap the rendered points with ``PC_MAX_POINTS`` on very
 dense scans.
 

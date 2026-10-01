@@ -30,7 +30,7 @@ from weightslab.backend.ledgers import DEFAULT_NAME, get_checkpoint_manager, get
 from weightslab.backend.model_interface import ModelInterface
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
-from weightslab.utils.logs import set_log_directory
+from weightslab.utils.logs import set_log_directory, experiment_log_dir
 from weightslab.utils.tools import detach_to_cpu, _running_in_notebook, _running_in_colab, _embedded_kernel_disabled
 from weightslab.trainer.services import notebook_service as _notebook_service
 from weightslab.backend.logger import LoggerQueue
@@ -83,7 +83,16 @@ def _resolve_configured_root_log_dir(configured):
          actually points at an existing directory; if it's set but stale/typo'd,
          a warning is logged and resolution falls through to (3) instead of
          silently training into a directory the UI never established.
-      3. A throwaway ``tempfile.mkdtemp()`` — last resort so serving never fails
+      3. The directory a RUNNING ``weightslab start`` established, read from
+         the marker file (see weightslab.utils.active_experiment). Only while
+         that UI is alive: a record left by one that has since exited must not
+         redirect an unrelated run. The
+         environment variable only reaches processes started FROM that same
+         shell; a training run launched in another terminal (or by
+         ``weightslab start example``) is a different process tree and used to
+         fall straight through to (4), landing in %TEMP% while the UI listed an
+         empty reports/ from the directory it had established.
+      4. A throwaway ``tempfile.mkdtemp()`` — last resort so serving never fails
          for lack of a directory.
     """
     if configured:
@@ -94,9 +103,28 @@ def _resolve_configured_root_log_dir(configured):
             return env_dir
         logger.warning(
             f"WEIGHTSLAB_ROOT_LOG_DIR is set to '{env_dir}', but that directory "
-            "does not exist. Falling back to a temporary directory instead."
+            "does not exist. Falling back to the experiment directory recorded "
+            "by `weightslab start`, then to a temporary directory."
         )
-    return tempfile.mkdtemp()
+    try:
+        from weightslab.utils.active_experiment import live_ui_experiment_dir
+        marker_dir = live_ui_experiment_dir()
+    except Exception:  # noqa: BLE001 -- never block serving on the marker
+        marker_dir = None
+    if marker_dir:
+        logger.info(
+            "Using the experiment directory established by `weightslab start`: "
+            "%s (no root_log_dir configured and WEIGHTSLAB_ROOT_LOG_DIR is not "
+            "set in this process).", marker_dir)
+        return marker_dir
+    tmp_dir = tempfile.mkdtemp()
+    logger.warning(
+        "No root_log_dir configured, no WEIGHTSLAB_ROOT_LOG_DIR, and no "
+        "experiment directory recorded by `weightslab start` — this run will "
+        "write to the throwaway directory %s. Checkpoints, reports and the "
+        "notebook will NOT be where the UI looks for them. Start the UI first "
+        "(`weightslab start`), or set root_log_dir in your config.", tmp_dir)
+    return tmp_dir
 
 
 # Get global dataframe proxy (auto-updated when ledger registers real manager)
@@ -494,6 +522,16 @@ class BatchSignalContext:
         out = {s: [] for s in self.sample_ids}
         if self.logger is None:
             return out
+        # Read the bounded in-memory tail: O(batch). The full-history query this
+        # replaced scanned the entire per_sample table on every call (140ms at
+        # 20M rows, once per step, growing without bound).
+        if not os.environ.get("WL_HISTORY_FROM_DB"):
+            recent = self.logger.recent_per_sample(signal_name, self.sample_ids)
+            for s in self.sample_ids:
+                vals = recent.get(s)
+                if vals:
+                    out[s] = list(vals)
+            return out
         # query_per_sample accepts a list of ids -> one scan for the whole batch.
         for sid, step, val, _ in self.logger.query_per_sample(signal_name, sample_ids=self.sample_ids):
             out.setdefault(int(sid), []).append(val)   # rows already ordered by seq (= step order)
@@ -528,22 +566,34 @@ class BatchSignalContext:
 # WEIGHTSLAB INTERNAL FUNCTIONS FOR LOGGING, SIGNAL EXTRACTION, WRAPPING, ETC. (not typically called directly by users)
 # #####################################################################################################################
 
-def _update_log_directory(new_log_dir: str):
-    """
-        Move the current log file to a new directory and update the file handler.
+def _update_log_directory(new_log_dir: str = None):
+    """Relocate the session log into the experiment's ``weightslab_logs/``.
 
-        This is useful for setting a user-specified log directory after initial
-        setup with a temporary file. The function will:
-        - Move the existing log file to the new directory (if it exists)
-        - Update the logging FileHandler to point to the new location
-    """
+    Logging is configured at ``import weightslab``, before any experiment
+    directory is known, so the session log starts in ``$WEIGHTSLAB_ROOT_LOG_DIR``
+    or a temp directory. This moves it under the ``root_log_dir`` that actually
+    won — otherwise a run whose ``root_log_dir`` came from the config dict (the
+    usual case) leaves its whole log behind in ``%TEMP%`` and the experiment
+    directory has no log at all.
 
-    # Update logging directory to use root_log_dir after parameters registration
-    hp = get_hyperparams()
+    Args:
+        new_log_dir: The resolved experiment root. Falls back to the registered
+            hyperparameters' ``root_log_dir`` when omitted.
+    """
+    root_log_dir = new_log_dir
+    if not root_log_dir:
+        try:
+            root_log_dir = get_hyperparams().get('root_log_dir')
+        except Exception as e:
+            logger.debug(f"Could not read root_log_dir from hyperparameters: {e}")
+    if not root_log_dir:
+        return
     try:
-        set_log_directory(str(hp.get('root_log_dir', new_log_dir)))
+        # Same layout setup_logging uses, so the file never moves between two
+        # different conventions and whoever is tailing it keeps seeing it grow.
+        set_log_directory(experiment_log_dir(root_log_dir))
     except Exception as e:
-        logger.debug(f"Could not update log directory: {e}")
+        logger.warning(f"Could not update log directory to {root_log_dir}: {e}")
 
 
 def _get_age(self):
@@ -719,25 +769,6 @@ def _log_signal(scalar: float, signal_per_sample: dict, reg_name: str, step: int
         except Exception:
             traceback.print_exc()
             pass
-
-
-def _update_log_directory(new_log_dir: str):
-    """
-        Move the current log file to a new directory and update the file handler.
-
-        This is useful for setting a user-specified log directory after initial
-        setup with a temporary file. The function will:
-        - Move the existing log file to the new directory (if it exists)
-        - Update the logging FileHandler to point to the new location
-    """
-
-    # Update logging directory to use root_log_dir after parameters registration
-    hp = get_hyperparams()
-    try:
-        set_log_directory(str(hp.get('root_log_dir', new_log_dir)))
-    except Exception as e:
-        logger.debug(f"Could not update log directory: {e}")
-
 
 
 def _move_to_cpu(value: Any) -> Any:
@@ -1023,9 +1054,23 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                              # batch and call the signal once. It returns a length-B
                              # array. Avoids B Python calls + B SignalContext allocs,
                              # and lets the signal do batched ledger reads.
+                             # inputs= must be populated here too: on the
+                             # subscribe_to path the context was built without it,
+                             # so b.inputs was {} and any signal declaring
+                             # inputs=[...] raised KeyError on every call. The
+                             # subscribed signal IS the declared input here, and
+                             # its per-sample values are already in val_vec.
+                             _decl = meta.get('inputs') or []
+                             _sub = meta.get('subscribe_to')
+                             _vals = [float(v) for v in val_vec]
+                             _bin = {}
+                             for _d in _decl:
+                                 if _sub is None or _d == _sub or _d == reg_name:
+                                     _bin[_d] = _vals
                              bctx = BatchSignalContext(
                                  sample_ids=[int(u) for u in ids_np],
-                                 subscribed_values=[float(v) for v in val_vec],
+                                 subscribed_values=_vals,
+                                 inputs=_bin,
                                  logger=_lg,
                                  dataframe=df_proxy,
                                  origin=kwargs.get('origin', 'train'),
@@ -1446,6 +1491,20 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 # _resolve_configured_root_log_dir for the resolution order).
                 _hp_cfg['root_log_dir'] = _resolve_configured_root_log_dir(
                     _hp_cfg.get('root_log_dir'))
+                # The experiment directory is now settled, so move the session
+                # log into it. Done here rather than in the branches below so it
+                # happens for every route (dict, YAML path, hyperparameters
+                # restored from a checkpoint), not only when the caller passed
+                # root_log_dir through `defaults`/kwargs.
+                _update_log_directory(_hp_cfg['root_log_dir'])
+                # Publish where training ACTUALLY writes, so the UI lists this
+                # run's reports/notebooks even when the two resolved their
+                # directory by different routes.
+                try:
+                    from weightslab.utils.active_experiment import record_backend_experiment
+                    record_backend_experiment(_hp_cfg['root_log_dir'])
+                except Exception as _exc:  # noqa: BLE001 -- advisory only
+                    logger.debug("Could not record the backend experiment dir: %s", _exc)
                 try:
                     # Check if a checkpoint manager is already registered in ledger
                     try:
@@ -1509,15 +1568,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                         # start ledger-managed watcher
                         watch_hyperparams_file(path, poll_interval=kwargs.get('poll_interval', 1.0))
 
-                        # Update log directory if root_log_dir provided in hyperparameters or defaults
-                        new_log_dir = None
-                        if defaults and 'root_log_dir' in defaults:
-                            new_log_dir = defaults['root_log_dir']
-                        elif 'root_log_dir' in kwargs:
-                            new_log_dir = kwargs['root_log_dir']
-                        if new_log_dir:
-                            _update_log_directory(new_log_dir)
-
                         # return the ledger handle (proxy or dict)
                         _hp = get_hyperparams()
                         _rebind_caller_local(obj, _hp)
@@ -1528,15 +1578,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                         get_hyperparams()
                         register_hyperparams(obj)
 
-                        # Update log directory if root_log_dir provided in hyperparameters or defaults
-                        new_log_dir = None
-                        if defaults and 'root_log_dir' in defaults:
-                            new_log_dir = defaults['root_log_dir']
-                        elif 'root_log_dir' in kwargs:
-                            new_log_dir = kwargs['root_log_dir']
-                        if new_log_dir:
-                            _update_log_directory(new_log_dir)
-
                         _hp = get_hyperparams()
                         _rebind_caller_local(obj, _hp)
                         return _hp
@@ -1544,15 +1585,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                         # unsupported type for hp; attempt best-effort registration
                         try:
                             register_hyperparams(dict(obj))
-
-                            # Update log directory if root_log_dir provided in hyperparameters or defaults
-                            new_log_dir = None
-                            if defaults and 'root_log_dir' in defaults:
-                                new_log_dir = defaults['root_log_dir']
-                            elif 'root_log_dir' in kwargs:
-                                new_log_dir = kwargs['root_log_dir']
-                            if new_log_dir:
-                                _update_log_directory(new_log_dir)
 
                             _hp = get_hyperparams()
                             _rebind_caller_local(obj, _hp)
@@ -1728,6 +1760,16 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
     # should not outlive the workspace that owns it.
     _register_pid_with_ui_server()
 
+    # Mirror tqdm progress bars into the session log. A bar paints itself onto
+    # the terminal and never touches `logging`, so a log file read after the run
+    # had no record of the run's own progress. Sampled on a timer, written to a
+    # channel the terminal handler filters out (the live bar is already there).
+    try:
+        from weightslab.utils.tqdm_logging import start_tqdm_log_mirror
+        start_tqdm_log_mirror()
+    except Exception as e:  # noqa: BLE001 -- never block serving on the mirror
+        logger.debug(f"Could not start the tqdm progress mirror: {e}")
+
     # Embed a real Jupyter kernel (shares this process's live objects) so the
     # studio notebook panel — and any external Jupyter client — can attach to
     # it, unless we're already inside a notebook/Colab kernel ourselves (mode
@@ -1738,6 +1780,25 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
         _notebook_service.configure_embedded_kernel(embed_kernel_decision)
 
     if serving_grpc:
+        # Stamp the gRPC port on this backend's active-experiment record, so a
+        # UI proxying to that port finds THIS experiment's directory rather
+        # than whichever backend happened to start last (see
+        # active_experiment._sole_live_dir). Advisory: never fail serving on it.
+        try:
+            from weightslab.utils.active_experiment import record_backend_experiment
+            _grpc_port = (kwargs.get("grpc_port")
+                          or int(os.getenv("GRPC_BACKEND_PORT", 50051)))
+            _root_log_dir = None
+            try:
+                _hp = ledgers.get_hyperparams()
+                _root_log_dir = _hp["root_log_dir"] if _hp is not None else None
+            except Exception:  # noqa: BLE001 -- no hyperparameters registered
+                _root_log_dir = None
+            if _root_log_dir:
+                record_backend_experiment(_root_log_dir, grpc_port=int(_grpc_port))
+        except Exception as _exc:  # noqa: BLE001
+            logger.debug("Could not record the backend gRPC port: %s", _exc)
+
         grpc_serve(**kwargs)
 
     if embed_kernel_decision:
@@ -4283,9 +4344,15 @@ def _parquet_safe_frame(df):
     still round-trips via ``json.loads``. Columns with no non-scalar values are
     left untouched, so numeric / bool / plain-string columns keep their native
     Arrow types. The input is never mutated (copy-on-write only when needed).
+
+    Lazy ``ArrayH5Proxy`` cells (``array_return_proxies=True``, e.g. a
+    ``prediction`` column) are written as their H5 reference string, e.g.
+    ``"arrays.h5:/0/prediction"`` -- Arrow can't encode the proxy object, and
+    loading every sample's array just to dump it would defeat the proxy.
     """
     import json as _json2
     import numpy as _np2
+    from weightslab.data.array_proxy import ArrayH5Proxy as _Proxy
 
     _NONSCALAR = (list, dict, tuple, set, _np2.ndarray)
     out = df
@@ -4294,6 +4361,12 @@ def _parquet_safe_frame(df):
         _s = df[_col]
         if _s.dtype != object:
             continue
+        if _s.map(lambda v: isinstance(v, _Proxy)).any():
+            if not _copied:
+                out = df.copy()
+                _copied = True
+            _s = _s.map(lambda v: v.path_ref if isinstance(v, _Proxy) else v)
+            out[_col] = _s
         # Skip columns that are already uniformly scalar (the common case).
         if not _s.map(lambda v: isinstance(v, _NONSCALAR)).any():
             continue
@@ -4935,6 +5008,16 @@ def resolve_signal_classifier(signal_name):
     return _GLOBAL_CLASSIFIER or classify_loss_shape
 
 
+_SHAPE_LABELS: dict = {}
+
+
+def _label_counts(cache):
+    out = {}
+    for lab in cache.values():
+        out[lab] = out.get(lab, 0) + 1
+    return out
+
+
 def write_signal_shapes(signal_name, tag_name=None, classifier=None, exp_hash=None, sample_ids=None):
     """Reusable engine: classify each sample's own trajectory of *signal_name*
     into a categorical tag and return the ``{label: count}`` distribution.
@@ -4953,17 +5036,29 @@ def write_signal_shapes(signal_name, tag_name=None, classifier=None, exp_hash=No
     clf = classifier or resolve_signal_classifier(signal_name)
     if tag_name is None:
         tag_name = signal_name + "_shape" if signal_name.endswith('_loss') else signal_name + "_loss_shape"
+
+    # Labels for samples this pass does not reclassify are carried here, so an
+    # incremental call still returns a distribution over the WHOLE dataset, and
+    # a sample whose label is unchanged is not re-written to the ledger.
+    cache = _SHAPE_LABELS.setdefault(signal_name, {})
+    if sample_ids is not None and not list(sample_ids):
+        return _label_counts(cache)
+
     series = {}
     for sid, step, val, _ in query_signal_history(signal_name, exp_hash=exp_hash, sample_ids=sample_ids):
         series.setdefault(sid, []).append((step, val))
     by_label = {}
     for sid, pts in series.items():
         label = clf([v for _, v in sorted(pts)])
-        if label is not None:
-            by_label.setdefault(label, []).append(sid)
+        if label is None:
+            continue
+        if cache.get(sid) == label:
+            continue                      # unchanged -> no ledger write needed
+        cache[sid] = label
+        by_label.setdefault(label, []).append(sid)
     for label, sids in by_label.items():
         set_categorical_tag(sids, tag_name, label)
-    return {k: len(v) for k, v in by_label.items()}
+    return _label_counts(cache)
 
 
 def write_loss_shapes(loss_signal="loss_sample", classifier=None):

@@ -76,8 +76,10 @@ via the decision table in §3.9, then copy its `wl.*` calls — §3 documents th
 whole API surface (reactive signals, group signals, the Ultralytics mixin,
 etc. aren't in the `.rst` docs; the examples are the primary source).
 
-TLS/UI deploy details: `weightslab/docs/weights_studio.rst`. TLS is opt-in:
-`weightslab se` once, then `weightslab start --certs`.
+TLS/UI deploy details: `weightslab/docs/weights_studio.rst`. TLS turns on once
+certs exist: `weightslab se` once, then `weightslab start` and the backend use
+them automatically (`--no-certs` forces HTTP). Windows: `se` uses the
+PowerShell script + Windows `openssl`; `--force-ubuntu` uses WSL bash instead.
 
 ---
 
@@ -193,7 +195,7 @@ from a watched object:
 - `wl.save_group_signals(signals={...}, group_ids=[...], origin="train_loader")` —
   one row per group, for pairwise values (e.g. contrastive loss) that can't map
   to a single sample. Needs a dataset that emits a `group_id` in its metadata
-  (`PyTorch/wl-generation`).
+  (`PyTorch/wl-image-generation`).
 - `wl.trajectory_stats(values)` / `wl.classify_loss_shape(values)` — building
   blocks behind the loss-shape tag (§3.6); call directly only for a custom classifier.
 
@@ -285,10 +287,10 @@ The automatic `tag:loss_shape` tag (§3.6) uses these same primitives.
 | LiDAR detection (2D/3D) | `Usecases/wl-{2d,3d}-lidar-detection` | `task_type="detection_pointcloud"`; 3D adds `render_thumbnail_2d`. |
 | Tabular / feature vectors | `PyTorch/wl-fraud-detection` | No `task_type`; `preload_labels=True, preload_metadata=True`; see §3.10 for a headless verification script. |
 | Embedding / clustering | `PyTorch/wl-clustering` (+ `face/model.py`) | `watch_or_edit` calls live inside the model wrapper, not `main.py`; open-ended loop. |
-| Paired/contrastive samples, group-level signals | `PyTorch/wl-generation` | `wl.save_group_signals`; dataset emits 2 rows per item via a `uids` metadata key. |
+| Paired/contrastive samples, group-level signals | `PyTorch/wl-image-generation` | `wl.save_group_signals`; dataset emits 2 rows per item via a `uids` metadata key. |
 | Reactive signals / custom loss-shape tagging | `Usecases/wl-classification-signals_shape_classification`, `Usecases/ws-signals-mnist` | §3.6; the latter is the minimal variant with no custom classifier. |
 | PyTorch Lightning | `Lightning/wl-classification` | Same `watch_or_edit` calls as plain PyTorch; guards wrap `training_step`/`validation_step` bodies; `Trainer(log_every_n_steps=0, enable_checkpointing=False, logger=False)`. |
-| Ultralytics YOLO (detect/segment) | `Ultralytics/wl-detection` | Don't call `watch_or_edit` for model/optimizer/data/loss/metric — pass `trainer=WLAwareTrainer` (or `WLAwareSegmentationTrainer`) from `weightslab.integrations.ultralytics` to `YOLO(...).train(...)`. It wires everything via UL callbacks; you only watch the run config as `flag="hyperparameters"`. |
+| Ultralytics YOLO (detect/segment) | `Ultralytics/wl-detection` | Don't call `watch_or_edit` for model/optimizer/data/loss/metric — pass `trainer=wl.WLAwareTrainer` (or `wl.WLAwareSegmentationTrainer`) to `YOLO(...).train(...)`. It wires everything via UL callbacks; you only watch the run config as `flag="hyperparameters"`. |
 
 ### 3.10 Verifying an integration headlessly
 
@@ -309,11 +311,13 @@ Authoritative reference: `weightslab/docs/configuration.rst`. High-signal ones:
 
 | Variable | Default | Why |
 |---|---|---|
-| `WEIGHTSLAB_LOG_LEVEL` | `INFO` | `DEBUG` for detail (`WATCHDOG` level sits between WARNING/ERROR). |
+| `WEIGHTSLAB_LOG_LEVEL` | `INFO` | **Terminal only**; `DEBUG` for detail (`WATCHDOG` level sits between WARNING/ERROR). |
+| `WEIGHTSLAB_LOG_FILE_LEVEL` | *(unset = all)* | The session log file (`<root_log_dir>/weightslab_logs/`) keeps every record whatever the terminal shows; set this to cap the file too. |
+| `WEIGHTSLAB_TQDM_LOG_INTERVAL` | `30` | Seconds between snapshots of live `tqdm` bars into the log (`0` disables); tqdm never goes through `logging`. |
 | `GRPC_BACKEND_HOST`/`PORT` | `0.0.0.0`/`50051` | Backend gRPC bind address. |
-| `GRPC_TLS_ENABLED` | `0` | TLS on the gRPC socket; set with `weightslab start --certs`. |
-| `GRPC_TLS_REQUIRE_CLIENT_AUTH` | `0` | mTLS; must match `--certs`. |
-| `WEIGHTSLAB_CERTS_DIR` | `~/.weightslab-certs` | Cert lookup — single source of truth. |
+| `GRPC_TLS_ENABLED` | `0` | TLS on the gRPC socket; set to `1` automatically when certs are found, `0`/`false` forces plaintext. |
+| `GRPC_TLS_REQUIRE_CLIENT_AUTH` | `0` | mTLS; must match what `weightslab start` presents. |
+| `WEIGHTSLAB_CERTS_DIR` | `~/.weightslab-certs` | Cert lookup — single source of truth; falls back to `~/.weightslab-certs` when unset/relative/without certs. |
 | `GRPC_AUTH_TOKEN` | unset | Optional token auth on top of mTLS. |
 | `GRPC_MAX_MESSAGE_BYTES` | `268435456` | Raise if large tensors/images fail to transfer. |
 | `WEIGHTSLAB_DISABLE_WATCHDOGS` | `0` | Set `1` when breakpoint-debugging (§5). |
@@ -342,8 +346,14 @@ are runtime (need only restart + reload). `ENABLE_*` default on; `0`/`false`/`no
 
 **Sample grid empty / "failed to fetch" / gRPC errors.** Check in order: (1)
 backend serving on `0.0.0.0:50051`; (2) `weightslab start` running, browser
-reaches `:8080`; (3) TLS mismatch if using `--certs` — run `weightslab se`
-first, export `WEIGHTSLAB_CERTS_DIR` (or drop TLS: omit `--certs`, `GRPC_TLS_ENABLED=0`).
+reaches `:8080`; (3) TLS mismatch — UI and backend each enable TLS when they
+find certs, so both must see the same `WEIGHTSLAB_CERTS_DIR` (or drop TLS on
+both: `weightslab start --no-certs`, `GRPC_TLS_ENABLED=0`).
+
+**`weightslab se` hangs with no output (Windows).** Only on the WSL path
+(`--force-ubuntu`, or the fallback after PowerShell fails): a stuck WSL distro
+blocks forever (output captured, no timeout). `wsl -e echo ok` hangs too →
+`wsl --shutdown`, or drop `--force-ubuntu`.
 
 **Env var change not taking effect.** `VITE_*` → rebuild frontend.
 `WS_*`/`BB_*`/`ENABLE_*` → restart `weightslab start` + reload tab.

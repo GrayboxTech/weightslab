@@ -56,31 +56,31 @@ list lives.
 
    **New Features**
 
-   - **Runs management** — unified UI to browse, organize, rename, and inspect
+   - **Runs management**, unified UI to browse, organize, rename, and inspect
      experiment runs.
 
-   - **Error bands & outlier highlighting** — curves now display statistical bands and
+   - **Error bands & outlier highlighting**, curves now display statistical bands and
      visually emphasize anomalous steps.
 
-   - **Relabelling export** — export tagged/annotated data to external tools (CVAT,
+   - **Relabelling export**, export tagged/annotated data to external tools (CVAT,
      V7, etc.) for downstream relabelling workflows.
 
-   - **Integrated OpenCode Agent** — full agent loop support (code generation,
+   - **Integrated OpenCode Agent**, full agent loop support (code generation,
      training, monitoring, report creation) directly inside WeightsLab.
 
-   - **Multimodal data support** — unified handling of images, videos, metadata, and
+   - **Multimodal data support**, unified handling of images, videos, metadata, and
      structured signals.
 
-   - **Automatic resource monitoring** — GPU/CPU/RAM usage tracked and surfaced during
+   - **Automatic resource monitoring**, GPU/CPU/RAM usage tracked and surfaced during
      training and agent operations.
 
-   - **Dynamic HTML report generation** — multi‑section experiment reports with plots,
+   - **Dynamic HTML report generation**, multi‑section experiment reports with plots,
      dataset analysis, training insights, and test results.
 
 
    **Fixes & Improvements**
 
-   - **Agent stability improvements** — better token management, reliable process
+   - **Agent stability improvements**, better token management, reliable process
      detaching, consistent initialization, and workspace‑safe lifecycle.
 
    - **Plotting upgrades**
@@ -94,16 +94,16 @@ list lives.
    - Right‑click actions: BBS, highlight, hide curve, step notes, load weights, color
      changes
 
-   - **Signal pipeline fixes** — improved decimation, preservation of special points,
+   - **Signal pipeline fixes**, improved decimation, preservation of special points,
      kernel stability, and classification logic.
 
-   - **DB performance improvements** — safer handling of large histories, better
+   - **DB performance improvements**, safer handling of large histories, better
      compaction, and reduced memory pressure.
 
-   - **Tag painter fixes** — more reliable tagging, discarding, and annotation
+   - **Tag painter fixes**, more reliable tagging, discarding, and annotation
      workflows.
 
-   - **Workspace & session recovery** — restart window reloads ongoing sessions,
+   - **Workspace & session recovery**, restart window reloads ongoing sessions,
      history, and conversation context.
 
    - **UI polish**
@@ -118,28 +118,28 @@ list lives.
 
    - Improved multimodal previews
 
-   - **Cross‑platform testing** — validated on Windows, Ubuntu, Jupyter, and Google
+   - **Cross‑platform testing**, validated on Windows, Ubuntu, Jupyter, and Google
      Colab.
 
 
    **Developer Experience**
 
-   - **Unified configuration** — examples now rely on clean cfg files instead of
+   - **Unified configuration**, examples now rely on clean cfg files instead of
      hardcoded defaults.
 
-   - **Improved CLI** — better agent commands, clearer ``/clear`` and ``/compact``,
+   - **Improved CLI**, better agent commands, clearer ``/clear`` and ``/compact``,
      stable loop behavior.
 
-   - **Changelog & documentation updates** — new “What’s New”, migration notes (W&B /
+   - **Changelog & documentation updates**, new “What’s New”, migration notes (W&B /
      v51 / 3LC), updated examples, and expanded UI documentation.
 
 
    **Experimental & Advanced**
 
-   - **Video generation workflows** — multi‑input styles, real‑world models, and
+   - **Video generation workflows**, multi‑input styles, real‑world models, and
      dataset‑driven video tasks.
 
-   - **Image generation workflows** — PyTorch‑based generation paths integrated with
+   - **Image generation workflows**, PyTorch‑based generation paths integrated with
      agent prompts.
 
 .. card::
@@ -303,7 +303,7 @@ list lives.
 
    - `#207 <https://github.com/GrayboxTech/weightslab/pull/207>`__
 
-     v1.2.5 — 2026-06-17 Fix EMA Sync. from Ultralytics trainer and evaluate mode
+     v1.2.5, 2026-06-17 Fix EMA Sync. from Ultralytics trainer and evaluate mode
 
 
 ----

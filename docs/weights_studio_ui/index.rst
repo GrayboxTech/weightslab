@@ -16,7 +16,7 @@ Architecture
 Runtime path:
 
 1. Browser (served from ``weightslab start``)
-2. ``weightslab start`` — pure-Python HTTP server that:
+2. ``weightslab start``, pure-Python HTTP server that:
 
    - Serves the pre-built Weights Studio SPA (vendored in ``weightslab/ui/static/``)
    - Translates gRPC-Web (browser) to raw gRPC (backend) via an embedded proxy
@@ -70,15 +70,15 @@ page itself for the details.
    main_area
    more/index
 
-- :doc:`landing_page` — the pre-experiment surface: agent chat, local Jupyter,
+- :doc:`landing_page`, the pre-experiment surface: agent chat, local Jupyter,
   Colab quickstarts, :ref:`report generation <studio-report-generation>`, and
   the :ref:`embedded-notebook`.
-- :doc:`agent` — the docked chat bar and Agent Window: commands, ``/loop``
+- :doc:`agent`, the docked chat bar and Agent Window: commands, ``/loop``
   jobs, setup, and history behavior.
-- :doc:`left_panel` — run management (training controls, evaluation, mode,
+- :doc:`left_panel`, run management (training controls, evaluation, mode,
   auto-refresh), in-training hyperparameter edits, tag painter mode, metadata
   sorting/histograms, and data actions (save, export).
-- :doc:`main_area` — the Plots Board (search, merged curves, error bands,
+- :doc:`main_area`, the Plots Board (search, merged curves, error bands,
   right-click actions, resource monitoring) and the Data Board (grid/list
   modes, quick filters, selection, tagging, the detail modal).
-- :doc:`more/index` — More to know.
+- :doc:`more/index`, More to know.

@@ -1,4 +1,4 @@
-LiDAR Detection — 2D and 3D (PyTorch)
+LiDAR Detection, 2D and 3D (PyTorch)
 ======================================
 
 .. raw:: html
@@ -17,7 +17,7 @@ LiDAR Detection — 2D and 3D (PyTorch)
 - ``weightslab/examples/Usecases/wl-2d-lidar-detection/main.py``
 - ``weightslab/examples/Usecases/wl-3d-lidar-detection/main.py``
 
-**Task:** Object detection on LiDAR point clouds — 2D pillar-grid (BEV) and
+**Task:** Object detection on LiDAR point clouds, 2D pillar-grid (BEV) and
 full 3D bounding boxes (KITTI-format).
 
 Both examples use the same WeightsLab integration pattern as
@@ -73,7 +73,7 @@ WeightsLab integration (identical to image detection)
    model     = wl.watch_or_edit(_model,     flag="model",     device=device)
    optimizer = wl.watch_or_edit(_optimizer, flag="optimizer")
 
-   # Signals — per sample and per instance (one per 3D box)
+   # Signals, per sample and per instance (one per 3D box)
    train_sig = {
        "loss":         wl.watch_or_edit(LiDAR3DLoss(...),  flag="loss",
                            name="train_loss/sample", per_sample=True, log=True),
@@ -84,7 +84,7 @@ WeightsLab integration (identical to image detection)
    }
 
    # Training loop
-   with guard_training_context:
+   with wl.guard_training_context:
        points, ids, targets, _ = next(train_loader)
        outputs = model(points.to(device))
        preds   = decode_3d_predictions(outputs.detach())
@@ -116,7 +116,7 @@ and override ``load_points`` and optionally ``render_thumbnail_2d``:
 .. tip::
 
    Both examples are bundled with WeightsLab (synthetic point clouds generated
-   on the fly — no external dataset required):
+   on the fly, no external dataset required):
 
    .. code-block:: bash
 

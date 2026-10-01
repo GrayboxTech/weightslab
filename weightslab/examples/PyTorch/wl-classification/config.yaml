@@ -1,8 +1,8 @@
 # Global configuration
 experiment_name: mnist_classification
 device: cpu
-training_steps_to_do: null  # Set to null for infinite training until manually stopped - behavior set by the user in main script
-# root_log_dir:  # Path to save current experiment checkpoints and data
+# training_steps_to_do: null  # Set to null for infinite training until manually stopped - behavior set by the user in main script
+root_log_dir: C:\Users\GuillaumePELLUET\Desktop\USECASES_TESTING  # Path to save current experiment checkpoints and data
 
 checkpoint_manager:
   load_config: false  # Disable loading previous checkpoint configuration to allow for changes in the current config.yaml file
@@ -14,10 +14,10 @@ optimizer:
 compute_natural_sort: false
 
 # Experiment parameters
-eval_full_to_train_steps_ratio: 500   # was 100 — full 10k eval was the dominant wall-clock cost
+eval_full_to_train_steps_ratio: 250   # was 100 — full 10k eval was the dominant wall-clock cost
 experiment_dump_to_train_steps_ratio: 250  # was 25 — frequent checkpoint dumps stalled training
 write_export_ratio: 100  # Export signal history + data grid to JSON/CSV every N steps
-skip_checkpoint_load: false  # If true restart the experiment from last state
+skip_checkpoint_load: false  # false = resume from this experiment's newest weights; true = always start from scratch
 tqdm_display: true  # Whether to use tqdm progress bars during training/evaluation
 is_training: false  # Start training immediately or not
 
@@ -35,12 +35,12 @@ serving_grpc: true
 data:
   train_loader:
     shuffle: true
-    batch_size: 16
+    batch_size: 64
     # max_samples: 256
   val_loader:
     shuffle: false
     # max_samples: 256
-    batch_size: 64
+    batch_size: 128
   test_loader:
     shuffle: false
     # max_samples: 256

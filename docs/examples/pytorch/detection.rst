@@ -1,4 +1,4 @@
-Detection — Penn-Fudan Pedestrians (PyTorch)
+Detection, Penn-Fudan Pedestrians (PyTorch)
 =============================================
 
 .. raw:: html
@@ -44,13 +44,13 @@ Integration walkthrough
        preload_labels=False,
    )
 
-``array_autoload_arrays=False`` — bounding-box arrays stored in the ledger
+``array_autoload_arrays=False``, bounding-box arrays stored in the ledger
 are **not** loaded into RAM on init; only their paths are kept.
-``array_return_proxies=True`` — reads return lazy proxy objects that
+``array_return_proxies=True``, reads return lazy proxy objects that
 materialise on access.
-``array_use_cache=True`` — recently accessed arrays are kept in a small LRU
+``array_use_cache=True``, recently accessed arrays are kept in a small LRU
 cache so repeated access (e.g. NMS evaluation on the same batch) is cheap.
-``preload_labels=False`` — labels are read on demand inside ``__getitem__``
+``preload_labels=False``, labels are read on demand inside ``__getitem__``
 instead of being scanned at startup. Use this when the dataset is large.
 
 These three flags together let the studio show sample thumbnails and
@@ -90,7 +90,7 @@ IoU as a distribution overlaid on each image.
 
 .. code-block:: python
 
-   with guard_training_context:
+   with wl.guard_training_context:
        outputs = model(inputs)
        preds   = decode_predictions(outputs.detach(), grid_size, conf_thresh)
 
@@ -115,7 +115,7 @@ computation graph (use ``.detach()``).
            ...
 
 ``get_items(idx, include_labels=True)`` loads only the label for sample
-``idx`` — no image decode, no transform. This lets you scan the full
+``idx``, no image decode, no transform. This lets you scan the full
 annotation distribution cheaply at startup without triggering the image
 pipeline. See :ref:`good-practice-get-items` for the recommended signature.
 

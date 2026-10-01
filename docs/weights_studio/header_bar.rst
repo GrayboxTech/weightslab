@@ -13,7 +13,7 @@ Training: Pause and Resume
    :width: 100%
 
 Toggles ``is_training`` on the backend. Pausing stops the training loop but
-leaves the process, the notebook kernel and the agent alive — this is the
+leaves the process, the notebook kernel and the agent alive, this is the
 correct way to stop for a while (see :ref:`good-practice-open-ended-loop`).
 
 Next to it, the **save-weights** button pauses training and forces a
@@ -35,13 +35,13 @@ Run Evaluation
 
 Triggers an evaluation pass on demand:
 
-1. Pick the **split** — ``train_loader`` or ``test_loader``.
+1. Pick the **split**, ``train_loader`` or ``test_loader``.
 2. Either leave **Full set (ignore tags)** checked, or uncheck it and pick the
    tags to restrict the pass to a subset.
 3. Click **Run Evaluation**. A status line reports progress and completion.
 
 Evaluating a tagged subset is the fast path for "did my fix actually help the
-samples I flagged?" — tag the bad ones, run eval on just that tag, compare.
+samples I flagged?", tag the bad ones, run eval on just that tag, compare.
 
 Mode selector: train / audit / eval
 -----------------------------------
@@ -50,10 +50,10 @@ Mode selector: train / audit / eval
    :alt: Mode selector with train, audit and eval options
    :width: 100%
 
-- **train** — the normal loop.
-- **audit** — inspect-only; data edits are recorded for review rather than
+- **train**, the normal loop.
+- **audit**, inspect-only; data edits are recorded for review rather than
   applied blind.
-- **eval** — the evaluation pass configured above.
+- **eval**, the evaluation pass configured above.
 
 Auto-refresh and cache
 ----------------------
@@ -65,9 +65,9 @@ Auto-refresh and cache
 **Refresh now** re-pulls the stats for the currently visible grid cells. The
 popover next to it configures the two refresh loops independently:
 
-- **Data auto-refresh** — on/off plus an interval, for the grid and its stats.
-- **Plot auto-refresh** — on/off plus an interval, for the signal plots.
-- **Clear cache and reload** — drops cached images and metadata, then reloads
+- **Data auto-refresh**, on/off plus an interval, for the grid and its stats.
+- **Plot auto-refresh**, on/off plus an interval, for the signal plots.
+- **Clear cache and reload**, drops cached images and metadata, then reloads
   the page. Reach for this when thumbnails look stale after a data edit.
 
 On a large dataset, turning data auto-refresh **off** while you work through a
@@ -78,8 +78,8 @@ Notebook and report buttons
 
 Two buttons sit left of the logo, both disabled until a backend connects:
 
-- **Notebook** — opens the :ref:`legacy-embedded-notebook`.
-- **Report** — generates an experiment report; see
+- **Notebook**, opens the :ref:`legacy-embedded-notebook`.
+- **Report**, generates an experiment report; see
   :ref:`legacy-studio-report-generation`.
 
 A third indicator reports the status of a **local Jupyter** server started

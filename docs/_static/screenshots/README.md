@@ -2,7 +2,7 @@
 
 One image per feature section in `docs/weights_studio.rst`.
 
-Every file here is currently a **placeholder** — a grey frame naming the
+Every file here is currently a **placeholder**, a grey frame naming the
 feature it stands in for. To add a real screenshot, overwrite the file
 **keeping its exact filename**; the docs reference these paths directly, so
 nothing else needs editing.

@@ -37,7 +37,7 @@ Because the UI is a plain Python process, cloud deployment is straightforward:
 5. Put a reverse proxy (nginx / ALB / Caddy) in front of port ``8080`` and
    expose only ``443`` publicly.
 
-The UI and backend can run on different machines — set ``--backend-host`` and
+The UI and backend can run on different machines, set ``--backend-host`` and
 ``--backend-port`` accordingly.
 
 Example systemd unit

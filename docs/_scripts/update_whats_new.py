@@ -275,7 +275,7 @@ def build_rst(releases: list) -> str:
 def main() -> None:
     releases = stable_releases(fetch_releases())
     OUTPUT.write_text(build_rst(releases), encoding="utf-8")
-    print(f"wrote {OUTPUT} — {len(releases)} releases, "
+    print(f"wrote {OUTPUT}, {len(releases)} releases, "
           f"{releases[-1]['tag_name']} … {releases[0]['tag_name']}")
 
 

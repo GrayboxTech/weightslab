@@ -1,4 +1,4 @@
-Segmentation Use Case — Per-instance & Per-sample Signals (PyTorch)
+Segmentation Use Case, Per-instance & Per-sample Signals (PyTorch)
 ===================================================================
 
 This page walks through the segmentation integration from:
@@ -27,9 +27,9 @@ The multi-index data model
 Segmentation samples are expanded into a ``(sample_id, annotation_id)``
 multi-index:
 
-- ``annotation_id == 0`` is the **canonical sample row** — it holds per-sample
+- ``annotation_id == 0`` is the **canonical sample row**, it holds per-sample
   predictions/targets/signals plus sample-level metadata, origin and tags.
-- ``annotation_id >= 1`` are the **instance rows** — one per object/class mask,
+- ``annotation_id >= 1`` are the **instance rows**, one per object/class mask,
   holding only that instance's target and per-instance signals.
 
 So a sample with N instance masks occupies ``N + 1`` rows. The studio collapses
@@ -133,7 +133,7 @@ lists so ordering lines up:
            dtype=torch.long,
        )
 
-   with guard_training_context:
+   with wl.guard_training_context:
        inputs, ids, labels, _ = next(loader)
        outputs = model(inputs)            # [B, C, H, W]
        batch_idx = _instance_batch_idx(labels)
@@ -190,11 +190,11 @@ Where the arrays come from in the studio
 
 When the UI requests a sample for a segmentation run:
 
-- **Raw image** — read directly from the dataset file each time (never stored in
+- **Raw image**, read directly from the dataset file each time (never stored in
   the dataframe).
-- **Prediction mask** — loaded lazily from the array store (``arrays.h5``) via a
+- **Prediction mask**, loaded lazily from the array store (``arrays.h5``) via a
   proxy, from whatever the per-sample path saved on ``instance_id 0``.
-- **GT label** — taken from the sample row's ``target`` if present, otherwise
+- **GT label**, taken from the sample row's ``target`` if present, otherwise
   reconstructed from the dataset file; the individual per-instance masks live on
   ``instance_id >= 1``.
 

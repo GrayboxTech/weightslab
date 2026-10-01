@@ -14,7 +14,7 @@ How it works
 ------------
 
 ``WLAwareTrainer`` subclasses Ultralytics' ``DetectionTrainer`` and installs
-WeightsLab through UL's callback hooks — no model changes required:
+WeightsLab through UL's callback hooks, no model changes required:
 
 - Wraps train and val datasets via ``wl.watch_or_edit(flag="data")`` so
   every sample gets a stable UID tracked in the ledger.
@@ -32,13 +32,12 @@ Minimal integration
 
    import weightslab as wl
    from ultralytics import YOLO
-   from weightslab.integrations.ultralytics import WLAwareTrainer
 
    wl.watch_or_edit(cfg, flag="hyperparameters", defaults=cfg)
    wl.serve()
 
    YOLO("yolo11n.pt").train(
-       trainer=WLAwareTrainer,
+       trainer=wl.WLAwareTrainer,
        data="my_dataset.yaml",
        imgsz=640,
        epochs=100,
@@ -78,14 +77,14 @@ What gets tracked
 
 **Per-sample train signals** (one value per image per batch):
 
-- ``train/box_per_sample`` — bounding-box regression loss per image
-- ``train/cls_per_sample`` — classification loss per image
-- ``train/dfl_per_sample`` — distribution focal loss per image
+- ``train/box_per_sample``, bounding-box regression loss per image
+- ``train/cls_per_sample``, classification loss per image
+- ``train/dfl_per_sample``, distribution focal loss per image
 - Live NMS prediction overlay visible in the studio
 
 **Per-sample val signals**:
 
-- ``val/iou_per_sample`` — IoU per image after NMS
+- ``val/iou_per_sample``, IoU per image after NMS
 - Post-NMS prediction overlay
 
 **Aggregate curves** (one value per epoch):
@@ -152,7 +151,6 @@ End-to-end sequence
 
    import os, yaml, torch
    import weightslab as wl
-   from weightslab.integrations.ultralytics import WLAwareTrainer
    from ultralytics import YOLO
 
    # 1) Load config and register as live hyperparameters
@@ -168,9 +166,9 @@ End-to-end sequence
    # 3) Block the main thread until the UI signals training to start
    wl.start_training(timeout=3)
 
-   # 4) Train — WLAwareTrainer handles all WL wiring internally
+   # 4) Train, WLAwareTrainer handles all WL wiring internally
    YOLO(cfg["model"]["name"]).train(
-       trainer=WLAwareTrainer,
+       trainer=wl.WLAwareTrainer,
        data=str(cfg["data_root"]),
        imgsz=cfg["image_size"],
        epochs=cfg.get("training_steps_to_do") or 1000,
