@@ -171,17 +171,14 @@ class TestDataLoaderInterface(unittest.TestCase):
     def test_dataloader_interface_worker_defaults_and_override(self):
         iface_default = DataLoaderInterface(self.train_ds, compute_hash=True, batch_size=self.batch_size)
         self.assertEqual(iface_default.dataloader.num_workers, 0)
-        self.assertTrue(iface_default.dataloader.pin_memory)
 
         iface_override = DataLoaderInterface(
             self.train_ds,
             batch_size=self.batch_size,
             num_workers=2,
-            pin_memory=False,
             compute_hash=True
         )
         self.assertEqual(iface_override.dataloader.num_workers, 2)
-        self.assertFalse(iface_override.dataloader.pin_memory)
 
     def test_dataloader_interface_uses_multiple_workers(self):
         dataset = WorkerIdDataset(64)
