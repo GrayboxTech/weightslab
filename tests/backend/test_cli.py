@@ -265,6 +265,14 @@ class TestUiStartNative(unittest.TestCase):
             k: os.environ.get(k)
             for k in ("WEIGHTSLAB_ROOT_LOG_DIR", "WL_LAST_EXPERIMENT_DIR")
         }
+        # `start` uses TLS whenever certs are found: default every test to "no
+        # certs" so results don't depend on the machine's ~/.weightslab-certs.
+        no_certs = MagicMock()
+        no_certs.has_valid_certs.return_value = False
+        patcher = patch("weightslab.cli.CertAuthManager.from_env_or_default",
+                        return_value=no_certs)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         os.chdir(self._cwd)
@@ -289,7 +297,7 @@ class TestUiStartNative(unittest.TestCase):
         kwargs = mock_serve.call_args.kwargs
         self.assertEqual(kwargs["backend_port"], 50051)
         self.assertFalse(kwargs["open_browser"])
-        self.assertIsNone(kwargs["certs_dir"])  # no --certs -> unsecured
+        self.assertIsNone(kwargs["certs_dir"])  # no certs found -> unsecured
 
     @patch("weightslab.utils.telemetry.ping_ui_launch")
     @patch("weightslab.ui.server.serve_ui")
@@ -303,6 +311,57 @@ class TestUiStartNative(unittest.TestCase):
         with self.assertLogs("weightslab.cli", level="WARNING"):
             ui_start_native(args)
         self.assertIsNone(mock_serve.call_args.kwargs["certs_dir"])
+
+    @staticmethod
+    def _certs_found_manager(mock_mgr):
+        mgr = MagicMock()
+        mgr.has_valid_certs.return_value = True
+        mgr.certs_dir = Path(tempfile.gettempdir()) / "wl-certs"
+        mgr.get_or_create_auth_token.return_value = "tok"
+        mock_mgr.from_env_or_default.return_value = mgr
+        return mgr
+
+    @patch("weightslab.utils.telemetry.ping_ui_launch")
+    @patch("weightslab.ui.server.serve_ui")
+    @patch("weightslab.cli.CertAuthManager")
+    def test_start_uses_certs_automatically_when_found(self, mock_mgr, mock_serve, _mock_ping):
+        """No flag: certs present -> HTTPS + mTLS, like the backend's import check."""
+        mgr = self._certs_found_manager(mock_mgr)
+        env = {k: v for k, v in os.environ.items() if k != "GRPC_TLS_ENABLED"}
+        with patch.dict(os.environ, env, clear=True):
+            ui_start_native(argparse.Namespace(port=9127, host=None, backend_host=None,
+                                               backend_port=None, no_browser=True, certs=False))
+        kwargs = mock_serve.call_args.kwargs
+        self.assertEqual(kwargs["certs_dir"], str(mgr.certs_dir))
+        self.assertEqual(kwargs["grpc_auth_token"], "tok")
+
+    @patch("weightslab.utils.telemetry.ping_ui_launch")
+    @patch("weightslab.ui.server.serve_ui")
+    @patch("weightslab.cli.CertAuthManager")
+    def test_start_no_certs_flag_forces_http(self, mock_mgr, mock_serve, _mock_ping):
+        self._certs_found_manager(mock_mgr)
+        ui_start_native(argparse.Namespace(port=9128, host=None, backend_host=None,
+                                           backend_port=None, no_browser=True,
+                                           certs=False, no_certs=True))
+        self.assertIsNone(mock_serve.call_args.kwargs["certs_dir"])
+        mock_mgr.from_env_or_default.assert_not_called()
+
+    @patch("weightslab.utils.telemetry.ping_ui_launch")
+    @patch("weightslab.ui.server.serve_ui")
+    @patch("weightslab.cli.CertAuthManager")
+    def test_start_tls_disabled_by_env_forces_http(self, mock_mgr, mock_serve, _mock_ping):
+        self._certs_found_manager(mock_mgr)
+        for value in ("0", "false", "OFF"):
+            with self.subTest(value=value), patch.dict(os.environ, {"GRPC_TLS_ENABLED": value}):
+                ui_start_native(argparse.Namespace(port=9129, host=None, backend_host=None,
+                                                   backend_port=None, no_browser=True, certs=False))
+                self.assertIsNone(mock_serve.call_args.kwargs["certs_dir"])
+
+    def test_certs_and_no_certs_are_mutually_exclusive(self):
+        with patch("sys.argv", ["weightslab", "start", "--certs", "--no-certs"]), \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                main()
 
     @patch("weightslab.utils.telemetry.ping_ui_launch")
     @patch("weightslab.ui.server.serve_ui")

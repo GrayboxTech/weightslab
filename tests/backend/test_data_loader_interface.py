@@ -10,7 +10,9 @@ from torch.utils.data import TensorDataset, DataLoader, Subset, Dataset, get_wor
 from torchvision import datasets, transforms
 
 from weightslab.utils.tools import capture_rng_state, restore_rng_state, seed_everything
-from weightslab.backend.dataloader_interface import DataLoaderInterface, WeightsLabDataSampler
+from weightslab.backend.dataloader_interface import (
+    DataLoaderInterface, WeightsLabDataSampler, _resolve_pin_memory,
+)
 from weightslab.components.global_monitoring import pause_controller
 from weightslab.backend import ledgers
 import weightslab.data.data_samples_with_ops as _dso
@@ -381,6 +383,44 @@ class TestDataLoaderInterface(unittest.TestCase):
         loader.reset()
         batches_after = sum(1 for _ in loader)
         self.assertEqual(batches_after, batches_before)
+
+
+class TestResolvePinMemory(unittest.TestCase):
+    """Pin only with an accelerator: without one PyTorch drops pin_memory but
+    warns on every iterator it creates (each epoch / eval pass / reset)."""
+
+    def _with_accelerator(self, available):
+        from unittest.mock import patch
+        return patch.object(torch.accelerator, "is_available", return_value=available)
+
+    def test_default_follows_accelerator(self):
+        with self._with_accelerator(True):
+            self.assertTrue(_resolve_pin_memory(None))
+        with self._with_accelerator(False):
+            self.assertFalse(_resolve_pin_memory(None))
+
+    def test_explicit_true_dropped_without_accelerator(self):
+        with self._with_accelerator(False):
+            self.assertFalse(_resolve_pin_memory(True))
+        with self._with_accelerator(True):
+            self.assertTrue(_resolve_pin_memory(True))
+
+    def test_explicit_false_is_kept(self):
+        with self._with_accelerator(True):
+            self.assertFalse(_resolve_pin_memory(False))
+
+    def test_no_warning_without_accelerator(self):
+        import warnings
+        ds = TensorDataset(torch.randn(8, 3), torch.randint(0, 2, (8,)))
+        with self._with_accelerator(False), warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            dl = DataLoaderInterface(ds, batch_size=4, register=False, compute_hash=False,
+                                     loader_name="pin_probe")
+            for _ in range(2):              # two iterators, like two epochs
+                for _batch in dl.dataloader:
+                    pass
+        self.assertFalse(dl.dataloader.pin_memory)
+        self.assertFalse([w for w in caught if "no accelerator is found" in str(w.message)])
 
 
 class TestDataLoaderReproducibility(unittest.TestCase):
