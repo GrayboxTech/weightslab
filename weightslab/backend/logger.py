@@ -2025,6 +2025,90 @@ class LoggerQueue:
         # value in the same batch, not just this row's.
         return tuple((sid, float(val) if val is not None else float("nan")) for (sid, val) in rows)
 
+    def _step_scope_filter(self, step: int, exp_hash, include_evaluations: bool):
+        """WHERE fragment + params for "everything recorded at or before *step*".
+
+        ``include_evaluations`` also matches the ``<exp_hash>_<n>`` hashes that
+        evaluation passes write their per-sample rows under (see
+        ``start_evaluation_mode``) — those passes bump the dataframe's
+        seen-counters too, so a rebuild that ignored them would undercount.
+        """
+        clauses = ["step <= ?"]
+        params: list = [int(step)]
+        if exp_hash:
+            if include_evaluations:
+                clauses.append("(experiment_hash = ? OR starts_with(experiment_hash, ?))")
+                params.extend([exp_hash, f"{exp_hash}_"])
+            else:
+                clauses.append("experiment_hash = ?")
+                params.append(exp_hash)
+        return " AND ".join(clauses), params
+
+    def get_per_sample_state_at_step(self, step: int, exp_hash: str | None = None,
+                                     include_evaluations: bool = True,
+                                     metric_names=None) -> dict:
+        """Per-sample view of the history as it stood at model age *step*.
+
+        Answers "what did each sample look like when the model was this old?":
+        the last value every signal had at or before *step*, plus the
+        seen-counters implied by the same rows. This is what lets the dataframe
+        be rewound after a checkpoint restore moves the model's age backwards
+        (see ``DataFrameManager.rewind_to_step``).
+
+        Args:
+            step: Model age to reconstruct at; rows with ``step > step`` are ignored.
+            exp_hash: Restrict to one experiment. ``None`` reads every hash.
+            include_evaluations: Also read the experiment's evaluation hashes.
+            metric_names: Restrict the returned ``signals`` map to these signals.
+                The counters are always derived from every signal, since any of
+                them recording a sample means the sample was seen.
+
+        Returns:
+            ``{sample_id: {"signals": {metric_name: value}, "last_seen": int,
+            "nb_seen": int}}`` for every sample with at least one row at or
+            before *step*. ``nb_seen`` counts DISTINCT steps: two signals
+            written at the same step are one sighting, not two.
+        """
+        where_sql, base_params = self._step_scope_filter(step, exp_hash, include_evaluations)
+
+        signal_sql = (
+            "SELECT metric_name, sample_id, value FROM ("
+            " SELECT metric_name, sample_id, value,"
+            "  ROW_NUMBER() OVER (PARTITION BY metric_name, sample_id"
+            "   ORDER BY step DESC, seq DESC) AS rn"
+            f" FROM per_sample WHERE {where_sql}"
+        )
+        signal_params = list(base_params)
+        if metric_names:
+            signal_sql += " AND metric_name IN (SELECT UNNEST(?))"
+            signal_params.append([str(name) for name in metric_names])
+        signal_sql += ") WHERE rn = 1"
+
+        seen_sql = (
+            "SELECT sample_id, MAX(step), COUNT(DISTINCT step) "
+            f"FROM per_sample WHERE {where_sql} GROUP BY sample_id"
+        )
+
+        with self._lock:
+            self._flush_stage()
+            signal_rows = self._conn.execute(signal_sql, signal_params).fetchall()
+            seen_rows = self._conn.execute(seen_sql, list(base_params)).fetchall()
+
+        state: dict = {}
+        for sample_id, last_seen, nb_seen in seen_rows:
+            state[str(sample_id)] = {
+                "signals": {},
+                "last_seen": int(last_seen),
+                "nb_seen": int(nb_seen),
+            }
+        for metric_name, sample_id, value in signal_rows:
+            entry = state.get(str(sample_id))
+            if entry is None:  # only possible if the two reads raced; keep it consistent
+                continue
+            entry["signals"][str(metric_name)] = (
+                float(value) if value is not None else float("nan"))
+        return state
+
     def query_per_instance(
         self,
         graph_name: str,

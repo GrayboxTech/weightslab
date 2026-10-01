@@ -76,8 +76,9 @@ via the decision table in §3.9, then copy its `wl.*` calls — §3 documents th
 whole API surface (reactive signals, group signals, the Ultralytics mixin,
 etc. aren't in the `.rst` docs; the examples are the primary source).
 
-TLS/UI deploy details: `weightslab/docs/weights_studio.rst`. TLS is opt-in:
-`weightslab se` once, then `weightslab start --certs`. Windows: `se` uses the
+TLS/UI deploy details: `weightslab/docs/weights_studio.rst`. TLS turns on once
+certs exist: `weightslab se` once, then `weightslab start` and the backend use
+them automatically (`--no-certs` forces HTTP). Windows: `se` uses the
 PowerShell script + Windows `openssl`; `--force-ubuntu` uses WSL bash instead.
 
 ---
@@ -310,10 +311,12 @@ Authoritative reference: `weightslab/docs/configuration.rst`. High-signal ones:
 
 | Variable | Default | Why |
 |---|---|---|
-| `WEIGHTSLAB_LOG_LEVEL` | `INFO` | `DEBUG` for detail (`WATCHDOG` level sits between WARNING/ERROR). |
+| `WEIGHTSLAB_LOG_LEVEL` | `INFO` | **Terminal only**; `DEBUG` for detail (`WATCHDOG` level sits between WARNING/ERROR). |
+| `WEIGHTSLAB_LOG_FILE_LEVEL` | *(unset = all)* | The session log file (`<root_log_dir>/weightslab_logs/`) keeps every record whatever the terminal shows; set this to cap the file too. |
+| `WEIGHTSLAB_TQDM_LOG_INTERVAL` | `30` | Seconds between snapshots of live `tqdm` bars into the log (`0` disables); tqdm never goes through `logging`. |
 | `GRPC_BACKEND_HOST`/`PORT` | `0.0.0.0`/`50051` | Backend gRPC bind address. |
-| `GRPC_TLS_ENABLED` | `0` | TLS on the gRPC socket; set with `weightslab start --certs`. |
-| `GRPC_TLS_REQUIRE_CLIENT_AUTH` | `0` | mTLS; must match `--certs`. |
+| `GRPC_TLS_ENABLED` | `0` | TLS on the gRPC socket; set to `1` automatically when certs are found, `0`/`false` forces plaintext. |
+| `GRPC_TLS_REQUIRE_CLIENT_AUTH` | `0` | mTLS; must match what `weightslab start` presents. |
 | `WEIGHTSLAB_CERTS_DIR` | `~/.weightslab-certs` | Cert lookup — single source of truth; falls back to `~/.weightslab-certs` when unset/relative/without certs. |
 | `GRPC_AUTH_TOKEN` | unset | Optional token auth on top of mTLS. |
 | `GRPC_MAX_MESSAGE_BYTES` | `268435456` | Raise if large tensors/images fail to transfer. |
@@ -343,8 +346,9 @@ are runtime (need only restart + reload). `ENABLE_*` default on; `0`/`false`/`no
 
 **Sample grid empty / "failed to fetch" / gRPC errors.** Check in order: (1)
 backend serving on `0.0.0.0:50051`; (2) `weightslab start` running, browser
-reaches `:8080`; (3) TLS mismatch if using `--certs` — run `weightslab se`
-first, export `WEIGHTSLAB_CERTS_DIR` (or drop TLS: omit `--certs`, `GRPC_TLS_ENABLED=0`).
+reaches `:8080`; (3) TLS mismatch — UI and backend each enable TLS when they
+find certs, so both must see the same `WEIGHTSLAB_CERTS_DIR` (or drop TLS on
+both: `weightslab start --no-certs`, `GRPC_TLS_ENABLED=0`).
 
 **`weightslab se` hangs with no output (Windows).** Only on the WSL path
 (`--force-ubuntu`, or the fallback after PowerShell fails): a stuck WSL distro

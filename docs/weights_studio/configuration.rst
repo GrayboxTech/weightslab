@@ -7,7 +7,9 @@ Backend environment variables (set before starting ``wl.serve()``)
 +----------------------------------+-------------------------+----------------------------------------------------+
 | Variable                         | Default                 | Description                                        |
 +==================================+=========================+====================================================+
-| ``WEIGHTSLAB_LOG_LEVEL``         | ``INFO``                | Log level (``DEBUG``, ``INFO``, ...)               |
+| ``WEIGHTSLAB_LOG_LEVEL``         | ``INFO``                | Terminal log level (``DEBUG``, ``INFO``, ...)      |
++----------------------------------+-------------------------+----------------------------------------------------+
+| ``WEIGHTSLAB_LOG_FILE_LEVEL``    | *(unset)*               | Log file level; unset keeps every record           |
 +----------------------------------+-------------------------+----------------------------------------------------+
 | ``GRPC_BACKEND_HOST``            | ``0.0.0.0``             | Host the backend gRPC server binds to              |
 +----------------------------------+-------------------------+----------------------------------------------------+
@@ -41,7 +43,7 @@ UI server environment variables (set before ``weightslab start``)
 +---------------------------+-------------------------+--------------------------------------------------+
 | ``GRPC_BACKEND_PORT``     | ``50051``               | Backend gRPC port to proxy to                    |
 +---------------------------+-------------------------+--------------------------------------------------+
-| ``WEIGHTSLAB_CERTS_DIR``  | ``~/.weightslab-certs`` | Certs dir (read when ``--certs``); when it       |
+| ``WEIGHTSLAB_CERTS_DIR``  | ``~/.weightslab-certs`` | Certs dir; HTTPS when it has certs; when it      |
 |                           |                         | holds none, ``~/.weightslab-certs`` is used      |
 +---------------------------+-------------------------+--------------------------------------------------+
 | ``WEIGHTSLAB_OPENCODE_PORT`` | ``4096``             | Port the agent (OpenCode) server is started on;  |

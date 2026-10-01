@@ -288,14 +288,20 @@ Logging & debug
      - Description
    * - ``WEIGHTSLAB_LOG_LEVEL``
      - ``INFO``
-     - Log verbosity for all WeightsLab Python components.
+     - Minimum level printed **to the terminal**; the session log file
+       keeps everything regardless.
        Accepted: ``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``.
        ``WATCHDOG`` (level 35) is a custom level between WARNING
        and ERROR reserved for watchdog/restart events.
+   * - ``WEIGHTSLAB_LOG_FILE_LEVEL``
+     - *(unset — everything)*
+     - Minimum level written to the session log file. Set it to cap
+       the file as well as the terminal.
    * - ``WEIGHTSLAB_LOG_TO_FILE``
-     - ``0``
-     - Set to ``1`` to write logs to a rotating file in the system
-       temp directory in addition to stdout.
+     - ``true``
+     - Set to ``false`` to skip the session log file. The file lives in
+       ``<root_log_dir>/weightslab_logs/`` once the experiment directory
+       resolves; its path is printed when the process exits.
    * - ``WEIGHTSLAB_SUPPRESS_BANNER``
      - ``0``
      - Set to ``1`` to suppress the ASCII art startup banner.

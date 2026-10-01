@@ -47,6 +47,7 @@ import weightslab.proto.experiment_service_pb2 as pb2
 
 from weightslab.backend import ledgers
 from weightslab.trainer.services.utils.tools import safe_grpc
+from weightslab.utils.logs import ensure_logging_intact
 
 logger = logging.getLogger(__name__)
 
@@ -590,6 +591,33 @@ def _run_embedded_kernel(connection_file: Path) -> None:
     app.init_signal = lambda: None
     try:
         app.initialize([])
+        # traitlets configures logging while building any Application, and
+        # logging.config.dictConfig CLOSES every handler in the process on its
+        # way in (_clearExistingHandlers -> logging.shutdown) without detaching
+        # them from the root logger. weightslab's file handler therefore keeps
+        # accepting records and silently dropping them: the session log stops
+        # dead right here, mid-run, while the terminal carries on as if nothing
+        # happened. Repair before anything else logs.
+        ensure_logging_intact()
+        # ipykernel's OutStream batches stdout/stderr writes and only ships
+        # them to iopub every `flush_interval` seconds (default 0.2s) -- fine
+        # for a notebook server with many kernels, but sluggish for a single
+        # embedded kernel where we want prints to show up close to instantly.
+        # MUST happen before the wrapping below: once sys.stdout is a
+        # _ThreadRoutedStream, this sets the attribute on the wrapper and the
+        # real OutStream keeps batching at 0.2s -- which stops cell output
+        # streaming live (see test_stdout_streams_live_not_buffered_...).
+        for _stream in (sys.stdout, sys.stderr):
+            if hasattr(_stream, "flush_interval"):
+                _stream.flush_interval = 0.05
+        # Wrap immediately after initialize(), not after the shell/matplotlib
+        # setup below: initialize() has just swapped sys.stdout/sys.stderr for
+        # ipykernel's OutStream, and anything that captures a stream in the gap
+        # is bound to the unrouted one for good. That gap was a couple of
+        # seconds, and the trainer builds its tqdm bar in it -- which is why the
+        # training progress bar disappeared from the terminal once the notebook
+        # kernel was enabled.
+        _install_thread_routed_streams(console_stdout, console_stderr)
         app.shell.colors = "NoColor"
         try:
             app.shell.enable_matplotlib("inline")
@@ -628,17 +656,7 @@ def _run_embedded_kernel(connection_file: Path) -> None:
         app.shell.ns_table["user_global"] = app.shell.user_module.__dict__
         app.shell.ns_table["user_local"] = app.shell.user_ns
         app.shell.set_completer_frame()
-        # ipykernel's OutStream batches stdout/stderr writes and only ships
-        # them to iopub every `flush_interval` seconds (default 0.2s) -- fine
-        # for a notebook server with many kernels, but sluggish for a single
-        # embedded kernel where we want prints to show up close to instantly.
-        import sys as _sys
-        for _stream in (_sys.stdout, _sys.stderr):
-            if hasattr(_stream, "flush_interval"):
-                _stream.flush_interval = 0.05
         _install_kernel_hooks(app.shell)
-        # After initialize() (OutStreams exist), before start() (cells run).
-        _install_thread_routed_streams(console_stdout, console_stderr)
         logger.info("Embedded Jupyter kernel connection file: %s", connection_file)
         app.start()  # blocks this thread forever (event loop)
     except Exception:

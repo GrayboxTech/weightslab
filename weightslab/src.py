@@ -30,7 +30,7 @@ from weightslab.backend.ledgers import DEFAULT_NAME, get_checkpoint_manager, get
 from weightslab.backend.model_interface import ModelInterface
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
-from weightslab.utils.logs import set_log_directory
+from weightslab.utils.logs import set_log_directory, experiment_log_dir
 from weightslab.utils.tools import detach_to_cpu, _running_in_notebook, _running_in_colab, _embedded_kernel_disabled
 from weightslab.trainer.services import notebook_service as _notebook_service
 from weightslab.backend.logger import LoggerQueue
@@ -566,22 +566,34 @@ class BatchSignalContext:
 # WEIGHTSLAB INTERNAL FUNCTIONS FOR LOGGING, SIGNAL EXTRACTION, WRAPPING, ETC. (not typically called directly by users)
 # #####################################################################################################################
 
-def _update_log_directory(new_log_dir: str):
-    """
-        Move the current log file to a new directory and update the file handler.
+def _update_log_directory(new_log_dir: str = None):
+    """Relocate the session log into the experiment's ``weightslab_logs/``.
 
-        This is useful for setting a user-specified log directory after initial
-        setup with a temporary file. The function will:
-        - Move the existing log file to the new directory (if it exists)
-        - Update the logging FileHandler to point to the new location
-    """
+    Logging is configured at ``import weightslab``, before any experiment
+    directory is known, so the session log starts in ``$WEIGHTSLAB_ROOT_LOG_DIR``
+    or a temp directory. This moves it under the ``root_log_dir`` that actually
+    won — otherwise a run whose ``root_log_dir`` came from the config dict (the
+    usual case) leaves its whole log behind in ``%TEMP%`` and the experiment
+    directory has no log at all.
 
-    # Update logging directory to use root_log_dir after parameters registration
-    hp = get_hyperparams()
+    Args:
+        new_log_dir: The resolved experiment root. Falls back to the registered
+            hyperparameters' ``root_log_dir`` when omitted.
+    """
+    root_log_dir = new_log_dir
+    if not root_log_dir:
+        try:
+            root_log_dir = get_hyperparams().get('root_log_dir')
+        except Exception as e:
+            logger.debug(f"Could not read root_log_dir from hyperparameters: {e}")
+    if not root_log_dir:
+        return
     try:
-        set_log_directory(str(hp.get('root_log_dir', new_log_dir)))
+        # Same layout setup_logging uses, so the file never moves between two
+        # different conventions and whoever is tailing it keeps seeing it grow.
+        set_log_directory(experiment_log_dir(root_log_dir))
     except Exception as e:
-        logger.debug(f"Could not update log directory: {e}")
+        logger.warning(f"Could not update log directory to {root_log_dir}: {e}")
 
 
 def _get_age(self):
@@ -757,25 +769,6 @@ def _log_signal(scalar: float, signal_per_sample: dict, reg_name: str, step: int
         except Exception:
             traceback.print_exc()
             pass
-
-
-def _update_log_directory(new_log_dir: str):
-    """
-        Move the current log file to a new directory and update the file handler.
-
-        This is useful for setting a user-specified log directory after initial
-        setup with a temporary file. The function will:
-        - Move the existing log file to the new directory (if it exists)
-        - Update the logging FileHandler to point to the new location
-    """
-
-    # Update logging directory to use root_log_dir after parameters registration
-    hp = get_hyperparams()
-    try:
-        set_log_directory(str(hp.get('root_log_dir', new_log_dir)))
-    except Exception as e:
-        logger.debug(f"Could not update log directory: {e}")
-
 
 
 def _move_to_cpu(value: Any) -> Any:
@@ -1498,6 +1491,12 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 # _resolve_configured_root_log_dir for the resolution order).
                 _hp_cfg['root_log_dir'] = _resolve_configured_root_log_dir(
                     _hp_cfg.get('root_log_dir'))
+                # The experiment directory is now settled, so move the session
+                # log into it. Done here rather than in the branches below so it
+                # happens for every route (dict, YAML path, hyperparameters
+                # restored from a checkpoint), not only when the caller passed
+                # root_log_dir through `defaults`/kwargs.
+                _update_log_directory(_hp_cfg['root_log_dir'])
                 # Publish where training ACTUALLY writes, so the UI lists this
                 # run's reports/notebooks even when the two resolved their
                 # directory by different routes.
@@ -1569,15 +1568,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                         # start ledger-managed watcher
                         watch_hyperparams_file(path, poll_interval=kwargs.get('poll_interval', 1.0))
 
-                        # Update log directory if root_log_dir provided in hyperparameters or defaults
-                        new_log_dir = None
-                        if defaults and 'root_log_dir' in defaults:
-                            new_log_dir = defaults['root_log_dir']
-                        elif 'root_log_dir' in kwargs:
-                            new_log_dir = kwargs['root_log_dir']
-                        if new_log_dir:
-                            _update_log_directory(new_log_dir)
-
                         # return the ledger handle (proxy or dict)
                         _hp = get_hyperparams()
                         _rebind_caller_local(obj, _hp)
@@ -1588,15 +1578,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                         get_hyperparams()
                         register_hyperparams(obj)
 
-                        # Update log directory if root_log_dir provided in hyperparameters or defaults
-                        new_log_dir = None
-                        if defaults and 'root_log_dir' in defaults:
-                            new_log_dir = defaults['root_log_dir']
-                        elif 'root_log_dir' in kwargs:
-                            new_log_dir = kwargs['root_log_dir']
-                        if new_log_dir:
-                            _update_log_directory(new_log_dir)
-
                         _hp = get_hyperparams()
                         _rebind_caller_local(obj, _hp)
                         return _hp
@@ -1604,15 +1585,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                         # unsupported type for hp; attempt best-effort registration
                         try:
                             register_hyperparams(dict(obj))
-
-                            # Update log directory if root_log_dir provided in hyperparameters or defaults
-                            new_log_dir = None
-                            if defaults and 'root_log_dir' in defaults:
-                                new_log_dir = defaults['root_log_dir']
-                            elif 'root_log_dir' in kwargs:
-                                new_log_dir = kwargs['root_log_dir']
-                            if new_log_dir:
-                                _update_log_directory(new_log_dir)
 
                             _hp = get_hyperparams()
                             _rebind_caller_local(obj, _hp)
@@ -1787,6 +1759,16 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
     # Before anything that can block: whatever happens next, this process
     # should not outlive the workspace that owns it.
     _register_pid_with_ui_server()
+
+    # Mirror tqdm progress bars into the session log. A bar paints itself onto
+    # the terminal and never touches `logging`, so a log file read after the run
+    # had no record of the run's own progress. Sampled on a timer, written to a
+    # channel the terminal handler filters out (the live bar is already there).
+    try:
+        from weightslab.utils.tqdm_logging import start_tqdm_log_mirror
+        start_tqdm_log_mirror()
+    except Exception as e:  # noqa: BLE001 -- never block serving on the mirror
+        logger.debug(f"Could not start the tqdm progress mirror: {e}")
 
     # Embed a real Jupyter kernel (shares this process's live objects) so the
     # studio notebook panel — and any external Jupyter client — can attach to
@@ -4362,9 +4344,15 @@ def _parquet_safe_frame(df):
     still round-trips via ``json.loads``. Columns with no non-scalar values are
     left untouched, so numeric / bool / plain-string columns keep their native
     Arrow types. The input is never mutated (copy-on-write only when needed).
+
+    Lazy ``ArrayH5Proxy`` cells (``array_return_proxies=True``, e.g. a
+    ``prediction`` column) are written as their H5 reference string, e.g.
+    ``"arrays.h5:/0/prediction"`` -- Arrow can't encode the proxy object, and
+    loading every sample's array just to dump it would defeat the proxy.
     """
     import json as _json2
     import numpy as _np2
+    from weightslab.data.array_proxy import ArrayH5Proxy as _Proxy
 
     _NONSCALAR = (list, dict, tuple, set, _np2.ndarray)
     out = df
@@ -4373,6 +4361,12 @@ def _parquet_safe_frame(df):
         _s = df[_col]
         if _s.dtype != object:
             continue
+        if _s.map(lambda v: isinstance(v, _Proxy)).any():
+            if not _copied:
+                out = df.copy()
+                _copied = True
+            _s = _s.map(lambda v: v.path_ref if isinstance(v, _Proxy) else v)
+            out[_col] = _s
         # Skip columns that are already uniformly scalar (the common case).
         if not _s.map(lambda v: isinstance(v, _NONSCALAR)).any():
             continue

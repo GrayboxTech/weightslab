@@ -60,6 +60,46 @@ def _embedded_kernel_disabled() -> bool:
     ).strip().lower() in ("1", "true", "yes", "on")
 
 
+def widen_column_for(df: "pd.DataFrame", col_pos: int, values):
+    """Prepare a positional write of *values* into *df*'s column at *col_pos*.
+
+    Writing (``df.iloc[rows, col_pos] = values``) into a narrower numeric/bool
+    column -- int or float32 cells receiving floats they can't hold exactly,
+    numbers meeting bools, or any object array -- makes pandas upcast the column
+    itself, with a FutureWarning ("Setting an item of incompatible dtype is
+    deprecated"); pandas 3 raises instead. This does that same upcast
+    explicitly, before the write, and only when the cast would change a value
+    (float64 values that are exact float32 keep a float32 column), to the dtype
+    pandas picks today (object for object values or bools meeting numbers, else
+    the numpy result type, e.g. int / float32 -> float64).
+
+    Returns the values to write: an object array holding only bools, bound for
+    a bool column, comes back as a bool array so the column stays bool.
+    """
+    cur = df.dtypes.iloc[col_pos]
+    vals = np.asarray(values)
+    if not isinstance(cur, np.dtype) or cur.kind not in "biuf":
+        return values
+    if vals.dtype == object:
+        if cur.kind == "b" and all(isinstance(v, (bool, np.bool_)) for v in vals):
+            return vals.astype(bool)
+        target = object                      # pandas stores object values as object
+    elif vals.dtype.kind not in "biuf" or vals.dtype == cur:
+        return values
+    elif cur.kind == "b" or vals.dtype.kind == "b":
+        target = object                      # pandas never mixes bools and numbers in one column
+    else:
+        if np.can_cast(vals.dtype, cur, casting="safe"):
+            return values
+        with np.errstate(invalid="ignore", over="ignore"):
+            cast = vals.astype(cur)
+        if np.array_equal(cast, vals, equal_nan=(cast.dtype.kind == "f")):
+            return values                    # lossless (e.g. float64 values that are exact float32)
+        target = np.result_type(cur, vals.dtype)
+    df.isetitem(col_pos, df.iloc[:, col_pos].astype(target))
+    return values
+
+
 def safe_reset_index(df: "pd.DataFrame") -> "pd.DataFrame":
     """Reset DataFrame index levels into columns, skipping any level whose name
     is already a column.

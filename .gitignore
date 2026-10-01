@@ -19,8 +19,8 @@ venv
 runs
 data
 outputs
-!./tests/data/
-!./weightslab/data/
+!tests/data/
+!weightslab/data/
 MagicMock
 drop
 htmlcov

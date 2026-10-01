@@ -222,12 +222,10 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
             # Per-sample accuracy: 1.0 if correct, else 0.0
             preds_flat = preds.view(-1)
             acc_per_sample = (preds_flat == labels.view(-1)).float()
-            acc_reversed_per_sample = (preds_flat != labels.view(-1)).float()
 
             # Log per-sample metric alongside signals; persists via the storer
             signals = {
-                "test_metric/Accuracy_per_sample": acc_per_sample,
-                "test_metric/Inverse_Accuracy_per_sample": acc_reversed_per_sample,
+                "test_metric/Accuracy_per_sample": acc_per_sample
             }
             wl.save_signals(
                 preds_raw=outputs,
@@ -295,10 +293,16 @@ if __name__ == "__main__":
 
     # Model
     _model = CNN().to(device)
+    # skip_previous_auto_load comes from the config so a restart resumes from
+    # the newest weights of this experiment, like the data snapshot already
+    # does. Hardcoding True here made the run start from scratch every time AND
+    # made config.yaml's documented `skip_checkpoint_load` inert for the model:
+    # the kwarg is only ever ORed with the config value (see
+    # backend/model_interface.py), so a True kwarg can never be turned off.
     model = wl.watch_or_edit(_model, flag="model", device=device,
             compute_dependencies=True,
             forced_model_wrapping=True,
-            skip_previous_auto_load=True)
+            skip_previous_auto_load=parameters.get("skip_checkpoint_load", False))
 
     # Optimizer
     lr = parameters.get("optimizer", {}).get("lr", 0.01)
@@ -385,7 +389,7 @@ if __name__ == "__main__":
 
     metric = wl.watch_or_edit(
         Accuracy(task="multiclass", num_classes=10).to(device),
-        flag="metric", signal_name="metric-ACC", log=True)
+        flag="loss", signal_name="metric-ACC", log=True)
 
     # Start WeightsLab services (gRPC only, no CLI)
     wl.serve(

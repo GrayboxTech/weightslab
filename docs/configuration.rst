@@ -410,18 +410,43 @@ Logging
      - Description
    * - ``WEIGHTSLAB_LOG_LEVEL``
      - ``INFO``
-     - Log level for all WeightsLab Python components.
+     - Minimum level printed **to the terminal**. The session log file is not
+       affected: it records everything regardless of this setting (see
+       ``WEIGHTSLAB_LOG_FILE_LEVEL``), so a quiet terminal still leaves a
+       full-fidelity log on disk.
        Accepted values: ``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``, ``WATCHDOG``.
        ``WATCHDOG`` (level 35) sits between WARNING and ERROR and is used for
        watchdog/restart events.
-   * - ``WEIGHTSLAB_LOG_TO_FILE``
+   * - ``WEIGHTSLAB_LOG_FILE_LEVEL``
+     - *(unset — everything)*
+     - Minimum level written to the session log file. Unset means no
+       restriction, which is the point: the terminal is filtered, the file is
+       complete. Set it (e.g. ``INFO``) to cap the file too when the full log
+       is more than you want on disk.
+   * - ``WEIGHTSLAB_TQDM_LOG_INTERVAL``
+     - ``30``
+     - Seconds between snapshots of any live ``tqdm`` progress bar into the
+       session log (``0`` disables). A bar paints itself onto the terminal and
+       never goes through ``logging``, so without this the log file has no
+       record of the run's own progress. Lines are sampled, not streamed: an
+       unchanged bar is not repeated.
+   * - ``WEIGHTSLAB_TQDM_LOG_TO_TERMINAL``
      - ``0``
-     - Write logs to a rotating file in addition to stdout.
-       Set to ``1`` to enable.
+     - By default the sampled progress lines go to the file only, since the
+       live bar is already on the terminal. Set to ``1`` to print them too.
+   * - ``WEIGHTSLAB_LOG_TO_FILE``
+     - ``true``
+     - Write a session log file in addition to stdout. Set to ``false`` to
+       disable. Only the main process writes one — ``DataLoader`` workers and
+       other spawned children keep a terminal-only logger.
    * - ``WEIGHTSLAB_ROOT_LOG_DIR``
-     - *(training script dir)*
-     - Root directory where training log snapshots are saved.
-       Defaults to a ``root_log_dir/`` folder next to your training script.
+     - *(temporary directory)*
+     - Experiment directory (checkpoints, reports, notebook, logs). Also what
+       ``weightslab start [DIR]`` exports. The session log starts in
+       ``<dir>/weightslab_logs/`` and, when it is unset, starts in a temporary
+       directory and is **moved** into ``<root_log_dir>/weightslab_logs/`` as
+       soon as the experiment's ``root_log_dir`` resolves — so the log always
+       ends up beside the checkpoints. The path is printed when the process exits.
    * - ``AUDIT_LOG_FORMAT``
      - ``json``
      - Output format for audit logs tracking all user interactions through gRPC.

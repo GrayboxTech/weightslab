@@ -46,6 +46,7 @@ from datetime import datetime
 
 from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
 from weightslab.components.experiment_hash import ExperimentHashGenerator
+from weightslab.data.h5_recovery import read_snapshot_table
 from weightslab.components.experiment_naming import generate_experiment_name
 from weightslab.backend.ledgers import (
     get_model,
@@ -1446,24 +1447,9 @@ class CheckpointManager:
         and the legacy inline format (a ``data`` list embedded in the JSON), so
         checkpoints written before the parquet change still load.
         """
-        # Legacy inline format: the table was embedded in the metadata JSON.
-        if 'data' in snapshot_data:
-            return pd.DataFrame(snapshot_data.get('data', []))
-
-        data_file = snapshot_data.get('data_file')
-        if not data_file:
-            return pd.DataFrame()
-
-        sidecar = data_dir / data_file
-        if not sidecar.exists():
-            logger.warning(f"Data snapshot sidecar not found: {sidecar}")
-            return pd.DataFrame()
-
-        fmt = (snapshot_data.get('data_format') or '').lower()
-        if fmt == 'parquet' or str(data_file).endswith('.parquet'):
-            return pd.read_parquet(sidecar)
-        # JSON sidecar is written with orient="columns" (see _write_snapshot_table).
-        return pd.read_json(sidecar, orient='columns')
+        # Shared with data.h5 recovery (weightslab.data.h5_recovery), which
+        # rebuilds tags/discards from the newest snapshot.
+        return read_snapshot_table(snapshot_data, data_dir)
 
     def save_data_snapshot(self, force_new_state: bool = False) -> Optional[Path]:
         """Save a snapshot of data state (sample_id, tags, discarded) + RNG state.
@@ -2212,6 +2198,61 @@ class CheckpointManager:
         logger.info(f"Loaded components: {result['loaded_components']}")
         return result
 
+    def _rewind_sample_state(self, exp_hash: str, step: Optional[int]) -> int:
+        """Bring the per-sample view back in line with a restored model age.
+
+        Restoring weights moves the model's age backwards, but the dataframe
+        still holds what the steps after it wrote — signal values, the
+        ``last_seen``/``nb_seen`` counters and the stored predictions. Those
+        describe a model state the restore just discarded, so the grid would
+        show a sample's loss from step 900 next to a model that is back at 400.
+
+        Rebuilds them from the signal history as it stood at *step*
+        (``LoggerQueue.get_per_sample_state_at_step`` →
+        ``DataFrameManager.rewind_to_step``).
+
+        Only runs when *exp_hash* is the experiment already loaded: step numbers
+        are only comparable within one experiment, so rewinding a dataframe that
+        belongs to a different run would compare two unrelated step axes. A
+        cross-experiment load replaces the per-sample state from that run's own
+        snapshot instead.
+
+        Returns the number of samples rewound (0 when nothing applied).
+        """
+        if step is None:
+            return 0
+        if not exp_hash or exp_hash != self.current_exp_hash:
+            logger.debug(
+                f"Skipping per-sample rewind: {exp_hash} is not the loaded experiment "
+                f"({self.current_exp_hash}); its per-sample state comes from its own snapshot")
+            return 0
+
+        try:
+            dfm = ledgers.get_dataframe()
+            lg = ledgers.get_logger()
+            if dfm is None or lg is None or not hasattr(lg, 'get_per_sample_state_at_step'):
+                return 0
+
+            state = lg.get_per_sample_state_at_step(step, exp_hash=exp_hash)
+            if not state:
+                # No history to rebuild from (a logger that was never loaded, or
+                # a run that logged no per-sample signals). Clearing the
+                # dataframe off the back of that would destroy values that are
+                # still on disk, so leave it and say why.
+                logger.warning(
+                    f"No per-sample history at or before step {step} for {exp_hash[:16]}; "
+                    "leaving the sample view as it is. Signals, last_seen/nb_seen and "
+                    "predictions may still show state from after the restored step.")
+                return 0
+
+            rewound = dfm.rewind_to_step(step, state)
+            if rewound:
+                logger.info(f"[OK] Rewound {rewound} sample(s) to step {step}")
+            return rewound
+        except Exception as e:
+            logger.warning(f"Could not rewind per-sample state to step {step}: {e}")
+            return 0
+
     def load_state(
         self,
         exp_hash: str,
@@ -2257,6 +2298,9 @@ class CheckpointManager:
             logger.warning("No components were loaded")
             return False
 
+        # Model age the restore lands on, for the per-sample rewind below.
+        applied_step = None
+
         # Apply model (architecture + weights)
         if 'model' in checkpoint_data['loaded_components']:
             try:
@@ -2282,6 +2326,7 @@ class CheckpointManager:
                 if loaded_step is not None:
                     loaded_step = int(loaded_step)
                     self._model_init_step = loaded_step
+                    applied_step = loaded_step
                     try:
                         setattr(model, 'current_step', loaded_step)
                     except Exception:
@@ -2308,6 +2353,7 @@ class CheckpointManager:
 
                     logger.info(f"[OK] Applied weights to existing model (step {step})")
                     self._model_init_step = step
+                    applied_step = step
                     if 'optimizer_state_dict' in weights:
                         try:
                             optimizer = get_optimizer()
@@ -2356,6 +2402,7 @@ class CheckpointManager:
                         # model.update_optimizer() # Update optimizer with new model parameters if needed
                         logger.info(f"[OK] Applied weights to reloaded model (step {step})")
                         self._model_init_step = step
+                        applied_step = step
                         logger.info("Successfully recovered by reloading full checkpoint with architecture and weights")
 
                     # Set Model Training Guard
@@ -2488,6 +2535,11 @@ class CheckpointManager:
             except Exception as e:
                 logger.warning(f"Failed to restore logger snapshot for {exp_hash}: {e}")
                 self.error_loading_checkpoint.append('logger') if 'logger' not in self.error_loading_checkpoint else None
+
+        # Rewind the per-sample view onto the age the model just came back to.
+        # Last, so it reads a dataframe that already has the snapshot applied and
+        # a logger history that is done loading.
+        self._rewind_sample_state(exp_hash, applied_step)
 
         # Update current experiment hash after everything is loaded
         success = len(self.error_loading_checkpoint) == 0
