@@ -2425,6 +2425,18 @@ _UI_ENV_GLOBALS = [
     ("WS_GRID_CACHE_MAX_MB", ("GRID_CACHE_MAX_MB", "VITE_WS_GRID_CACHE_MAX_MB")),
     ("WS_MODAL_CACHE_MAX_MB", ("MODAL_CACHE_MAX_MB", "VITE_WS_MODAL_CACHE_MAX_MB")),
     ("WS_WL_PC_MAX_POINTS", ("PC_MAX_POINTS", "VITE_WL_PC_MAX_POINTS")),
+    # Plot point budgets. The first is what the initial full-history load asks
+    # for per curve; the second caps what a zoom/pan refetch may ask for (the
+    # request itself is derived from the plot's pixel width). Both were
+    # previously unreachable -- the SPA read window.WS_PLOT_MAX_POINTS_REQUEST
+    # but nothing ever set it, and the ceiling was a hardcoded constant -- so
+    # tuning the resolution/memory trade meant rebuilding the bundle.
+    ("WS_PLOT_MAX_POINTS_REQUEST",
+     ("PLOT_MAX_POINTS_REQUEST", "WS_PLOT_MAX_POINTS_REQUEST",
+      "VITE_PLOT_MAX_POINTS_REQUEST")),
+    ("WS_PLOT_MAX_POINT_BUDGET",
+     ("PLOT_MAX_POINT_BUDGET", "WS_PLOT_MAX_POINT_BUDGET",
+      "VITE_PLOT_MAX_POINT_BUDGET")),
     ("WS_WL_DISABLE_GPU_RENDERING", ("DISABLE_GPU_RENDERING", "VITE_WL_DISABLE_GPU_RENDERING")),
     ("WS_ENABLE_PLOTS", ("ENABLE_PLOTS", "WS_ENABLE_PLOTS", "VITE_ENABLE_PLOTS")),
     ("WS_ENABLE_DATA_EXPLORATION",

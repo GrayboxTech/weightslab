@@ -30,7 +30,6 @@ Design notes
 """
 
 import functools
-import itertools
 import json
 import logging
 import os
@@ -118,12 +117,6 @@ _DEFAULT_MAX_POINTS_PER_CURVE = _env_int("WL_SIGNAL_MAX_POINTS_PER_CURVE", 1000)
 # Never reduce a curve below first + last + one interior point, so a
 # downsampled curve still reads as a curve rather than a straight segment.
 _MIN_POINTS_PER_CURVE = 3
-# Rows that must survive downsampling regardless of which bucket they land in
-# (evaluation markers, annotated points, steps carrying outliers) are fetched by
-# a separate filtered scan. That scan is bounded too -- a pathological run where
-# every step carries an outlier would otherwise reintroduce the full-table read
-# this whole path exists to avoid. Truncation is logged, never silent.
-_MAX_SPECIAL_ROWS = _env_int("WL_SIGNAL_MAX_SPECIAL_ROWS", 20000)
 # Chunk size for the uncapped (export/snapshot) path, which streams instead of
 # calling fetchall() on the whole table.
 _HISTORY_STREAM_CHUNK = _env_int("WL_SIGNAL_STREAM_CHUNK", 500_000)
@@ -1524,23 +1517,39 @@ class LoggerQueue:
         actually drawable -- not by the table size. This is what makes a
         hundred-million-row history openable.
 
-        The curve is split into ``max_points / 2`` equal step-buckets and TWO
-        representatives — the bucket's minimum-value and maximum-value rows — are
-        emitted per bucket (min/max decimation), via a streaming hash aggregate
-        rather than a sort/window. Keeping both extremes is what preserves spikes
-        that fall between bucket edges (earliest-per-bucket used to drop them);
-        halving the bucket count keeps the total at ~``max_points`` per curve.
-        Three further rules keep the reduced curve faithful:
+        ``max_points`` is a HARD per-curve bound, not a target. The curve is
+        split into equal step-buckets and each bucket emits, via streaming hash
+        aggregates rather than a sort/window:
+
+        * its minimum-value row and its maximum-value row (min/max decimation)
+          -- a spike is by definition its bucket's extreme, so an up- or
+          down-spike between bucket edges always survives, which plain
+          earliest-per-bucket decimation used to drop;
+        * when ``keep_special``, one row for each KIND of special point the
+          bucket holds: evaluation marker, annotated point, outlier-bearing
+          step. Per kind, because they differ in count by orders of magnitude --
+          a run has a handful of notes but can have an outlier at every step, so
+          they must be decimated against their own kind or the rare kinds are
+          starved out.
+
+        The bucket count is derived per curve from what one of ITS buckets costs
+        (``(max_points - 2) / (2 + kinds it contains)``), which is what makes the
+        bound hard and keeps a curve with no specials at full value resolution.
+        Two further rules keep the reduced curve faithful:
 
         * the curve's true first and last steps are always emitted, so endpoints
           and the x-extent never move under downsampling;
-        * evaluation markers, annotated points and steps carrying outliers are
-          never dropped (``keep_special``) -- those are exactly the points a
-          user zooms in to find;
-        * ``max_points`` is clamped to at least ``_MIN_POINTS_PER_CURVE``.
+        * the bucket count is clamped to at least ``_MIN_POINTS_PER_CURVE``, the
+          one case where a curve may exceed the budget (a 3-bucket floor, so a
+          tiny ``max_points`` still yields a curve rather than a segment).
+
+        A curve therefore costs at most ~``max_points`` rows plus its two
+        endpoints, however many rows the table holds behind it. Each row carries
+        ``metric_value`` plus the ``value_min``/``value_max`` band, so a plot
+        drawing all three series renders at most ~``3 * max_points`` points.
 
         Args:
-            max_points: target points per curve. ``None`` uses
+            max_points: hard cap on points per curve. ``None`` uses
                 ``WL_SIGNAL_MAX_POINTS_PER_CURVE``.
             metric_names / exp_hashes: restrict to these curves. Passing the one
                 signal being zoomed keeps a zoom refetch proportional to that
@@ -1548,16 +1557,27 @@ class LoggerQueue:
             x_min / x_max: restrict to a step range -- the zoom path. Buckets
                 are laid out across the *visible* range, so zooming in resolves
                 real detail instead of restretching the same points.
-            keep_special: emit marker/annotated/outlier rows regardless of
-                bucketing.
+            keep_special: reserve one row per bucket per special kind
+                (marker / annotated / outlier-bearing). ``False`` spends the
+                whole budget on value decimation instead.
         """
-        # Two representatives per bucket (the min-value and max-value rows, see
-        # `reps` below) preserve spikes, so halve the bucket count to still net
-        # ~max_points per curve overall. 10k points -> 500 buckets x {min,max}
-        # -> ~1000 points, WITH the spikes that plain earliest-per-bucket
-        # decimation used to drop.
-        n_buckets = max(int(max_points or _DEFAULT_MAX_POINTS_PER_CURVE) // 2,
-                        _MIN_POINTS_PER_CURVE)
+        # Specials used to be a SEPARATE, uncapped query unioned on top of the
+        # decimated rows, bounded only by a flat global LIMIT. That made the cap
+        # a suggestion: any signal whose steps mostly carry outliers -- which is
+        # every per-sample loss once the trend band tightens around a converged
+        # mean -- returned tens of thousands of points for a 1000-point budget,
+        # and silently truncated to an arbitrary scan-order prefix once it hit
+        # the limit. Folding specials into the bucket grid makes the per-curve
+        # total bounded by construction and spreads the survivors across the
+        # x-range instead of clustering them wherever the scan happened to start.
+        #
+        # Each special KIND gets its own slot per bucket rather than the three
+        # sharing one, because they differ in nature by orders of magnitude: a
+        # run has a handful of hand-placed notes and a marker per evaluation,
+        # but can have an outlier-bearing step at every step. Sharing one slot
+        # under a fixed priority starves the rarest kinds outright -- exactly
+        # the ones a user would notice missing -- so the thousands of outlier
+        # steps must be decimated against each other, not against the 6 notes.
         where, params = self._scope_filters(metric_names, exp_hashes, x_min, x_max)
         cols = ", ".join(_SIGNAL_READ_COLS)
         # arg_min(col, step) picks each column from the bucket's earliest-step
@@ -1584,13 +1604,57 @@ class LoggerQueue:
             f"arg_max({c}, metric_value) AS {c}" for c in _SIGNAL_READ_COLS
             if c not in ("metric_name", "experiment_hash")
         )
+        # Which KIND of special a row is: 1 marker, 2 annotated, 3 outlier-
+        # bearing, 0 ordinary. It is a GROUP BY key below, so each kind is
+        # decimated against its own kind.
+        special_class = (
+            "CASE WHEN is_evaluation_marker THEN 1 "
+            "WHEN point_note IS NOT NULL AND point_note <> '' THEN 2 "
+            "WHEN COALESCE(outlier_count, 0) > 0 THEN 3 "
+            "ELSE 0 END"
+        )
+        # Within a (bucket, kind) group, the row flagging the most samples wins.
+        # Markers and notes all carry outlier_count 0, so those groups tie and
+        # resolve arbitrarily -- fine, since a bucket rarely holds two of either.
+        picks_special = ", ".join(
+            f"arg_max({c}, COALESCE(outlier_count, 0)) AS {c}"
+            for c in _SIGNAL_READ_COLS
+            if c not in ("metric_name", "experiment_hash")
+        )
+        # Per bucket a curve emits the min-value row, the max-value row, and one
+        # row for each special kind it actually contains; 2 endpoint rows sit
+        # outside the grid to pin the x-extent. So the bucket count that spends
+        # exactly the budget depends on which kinds that curve has -- and it is
+        # computed PER CURVE, in `bounds` below, rather than once for the
+        # request: a dashboard load asks for every signal at once, and sizing
+        # them all by the messiest one would make a clean resource curve pay for
+        # a loss curve's outliers. A curve with no specials keeps the whole
+        # budget for value decimation, exactly as before this path learned about
+        # specials at all.
+        budget = int(max_points or _DEFAULT_MAX_POINTS_PER_CURVE)
+        kinds_expr = (
+            "(2 + MAX(CASE WHEN is_evaluation_marker THEN 1 ELSE 0 END)"
+            " + MAX(CASE WHEN point_note IS NOT NULL AND point_note <> ''"
+            " THEN 1 ELSE 0 END)"
+            " + MAX(CASE WHEN COALESCE(outlier_count, 0) > 0 THEN 1 ELSE 0 END))"
+            if keep_special else "2"
+        )
+        # `//` is DuckDB's floor division; `/` would make nb a float (see the
+        # note on the bucket expression below).
+        nb_expr = (f"GREATEST(({budget} - 2) // {kinds_expr}, "
+                   f"{_MIN_POINTS_PER_CURVE})")
         sql = f"""
         WITH scoped AS (
-            SELECT {cols} FROM signals WHERE 1=1{where}
+            SELECT {cols}, {special_class} AS special_class
+            FROM signals WHERE 1=1{where}
         ),
         bounds AS (
+            -- nb is this curve's own bucket count: the budget divided by what
+            -- one of ITS buckets costs (2 value rows + one per special kind it
+            -- contains). Clamped so a curve is never reduced below first + last
+            -- + one interior point.
             SELECT metric_name AS m, experiment_hash AS h,
-                   MIN(step) AS lo, MAX(step) AS hi
+                   MIN(step) AS lo, MAX(step) AS hi, {nb_expr} AS nb
             FROM scoped GROUP BY 1, 2
         ),
         tagged AS (
@@ -1598,7 +1662,7 @@ class LoggerQueue:
                    CASE WHEN b.hi <= b.lo THEN 0
                         -- step/lo/hi are all INTEGER (INT32) columns; the
                         -- subtraction fits fine, but multiplying that by
-                        -- n_buckets can overflow INT32 on a long-running
+                        -- the bucket count can overflow INT32 on a long-running
                         -- experiment (e.g. step ~538k * a few thousand
                         -- buckets already exceeds it) well before the
                         -- outer CAST ever gets a chance to widen it. Cast
@@ -1607,10 +1671,10 @@ class LoggerQueue:
                         -- DuckDB's `/` is float division even between two
                         -- integer operands (unlike Postgres/MySQL) -- it would
                         -- leave `bucket` a near-unique float per row instead of
-                        -- an integer 0..n_buckets, so GROUP BY bucket below
+                        -- an integer 0..nb, so GROUP BY bucket below
                         -- would barely deduplicate anything. `//` is DuckDB's
                         -- floor-division operator; that's the one we need here.
-                        ELSE (CAST(s.step - b.lo AS BIGINT) * {n_buckets}) // (b.hi - b.lo)
+                        ELSE (CAST(s.step - b.lo AS BIGINT) * b.nb) // (b.hi - b.lo)
                    END AS bucket
             FROM scoped s
             JOIN bounds b
@@ -1625,6 +1689,16 @@ class LoggerQueue:
             UNION ALL
             SELECT metric_name, experiment_hash, {picks_vmax}
             FROM tagged GROUP BY metric_name, experiment_hash, bucket
+        ),
+        specials AS (
+            -- One row per (bucket, kind). special_class in the GROUP BY is what
+            -- makes each kind decimate against its own kind: the 15k outlier
+            -- steps of a per-sample loss compete with each other for the outlier
+            -- slot and never crowd out the 6 notes. WHERE drops ordinary rows,
+            -- so a bucket holding no specials emits nothing.
+            SELECT metric_name, experiment_hash, {picks_special}
+            FROM tagged WHERE special_class > 0
+            GROUP BY metric_name, experiment_hash, bucket, special_class
         ),
         ends AS (
             -- One representative row per endpoint, not every raw row that
@@ -1641,36 +1715,21 @@ class LoggerQueue:
             FROM scoped GROUP BY metric_name, experiment_hash
         )
         SELECT {cols} FROM reps
+        {"UNION ALL SELECT " + cols + " FROM specials" if keep_special else ""}
         UNION ALL
         SELECT {cols} FROM ends
-        """
-        special_sql = f"""
-        SELECT {cols} FROM signals
-        WHERE 1=1{where}
-          AND (is_evaluation_marker
-               OR (point_note IS NOT NULL AND point_note <> '')
-               OR COALESCE(outlier_count, 0) > 0)
-        LIMIT {_MAX_SPECIAL_ROWS + 1}
         """
         with self._lock:
             self._flush_stage()
             rows = self._conn.execute(sql, params).fetchall()
-            special = (self._conn.execute(special_sql, params).fetchall()
-                       if keep_special else [])
-        if len(special) > _MAX_SPECIAL_ROWS:
-            logger.warning(
-                "Signal history: more than %d marker/annotated/outlier points "
-                "matched; keeping the first %d. Narrow the step range or the "
-                "signal set to see the rest.",
-                _MAX_SPECIAL_ROWS, _MAX_SPECIAL_ROWS)
-            special = special[:_MAX_SPECIAL_ROWS]
 
-        # UNION ALL can repeat a row across the three branches; dedupe on the
-        # identity the UI keys on. Bounded by the reduced row count, not by the
-        # table size.
+        # UNION ALL can repeat a row across the branches; dedupe on the identity
+        # the UI keys on. Bounded by the reduced row count, not by the table
+        # size -- and a special row that is also its bucket's value extreme
+        # collapses to one point, handing the budget back to the curve.
         seen: set = set()
         result: dict = {}
-        for row in itertools.chain(rows, special):
+        for row in rows:
             key = (row[0], row[1], row[2])
             if key in seen:
                 continue
