@@ -302,7 +302,7 @@ if __name__ == "__main__":
              serving_cli=cfg.get("serving_cli", False))
 
     # ================= Training loop =================
-    wl.start_training(timeout=3)
+    # wl.start_training(timeout=3)
 
     eval_ratio = int(cfg.get("eval_full_to_train_steps_ratio", 100))
     sample_every = int(cfg.get("sample_every", 250))

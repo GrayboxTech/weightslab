@@ -148,7 +148,7 @@ def main(argv=None) -> int:
     print(f" experiment dir={experiment_dir()}")
     print(" try: set_hp optimizer.lr 0.0005   (or edit the YAML)")
     print("=" * 70)
-    wl.start_training(timeout=3)
+    # wl.start_training(timeout=3)
 
     total = args.steps or int(read_path(hp, "training_steps_to_do", 300) or 300)
     last = {key: read_path(hp, key) for key in WATCHED}

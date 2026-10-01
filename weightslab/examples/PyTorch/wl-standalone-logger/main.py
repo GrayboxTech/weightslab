@@ -172,7 +172,7 @@ def main(argv=None) -> int:
     print(" LOGGER-ONLY standalone — attach with `weightslab cli`, UI with `weightslab start`")
     print(f" signals: train/loss, eval/loss, eval/accuracy   log_dir={log_dir}")
     print("=" * 70)
-    wl.start_training(timeout=3)
+    # wl.start_training(timeout=3)3)
 
     batches = iter(train_loader)
     for step in range(1, args.steps + 1):
