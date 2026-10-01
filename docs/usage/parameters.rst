@@ -3,7 +3,7 @@
 WeightsLab Parameters
 =====================
 
-All knobs available to configure WeightsLab — both the SDK call parameters
+All knobs available to configure WeightsLab, both the SDK call parameters
 you pass in Python code and the environment variables that control runtime
 behaviour.
 
@@ -15,7 +15,7 @@ behaviour.
 
 .. _parameters-sdk:
 
-Part A — SDK Parameters
+Part A, SDK Parameters
 ------------------------
 
 These are the keyword arguments accepted by WeightsLab's integration calls.
@@ -23,7 +23,7 @@ They are passed directly in Python; no config file is needed.
 
 .. _params-watch-or-edit-common:
 
-``wl.watch_or_edit()`` — common kwargs
+``wl.watch_or_edit()``, common kwargs
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Accepted by every ``flag`` value.
@@ -58,7 +58,7 @@ Accepted by every ``flag`` value.
 
 .. _params-data-loader:
 
-Data loader — ``flag="data"``
+Data loader, ``flag="data"``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Passed to ``wl.watch_or_edit(dataset, flag="data", **kwargs)``.
@@ -155,7 +155,7 @@ See :ref:`good-practice-heavy-experiment` for the recommended combination.
 
 .. _params-model:
 
-Model — ``flag="model"``
+Model, ``flag="model"``
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. list-table::
@@ -194,7 +194,7 @@ Model — ``flag="model"``
 
 .. _params-hyperparameters:
 
-Hyperparameters — ``flag="hyperparameters"``
+Hyperparameters, ``flag="hyperparameters"``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. list-table::
@@ -221,7 +221,7 @@ Hyperparameters — ``flag="hyperparameters"``
 
 .. _params-signal:
 
-Signal / metric / loss — ``flag="loss"`` / ``"metric"`` / ``"signal"``
+Signal / metric / loss, ``flag="loss"`` / ``"metric"`` / ``"signal"``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Passed to ``wl.watch_or_edit(criterion, flag="loss", **kwargs)`` or to
@@ -270,7 +270,7 @@ the ``@wl.signal(...)`` decorator.
 
 .. _parameters-env:
 
-Part B — Environment Variables
+Part B, Environment Variables
 --------------------------------
 
 All variables are optional; the default is used when the variable is unset
@@ -294,7 +294,7 @@ Logging & debug
        ``WATCHDOG`` (level 35) is a custom level between WARNING
        and ERROR reserved for watchdog/restart events.
    * - ``WEIGHTSLAB_LOG_FILE_LEVEL``
-     - *(unset — everything)*
+     - *(unset, everything)*
      - Minimum level written to the session log file. Set it to cap
        the file as well as the terminal.
    * - ``WEIGHTSLAB_LOG_TO_FILE``

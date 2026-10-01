@@ -34,7 +34,7 @@ The integration
        model_signals_every_n_steps=1,
    )
 
-No hooks to write, and **no call anywhere in the training loop** — the loop is
+No hooks to write, and **no call anywhere in the training loop**, the loop is
 byte-for-byte the same as ``wl-classification``'s. Pass a list instead of
 ``True`` to narrow the set, e.g. ``track_model_signals=["grad_norm",
 "activation_std"]``.
@@ -58,7 +58,7 @@ Layers with parameters get all eight; parameter-free layers (``ReLU``,
 ops (``Sequential``, ``Flatten``, ``Identity``, ``Dropout``) are skipped, since
 their output statistics duplicate the layer before them.
 
-For the model in this example — three conv blocks and a two-layer head — that
+For the model in this example, three conv blocks and a two-layer head, that
 is 74 curves: 14 layers × 4 activation stats, 8 parameterized layers × 2 norms,
 and the 2 global norms.
 
@@ -88,7 +88,7 @@ mapping at startup:
           15  Linear          (10, 128)
 
 These are the same ids the model panel and every architecture op (freeze /
-reset / operate) use — so a curve that looks wrong names the layer you then act
+reset / operate) use, so a curve that looks wrong names the layer you then act
 on, whether from the UI, the CLI, or the agent.
 
 Note that every module in this example's model is a **named attribute** rather
@@ -118,7 +118,7 @@ Fashion-MNIST is small enough to make each failure mode legible:
      - That layer has gone constant (dead ReLUs, saturated BatchNorm). Still
        consuming compute, contributing nothing.
    * - ``activation_min`` pinned at exactly 0.0 across a whole ReLU
-     - The same story from the other side — nothing is getting through.
+     - The same story from the other side, nothing is getting through.
    * - ``weights_norm`` climbing without bound while the loss flattens
      - The model is growing weights instead of learning structure. Add decay.
 
@@ -131,14 +131,14 @@ Three things keep the per-step overhead small enough to leave on by default:
   whole step costs *one* host↔device sync no matter how many layers are
   tracked.
 - **Gradients are captured by post-accumulate hooks**, so nothing walks the
-  parameter list a second time — and nothing depends on where your loop calls
+  parameter list a second time, and nothing depends on where your loop calls
   ``optimizer.zero_grad()``.
 - **``model_signals_every_n_steps``** samples every Nth step. On a large model,
   10–50 makes the cost negligible while the curves stay just as readable. Reach
   for this before dropping metrics.
 
 Collection only happens inside ``guard_training_context``, so the evaluation
-pass contributes nothing — a gradient or activation curve never contains values
+pass contributes nothing, a gradient or activation curve never contains values
 the optimizer did not see. This holds even for eval loops that skip
 ``model.eval()`` or ``torch.no_grad()``.
 

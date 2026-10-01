@@ -14,7 +14,7 @@ How it works
 ------------
 
 ``WLAwareTrainer`` subclasses Ultralytics' ``DetectionTrainer`` and installs
-WeightsLab through UL's callback hooks — no model changes required:
+WeightsLab through UL's callback hooks, no model changes required:
 
 - Wraps train and val datasets via ``wl.watch_or_edit(flag="data")`` so
   every sample gets a stable UID tracked in the ledger.
@@ -77,14 +77,14 @@ What gets tracked
 
 **Per-sample train signals** (one value per image per batch):
 
-- ``train/box_per_sample`` — bounding-box regression loss per image
-- ``train/cls_per_sample`` — classification loss per image
-- ``train/dfl_per_sample`` — distribution focal loss per image
+- ``train/box_per_sample``, bounding-box regression loss per image
+- ``train/cls_per_sample``, classification loss per image
+- ``train/dfl_per_sample``, distribution focal loss per image
 - Live NMS prediction overlay visible in the studio
 
 **Per-sample val signals**:
 
-- ``val/iou_per_sample`` — IoU per image after NMS
+- ``val/iou_per_sample``, IoU per image after NMS
 - Post-NMS prediction overlay
 
 **Aggregate curves** (one value per epoch):
@@ -166,7 +166,7 @@ End-to-end sequence
    # 3) Block the main thread until the UI signals training to start
    wl.start_training(timeout=3)
 
-   # 4) Train — WLAwareTrainer handles all WL wiring internally
+   # 4) Train, WLAwareTrainer handles all WL wiring internally
    YOLO(cfg["model"]["name"]).train(
        trainer=wl.WLAwareTrainer,
        data=str(cfg["data_root"]),

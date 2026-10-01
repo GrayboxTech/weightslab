@@ -1,4 +1,4 @@
-Detection — YOLO (Ultralytics)
+Detection, YOLO (Ultralytics)
 ===============================
 
 .. raw:: html
@@ -18,7 +18,7 @@ dataset, trained through Ultralytics' own training loop.
 
 This is the *no-loop* integration. Where the PyTorch examples wrap each piece
 by hand (data, model, optimizer, loss, guard contexts), here a single drop-in
-trainer — ``WLAwareTrainer`` — installs all of that through Ultralytics'
+trainer, ``WLAwareTrainer``, installs all of that through Ultralytics'
 callback hooks. Your script only loads a config, registers it as
 hyperparameters, starts the services, and calls ``YOLO.train()``.
 
@@ -73,7 +73,7 @@ still dump its run arguments.
        optimizer="SGD", lr0=0.001,
    )
 
-``trainer=wl.WLAwareTrainer`` is the entire integration — the model is untouched
+``trainer=wl.WLAwareTrainer`` is the entire integration, the model is untouched
 and YOLO's loop is untouched. ``project``/``name`` become Ultralytics'
 ``save_dir``, which the WeightsLab logger then reuses as its own
 ``log_dir``/``name``, so both tools write under the same run directory.
@@ -151,8 +151,8 @@ Each row below is a step you would otherwise write by hand:
 **Per-sample** (one value per image, per pass):
 
 - ``train/box_per_sample``, ``train/cls_per_sample``,
-  ``train/dfl_per_sample`` — the three YOLO loss terms, un-reduced.
-- ``val/iou_per_sample`` — IoU after NMS.
+  ``train/dfl_per_sample``, the three YOLO loss terms, un-reduced.
+- ``val/iou_per_sample``, IoU after NMS.
 - A live prediction overlay on both splits, so you can see the boxes the
   model is currently producing on any individual image.
 
@@ -165,11 +165,11 @@ Each row below is a step you would otherwise write by hand:
 The deny-aware sampler is active on both splits, exactly as in the PyTorch
 examples:
 
-- **Train** — the sampler stops yielding the sample; the optimizer never sees
+- **Train**, the sampler stops yielding the sample; the optimizer never sees
   it again and its signals freeze at their last value.
-- **Val** — the sample leaves the val loader, and val metrics reflect the
+- **Val**, the sample leaves the val loader, and val metrics reflect the
   reduced set.
-- **All of val discarded** — ``validate()`` returns an empty result dict
+- **All of val discarded**, ``validate()`` returns an empty result dict
   instead of crashing on ``np.concatenate([])``.
 
 Running it
@@ -190,7 +190,7 @@ then:
 .. note::
 
    Unlike the PyTorch examples, this one has no ``weightslab start example``
-   flag — it needs a dataset of your own, so there is nothing to
+   flag, it needs a dataset of your own, so there is nothing to
    auto-download.
 
 On Windows, install the ``torchvision`` CUDA wheels separately (the default
@@ -213,9 +213,9 @@ trainer: `KITTI detection
 See also
 --------
 
-- :doc:`/ultralytics` — the full integration reference: config walkthrough,
+- :doc:`/ultralytics`, the full integration reference: config walkthrough,
   every tracked signal, platform notes, and the end-to-end sequence.
-- :doc:`../pytorch/detection` — the same task wired by hand in plain PyTorch,
+- :doc:`../pytorch/detection`, the same task wired by hand in plain PyTorch,
   with per-instance signals and a custom collate.
 
 .. raw:: html

@@ -21,11 +21,11 @@ List view
    :alt: Data exploration board in list view
    :width: 100%
 
-The same data as a table — one row per sample, a leading image column, and one
+The same data as a table, one row per sample, a leading image column, and one
 column per visible metadata field. This is the view for sorting and comparing
 numbers rather than looking at pictures:
 
-- **Click a column header** to sort — it cycles descending → ascending → off.
+- **Click a column header** to sort, it cycles descending → ascending → off.
 - **Click the lock icon** to pin a column so it survives later sorts.
 - **Right-click a header** for clone, delete, reset, and histogram.
 - **Click a row** to open that sample's detail modal.
@@ -40,7 +40,7 @@ Quick filters
    :alt: Quick filters bar
    :width: 100%
 
-Filter and sort **without going through the agent** — no LLM in the loop, no
+Filter and sort **without going through the agent**, no LLM in the loop, no
 waiting. Build conditions from a column, an operator
 (``==``, ``!=``, ``>``, ``<``, ``>=``, ``<=``, ``between``, ``contains``,
 ``has_tag``, ``not_has_tag``) and a value, stack several, and add a sort.
@@ -69,7 +69,7 @@ Selection and the context menu
   samples, restore discarded ones.
 
 Discarding removes samples from the model's active set without deleting
-anything — the counter in the bottom bar shows *total* against *active*, and
+anything, the counter in the bottom bar shows *total* against *active*, and
 a discard is always reversible.
 
 Tagging modal
@@ -92,5 +92,5 @@ Bottom bar
 
 The batch slider walks through the dataset a page at a time, with the start and
 end sample indices either side of it. On the right: **total available samples**
-and **active samples used by the model** — the gap between them is exactly what
+and **active samples used by the model**, the gap between them is exactly what
 you have discarded.

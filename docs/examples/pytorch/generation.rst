@@ -1,4 +1,4 @@
-Generation / Anomaly Detection — MVTec (PyTorch)
+Generation / Anomaly Detection, MVTec (PyTorch)
 =================================================
 
 .. raw:: html
@@ -39,7 +39,7 @@ Integration walkthrough
 
 ``compute_dependencies=False`` skips the static dependency graph computation
 for the wrapped model. Use this when the model has dynamic control flow,
-multiple outputs, or cannot be traced by ``torch.fx`` — common in
+multiple outputs, or cannot be traced by ``torch.fx``, common in
 encoder-decoder architectures.
 
 2. Dataset with paired samples

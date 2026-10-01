@@ -3,7 +3,7 @@ Weights Studio CLI
 
 Weights Studio CLI is the terminal counterpart to the browser UI: a local
 developer REPL attached directly to a running experiment's global ledger, over
-its own plain-TCP connection — no browser, no gRPC-Web proxy.
+its own plain-TCP connection, no browser, no gRPC-Web proxy.
 
 Reach for it when you want a quick status check or a scripted intervention
 without opening a browser tab, when you're working over SSH with no port to
@@ -43,16 +43,16 @@ Sections
    cli_init
    cli_console
 
-- :doc:`cli_init` — starting the CLI server (foreground or headless),
+- :doc:`cli_init`, starting the CLI server (foreground or headless),
   attaching a client, auto-discovery, and the transport/security model.
-- :doc:`cli_console` — every console command: discovery/help, training
+- :doc:`cli_console`, every console command: discovery/help, training
   control, registry inspection, sample-level tag/discard, hyperparameters,
   evaluation, audit mode, the AI agent, and experiment reports.
 
 See also
 --------
 
-- :doc:`../weights_studio_ui/index` — the visual counterpart, for boards,
+- :doc:`../weights_studio_ui/index`, the visual counterpart, for boards,
   plots, and the docked agent chat.
-- :doc:`../user_commands` — the outer ``weightslab`` command (``se``,
+- :doc:`../user_commands`, the outer ``weightslab`` command (``se``,
   ``start``, ``cli``, ``tunnel``, ``export``) and its flags.

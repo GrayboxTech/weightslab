@@ -1,4 +1,4 @@
-Classification — MNIST (PyTorch Lightning)
+Classification, MNIST (PyTorch Lightning)
 ==========================================
 
 .. raw:: html
@@ -75,8 +75,8 @@ so the module receives already-tracked objects:
            return self.optimizer
 
 The guard contexts replace the manual ``with guard_training_context:`` blocks
-from the raw PyTorch loop. Everything else — loss calls, signal routing,
-ledger writes — is identical.
+from the raw PyTorch loop. Everything else, loss calls, signal routing,
+ledger writes, is identical.
 
 3. Trainer setup
 ~~~~~~~~~~~~~~~~
@@ -116,4 +116,3 @@ Multi-GPU (DDP)
 ---------------
 
 See :doc:`/pytorch_lightning` for the full multi-GPU trainer setup.
-

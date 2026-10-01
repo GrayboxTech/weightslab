@@ -44,7 +44,7 @@ weightslab se
    weightslab se [certs_dir] [--force-certs] [--force-ubuntu]
 
 Generates TLS certificates and a gRPC auth token into a certs directory, then
-tells you to export ``WEIGHTSLAB_CERTS_DIR`` — the **single source of
+tells you to export ``WEIGHTSLAB_CERTS_DIR``, the **single source of
 truth** the training backend, ``weightslab start``, and any new shell all
 read to decide whether TLS/auth is on (derived purely from whether cert files
 exist in that directory).
@@ -60,12 +60,12 @@ The certificates come from a bundled script that needs ``openssl`` on
 
 Options:
 
-- ``certs_dir`` — directory for the certs and token (default:
+- ``certs_dir``, directory for the certs and token (default:
   ``$WEIGHTSLAB_CERTS_DIR``, else ``~/.weightslab-certs``). A
   ``WEIGHTSLAB_CERTS_DIR`` that isn't an absolute path is ignored with a
   warning.
-- ``--force-certs`` — regenerate the certificates even if they already exist.
-- ``--force-ubuntu`` — Windows only. Skip PowerShell and run the bash script
+- ``--force-certs``, regenerate the certificates even if they already exist.
+- ``--force-ubuntu``, Windows only. Skip PowerShell and run the bash script
   in your default WSL distribution (for example Ubuntu; ``wsl -l -v`` shows
   which one is the default), with no fallback. Use it when you want the WSL
   ``openssl``. This path does not add the CA to the Windows trust store. It
@@ -88,28 +88,28 @@ Runs the UI natively from Python: one process serves the bundled Weights
 Studio page and proxies gRPC-Web to the training backend. It serves HTTPS, and
 uses mTLS to the backend, whenever TLS certificates are found in
 ``$WEIGHTSLAB_CERTS_DIR`` (else ``~/.weightslab-certs``, also used when the
-variable points at a directory without certs) — the same rule the backend
+variable points at a directory without certs), the same rule the backend
 applies at startup, so both ends agree. Without certificates, or with
 ``GRPC_TLS_ENABLED=0``, it serves plain HTTP.
 
 **Arguments**
 
-- ``DIR`` *(positional, optional)* — establishes the experiment directory (its
+- ``DIR`` *(positional, optional)*, establishes the experiment directory (its
   checkpoints, logs, and ``notebook.ipynb`` live there); created if missing.
   Omit it to create a fresh ``./wl-<adjective>-<noun>`` directory. UI-only; it
   does not start training on its own.
-- ``--port`` *(int)* — UI HTTP port; see the resolution order below.
-- ``--config`` *(file)* — experiment config (YAML) to read the UI port from.
-- ``--host`` *(str)* — interface the UI binds to. Default:
+- ``--port`` *(int)*, UI HTTP port; see the resolution order below.
+- ``--config`` *(file)*, experiment config (YAML) to read the UI port from.
+- ``--host`` *(str)*, interface the UI binds to. Default:
   ``$WEIGHTSLAB_UI_HOST``, else **0.0.0.0**.
-- ``--backend-host`` *(str)* — backend gRPC host to proxy to. Default:
+- ``--backend-host`` *(str)*, backend gRPC host to proxy to. Default:
   ``$GRPC_BACKEND_HOST``, else **localhost**.
-- ``--backend-port`` *(int)* — backend gRPC port to proxy to. Default:
+- ``--backend-port`` *(int)*, backend gRPC port to proxy to. Default:
   ``$GRPC_BACKEND_PORT``, else **50051**.
-- ``--no-browser`` — don't open a browser tab.
-- ``--certs`` — require TLS: if no valid certificates are found it logs a
+- ``--no-browser``, don't open a browser tab.
+- ``--certs``, require TLS: if no valid certificates are found it logs a
   warning (then serves plain HTTP). Run ``weightslab se`` first.
-- ``--no-certs`` — force plain HTTP and a plaintext backend connection, even
+- ``--no-certs``, force plain HTTP and a plaintext backend connection, even
   when certificates exist (e.g. for a plaintext or tunnelled backend).
 
 Port resolution order:
@@ -148,10 +148,10 @@ first, without prompting, then runs its ``main.py``.
 
 ``weightslab example start [flags]`` (subcommand order swapped) and the bare
 ``weightslab example`` are accepted as tolerant aliases with identical
-behavior — they don't appear in ``--help`` on purpose, ``start example`` is
+behavior, they don't appear in ``--help`` on purpose, ``start example`` is
 the documented form.
 
-**Arguments** — mutually exclusive; default is ``--cls``:
+**Arguments**, mutually exclusive; default is ``--cls``:
 
 .. list-table::
    :header-rows: 1
@@ -173,7 +173,7 @@ the documented form.
    * - ``--2d_det``
      - 2D LiDAR point-cloud detection
 
-One-level-at-a-time MNIST demos (four-way SDK approach — see
+One-level-at-a-time MNIST demos (four-way SDK approach, see
 :doc:`four_way_approach`), also mutually exclusive with the flags above:
 
 .. list-table::
@@ -213,9 +213,9 @@ weightslab cli
 Opens an interactive console attached to a running experiment's CLI server.
 The experiment must serve it (``wl.serve(serving_cli=True)``).
 
-- ``--port`` *(int)* — CLI server port. Default: auto-discover the running
+- ``--port`` *(int)*, CLI server port. Default: auto-discover the running
   experiment (it advertises its port on startup), else ``$CLI_PORT``.
-- ``--host`` *(str)* — CLI server host. Default: the host the experiment
+- ``--host`` *(str)*, CLI server host. Default: the host the experiment
   advertised, else ``$CLI_HOST``, else **localhost**.
 
 The console commands are listed under `Interactive CLI console`_ below.
@@ -230,7 +230,7 @@ weightslab agent
 Provisions the integrated OpenCode agent (downloads the per-user OpenCode
 binary if missing) and signs it in. ``--provision-only`` stops after
 provisioning, without walking through sign-in. This is the CLI counterpart to
-typing ``/init`` in the Weights Studio agent bar — see :doc:`agent`.
+typing ``/init`` in the Weights Studio agent bar, see :doc:`agent`.
 
 weightslab tunnel
 ~~~~~~~~~~~~~~~~~~
@@ -242,14 +242,14 @@ weightslab tunnel
    weightslab tunnel [ENDPOINT] [--listen-port N] [--listen-host H] [--remote-port N]
 
 Forwards a **remote** gRPC training backend to a **local** TCP port so the
-Weights Studio UI — whose ``weightslab start`` proxy dials ``localhost:50051``
-by default — connects to it as if it were local. This is what lets you **train
+Weights Studio UI, whose ``weightslab start`` proxy dials ``localhost:50051``
+by default, connects to it as if it were local. This is what lets you **train
 on a remote machine (e.g. Google Colab) and watch it live in Studio running on
 your laptop**: you run the UI locally and bridge the remote backend to it.
 
 It is a raw byte forwarder (no protocol parsing) because the browser speaks
 gRPC-Web to the ``weightslab start`` server, which speaks native HTTP/2 gRPC to
-its upstream — those HTTP/2 frames must pass through untouched. Two
+its upstream, those HTTP/2 frames must pass through untouched. Two
 consequences:
 
 - The remote tunnel must be **raw TCP**, *not* an HTTP/gRPC-Web tunnel. A
@@ -262,18 +262,18 @@ consequences:
 
 **Arguments**
 
-- ``ENDPOINT`` *(positional, optional)* — the remote backend as ``host:port``
+- ``ENDPOINT`` *(positional, optional)*, the remote backend as ``host:port``
   (e.g. ``0.tcp.ngrok.io:12345``); a ``tcp://`` prefix is accepted and
   stripped. Default: the ``WEIGHTSLAB_TUNNEL_ENDPOINT`` environment variable, so
   a bare ``weightslab tunnel`` works once that is exported.
-- ``--listen-port``, ``-p`` *(int)* — local port to expose. Default: **50051**
-  (the port ``weightslab start`` proxies to by default — leave it unless you
+- ``--listen-port``, ``-p`` *(int)*, local port to expose. Default: **50051**
+  (the port ``weightslab start`` proxies to by default, leave it unless you
   pass ``--backend-port`` or set ``GRPC_BACKEND_PORT``).
-- ``--listen-host`` *(str)* — interface to bind. Default: **auto** —
+- ``--listen-host`` *(str)*, interface to bind. Default: **auto** —
   ``127.0.0.1`` on Windows/macOS, ``0.0.0.0`` (all interfaces) on Linux. With
   the UI on the same machine, ``--listen-host 127.0.0.1`` works on Linux too
   and keeps the tunnel private.
-- ``--remote-port`` *(int)* — the remote port, when ``ENDPOINT`` has only a
+- ``--remote-port`` *(int)*, the remote port, when ``ENDPOINT`` has only a
   host and no ``:port``.
 
 **Examples**
@@ -298,14 +298,14 @@ consequences:
    weightslab tunnel bore.pub:12345               # the host:port bore printed
 
    # 3) Open the URL `weightslab start` printed (http://localhost:8080 by
-   #    default) — Studio streams live from Colab.
+   #    default), Studio streams live from Colab.
 
 .. note::
 
    Step 1 can be done for you: call ``wl.serve(serving_grpc=True,
    serving_bore=True)`` in the training script. It downloads ``bore``, opens the
    relay, and prints the exact ``weightslab tunnel bore.pub:<port>`` line to run
-   on your machine — see ``serve`` in :doc:`user_functions`.
+   on your machine, see ``serve`` in :doc:`user_functions`.
 
 The command probes the remote on startup (warning, not fatal, if it isn't up
 yet), re-resolves the endpoint per connection (so a changing tunnel IP is picked
@@ -324,26 +324,26 @@ weightslab export
                       [--origin ORIGIN] [--predictions] [--tag TAG ...] [--host HOST] [--port PORT]
 
 Exports bounding-box/segmentation annotations from a **running** experiment
-to a relabeling-tool format — connects over gRPC exactly like ``weightslab
+to a relabeling-tool format, connects over gRPC exactly like ``weightslab
 cli`` does, and is the CLI counterpart to Weights Studio's "Export" button
 and :func:`wl.export_annotations`. See :doc:`export` for the format
 reference, class-name/image-path resolution, and caveats.
 
 **Arguments**
 
-- ``--format``, ``-f`` *(required)* — ``cvat`` (XML), ``label_studio``
-  (JSON), or ``v7`` (Darwin JSON, zipped — one file per image).
-- ``OUTPUT`` *(positional, optional)* — output file path or directory.
+- ``--format``, ``-f`` *(required)*, ``cvat`` (XML), ``label_studio``
+  (JSON), or ``v7`` (Darwin JSON, zipped, one file per image).
+- ``OUTPUT`` *(positional, optional)*, output file path or directory.
   Default: the current directory, using the format's default filename
   (e.g. ``annotations_cvat.xml``).
-- ``--origin`` *(str)* — restrict to one registered split/loader (e.g.
+- ``--origin`` *(str)*, restrict to one registered split/loader (e.g.
   ``train_loader``). Default: every registered split.
-- ``--predictions`` — export model predictions instead of ground-truth targets.
-- ``--tag`` *(str, repeatable)* — restrict to samples carrying this tag
+- ``--predictions``, export model predictions instead of ground-truth targets.
+- ``--tag`` *(str, repeatable)*, restrict to samples carrying this tag
   (e.g. ``ToReview``); repeat for multiple tags (matches ANY of them).
   Default: every sample.
-- ``--host`` *(str)* — backend host to connect to. Default: **127.0.0.1**.
-- ``--port`` *(int)* — backend gRPC port to connect to. Default:
+- ``--host`` *(str)*, backend host to connect to. Default: **127.0.0.1**.
+- ``--port`` *(int)*, backend gRPC port to connect to. Default:
   ``$GRPC_BACKEND_PORT`` or **50051**.
 
 **Examples**
@@ -360,11 +360,11 @@ Interactive CLI console
 ------------------------
 
 ``weightslab cli`` attaches to a full interactive console for a running
-experiment — a local developer REPL over the global ledger, independent of
+experiment, a local developer REPL over the global ledger, independent of
 the Weights Studio UI. It has its own home now:
 
-- :doc:`weights_studio_cli/index` — overview and quick start.
-- :doc:`weights_studio_cli/cli_init` — starting the server, attaching a
+- :doc:`weights_studio_cli/index`, overview and quick start.
+- :doc:`weights_studio_cli/cli_init`, starting the server, attaching a
   client, transport and security model.
-- :doc:`weights_studio_cli/cli_console` — every console command, with
+- :doc:`weights_studio_cli/cli_console`, every console command, with
   syntax, aliases, and examples.

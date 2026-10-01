@@ -1,4 +1,4 @@
-Segmentation — BDD100k (PyTorch)
+Segmentation, BDD100k (PyTorch)
 =================================
 
 .. raw:: html
@@ -27,7 +27,7 @@ Integration walkthrough
 1. Lazy loading with performance flags
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Identical to the detection example — see :doc:`detection` section 1 for
+Identical to the detection example, see :doc:`detection` section 1 for
 rationale.
 
 .. code-block:: python
@@ -76,7 +76,7 @@ the predicted mask.
                 + dice_sample(outputs, targets, batch_ids=ids)
        combined.mean().backward()
 
-Each signal call is independent — it stores its value and returns a
+Each signal call is independent, it stores its value and returns a
 ``(batch_size,)`` tensor you can add or reduce freely.
 
 4. Custom per-sample class signals
