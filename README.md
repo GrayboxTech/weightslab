@@ -353,4 +353,14 @@ any single file. It's the fastest way to orient before a first change and contri
 We're building a community of ML engineers around data-centric training tooling.
 Interested in contributing or just want to say hi? → hello [at] graybx [dot] com
 
+If WeightsLab is part of your development process / project / publication, please cite us ❤️:
+
+@misc{wl2024,
+title = {WeightsLab - A monitoring platform for ML teams building real‑world AI at scale},
+year = {2024},
+note = {Software available from http://github.com/GrayboTech/weightslab},
+url={https://graybx.com},
+author = {GrayBx},
+}
+
 </details>
