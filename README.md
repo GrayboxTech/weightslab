@@ -353,6 +353,7 @@ any single file. It's the fastest way to orient before a first change and contri
 We're building a community of ML engineers around data-centric training tooling.
 Interested in contributing or just want to say hi? → hello [at] graybx [dot] com
 
+</details>
 If WeightsLab is part of your development process / project / publication, please cite us ❤️:
 
 @misc{wl2024,
