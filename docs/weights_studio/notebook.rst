@@ -38,6 +38,9 @@ How it works
   (merged, in order), the value of the last expression, any ``matplotlib``
   figures rendered inline as images, and a full traceback on error.
 - A run can be interrupted mid-flight with the stop button next to the cell.
+- Running a code cell pauses a running training first, and training stays
+  paused until Play: a cell always sees one state of the model (see
+  :ref:`notebook-pauses-training`).
 
 Cell types
 ----------

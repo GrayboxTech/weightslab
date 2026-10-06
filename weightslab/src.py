@@ -45,6 +45,7 @@ from weightslab.projection import (
     observe_batch as _projection_observe_batch,
     project_dataset,
     projection_enabled as _projection_enabled,
+    save_projection_coords,
 )
 
 
@@ -1277,7 +1278,8 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
         # Live 3-D projection options, popped for the same reason: it is a hook
         # ON a wrapped model, not part of what wrapping means. False opts out;
-        # a dict steers layer/dim/cadence; absent means "the env var decides".
+        # a dict steers layer/dim/cadence; a string is shorthand for
+        # {'layer': ...}; absent (or True) means "the env var decides".
         projection_opts = kwargs.pop('projection', None)
 
         # Now construct the wrapper and let it register into the ledger.
@@ -1313,9 +1315,23 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # projection=False to opt this one model out. Same failure contract as
         # the signal tracking above: a projection that cannot install is a lost
         # view, never a failed run.
-        if projection_opts is not False:
+        if projection_opts is False:
+            # One projection per process, and this is THE model now: a hook
+            # left from a previous wrap would keep fitting on a model nobody
+            # trains, and a checkpoint restore parked for it would be applied
+            # to the next one that opts in.
+            _detach_projection()
+            from weightslab.projection import clear_pending_restore
+            clear_pending_restore()
+            logger.info("Live projection off for this model (projection=False)")
+        else:
             try:
-                opts = dict(projection_opts) if isinstance(projection_opts, dict) else {}
+                if isinstance(projection_opts, dict):
+                    opts = dict(projection_opts)
+                elif isinstance(projection_opts, str):
+                    opts = {'layer': projection_opts}
+                else:
+                    opts = {}
                 _attach_projection(obj, layer=opts.pop('layer', None), **opts)
             except Exception as exc:
                 logger.warning(f"Could not install live projection: {exc}")
@@ -1660,6 +1676,23 @@ def start_training(timeout: int = None) -> None:
     # safeguard. Bypass it only when no dataloader is registered; data-backed
     # workflows retain the existing hash-completeness check.
     pause_ctrl.resume(force=not ledgers.list_dataloaders())
+
+
+def pause_training() -> None:
+    """Pause training from your own code — the Studio's pause button, as a call.
+
+    The counterpart of :func:`start_training`. Takes effect at the next
+    ``with wl.guard_training_context:``, which blocks until training is resumed
+    (the Play button in the Studio header, or :func:`start_training`). The step
+    in flight is not interrupted. While paused, the gRPC server, the Studio and
+    the notebook keep running against the live model and data — which is the
+    point: pause once the run has converged, then inspect it.
+
+    Example:
+        >>> if converged:
+        ...     wl.pause_training()   # the next training step waits for Play
+    """
+    pause_ctrl.pause()
 
 
 def _register_pid_with_ui_server() -> None:
@@ -2444,6 +2477,7 @@ def save_signals(
     step: int | None = None,
     log: bool = False,
     _react: bool = True,
+    _seen: bool = True,
 ):
     """Save **per-sample** statistics to the tracked dataset.
 
@@ -2633,14 +2667,18 @@ def save_signals(
     else:
         losses_data = None
 
-    # Enqueue to dataframe manager buffer for efficiency
+    # Enqueue to dataframe manager buffer for efficiency.
+    #
+    # _seen=False (internal) writes the values WITHOUT a step, which is what
+    # bumps a sample's nb_seen/last_seen: projection coordinates describe where
+    # a sample sits in a picture, not a step at which the model saw it.
     DATAFRAME_M.enqueue_batch(
         sample_ids=batch_ids_np,
         preds_raw=preds_raw_np if preds_raw_np is not None else preds_raw,
         preds=preds_np if preds_np is not None else preds,
         targets=target_np if target_np is not None else targets,
         losses=losses_data,
-        step=step
+        step=step if _seen else None
     )
 
     # Live 3-D projection, for the usecases that never register a flag="loss"
@@ -2648,8 +2686,10 @@ def save_signals(
     # wrappers, custom eval loops, anything hand-rolled). Between this and the
     # loss wrapper, every supported way of producing a per-sample value feeds
     # the projection. Re-entrancy safe: the projection's own coordinate
-    # write-back lands in this same function and is guarded there.
-    _projection_observe_batch(batch_ids, step)
+    # write-back lands in this same function and is guarded there. Not for a
+    # _seen=False write, which carries no batch the model just ran.
+    if _seen:
+        _projection_observe_batch(batch_ids, step)
 
     # Reactive signals: these just-logged signals may satisfy an inputs=[...]
     # signal. Only logged (queryable) signals can be inputs. _react=False on the
@@ -3401,7 +3441,20 @@ def track_model_signals(model=None, **kwargs):
 
 def clear_all():
     """Clear all WeightsLab registries (models, dataloaders, etc.)."""
+    global DATAFRAME_M
     ledgers.clear_all()
+    # The cached dataframe handle is a ledger Proxy that clear_all just
+    # orphaned: the next registration creates a NEW proxy, and save_signals
+    # kept writing to the dead one ("Proxy target not set"). Re-resolve lazily.
+    DATAFRAME_M = None
+    # The projection hooks the model the ledger just let go of; a later wrap
+    # would re-attach anyway, but until then nothing should keep capturing its
+    # forward passes, nor apply a parked checkpoint restore to the next model.
+    _detach_projection()
+    from weightslab.projection import clear_pending_restore
+    from weightslab.projection.registry import clear_registry
+    clear_pending_restore()
+    clear_registry()
 
 
 def _unpack_batch(batch, device=None):

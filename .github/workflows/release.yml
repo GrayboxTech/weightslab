@@ -931,3 +931,95 @@ jobs:
           files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # VERSION FILE SYNC — after either release, commit the tag's version into
+  # weightslab/VERSION: on main AND dev for a main release, on dev only for a
+  # dev release (a dev version never lands on main this way).
+  # ═══════════════════════════════════════════════════════════════════════════
+  # weightslab/VERSION is the last-resort source of weightslab.__version__ (and
+  # so of the telemetry version): read only when there is no git metadata, no
+  # setuptools_scm-built _version.py and no installed dist metadata. It never
+  # overrides a git-derived version, so builds and checkouts are unaffected.
+  #
+  # main and dev both reject direct pushes (PR + status-check rulesets) unless
+  # the pusher is a ruleset bypass actor, which GITHUB_TOKEN is not — hence
+  # VERSION_SYNC_TOKEN: a token of a bypass actor with contents:write on this
+  # repo. "[skip ci]" stops that push from re-triggering ci.yml/docs-pages.yml
+  # (a PAT push triggers workflows, a GITHUB_TOKEN push would not), which would
+  # otherwise run a TestPyPI publish for the push to main.
+  sync-version-file:
+    name: Sync weightslab/VERSION
+    needs: [detect-target, create-dev-release, create-main-release]
+    # !cancelled(): exactly one of the two release jobs is skipped on any tag.
+    if: ${{ !cancelled() && (needs.create-main-release.result == 'success' || needs.create-dev-release.result == 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require the push token
+        env:
+          VERSION_SYNC_TOKEN: ${{ secrets.VERSION_SYNC_TOKEN }}
+        run: |
+          if [ -z "${VERSION_SYNC_TOKEN}" ]; then
+            echo "::error::VERSION_SYNC_TOKEN is not set; main/dev reject pushes from GITHUB_TOKEN, so weightslab/VERSION was not updated for ${GITHUB_REF_NAME}. The release itself is published."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      # PEP 440-normalized, so the file holds what a build of the tag reports:
+      # v2.0.2 -> 2.0.2, v1.3.1-dev0 -> 1.3.1.dev0.
+      - name: Compute version and target branches
+        id: target
+        env:
+          IS_MAIN: ${{ needs.detect-target.outputs.is_main }}
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet packaging
+          VERSION="$(python -c 'import os; from packaging.version import Version; print(Version(os.environ["GITHUB_REF_NAME"]))')"
+          BRANCHES="dev"
+          if [ "${IS_MAIN}" = "true" ]; then
+            BRANCHES="main dev"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "branches=${BRANCHES}" >> $GITHUB_OUTPUT
+          echo "Tag ${GITHUB_REF_NAME} -> weightslab/VERSION=${VERSION} on: ${BRANCHES}"
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.VERSION_SYNC_TOKEN }}
+
+      # Each branch is rewritten from its fresh tip; a push rejected because the
+      # branch moved meanwhile is retried on the new tip rather than rebased.
+      - name: Commit weightslab/VERSION
+        env:
+          VERSION: ${{ steps.target.outputs.version }}
+          BRANCHES: ${{ steps.target.outputs.branches }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for BRANCH in ${BRANCHES}; do
+            for attempt in 1 2 3; do
+              git fetch --depth=1 origin "${BRANCH}"
+              git checkout -q -B "${BRANCH}" FETCH_HEAD
+              printf '%s\n' "${VERSION}" > weightslab/VERSION
+              git add weightslab/VERSION
+              if git diff --cached --quiet; then
+                echo "${BRANCH}: weightslab/VERSION is already ${VERSION}"
+                continue 2
+              fi
+              git commit -q -m "release: weightslab/VERSION -> ${VERSION} [skip ci]"
+              if git push origin "HEAD:${BRANCH}"; then
+                echo "${BRANCH}: weightslab/VERSION -> ${VERSION}"
+                continue 2
+              fi
+              echo "Push to ${BRANCH} rejected (attempt ${attempt}/3); retrying on its new tip"
+              sleep 5
+            done
+            echo "::error::Could not push weightslab/VERSION to ${BRANCH}"
+            exit 1
+          done

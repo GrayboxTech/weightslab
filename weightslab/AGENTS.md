@@ -260,7 +260,7 @@ def hardness(loss_vals, entropy_vals): ...
 - No custom classifier needed? Pass `loss_shape_signal=<name>` to
   `wl.write_dataframe(...)` (§3.7) to compute the built-in tag at dump time.
 
-### 3.6b Live 3-D projection (parametric UMAP)
+### 3.6b Live 3-D projection (parametric UMAP) — beta
 
 On by default, no code: `wl.watch_or_edit(model, flag="model")` hooks the
 **input of the last parameterised layer** (last `nn.Linear`, else last conv —
@@ -271,9 +271,48 @@ its own optimizer — it cannot perturb training. Studio shows a **Projection**
 board (3-D scatter, zoom = server-side level-of-detail, click/lasso selection →
 `sample_id` filter on the data board).
 
-- Off: `WEIGHTSLAB_PROJECTION=0` (removes the hook; zero cost), or
-  `wl.watch_or_edit(model, flag="model", projection=False)` per model.
-- Steer: `projection={"layer": "backbone.fc", "every_n_steps": 20, "min_dist": 0.05}`.
+- Off: `WEIGHTSLAB_PROJECTION=0` (removes the hook; zero cost; wins over any
+  keyword), or `wl.watch_or_edit(model, flag="model", projection=False)` per model
+  (also removes an earlier model's hook — one projection per process).
+- Steer: `projection={"layer": "backbone.fc", "every_n_steps": 20, "min_dist": 0.05}`;
+  a string is shorthand for the layer (`projection="backbone.fc"`). Keys:
+  `layer, every_n_steps, out_dim, n_neighbors, graph_size, inner_steps, lr,
+  min_dist, spread, repulsion_strength, signal_prefix` — each overrides its env var.
+- **Bring your own** (t-SNE, umap-learn, PCA…): `wl.save_projection_coords(coords,
+  batch_ids=ids, prefix="tsne")` with `(N, 2|3)` coords, or let WeightsLab collect
+  the features: `wl.project_dataset(model, loader, method=TSNE(n_components=3))`
+  (`method` = anything with `fit_transform`, or a callable `(N,F) -> (N,2|3)`; prefix
+  defaults to the method's name). Any time — e.g. at `model.get_age() == 500`.
+  Refused: the prefix `umap` while the built-in runs, shapes other than 2/3 columns.
+  Not counted as "seen" (no `nb_seen`/`last_seen` bump). The board's picker lists it.
+  The picker shows only REGISTERED prefixes (`<root_log_dir>/projection/prefixes.json`,
+  written by every WeightsLab projection writer), so hand-written `tsne_x` signals via
+  `save_signals` do not appear — use `save_projection_coords`. No registry file
+  (an older run) ⇒ every `_x`/`_y` column pair is offered.
+- Live coverage: every training batch is buffered (graph = the last `graph_size`
+  samples) and placed with the current encoder between fits, so all samples get
+  coordinates each epoch. Nothing is drawn before the first fit.
+- From the Studio notebook: a cell can read the live model and call
+  `wl.save_projection_coords`; running a cell PAUSES training first (and it stays
+  paused until Play). From the script: `wl.pause_training()` (e.g. at convergence).
+  Examples: `examples/Usecases/wl-fashion-mnist-umap` (built-in, live),
+  `examples/Usecases/wl-fashion-mnist-custom-projection` (converge → pause from code
+  → notebook-written t-SNE → board) and `examples/PyTorch/wl-fashion-mnist-umap`
+  (1k steps with the live UMAP → reload the checkpoint → discard the lowest-loss
+  samples → your own 2-D PCA → compare).
+  `project_dataset` sweeps the WHOLE loader (a tracked loader mid-epoch is restarted),
+  never ages the model, and returns `sample_ids` aligned with the features your `method` got.
+- Studio: with nothing to draw the board shows an orange "No projection found"
+  ribbon with the backend's reason (not fitted yet / stopped / off / other prefixes).
+- Checkpoints: the encoder is saved beside every checkpoint
+  (`models/<hash>/projection/<ckpt>.pt`) and restored WITH it — on a restart's
+  auto-load too, even though the projection attaches after the weights load. A
+  checkpoint older than the first fit resets the layout; an architecture restore
+  re-hooks the same layer (by name) on the new model object.
+- Failure contract: never raises into training. A failed fit warns once and
+  retries; 5 in a row turn it off for the run (`stats()["disabled_reason"]`);
+  NaN/inf features are skipped (encoder never goes NaN); bad options → warning,
+  model still wrapped.
 - Works for every supervised task — it only needs a forward pass plus a
   per-sample write carrying `batch_ids` (a `flag="loss"` criterion **or** a
   direct `wl.save_signals`). Detection/segmentation `per_instance=True` is
@@ -282,7 +321,8 @@ board (3-D scatter, zoom = server-side level-of-detail, click/lasso selection �
 - Fully dynamic: layer, reduction, feature width and device are all discovered
   from the first batch. A live architecture edit (prune/grow) rebuilds the
   encoder — the cloud re-lays-out, `stats()["rebuilds"]` counts it.
-- Debug: `wl.projection.get_tracker().stats()`. `fits == 0` while training means
+- Debug: `wl.projection.get_tracker().stats()` (`enabled, layer, fits, failures,
+  skipped_nonfinite, disabled_reason, …`). `fits == 0` while training means
   the auto-picked layer never ran — pass `projection={"layer": ...}`.
 - **Wrong layer after the fact?** `wl.project_dataset(model, loader, layer="backbone.layer3",
   prefix="umap_layer3", epochs=20)` re-projects offline from a restored checkpoint —
@@ -352,7 +392,7 @@ Authoritative reference: `weightslab/docs/configuration.rst`. High-signal ones:
 | `GRPC_AUTH_TOKEN` | unset | Optional token auth on top of mTLS. |
 | `GRPC_MAX_MESSAGE_BYTES` | `268435456` | Raise if large tensors/images fail to transfer. |
 | `WEIGHTSLAB_DISABLE_WATCHDOGS` | `0` | Set `1` when breakpoint-debugging (§5). |
-| `WEIGHTSLAB_PROJECTION` | on | Live 3-D parametric-UMAP projection. `0`/`false`/`no`/`off` removes the hook entirely. Also `_EVERY` (50), `_DIM` (3), `_NEIGHBORS` (15). |
+| `WEIGHTSLAB_PROJECTION` | on | Live 3-D parametric-UMAP projection (beta). `0`/`false`/`no`/`off` removes the hook entirely. Also `_EVERY` (50), `_DIM` (3), `_NEIGHBORS` (15), `_GRAPH` (512, kNN graph buffer). |
 | `GRPC_WATCHDOG_STUCK_SECONDS` | `60` | Lock/RPC stuck threshold + lock-acquire timeout. |
 
 **Frontend — runtime `window.*` globals (injected at `weightslab start` time; restart+reload to apply):**
@@ -431,7 +471,7 @@ around here.
 - `components/` — `global_monitoring.py` (locks, `guard_*`, pause), `checkpoint_manager.py`, `evaluation_controller.py`.
 - `data/` — `dataframe_manager.py`, `data_samples_with_ops.py`, `sample_stats.py`, H5 storage (`h5_dataframe_store.py`, `h5_array_store.py`, `array_proxy.py`).
 - `backend/` — `ledgers.py` (`GLOBAL_LEDGER`), `logger.py`, `audit_logger.py`, `cli.py`.
-- `projection/parametric_umap.py` — live 3-D projection (§3.6b): feature hook, UMAP encoder, coordinate write-back; served by `trainer/services/projection_service.py` (`GetProjection`).
+- `projection/parametric_umap.py` — live 3-D projection (§3.6b): feature hook, UMAP encoder, coordinate write-back, checkpoint pairing; `projection/custom.py` — user projections (`save_projection_coords`); served by `trainer/services/projection_service.py` (`GetProjection`).
 - `security/` (`CertAuthManager`), `proto/`, `docs/`.
 - `integrations/ultralytics/` — `WLAwareTrainer`/`WLAwareSegmentationTrainer` (§3.9) — the only wiring done outside a user script.
 - `examples/{PyTorch,Lightning,Ultralytics,Usecases}/<usecase>/main.py` (+`config.yaml`, `utils/`) — the integration cookbook (§3); `examples/Notebooks/` mirrors most as notebooks, same wiring; `examples/utils/baseline_models/` is a plain model zoo (only the two `wl-classification` examples use it).

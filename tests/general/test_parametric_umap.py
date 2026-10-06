@@ -1,6 +1,7 @@
 """Parametric UMAP: the projection itself, and the view-box serving around it."""
 
 import os
+import time
 import unittest
 
 import numpy as np
@@ -791,23 +792,23 @@ class TestStratifiedDecimation(unittest.TestCase):
         sizes = {"big": 100_000, "mid": 5_000, "tiny": 200}
         ids, groups = self._blobs(sizes)
 
-        budget = 20_000                      # >= 10% of the cloud, so every
-        keep = ps.stratified_keep(ids, groups, budget)   # floor is payable
+        budget = 20_000
+        keep = ps.stratified_keep(ids, groups, budget)
         self.assertLessEqual(len(keep), budget)
 
         kept = groups[keep]
         for name, count in sizes.items():
             got = int((kept == name).sum())
-            floor = int(np.ceil(ps.MIN_GROUP_FRACTION * count))
+            floor = int(np.ceil(0.10 * count))
             self.assertGreaterEqual(
                 got, min(floor, count),
-                f"{name}: kept {got} of {count}, below the 10% floor")
+                f"{name}: kept {got} of {count}, below 10% of itself")
 
     def test_tight_budget_still_protects_the_small_clusters(self):
-        """When 10% of everything exceeds the budget the floor cannot hold for
-        every group -- the big one absorbs the shortfall, the small ones keep
-        their share. Losing a little resolution on a 100k blob costs nothing;
-        losing a 200-point cluster loses the finding."""
+        """When 10% of everything exceeds the budget the big group absorbs the
+        shortfall and the small ones keep their share. Losing a little
+        resolution on a 100k blob costs nothing; losing a 200-point cluster
+        loses the finding."""
         sizes = {"big": 100_000, "mid": 5_000, "tiny": 200}
         ids, groups = self._blobs(sizes)
         budget = 5_000
@@ -817,9 +818,31 @@ class TestStratifiedDecimation(unittest.TestCase):
         kept = groups[keep]
         for name in ("tiny", "mid"):
             got = int((kept == name).sum())
-            floor = int(np.ceil(ps.MIN_GROUP_FRACTION * sizes[name]))
-            self.assertGreaterEqual(got, floor, f"{name} lost its floor")
+            floor = int(np.ceil(0.10 * sizes[name]))
+            self.assertGreaterEqual(got, floor, f"{name} lost its share")
         self.assertGreater(int((kept == "big").sum()), 0)
+
+    def test_every_class_is_drawn_when_the_budget_is_far_below_the_data(self):
+        """THE scale regression. A 10% floor per group, paid smallest group
+        first, spent a 50k budget over 3M balanced samples on the first two
+        classes and drew the other eight not at all."""
+        n, classes, budget = 300_000, 10, 5_000
+        ids = np.arange(n)
+        groups = ids % classes
+        kept = groups[ps.stratified_keep(ids, groups, budget)]
+        counts = np.bincount(kept, minlength=classes)
+        self.assertEqual(int(counts.sum()), budget)
+        # Balanced classes, balanced draw.
+        self.assertGreater(counts.min(), 0.8 * budget / classes, counts)
+
+    def test_a_small_cluster_is_drawn_denser_than_a_flat_sample(self):
+        """1/sqrt(size) stratification: 100x smaller is drawn ~10x denser."""
+        ids = np.arange(1_010_000)
+        groups = np.where(ids < 10_000, 1, 0)        # 10k cluster in a 1M cloud
+        kept = groups[ps.stratified_keep(ids, groups, 50_000)]
+        small_rate = (kept == 1).sum() / 10_000
+        big_rate = (kept == 0).sum() / 1_000_000
+        self.assertGreater(small_rate / big_rate, 5)
 
     def test_nothing_to_do_under_budget(self):
         ids = np.array([f"s{i}" for i in range(50)])
@@ -880,7 +903,20 @@ class TestStratifiedDecimation(unittest.TestCase):
 
 class TestPrefixDiscovery(unittest.TestCase):
     """The board can only offer an offline re-projection if the server reports
-    it -- only the server knows which projections a dataset holds."""
+    it -- only the server knows which projections a dataset holds.
+
+    These run with NO prefix registry, i.e. a run written before it existed,
+    which discovers projections from column pairs. The registered path is
+    covered in test_projection_lifecycle.py."""
+
+    def setUp(self):
+        from weightslab.projection.registry import clear_registry
+        self._saved_root = os.environ.pop("WEIGHTSLAB_ROOT_LOG_DIR", None)
+        clear_registry()
+
+    def tearDown(self):
+        if self._saved_root is not None:
+            os.environ["WEIGHTSLAB_ROOT_LOG_DIR"] = self._saved_root
 
     def _frame(self, prefixes):
         n = 40
@@ -1134,6 +1170,290 @@ class TestProjectionServing(unittest.TestCase):
         frame.iloc[:40, frame.columns.get_loc("signals//umap_y")] = np.nan
         resp = ps.build_projection_response(frame, pb2.ProjectionRequest())
         self.assertEqual(resp.total_available, 60)
+
+    def test_the_frustum_keeps_only_what_the_camera_sees(self):
+        """A plane x >= 2 (n = (1,0,0), d = -2) plus far-away dummies."""
+        frame = self._frame(2000)
+        far = [0, 0, 1, 1e6] * 5
+        resp = ps.build_projection_response(frame, pb2.ProjectionRequest(
+            frustum_planes=[1, 0, 0, -2] + far))
+        xyz = np.array(resp.coords).reshape(-1, 3)
+        self.assertTrue((xyz[:, 0] >= 2).all())
+        self.assertGreater(len(xyz), 0)
+        self.assertLess(resp.total_in_view, resp.total_available)
+
+
+class TestProjectionIndexAtScale(unittest.TestCase):
+    """The cell grid and the priority walk must choose exactly the points a
+    plain scan would -- they only read less to find them."""
+
+    def setUp(self):
+        self._saved = ps.CELL_INDEX_MIN_POINTS
+        ps.CELL_INDEX_MIN_POINTS = 1_000           # use the grid on a small cloud
+
+    def tearDown(self):
+        ps.CELL_INDEX_MIN_POINTS = self._saved
+
+    def _frame(self, n, dims=3, seed=5):
+        rng = np.random.default_rng(seed)
+        centres = rng.uniform(-20, 20, (6, dims))
+        pick = rng.integers(0, 6, n)
+        xyz = centres[pick] + rng.normal(0, 2.0, (n, dims))
+        index = pd.MultiIndex.from_arrays(
+            [np.where(np.arange(n) % 5 == 0, "test_loader", "train_loader"), np.arange(n)],
+            names=["origin", "sample_id"])
+        data = {f"signals//umap_{a}": xyz[:, i] for i, a in enumerate("xyz"[:dims])}
+        data["target"] = pick
+        return pd.DataFrame(data, index=index)
+
+    def _scan(self, index, region, budget):
+        hits = np.flatnonzero(region.contains(index.xyz))
+        return hits[:budget], len(hits)
+
+    def test_every_path_picks_the_same_points(self):
+        for dims in (2, 3):
+            index, failure = ps.ProjectionIndex.build(self._frame(30_000, dims), "umap", "")
+            self.assertIsNone(failure)
+            self.assertIsNotNone(index.cells)
+            boxes = [((-3,) * dims, (3,) * dims),          # small: cell path
+                     ((-50,) * dims, (50,) * dims),        # everything: walk
+                     ((-30,) * dims, (0,) * dims)]         # in between
+            for lo, hi in boxes:
+                for budget in (100, 5_000, 50_000):
+                    region = ps.ViewRegion(lo, hi)
+                    got, in_view = index.select(region, budget)
+                    want, total = self._scan(index, region, budget)
+                    np.testing.assert_array_equal(got, want, f"{dims}d {lo} {budget}")
+                    if in_view <= budget or total <= budget:
+                        self.assertEqual(in_view, total)
+
+    def test_culling_cells_against_the_frustum_loses_nothing(self):
+        """A wedge (x + y >= 0, z <= 5) inside a wide box: cells wholly
+        outside a plane are skipped, and the answer must not change."""
+        index, _ = ps.ProjectionIndex.build(self._frame(30_000), "umap", "")
+        normals = np.array([[1, 1, 0], [0, 0, -1]], dtype=np.float32)
+        offsets = np.array([0, 5], dtype=np.float32)
+        region = ps.ViewRegion((-40,) * 3, (40,) * 3, normals, offsets)
+        for budget in (50, 2_000, 50_000):
+            got, _ = index.select(region, budget)
+            want, _ = self._scan(index, region, budget)
+            np.testing.assert_array_equal(got, want)
+        np.testing.assert_array_equal(index.select_all(region),
+                                      np.flatnonzero(region.contains(index.xyz)))
+
+    def test_zooming_in_only_adds_points_through_the_grid(self):
+        index, _ = ps.ProjectionIndex.build(self._frame(40_000), "umap", "")
+        wide, _ = index.select(ps.ViewRegion((-40,) * 3, (40,) * 3), 2_000)
+        zoom = ps.ViewRegion((-5,) * 3, (5,) * 3)
+        narrow, _ = index.select(zoom, 2_000)
+        wide_inside = [p for p in wide if zoom.contains(index.xyz[p:p + 1])[0]]
+        self.assertTrue(set(wide_inside).issubset(set(narrow.tolist())))
+
+    def test_the_cached_answer_matches_the_uncached_one(self):
+        frame = self._frame(20_000)
+        request = pb2.ProjectionRequest(has_bounds=True, min_x=-10, min_y=-10, min_z=-10,
+                                        max_x=10, max_y=10, max_z=10, max_points=3_000)
+        cache = ps.ProjectionCache()
+        cached = cache.serve(request, view=lambda: frame, is_filtered=lambda: False)
+        plain = ps.build_projection_response(frame, request)
+        self.assertEqual(list(cached.sample_ids), list(plain.sample_ids))
+        self.assertEqual(cached.total_in_view, plain.total_in_view)
+
+    def test_moved_coordinates_reuse_the_order_and_draw_where_points_are(self):
+        frame = self._frame(5_000)
+        first, _ = ps.ProjectionIndex.build(frame, "umap", "")
+        same, _ = ps.ProjectionIndex.build(frame, "umap", "", previous=first)
+        self.assertIs(same, first)                       # nothing changed
+        frame["signals//umap_x"] += 100.0                # training moved the cloud
+        moved, _ = ps.ProjectionIndex.build(frame, "umap", "", previous=first)
+        self.assertIsNot(moved, first)
+        np.testing.assert_array_equal(moved.rows, first.rows)
+        self.assertGreater(moved.lo[0], first.lo[0] + 50)
+        # And an answer from the OLD index already draws the new positions.
+        resp = first.respond(pb2.ProjectionRequest(max_points=100))
+        self.assertGreater(min(np.array(resp.coords).reshape(-1, 3)[:, 0]), 50)
+
+
+class TestProjectionCache(unittest.TestCase):
+    def _frame(self, n=3000):
+        rng = np.random.default_rng(2)
+        index = pd.MultiIndex.from_arrays(
+            [np.full(n, "train_loader"), np.arange(n).astype(str)],
+            names=["origin", "sample_id"])
+        return pd.DataFrame({f"signals//umap_{a}": rng.normal(size=n) for a in "xyz"},
+                            index=index)
+
+    def test_a_grid_page_is_served_whole_ignoring_view_and_budget(self):
+        frame = self._frame()
+        cache = ps.ProjectionCache()
+        resp = cache.serve(pb2.ProjectionRequest(
+            follow_view=True, restrict_sample_ids=[str(i) for i in range(100, 160)],
+            max_points=10, has_bounds=True, min_x=50, max_x=60, min_y=50, max_y=60,
+            min_z=50, max_z=60), view=lambda: frame, is_filtered=lambda: False)
+        self.assertTrue(resp.success, resp.message)
+        self.assertEqual(sorted(map(int, resp.sample_ids)), list(range(100, 160)))
+
+    def test_a_filtered_view_does_not_pull_the_dataset_on_every_request(self):
+        frame = self._frame()
+        pulls = []
+        filtered = [False]
+        cache = ps.ProjectionCache()
+        kwargs = dict(view=lambda: frame, is_filtered=lambda: filtered[0],
+                      pull_full=lambda: pulls.append(1) or frame)
+        cache.serve(pb2.ProjectionRequest(), **kwargs)   # built from the full view
+        filtered[0] = True                               # a lasso filtered the grid
+        for _ in range(5):
+            resp = cache.serve(pb2.ProjectionRequest(), **kwargs)
+            self.assertEqual(resp.total_available, 3000)
+        self.assertEqual(pulls, [])
+
+    def test_a_stale_index_is_refreshed_in_the_background(self):
+        frame = self._frame()
+        cache = ps.ProjectionCache()
+        cache.REFRESH_SECONDS = 0.0
+        kwargs = dict(view=lambda: frame, is_filtered=lambda: False)
+        cache.serve(pb2.ProjectionRequest(), **kwargs)
+        before = cache._entries[("full", "")].index
+        frame["signals//umap_x"] += 1.0
+        # Each request answers at once and, once the index is old enough
+        # (four times its build time), kicks a rebuild -- as the board's polls do.
+        deadline = time.time() + 10
+        while cache._entries[("full", "")].index is before and time.time() < deadline:
+            cache.serve(pb2.ProjectionRequest(), **kwargs)
+            time.sleep(0.02)
+        self.assertIsNot(cache._entries[("full", "")].index, before)
+
+    def test_non_numeric_ids_rank_stably_whatever_else_is_in_the_array(self):
+        a = ps._stable_rank(np.array(["cat", "dog"]))
+        b = ps._stable_rank(np.array(["cat", "a-much-longer-sample-name", "dog"]))
+        self.assertEqual(a[0], b[0])
+        self.assertEqual(a[1], b[2])
+
+
+class TestLassoSelection(unittest.TestCase):
+    """A lasso selects on the server, over every sample -- drawn or not."""
+
+    # Identity camera: clip = (x, y, z, 1), so NDC = (x, y), and a 100x100
+    # canvas puts x = -1..1 at pixels 0..100 and y = 1..-1 at 0..100.
+    CAMERA = list(np.eye(4).T.ravel())
+    VIEWPORT = [100, 100]
+    CENTRE = [25, 25, 75, 25, 75, 75, 25, 75]       # NDC square [-0.5, 0.5]^2
+    LEFT = [0, 0, 50, 0, 50, 100, 0, 100]           # NDC x in [-1, 0]
+
+    def _frame(self, n=20_000):
+        rng = np.random.default_rng(4)
+        index = pd.MultiIndex.from_arrays(
+            [np.full(n, "train_loader"), np.arange(n)], names=["origin", "sample_id"])
+        return pd.DataFrame({f"signals//umap_{a}": rng.uniform(-1, 1, n) for a in "xyz"},
+                            index=index)
+
+    def _lasso(self, cache, frame, polygon, mode, **extra):
+        return cache.serve(pb2.ProjectionRequest(
+            lasso_mode=mode, lasso_px=polygon, lasso_viewport=self.VIEWPORT,
+            view_projection=self.CAMERA, max_points=100, **extra),
+            view=lambda: frame, is_filtered=lambda: False)
+
+    def _expected(self, frame, x0, x1, y0, y1):
+        x, y = frame["signals//umap_x"].to_numpy(), frame["signals//umap_y"].to_numpy()
+        return set(np.flatnonzero((x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)).tolist())
+
+    def test_the_raster_test_matches_the_loop(self):
+        rng = np.random.default_rng(0)
+        xyz = rng.uniform(-1, 1, (5000, 3)).astype(np.float32)
+        inside = ps.points_in_lasso(xyz, self.CAMERA, np.array(self.CENTRE).reshape(-1, 2),
+                                    self.VIEWPORT)
+        want = (np.abs(xyz[:, 0]) < 0.48) & (np.abs(xyz[:, 1]) < 0.48)
+        clear = (np.abs(xyz[:, 0]) > 0.52) | (np.abs(xyz[:, 1]) > 0.52)
+        self.assertTrue(inside[want].all())              # well inside: selected
+        self.assertFalse(inside[clear].any())            # well outside: not
+
+    def test_selects_every_sample_in_the_loop_not_just_the_drawn_ones(self):
+        frame = self._frame()
+        cache = ps.ProjectionCache()
+        resp = self._lasso(cache, frame, self.CENTRE, pb2.PROJECTION_LASSO_REPLACE)
+        self.assertTrue(resp.success, resp.message)
+        self.assertTrue(resp.selection_token)
+        self.assertGreater(resp.selected, 100 * 10)      # far beyond the 100 drawn
+        expected = self._expected(frame, -0.5, 0.5, -0.5, 0.5)
+        got = set(cache.selection(resp.selection_token).tolist())
+        # Pixel-quantised edges: everything well inside, nothing well outside.
+        self.assertTrue(self._expected(frame, -0.48, 0.48, -0.48, 0.48) <= got)
+        self.assertTrue(got <= self._expected(frame, -0.52, 0.52, -0.52, 0.52))
+        self.assertAlmostEqual(len(got), len(expected), delta=0.05 * len(expected))
+
+    def test_refine_keeps_only_the_previous_selection_inside_the_new_loop(self):
+        frame = self._frame()
+        cache = ps.ProjectionCache()
+        first = self._lasso(cache, frame, self.CENTRE, pb2.PROJECTION_LASSO_REPLACE)
+        refined = self._lasso(cache, frame, self.LEFT, pb2.PROJECTION_LASSO_REFINE)
+        a = set(cache.selection(first.selection_token).tolist())
+        b = set(cache.selection(refined.selection_token).tolist())
+        self.assertTrue(b < a)
+        x = frame["signals//umap_x"].to_numpy()
+        self.assertTrue((x[sorted(b)] <= 0.025).all())     # one pixel = 0.02
+
+    def test_add_unions_with_the_previous_selection(self):
+        frame = self._frame()
+        cache = ps.ProjectionCache()
+        first = self._lasso(cache, frame, self.CENTRE, pb2.PROJECTION_LASSO_REPLACE)
+        both = self._lasso(cache, frame, self.LEFT, pb2.PROJECTION_LASSO_ADD)
+        a = set(cache.selection(first.selection_token).tolist())
+        b = set(cache.selection(both.selection_token).tolist())
+        self.assertTrue(a < b)
+
+    def test_drawn_points_say_whether_they_are_selected(self):
+        """The client only ever holds the drawn subsample, so a point that
+        arrives with a later zoom must arrive marked."""
+        frame = self._frame()
+        cache = ps.ProjectionCache()
+        kwargs = dict(view=lambda: frame, is_filtered=lambda: False)
+        resp = self._lasso(cache, frame, self.CENTRE, pb2.PROJECTION_LASSO_REPLACE)
+        selected = set(cache.selection(resp.selection_token).tolist())
+        view = cache.serve(pb2.ProjectionRequest(max_points=5_000), **kwargs)
+        self.assertEqual(len(view.in_selection), len(view.sample_ids))
+        self.assertEqual([int(s) in selected for s in view.sample_ids], list(view.in_selection))
+        cleared = self._lasso(cache, frame, [], pb2.PROJECTION_LASSO_REPLACE)
+        self.assertEqual(cleared.selected, 0)
+        self.assertEqual(len(cache.serve(pb2.ProjectionRequest(), **kwargs).in_selection), 0)
+
+    def test_the_data_board_applies_a_selection_by_token(self):
+        import contextlib
+        from types import SimpleNamespace
+        from weightslab.trainer.services.data_service import DataService
+        frame = self._frame()
+        cache = ps.ProjectionCache()
+        resp = self._lasso(cache, frame, self.CENTRE, pb2.PROJECTION_LASSO_REPLACE)
+        service = SimpleNamespace(
+            _projection_cache=cache, _all_datasets_df=frame, _is_filtered=False,
+            _watched_lock=lambda name: contextlib.nullcontext(),
+            _pull_into_all_data_view_df=lambda: frame,
+            _build_success_response=lambda df, message, intent_type: (df, message))
+        df, _ = DataService._apply_projection_selection(
+            service, f"@projection_selection {resp.selection_token}")
+        self.assertEqual(len(df), resp.selected)
+        self.assertTrue(service._is_filtered)
+        expired = DataService._apply_projection_selection(service, "@projection_selection nope")
+        self.assertFalse(expired.success)
+
+    def test_a_selection_finds_its_samples_in_a_rebuilt_view(self):
+        """The view the selection is applied to, or refined against, is often
+        not the frame the loop was drawn on (the data board rebuilt it in
+        between, reordered): its rows are found again by sample id."""
+        frame = self._frame()
+        cache = ps.ProjectionCache()
+        resp = self._lasso(cache, frame, self.CENTRE, pb2.PROJECTION_LASSO_REPLACE)
+        rebuilt = frame.iloc[::-1].copy()                 # same samples, new rows
+        rows = cache.selection_rows(resp.selection_token, rebuilt)
+        self.assertEqual(len(rows), resp.selected)
+        picked = rebuilt.index.get_level_values("sample_id")[rows]
+        self.assertEqual(set(picked), set(cache.selection(resp.selection_token).tolist()))
+        # ...and a string-id view finds them too (the grid sends strings).
+        as_text = frame.copy()
+        as_text.index = pd.MultiIndex.from_arrays(
+            [frame.index.get_level_values(0), frame.index.get_level_values(1).astype(str)],
+            names=frame.index.names)
+        found = ps.SampleIdLookup().rows(as_text, [str(i) for i in picked[:50]])
+        self.assertEqual(len(found), 50)
 
 
 if __name__ == "__main__":

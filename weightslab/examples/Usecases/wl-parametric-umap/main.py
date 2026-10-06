@@ -19,7 +19,12 @@ Turn the projection off and watch the columns disappear::
     WEIGHTSLAB_PROJECTION=0 python main.py
 
 Other knobs: ``WEIGHTSLAB_PROJECTION_EVERY`` (fit cadence, default 50 steps),
-``WEIGHTSLAB_PROJECTION_DIM`` (3), ``WEIGHTSLAB_PROJECTION_NEIGHBORS`` (15).
+``WEIGHTSLAB_PROJECTION_DIM`` (3), ``WEIGHTSLAB_PROJECTION_NEIGHBORS`` (15),
+``WEIGHTSLAB_PROJECTION_GRAPH`` (512).
+
+It ends by plugging in projections of its own -- the same path a t-SNE or a
+umap-learn layout of yours would take -- so the board's picker offers
+``umap``, ``umap_trunk``, ``pca`` and ``pca_inputs`` side by side.
 """
 
 import os
@@ -160,7 +165,10 @@ def main():
     # Ground truth arrives aligned with the points (color_column="target"), so
     # there is nothing to join: WeightsLab assigns its own sample uids and they
     # are what the projection is keyed by, not the dataset's own index.
-    labels = np.array(response.color_values, dtype=np.int64)
+    # Class ids come back as categorical LABELS ("0.0".."5.0"), not as a numeric
+    # ramp: a class id is a name, and ramping it would paint neighbouring
+    # classes near-identical shades.
+    labels = np.array(response.color_labels).astype(float).astype(np.int64)
     print(f"  {response.returned} points, extent "
           f"x[{response.extent_min_x:.2f}, {response.extent_max_x:.2f}] "
           f"y[{response.extent_min_y:.2f}, {response.extent_max_y:.2f}] "
@@ -196,7 +204,7 @@ def main():
     alt = ps.build_projection_response(
         frame, pb2.ProjectionRequest(prefix="umap_trunk", color_column="target"))
     alt_xyz = np.array(alt.coords, dtype=np.float32).reshape(-1, 3)
-    alt_labels = np.array(alt.color_values, dtype=np.int64)
+    alt_labels = np.array(alt.color_labels).astype(float).astype(np.int64)
     alt_cent = np.stack([alt_xyz[alt_labels == c].mean(axis=0) for c in range(CLUSTERS)])
     alt_within = float(np.mean([
         np.linalg.norm(alt_xyz[alt_labels == c] - alt_cent[c], axis=1).mean()
@@ -206,6 +214,35 @@ def main():
         for i in range(CLUSTERS) for j in range(i + 1, CLUSTERS)]))
     print(f"  'umap_trunk' separation: {alt_between / max(alt_within, 1e-9):.1f}x "
           f"(vs {between / max(within, 1e-9):.1f}x for the live 'umap')")
+
+    # ---- bring your own projection -----------------------------------------
+    # Any algorithm plugs into the same board: it draws every <prefix>_x/_y(/_z)
+    # it finds. A 3-component PCA here (torch only, so the demo needs nothing
+    # extra); sklearn's TSNE(n_components=3) or umap.UMAP(n_components=3) drop
+    # in the same way, since anything with fit_transform is accepted.
+    def pca3(features):
+        centered = torch.from_numpy(features)
+        centered = centered - centered.mean(dim=0)
+        _, _, v = torch.pca_lowrank(centered, q=3)
+        return (centered @ v[:, :3]).numpy()
+
+    print("\nyour own projection, on features WeightsLab collects (method=)...")
+    mine = wl.project_dataset(model, loader, method=pca3, prefix="pca", verbose=False)
+    print(f"  {mine['samples']} samples x {mine['feature_dim']} features -> {mine['columns']}")
+
+    # ...or compute everything yourself and hand over the coordinates: a PCA of
+    # the raw INPUTS, to set against what the model learned.
+    xs, uids = [], []
+    for x, ids, _ in loader:
+        xs.append(x)
+        uids.extend(ids.tolist() if hasattr(ids, "tolist") else list(ids))
+    raw = pca3(torch.cat(xs).numpy())
+    print(f"  wl.save_projection_coords -> "
+          f"{wl.save_projection_coords(raw, batch_ids=uids, prefix='pca_inputs')}")
+
+    manager.flush()
+    frame = manager._df
+    print(f"  projections now stored: {ps.available_prefixes(frame)}")
 
     # ---- the level-of-detail contract the 3-D board relies on --------------
     box = pb2.ProjectionRequest(

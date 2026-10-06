@@ -1033,6 +1033,45 @@ message ProjectionRequest {
   // query into the data board, and re-reading it here would collapse the cloud
   // to the points just selected, leaving nothing to select from next.
   bool follow_view = 11;
+
+  // The samples the data grid is rendering right now (its current page).
+  //
+  // Honoured whenever follow_view is set: the cloud narrows to exactly these
+  // samples, filtered data view or not. An empty list means "no restriction".
+  // Served in full: no view box, no budget -- a grid page is small.
+  repeated string restrict_sample_ids = 12;
+
+  // The camera's view frustum, as 6 planes of 4 floats each (nx, ny, nz, d):
+  // a point p is on screen when n.p + d >= 0 for every plane.
+  //
+  // Sent alongside the min/max box, which is then the frustum's bounding box
+  // clipped to the cloud. The box alone is a poor stand-in for a perspective
+  // view: it either cuts off points that are on screen or spends the budget on
+  // points that are not. Empty => the box is the whole region.
+  repeated float frustum_planes = 13;
+
+  // --- Lasso selection ------------------------------------------------------
+  // With a mode set, the request is a SELECTION rather than a view: every
+  // sample whose screen position falls inside `lasso_px` -- drawn or not, since
+  // the view only ever draws a subsample -- is selected on the server and kept
+  // there under ProjectionResponse.selection_token, because a selection over
+  // millions of samples cannot travel as a list of ids. The box and planes
+  // above then describe the lasso's own sub-frustum and only narrow the
+  // candidates.
+  ProjectionLassoMode lasso_mode = 14;
+  repeated float lasso_px = 15;          // polygon, x,y pairs in canvas pixels
+  repeated float lasso_viewport = 16;    // canvas width, height in pixels
+  repeated float view_projection = 17;   // camera projection * view, column-major 4x4
+}
+
+enum ProjectionLassoMode {
+  PROJECTION_LASSO_NONE = 0;     // an ordinary view request
+  PROJECTION_LASSO_REPLACE = 1;  // the selection becomes what is inside the loop
+  PROJECTION_LASSO_ADD = 2;      // ... plus what was selected before
+  // ... minus what is outside it: only what was selected before AND is inside
+  // the loop. Drawn from another angle, this carves a 3-D volume out of the
+  // column a single loop selects.
+  PROJECTION_LASSO_REFINE = 3;
 }
 
 // Coordinates come back as PACKED parallel arrays rather than one message per
@@ -1078,4 +1117,16 @@ message ProjectionResponse {
   // representation and worth seeing in place, but they are not training the
   // model, so they must not read as live members of a cluster.
   repeated bool discarded = 21;
+
+  // Lasso requests only: how many samples the selection holds, and the token
+  // that applies it to the data board -- send the data query
+  // "@projection_selection <token>". The ids themselves stay on the server.
+  int64 selected = 22;
+  string selection_token = 23;
+
+  // View requests: per point (length N), whether it is in the current lasso
+  // selection. Sent so a point that only arrives with a later zoom is drawn
+  // selected too -- the client never holds the whole selection. Empty when
+  // nothing is selected.
+  repeated bool in_selection = 24;
 }

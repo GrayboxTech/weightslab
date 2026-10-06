@@ -34,7 +34,7 @@ Directory structure
 ``root_log_dir`` comes from the top-level ``root_log_dir`` key in your
 hyperparameters config (or the ``root_log_dir=`` kwarg on
 ``wl.watch_or_edit(..., flag="model"/"data"/...)`` for a per-object override)
-— see :doc:`configuration`.
+, see :doc:`configuration`.
 
 The experiment hash
 --------------------

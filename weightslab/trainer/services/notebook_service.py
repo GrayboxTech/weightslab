@@ -676,6 +676,59 @@ def _run_embedded_kernel(connection_file: Path) -> None:
         logger.error("Embedded notebook kernel crashed during startup", exc_info=True)
 
 
+# How long a cell waits for the training step in flight to finish once it has
+# paused training (see pause_training_for_cell).
+_PAUSE_BARRIER_TIMEOUT_S = 30.0
+
+PAUSED_FOR_CELL_NOTE = (
+    "[WeightsLab] Training paused to run this cell -- press Play in the header "
+    "to resume.\n")
+
+
+def pause_training_for_cell(timeout_s: float = _PAUSE_BARRIER_TIMEOUT_S):
+    """Pause a running training before a notebook cell executes.
+
+    A cell runs in the SAME process as the training loop, against the live
+    model, dataframe and checkpoints. Letting the loop keep stepping underneath
+    it means a cell that reads features, computes a t-SNE, or inspects weights
+    sees a model that changes mid-cell -- the numbers describe no single state
+    of the run. So executing a cell pauses training first, exactly like the
+    header's pause button (same controller, so the UI shows it paused), and it
+    STAYS paused: resuming is the user's call, via Play.
+
+    pause() only stops the loop at its next step; the step in flight runs to
+    the end, holding the training lock. Taking that lock once (and releasing it
+    at once) is the barrier that waits it out -- the next step then blocks in
+    wait_if_paused() before it can take the lock again.
+
+    Returns the note to print in the cell's output when it paused a running
+    training, else None (already paused, or no training at all).
+    """
+    try:
+        from weightslab.components.global_monitoring import (
+            pause_controller, weightslab_rlock)
+    except Exception:
+        return None
+    try:
+        if pause_controller.is_paused():
+            return None
+        pause_controller.pause()
+    except Exception as exc:
+        logger.warning("notebook: could not pause training before the cell: %s", exc)
+        return None
+    note = PAUSED_FOR_CELL_NOTE
+    try:
+        if weightslab_rlock.acquire(timeout=timeout_s):
+            weightslab_rlock.release()
+        else:
+            note += ("[WeightsLab] (the training step in progress had not finished "
+                     f"after {timeout_s:.0f}s; it completes alongside this cell.)\n")
+    except Exception:
+        pass
+    logger.info("notebook: training paused to run a cell")
+    return note
+
+
 def _install_kernel_hooks(shell) -> None:
     """Bracket every cell with the same write-guard + df-refresh the legacy
     kernel applies -- but as IPython events, which run ON the kernel's own
@@ -687,6 +740,12 @@ def _install_kernel_hooks(shell) -> None:
         # This hook runs on the thread that executes the cell -- the one
         # _ThreadRoutedStream lets through to the notebook.
         _CELL_THREAD["ident"] = threading.get_ident()
+        # Code reaching the embedded kernel some other way than the Studio's
+        # RunNotebookCell (`jupyter console --existing`) pauses training too.
+        # From the Studio this is a no-op: RunNotebookCell already paused it.
+        note = pause_training_for_cell()
+        if note:
+            print(note, end="")
         try:
             shell.user_ns["df"] = get_df(_ACTIVE_BINDING["data_service"])
         except Exception:
@@ -1265,6 +1324,12 @@ class NotebookService:
         started = time.perf_counter()
         exec_count = 0
         ok = True
+        # Before the kernel starts: the cell must see one state of the run, not
+        # a model the training loop keeps stepping underneath it.
+        note = pause_training_for_cell()
+        if note:
+            self._audit("notebook_pause_training", "success", {"cell_id": cell_id})
+            yield pb2.NotebookCellChunk(cell_id=cell_id, stdout=note)
         try:
             kernel = self._get_kernel()
             for kind, payload in kernel.run_streaming(code):

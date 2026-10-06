@@ -880,8 +880,6 @@ class LedgeredDataFrameManager:
                     # Keep the (sample_id, annotation_id) index clean and grouped.
                     if self._df.index.has_duplicates:
                         self._df = self._df[~self._df.index.duplicated(keep='last')]
-                    if isinstance(self._df.index, pd.MultiIndex):
-                        self._df = self._df.sort_index()
             else:
                 logger.warning(f"[LedgeredDataFrameManager] Loaded data missing 'sample_id' column for origin={origin}. Skipping load.")
         self._apply_recovery_snapshot(origin)

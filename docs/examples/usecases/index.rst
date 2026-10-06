@@ -4,7 +4,8 @@ Specific User Usecases
 ======================
 
 Task-specific integrations that go beyond the standard loop: point-cloud
-inputs, per-sample loss trajectory analysis, and per-layer training dynamics.
+inputs, per-sample loss trajectory analysis, per-layer training dynamics, and
+projections of the learned representation.
 
 .. raw:: html
 
@@ -19,3 +20,4 @@ inputs, per-sample loss trajectory analysis, and per-layer training dynamics.
    lidar_detection
    loss_shape_classification
    model_signals
+   projection_fashion_mnist

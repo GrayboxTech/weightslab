@@ -371,11 +371,21 @@ Projection Board
    :alt: Projection board showing the 3-D parametric-UMAP cloud
    :width: 100%
 
+.. note::
+
+   **Beta** — the board carries a *Beta* pill in its header. It works end to
+   end, but its controls may still change between releases.
+
 A navigable 3-D view of the representation the model is learning: one point per
 sample, placed by the live parametric-UMAP encoder (see :doc:`../projection`
-for the training-side half). The board appears only when a run has a
-projection, and reveals itself as soon as the first fit lands — no reload
-needed.
+for the training-side half), or by a projection you computed yourself.
+
+The board is opened from the **Projection** button in the Data Exploration
+header, and opens beside the Data board. Nothing about a run puts it on screen
+by itself. Opened before there is anything to draw — before the first fit, with
+the projection turned off, or before you plugged in your own — it shows an
+orange **No projection found** ribbon with the backend's reason, and fills in
+as soon as coordinates arrive — no reload needed.
 
 Navigating
 ~~~~~~~~~~
@@ -384,6 +394,22 @@ Navigating
 - **ctrl+scroll** to zoom toward the cursor — the same gesture the plots use.
   Plain scroll is left to the page, so the board never traps your wheel.
 - **Fit** re-frames the whole cloud.
+- The **expand** button gives the projection the whole view (Esc to exit).
+- Keyboard: ``L`` lasso · ``R`` reset · ``C`` clear · ``F`` fit · ``E`` expand.
+
+Which projection
+~~~~~~~~~~~~~~~~
+
+A run can hold several projections: the live ``umap`` one, offline
+re-projections from other layers, and any you computed yourself with t-SNE,
+``umap-learn`` or anything else (``wl.save_projection_coords`` /
+``wl.project_dataset(method=...)``, see :ref:`projection-bring-your-own`). When
+there is more than one, a picker in the header switches between them; with the
+built-in turned off, the board opens directly on yours.
+
+The status line counts points, e.g.
+``4,812 pts (of 61,004 in view) · 70,000 projected · 120 fits``. The fit count
+belongs to the live encoder, so it is shown only for its projection.
 
 The axes are unlabelled on purpose: UMAP coordinates carry no units, so they
 are an orientation cue only.
@@ -391,38 +417,83 @@ are an orientation cue only.
 Selecting samples
 ~~~~~~~~~~~~~~~~~
 
-Click a point, or switch on **Lasso** and drag a loop around a region (hold
-Shift to add to the selection). Either way the selected sample ids are pushed
-into the :ref:`studio-data-board` as an ordinary ``sample_id`` filter, so the
-grid, the list view and every existing affordance work on the result.
+Double-click a point, or switch on **Lasso** and drag a loop around a region.
+Either way the result lands in the :ref:`studio-data-board` as an ordinary
+filter, so the grid, the list view and every existing affordance work on it. A
+single click only names the point (``sample 1234``).
 
-The projection itself is **never** filtered by that selection — it always draws
-the whole dataset, with the selection highlighted. Following its own filter
-would collapse the cloud to the points just selected, leaving nothing to select
-from next.
+The lasso selects **every sample inside the loop, drawn or not**. The cloud on
+screen is a level-of-detail subsample (see below), so the selection is made on
+the server over the whole projection and applied to the Data board from there;
+the status line shows its size. While the lasso is armed, a line over the cloud
+says what the next loop will do:
+
+- **Shift** adds what is inside the loop to the current selection.
+- **Ctrl** *refines* it: only the samples already selected that are also inside
+  the new loop are kept. A single loop selects a whole column through the
+  cloud; rotate the cloud and Ctrl-lasso the same cluster again, and the two
+  columns intersect in a 3-D volume — the cluster alone. The loop is drawn
+  dashed cyan while Ctrl is held.
+
+With **Overview** following a grid page, every point of the page is drawn, so
+the lasso simply selects the drawn points.
+
+The projection itself is **never** filtered by that selection — it draws the
+whole dataset, with the selection highlighted. Following its own filter would
+collapse the cloud to the points just selected, leaving nothing to select from
+next. **Clear** drops the selection and the highlight.
+
+**Overview** decides whether the cloud follows the Data board's *other*
+filters (a query you or the agent applied). Off by default: the cloud shows the
+whole dataset, which is what lets you see where a filtered subset sits in the
+representation. Switch it on to draw only the Data board's current view.
+
+The other way round, right-click a sample in the grid and choose **Highlight in
+Projection** to find it in the cloud. Right-clicking inside the cloud itself is
+the same as **Reset view**.
 
 Colour
 ~~~~~~
 
-Points follow the **split** by default, using the same palette as the grid, so
-a sample is the same colour everywhere in Studio. The picker recolours by any
-metadata column — numeric columns get a ramp, categorical ones a palette.
+The settings cog holds the colour picker, the point size and **Reset view**
+(camera, axes, selection and highlight).
+
+Points are coloured by **Class** (the ground-truth label) by default — on a
+classification set, the classes are what the clusters mean. **Split** uses the
+grid's split palette, so a sample is the same colour everywhere in Studio. Any
+metadata column works too: numeric columns get a ramp, categorical ones a
+palette. Discarded samples are drawn grey, still in place.
 
 Level of detail
 ~~~~~~~~~~~~~~~
 
-The board never downloads the whole dataset. It asks for the points inside the
-box its camera frames, up to a render budget, and the server decimates to that
-budget; zooming in narrows the box, so the same budget buys finer detail.
+The board never downloads the whole dataset. It asks for the points its camera
+can see — the view frustum — up to a render budget (50,000 by default), and
+the server answers with that many of them; zooming in narrows the frustum, so
+the same budget buys finer detail. Every camera move that settles asks again.
 
 Two properties follow from the sampling being deterministic rather than random:
 repeated requests pick the same points (the cloud does not boil when you nudge
 the camera), and zooming in only *adds* points. The sample is also
-**stratified** — every cluster keeps at least 10% of its own points, so a small
-cluster cannot be sampled out of existence and read as noise.
+**stratified** by cluster, at a density proportional to ``1/sqrt(cluster
+size)``: a cluster 100 times smaller is drawn 10 times denser than a flat
+sample would draw it, so a small cluster cannot be sampled out of existence and
+read as noise, and every class still appears when the dataset is many times the
+budget.
 
-The status line says plainly when the view is decimated, e.g.
-``4,812 pts (of 61,004 in view) · 70,000 projected``.
+The server keeps an index of the projection — the sampling order and a spatial
+grid — rebuilt in the background as training moves the points, so a view costs
+about what it returns rather than the size of the dataset: about 0.1 s for
+50,000 points whether the projection holds one million samples or ten. The
+first open of a large projection builds that index once (a few seconds at 10M
+samples).
+
+With **Overview** following a grid page, the cloud is exactly that page, drawn
+whole: no budget and no frustum.
+
+The status line says plainly when the view is decimated (the ``of ... in
+view`` part), so a level-of-detail subsample never reads as all the data there
+is.
 
 Arranging the boards
 --------------------
