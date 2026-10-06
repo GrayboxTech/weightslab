@@ -15,6 +15,7 @@ import threading
 import weakref
 import logging
 import os
+import sys
 import time
 import yaml
 from collections.abc import MutableMapping
@@ -1285,6 +1286,15 @@ class Ledger:
             _dswo._GLOBAL_UID_REGISTRY.clear()
         except Exception:
             pass
+
+        # src caches the dataframe handle, which is one of the proxies just
+        # dropped: the next registration makes a NEW proxy, and save_signals
+        # kept writing to the dead one while the new run's table stayed empty.
+        # wl.clear_all() resets it too; this covers ledgers.clear_all() called
+        # directly. sys.modules, not an import: never loaded, nothing cached.
+        src = sys.modules.get("weightslab.src")
+        if src is not None:
+            src.DATAFRAME_M = None
 
     def snapshot(self) -> Dict[str, List[str]]:
         """Return the current keys for all registries (a lightweight snapshot)."""

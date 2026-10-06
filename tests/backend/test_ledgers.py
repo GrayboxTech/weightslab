@@ -717,5 +717,26 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(wrapped.calls, 1)
 
 
+class LedgerClearDropsCachedHandlesTests(unittest.TestCase):
+    """ledgers.clear_all() must not leave src writing to the old dataframe.
+
+    src caches the dataframe proxy in DATAFRAME_M. clear() drops that proxy and
+    the next registration makes a new one, so a kept handle sent every
+    save_signals write to the previous run while the new run's table stayed
+    empty -- what wl.clear_all() already prevented, and ledgers.clear_all()
+    (the call most tests and integrations make) did not.
+    """
+
+    def tearDown(self):
+        GLOBAL_LEDGER.clear()
+
+    def test_clear_resets_src_cached_dataframe(self):
+        from weightslab import src
+        src.DATAFRAME_M = GLOBAL_LEDGER.get_dataframe(DEFAULT_NAME)
+        self.assertIsNotNone(src.DATAFRAME_M)
+        GLOBAL_LEDGER.clear()
+        self.assertIsNone(src.DATAFRAME_M)
+
+
 if __name__ == "__main__":
     unittest.main()

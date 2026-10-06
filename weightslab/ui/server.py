@@ -243,6 +243,9 @@ class _JupyterSession:
                     process = subprocess.Popen(
                         _build_jupyter_cmd(notebooks_dir),
                         cwd=notebooks_dir,
+                        # Never read; inheriting it fails on Windows when the
+                        # parent has none usable (see opencode_process.resolve_or_spawn_opencode).
+                        stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
                         text=True,
@@ -670,6 +673,9 @@ class _OpencodeSession:
                 process = subprocess.Popen(
                     cmd,
                     cwd=workspace_dir,
+                    # Never read; inheriting it fails on Windows when the
+                    # parent has none usable (see opencode_process.resolve_or_spawn_opencode).
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,

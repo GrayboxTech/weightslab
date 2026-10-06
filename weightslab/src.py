@@ -41,11 +41,11 @@ from weightslab.components.global_monitoring import pause_controller as pause_ct
 from weightslab.projection import (
     attach_projection as _attach_projection,
     detach_projection as _detach_projection,
-    get_tracker as _projection_tracker,
     observe_batch as _projection_observe_batch,
-    project_dataset,
-    projection_enabled as _projection_enabled,
-    save_projection_coords,
+    # Re-exported: `wl.project_dataset` / `wl.save_projection_coords` resolve
+    # through this module (see _LAZY_EXPORTS in weightslab/__init__.py).
+    project_dataset as project_dataset,
+    save_projection_coords as save_projection_coords,
 )
 
 

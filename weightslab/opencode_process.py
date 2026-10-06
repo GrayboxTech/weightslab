@@ -509,6 +509,10 @@ def resolve_or_spawn_opencode(workspace_dir: str, origin: Optional[str] = None,
     try:
         process = subprocess.Popen(
             cmd, cwd=workspace_dir,
+            # stdin too: a server never reads it, and inheriting the parent's
+            # fails on Windows when that has none usable (a Jupyter kernel,
+            # pythonw, a detached task) -- WinError 6 / 50 at spawn.
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             # Detached: this server is meant to outlive whichever side
             # happened to spawn it (the other side may still be using it
