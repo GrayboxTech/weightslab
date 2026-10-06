@@ -1129,4 +1129,12 @@ message ProjectionResponse {
   // selected too -- the client never holds the whole selection. Empty when
   // nothing is selected.
   repeated bool in_selection = 24;
+
+  // Which layer the coordinates were computed from, so the board can say what
+  // it is a picture of: its named_modules() name ("model.22" -- what
+  // projection={'layer': ...} and project_dataset(layer=...) take) and what
+  // was read there ("C3k2 output", "Linear input"). Empty for a projection
+  // WeightsLab did not compute (wl.save_projection_coords).
+  string layer = 25;
+  string layer_detail = 26;
 }

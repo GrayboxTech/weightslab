@@ -147,7 +147,15 @@ One rule: **the input of the last parameterised layer** , last ``nn.Linear``,
 else the last conv, else the last leaf module's output. That layer is the
 model's head, so what flows *into* it is the representation; what comes *out*
 is class scores. Auxiliary heads (``aux_classifier``, ``aux_head``, ...) are
-skipped.
+skipped, and so are frozen layers while a trainable one exists: a layer whose
+weights never train is a fixed operator, not the head (YOLO's ``dfl`` box
+decoder, registered after the class/box convs, only runs at inference).
+
+The board names the layer under its title (``layer model.22 · C3k2 output``),
+so a cloud never has to be taken on faith. ``WLAwareTrainer`` (Ultralytics)
+hooks the output of the last block before the head, the layer UL's own
+``YOLO.embed()`` pools, and also feeds the projection from the EMA model that
+validation runs on.
 
 Reading the output instead fails silently: a segmentation head emits
 ``(B, num_classes)``, a well-shaped tensor UMAP will happily lay out, and you

@@ -1082,7 +1082,31 @@ class ProjectionIndex:
                 response.fits = int(tracker.steps_trained)
         except Exception:
             pass
+        response.layer, response.layer_detail = projection_layer(self.prefix)
         return response
+
+
+def projection_layer(prefix: str) -> tuple:
+    """``(layer, layer_detail)`` that *prefix*'s coordinates were computed from,
+    ``("", "")`` when unknown (a projection the user computed themselves).
+
+    The live tracker answers for its own prefix -- it may have re-attached to
+    another layer since it registered; the registry for everything else.
+    """
+    try:
+        from weightslab.projection import get_tracker
+        tracker = get_tracker()
+        if (tracker is not None and tracker.signal_prefix == prefix
+                and tracker.layer_name):
+            return tracker.layer_name, tracker.layer_detail or ""
+    except Exception:
+        pass
+    try:
+        from weightslab.projection.registry import prefix_info
+        info = prefix_info(prefix)
+    except Exception:
+        info = {}
+    return info.get("layer", ""), info.get("layer_detail", "")
 
 
 def build_projection_response(frame, request) -> pb2.ProjectionResponse:

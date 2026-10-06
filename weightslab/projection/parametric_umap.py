@@ -359,6 +359,11 @@ class ProjectionTracker:
 
         self._encoder: ProjectionEncoder | None = None
         self._optimizer: th.optim.Optimizer | None = None
+        # How the hook reads the layer -- (use_input, feature_last) -- kept so
+        # a mirror on another copy of that layer reads it the same way.
+        self._hook_spec = (True, True)
+        # Hooks on copies of the layer in OTHER models (see mirror).
+        self._mirror_handles: list = []
         # Feature width the encoder was built for. Compared on every fit so a
         # live architecture edit rebuilds it instead of raising forever.
         self._encoder_dim: int | None = None
@@ -391,6 +396,8 @@ class ProjectionTracker:
         # module, so a checkpoint restore that swaps in a NEW model object can
         # hook the same layer on it (see reattach_projection).
         self.layer_name: str | None = None
+        # What the hook reads there, e.g. "C3k2 output" (see layer_detail).
+        self.layer_detail: str | None = None
         self._registered_prefix: str | None = None
         # Failure accounting (see _record_failure). The projection is
         # instrumentation: it may stop, it may never take the run down.
@@ -410,20 +417,49 @@ class ProjectionTracker:
         channels-first tensor. It defaults to ``use_input`` only to keep the
         two-argument call working; :func:`pick_embedding_layer` always states it.
         """
-        self.detach()
+        # Only the primary hook: mirrors sit on other models that are still
+        # running (an EMA shadow), and a re-attach to a restored model must
+        # not silence them.
+        self._remove_handle()
         if feature_last is None:
             feature_last = use_input
+        self._hook_spec = (bool(use_input), bool(feature_last))
         self._handle = module.register_forward_hook(
-            _FeatureHook(self, bool(use_input), bool(feature_last)))
+            _FeatureHook(self, *self._hook_spec))
         return self._handle
 
-    def detach(self) -> None:
+    def mirror(self, module: nn.Module) -> bool:
+        """Also capture from *module*: the hooked layer's twin in another copy
+        of the model, which then feeds this tracker exactly like the original.
+
+        For a copy made BEFORE the projection attached -- one made after
+        already carries the hook (see ``_FeatureHook.__deepcopy__``). Idempotent.
+        """
+        if self._handle is None:
+            return False
+        hooks = getattr(module, "_forward_hooks", None) or {}
+        if any(isinstance(h, _FeatureHook) and h.tracker is self for h in hooks.values()):
+            return True
+        self._mirror_handles.append(
+            module.register_forward_hook(_FeatureHook(self, *self._hook_spec)))
+        return True
+
+    def _remove_handle(self) -> None:
         if self._handle is not None:
             try:
                 self._handle.remove()
             except Exception:
                 pass
             self._handle = None
+
+    def detach(self) -> None:
+        self._remove_handle()
+        for handle in self._mirror_handles:
+            try:
+                handle.remove()
+            except Exception:
+                pass
+        self._mirror_handles = []
 
     def reset(self) -> None:
         """Forget the learned layout: no encoder, empty buffer, no fits.
@@ -597,18 +633,31 @@ class ProjectionTracker:
         self._buffer_count = 0
 
     def _fit(self, graph_feats: th.Tensor) -> None:
-        """A few encoder steps on the UMAP objective over *graph_feats*."""
-        target_p = membership_high_dim(graph_feats, self.n_neighbors)
-        loss = None
-        for _ in range(self.inner_steps):
-            self._optimizer.zero_grad(set_to_none=True)
-            loss = self._umap_loss(graph_feats, target_p)
-            if not bool(th.isfinite(loss)):
-                # Raised BEFORE the step, so a bad loss never reaches the
-                # encoder's weights.
-                raise FloatingPointError("non-finite UMAP loss")
-            loss.backward()
-            self._optimizer.step()
+        """A few encoder steps on the UMAP objective over *graph_feats*.
+
+        Grad is switched back on here, whatever the caller had: per-sample
+        values are often logged from inside a ``no_grad`` (the Ultralytics
+        integration ships every signal under one), which left the UMAP loss
+        without a graph -- every fit failed, and after five the projection
+        turned itself off having never placed a point. The encoder and its
+        inputs are this tracker's own, so this cannot touch the model's graph.
+        """
+        with th.inference_mode(False), th.enable_grad():
+            if graph_feats.is_inference():
+                # Captured under inference_mode: such a tensor cannot be
+                # saved for backward, a plain copy can.
+                graph_feats = graph_feats.clone()
+            target_p = membership_high_dim(graph_feats, self.n_neighbors)
+            loss = None
+            for _ in range(self.inner_steps):
+                self._optimizer.zero_grad(set_to_none=True)
+                loss = self._umap_loss(graph_feats, target_p)
+                if not bool(th.isfinite(loss)):
+                    # Raised BEFORE the step, so a bad loss never reaches the
+                    # encoder's weights.
+                    raise FloatingPointError("non-finite UMAP loss")
+                loss.backward()
+                self._optimizer.step()
         self.last_loss = float(loss.detach().item())
         self.steps_trained += 1
 
@@ -697,7 +746,10 @@ class ProjectionTracker:
                 emit = feats
 
             try:
-                self._ensure_encoder(emit.shape[1], emit.device)
+                # Outside the caller's inference_mode, if any: an encoder
+                # built in there has weights autograd can never train.
+                with th.inference_mode(False):
+                    self._ensure_encoder(emit.shape[1], emit.device)
                 if fit_now:
                     self._fit(emit)
                 # On a fit step, `emit` is the whole buffer: the encoder just
@@ -755,9 +807,11 @@ class ProjectionTracker:
                 self._writing_back = False
             self.samples_written += len(ids)
             if self._registered_prefix != self.signal_prefix:
-                # Tell the board these columns are a projection (see registry).
+                # Tell the board these columns are a projection, and which
+                # layer they come from (see registry).
                 from weightslab.projection.registry import register_prefix
-                register_prefix(self.signal_prefix)
+                register_prefix(self.signal_prefix, layer=self.layer_name,
+                                layer_detail=self.layer_detail)
                 self._registered_prefix = self.signal_prefix
             # Checkpoint occasionally, so a crash or a Ctrl-C does not cost the
             # layout. Cheap: a few hundred KB of encoder weights.
@@ -798,6 +852,7 @@ class ProjectionTracker:
             "samples_written": self.samples_written,
             "last_loss": self.last_loss,
             "layer": self.layer_name,
+            "layer_detail": self.layer_detail,
             "failures": self.failures,
             "skipped_nonfinite": self.skipped_nonfinite,
             "disabled_reason": self.disabled_reason,
@@ -856,30 +911,53 @@ def pick_embedding_layer(model: nn.Module):
     on an evaluation pass the hook produced nothing at all and the cloud simply
     stopped gaining test-split points. Both failures are silent.
 
+    FROZEN layers are skipped too, while a trainable one exists. A layer whose
+    weights never train is a fixed operator, not the head: YOLO's ``Detect``
+    registers its ``dfl`` box-decoding conv (frozen by construction) after the
+    class/box convs, so "the last conv" was the DFL -- which only runs to decode
+    boxes at inference, so the training forward never reached the hook, and
+    what it did see was a 16-bin box-distance softmax, not the representation.
+    A model frozen whole (wrapped for inspection only) still gets a pick.
+
     Returns ``(module, use_input, feature_last)``.
     """
     # main = anything not under an auxiliary head; aux = the fallback, used
-    # only if a model turns out to be nothing BUT an auxiliary head.
-    last_linear = {"main": None, "aux": None}
-    last_conv = {"main": None, "aux": None}
+    # only if a model turns out to be nothing BUT an auxiliary head; fixed =
+    # frozen parameterised layers, the last resort before a bare leaf.
+    last_linear = {"main": None, "aux": None, "fixed": None}
+    last_conv = {"main": None, "aux": None, "fixed": None}
     last_leaf = {"main": None, "aux": None}
     for name, module in model.named_modules():
         bucket = "aux" if _AUXILIARY_NAME.search(name) else "main"
+        param_bucket = "fixed" if _is_frozen(module) else bucket
         if isinstance(module, nn.Linear):
-            last_linear[bucket] = module
+            last_linear[param_bucket] = module
         elif isinstance(module, nn.modules.conv._ConvNd):
-            last_conv[bucket] = module
+            last_conv[param_bucket] = module
         if len(list(module.children())) == 0:
             last_leaf[bucket] = module
 
-    linear = last_linear["main"] or last_linear["aux"]
-    conv = last_conv["main"] or last_conv["aux"]
+    for buckets in (("main", "aux"), ("fixed",)):
+        linear = next((last_linear[b] for b in buckets if last_linear[b] is not None), None)
+        if linear is not None:
+            return linear, True, True
+        conv = next((last_conv[b] for b in buckets if last_conv[b] is not None), None)
+        if conv is not None:
+            return conv, True, False
     leaf = last_leaf["main"] or last_leaf["aux"]
-    if linear is not None:
-        return linear, True, True
-    if conv is not None:
-        return conv, True, False
     return leaf, False, False
+
+
+def _is_frozen(module: nn.Module) -> bool:
+    """Whether *module* has weights of its own and none of them train."""
+    params = list(module.parameters(recurse=False))
+    return bool(params) and not any(p.requires_grad for p in params)
+
+
+def layer_detail(module: nn.Module, use_input: bool) -> str:
+    """What the hook reads at *module*, in words: ``"C3k2 output"``,
+    ``"Linear input"``. Shown beside the layer name on the projection board."""
+    return f"{type(module).__name__} {'input' if use_input else 'output'}"
 
 
 def _describe_layer(module):
@@ -950,6 +1028,7 @@ def attach_projection(model: nn.Module, layer=None, **kwargs):
     tracker = ProjectionTracker(**kwargs)
     tracker.attach(target, use_input=use_input, feature_last=feature_last)
     tracker.layer_name = name
+    tracker.layer_detail = layer_detail(target, use_input)
     _TRACKER = tracker
 
     # Which encoder to start from. The model wrapper restores the checkpoint
@@ -966,7 +1045,7 @@ def attach_projection(model: nn.Module, layer=None, **kwargs):
         load_projection(tracker)
     logger.info(
         f"[projection] attached to {name or type(target).__name__} "
-        f"({type(target).__name__} {'input' if use_input else 'output'}, "
+        f"({tracker.layer_detail}, "
         f"{'features last' if feature_last else 'channels first'}); "
         f"disable with {ENV_ENABLED}=0 or projection=False"
     )
@@ -996,6 +1075,7 @@ def reattach_projection(model) -> bool:
         return False
     tracker.attach(target, use_input=use_input, feature_last=feature_last)
     tracker.layer_name = name
+    tracker.layer_detail = layer_detail(target, use_input)
     tracker._pending = None
     tracker._clear_buffer()
     logger.info(f"[projection] re-attached to {name or type(target).__name__} "
@@ -1249,6 +1329,9 @@ def project_dataset(model, dataloader, layer=None, prefix: str | None = None,
                                 min_dist=min_dist, spread=spread,
                                 signal_prefix=prefix)
     tracker.attach(target, use_input=use_input, feature_last=feature_last)
+    # Recorded with the prefix, so the board can say which layer this is.
+    tracker.layer_name = next((n for n, m in module.named_modules() if m is target), None)
+    tracker.layer_detail = layer_detail(target, use_input)
 
     was_training = module.training
     module.eval()
@@ -1326,6 +1409,9 @@ def project_dataset(model, dataloader, layer=None, prefix: str | None = None,
                 f"-> '{prefix}'")
         coords = _custom.run_method(method, feats.numpy())
         columns = _custom.save_projection_coords(coords, ids, prefix=prefix)
+        from weightslab.projection.registry import register_prefix
+        register_prefix(prefix, layer=tracker.layer_name,
+                        layer_detail=tracker.layer_detail)
         return {
             "samples": int(feats.shape[0]),
             "sample_ids": ids,
@@ -1400,6 +1486,8 @@ def project_dataset(model, dataloader, layer=None, prefix: str | None = None,
         # width, which only triggers a rebuild and throws the fit away.
         live.detach()
         live.attach(target, use_input=use_input, feature_last=feature_last)
+        live.layer_name = tracker.layer_name
+        live.layer_detail = tracker.layer_detail
         live._encoder = tracker._encoder
         live._optimizer = tracker._optimizer
         live._encoder_dim = tracker._encoder_dim
@@ -1612,6 +1700,31 @@ def load_projection(tracker=None, root_log_dir=None) -> bool:
         f"({tracker._encoder_dim} -> {tracker.out_dim}, {tracker.steps_trained} prior fits); "
         f"the layout continues rather than restarting")
     return True
+
+
+def mirror_projection(model) -> bool:
+    """Feed the live projection from *model* too: a second copy of the
+    projected model that was made BEFORE the projection attached.
+
+    Ultralytics is the case in point: its trainer builds the EMA shadow in
+    ``_setup_train``, before ``on_train_start`` where the model gets wrapped,
+    and validation runs on that shadow -- so without this no validation sample
+    is ever placed. A copy made AFTER the attach needs nothing; deepcopy keeps
+    the hook. The same layer is found by name; returns whether *model* now
+    feeds the tracker.
+    """
+    tracker = _TRACKER
+    if tracker is None or tracker.disabled_reason or not tracker.layer_name:
+        return False
+    root = resolve_module(model)
+    if root is None:
+        return False
+    target = dict(root.named_modules()).get(tracker.layer_name)
+    if target is None:
+        logger.debug(f"[projection] no layer {tracker.layer_name!r} to mirror on "
+                     f"{type(root).__name__}")
+        return False
+    return tracker.mirror(target)
 
 
 def detach_projection() -> None:
