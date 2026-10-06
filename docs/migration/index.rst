@@ -5,7 +5,7 @@
 Migration guides
 ================
 
-.. attention:: Draft — not yet linked from the main navigation
+.. attention:: Draft, not yet linked from the main navigation
 
    These guides are written but not published: the entry is commented out of
    the site's index while the mappings are reviewed against each tool's
@@ -15,7 +15,7 @@ Moving an existing experiment onto WeightsLab, from whichever tool you are
 using now. Each guide follows the same four sections:
 
 **Migration notes**
-   What changes conceptually — the part worth reading before you touch code.
+   What changes conceptually, the part worth reading before you touch code.
 
 **Replaced parts**
    A call-for-call mapping from the tool's API to WeightsLab's.
@@ -38,7 +38,7 @@ The one idea behind all four
 -----------------------------
 
 Every tool below is, in the end, **write-only**. Your training loop reports
-outward — scalars, images, tables, dataset revisions — and a UI reads what was
+outward, scalars, images, tables, dataset revisions, and a UI reads what was
 reported. Changing anything means stopping the run, editing code or data, and
 starting again.
 
@@ -67,4 +67,4 @@ migration notes matter more than the tables.
 
    These guides describe each tool's typical usage at the time of writing.
    They are a starting point for a port, not a specification of the other
-   tool's API — check against its current documentation as you go.
+   tool's API, check against its current documentation as you go.

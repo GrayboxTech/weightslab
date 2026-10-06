@@ -4,7 +4,7 @@ Experiment Agent Assistant
 The WeightsLab agent translates natural-language requests into safe data/model
 operations on your live experiment.
 
-.. warning:: Unstable — in active development
+.. warning:: Unstable, in active development
 
    The agent as a whole is **experimental**. Its behaviour, the actions it
    exposes, the prompts it responds well to, and the shape of its replies are
@@ -12,14 +12,14 @@ operations on your live experiment.
    provider you connect. It can misread a request, act on the wrong subset, or
    fail outright on an experiment whose data or signals are unusual.
 
-   Use it where a wrong answer is cheap to notice and undo — exploring the
+   Use it where a wrong answer is cheap to notice and undo, exploring the
    grid, deriving a column, asking what a signal did. **Check what it did
    before relying on it**, especially for anything that changes data or the
    model. Everything it can do is also reachable by hand: quick filters, the
    grid's own selection and context menu, the left panel, the CLI console, and
    the SDK. Prefer those when the result has to be right the first time.
 
-   Feedback on what breaks is what stabilises it — please report it.
+   Feedback on what breaks is what stabilises it, please report it.
 
 
 Where you can use it
@@ -37,15 +37,15 @@ Two agent surfaces, one OpenCode server
 -----------------------------------------
 
 WeightsLab's agent capability is backed entirely by `OpenCode
-<https://opencode.ai>`_ — a local ``opencode serve`` process that WeightsLab
+<https://opencode.ai>`_, a local ``opencode serve`` process that WeightsLab
 starts (or reuses) for you. There is no separate OpenRouter/Ollama
 integration to configure: OpenCode itself is the provider layer, and its own
 config (``opencode auth login``, or the login modal described below) holds
-whatever credentials you use — OpenRouter, Anthropic, a local Ollama model,
+whatever credentials you use, OpenRouter, Anthropic, a local Ollama model,
 anything OpenCode supports.
 
 That one server backs **two very different agent surfaces**, and knowing
-which one you're talking to matters — everything on the rest of this page
+which one you're talking to matters, everything on the rest of this page
 describes the first one:
 
 .. list-table::
@@ -60,10 +60,10 @@ describes the first one:
        (``DataManipulationAgent``, ``weightslab/trainer/services/agent/agent.py``)
      - The landing-page chat (pre-experiment) and ``/loop`` (during an experiment)
    * - Toolset
-     - None — every mutating tool (``write``/``edit``/``patch``/``bash``) is
+     - None, every mutating tool (``write``/``edit``/``patch``/``bash``) is
        explicitly disabled on every call (``opencode_chat.py``'s
        ``_MUTATING_TOOLS``)
-     - Full toolset — bash, file read/write/edit/patch
+     - Full toolset, bash, file read/write/edit/patch
    * - Memory
      - ``self.history``, cleared/summarized by ``/clear`` and ``/compact``
      - An OpenCode session (server-side); cleared/summarized the same way, via
@@ -75,7 +75,7 @@ describes the first one:
 
 **During an active experiment, the only way to reach the frontend/OpenCode
 agent is** ``/loop`` **from the experiment agent bar.** The landing-page chat
-only exists pre-experiment — once you're connected to a running experiment,
+only exists pre-experiment, once you're connected to a running experiment,
 that surface is gone, and ``/loop`` (see the "``/loop`` reference" section
 near the end of this page) is the sole entry point to the same kind of agent.
 
@@ -103,7 +103,7 @@ Resolution order, last one wins:
    installed ``weightslab`` package is loaded first, if present).
 3. The first ``agent_config.yaml`` found, searched in this order:
 
-   - ``$AGENT_CONFIG_PATH`` — either the YAML file itself or a directory
+   - ``$AGENT_CONFIG_PATH``, either the YAML file itself or a directory
      containing ``.agent_config.yaml`` / ``agent_config.yaml``
    - ``agent_config.yaml`` inside the installed ``weightslab`` package
    - ``./agent_config.yaml`` in the current working directory
@@ -115,10 +115,10 @@ Resolution order, last one wins:
 
    The YAML **overrides** the environment, not the other way around. Comment a key
    out (as the shipped ``agent_config.yaml`` does for ``openrouter_api_key``) to let
-   the environment variable through — and keep real keys in ``.env`` /
+   the environment variable through, and keep real keys in ``.env`` /
    ``$OPENROUTER_API_KEY`` rather than in a file you might commit.
 
-Remote provider — OpenRouter
+Remote provider, OpenRouter
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. list-table::
@@ -175,7 +175,7 @@ Conversation memory (what's actually kept between turns)
 
 The agent's cross-turn memory is intentionally small: a flat list
 (``self.history``) of ``"User: <raw text>"`` / ``"Action: N ops executed"``
-lines, with only the **last 5 entries** fed into the next turn's prompt — no
+lines, with only the **last 5 entries** fed into the next turn's prompt, no
 structured record of which columns/tags/layers a prior turn actually touched,
 and it resets on backend restart or ``/reset``. This is *separate* from the
 intra-request chaining described above (which only helps within a single
@@ -183,7 +183,7 @@ multi-sentence request): a follow-up like *"now discard those samples"* in a
 **new** message has to work by the model re-reading the previous turn's own
 wording from that trimmed history, not from any structured state. It usually
 works because the original instruction text is preserved verbatim, but it's
-weaker than true memory — don't rely on it across many turns or for details a
+weaker than true memory, don't rely on it across many turns or for details a
 prior turn didn't literally say. ``test_agent_model_and_safety_unit.py``
 (``TestConversationHistory``) pins down the exact accumulate/trim contract,
 and ``test_agent_live_prompt_evaluation.py``
@@ -209,7 +209,7 @@ one shared environment variable:
 
 If ``OPENCODE_URL`` is set and reachable, the UI server adopts it directly
 instead of spawning a child; the backend SDK agent reads the same variable
-(``agent.py``'s ``_load_config``) — set it once and both sides talk to the one
+(``agent.py``'s ``_load_config``), set it once and both sides talk to the one
 server, so a model you authenticate once is available everywhere.
 Which model gets used, and how the two sides agree
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -285,13 +285,13 @@ Credentials and provider setup live in OpenCode itself, never in WeightsLab:
 
 or, from the browser, the landing page's login modal drives the same flow
 without a terminal. For a fully local setup, point OpenCode's own config at
-Ollama (or any other local provider it supports) — WeightsLab needs no
+Ollama (or any other local provider it supports), WeightsLab needs no
 changes on its side; it just asks OpenCode for whichever model you've
 selected.
 
 You can initialize the backend SDK agent three ways.
 
-Option 1 — Weights Studio UI (recommended)
+Option 1, Weights Studio UI (recommended)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The agent chat bar sits at the top of Weights Studio. When the agent is not yet
@@ -345,7 +345,7 @@ Or initialize at runtime, without restarting the experiment:
 Runtime ``agent init`` only accepts ``--provider openrouter``; the local provider is
 configured through the file settings below.
 
-Local provider — Ollama
+Local provider, Ollama
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 Everything stays on your machine: no API key, no traffic leaving the host. Useful
@@ -368,13 +368,13 @@ for air-gapped experiments and for keeping sample-level data local.
      - Host running the Ollama daemon.
    * - ``ollama_port``
      - ``11435``
-     - Daemon port. **Note the default is 11435, not Ollama's own 11434** — set it
+     - Daemon port. **Note the default is 11435, not Ollama's own 11434**, set it
        explicitly unless you started the daemon on 11435.
    * - ``fallback_to_local``
      - ``true`` (the shipped ``agent_config.yaml`` sets ``false``)
      - Set up Ollama even when ``provider`` is ``openrouter``.
 
-The Ollama settings are **config-file only** — unlike the OpenRouter ones they have
+The Ollama settings are **config-file only**, unlike the OpenRouter ones they have
 no environment-variable equivalent, so they must live in an ``agent_config.yaml``
 (use ``$AGENT_CONFIG_PATH`` to point at yours).
 
@@ -416,7 +416,7 @@ Using the agent effectively
 
 - **Use your own words for splits.** "train samples", "test data", "the
   inference split", "holdout" all resolve to the ``origin`` column
-  automatically — the agent maps your wording to whatever the dataset's actual
+  automatically, the agent maps your wording to whatever the dataset's actual
   split values are (``train_split``, ``test_loader``, ``inf_split``, …), so
   you never need to know the exact stored spelling.
 - **"A or B" on the same field → one condition, not two filters.** "Keep
@@ -512,7 +512,7 @@ The assistant enforces safe execution rules:
    ``wl.save_signals(..., log=True)`` (the flag that writes the per-sample
    history to the logger's DuckDB store). A sample with no recorded history is
    treated as *not matching* (its ``signal_history`` value is ``NaN``, so
-   comparisons are ``False``) — the query never errors, it just excludes those
+   comparisons are ``False``), the query never errors, it just excludes those
    rows.
 
 ``/loop`` reference
@@ -520,7 +520,7 @@ The assistant enforces safe execution rules:
 
 ``/loop``, typed into the **experiment agent bar**, is the other agent
 surface described at the top of this page: it starts a recurring check-in
-against a dedicated OpenCode session — the same kind of session the
+against a dedicated OpenCode session, the same kind of session the
 landing-page chat uses, with the same full toolset. It never touches the
 backend SDK agent directly.
 
@@ -532,38 +532,43 @@ backend SDK agent directly.
 
 - **Syntax**: ``/loop <N>m|<N>h <prompt>`` to start (minimum interval: 60s),
   ``/loop list`` to see running jobs, ``/loop stop <id>`` to cancel one.
-- **What it can do**: the loop's OpenCode session is told about the local
-  ``weightslab`` CLI, reachable over bash against the live training process:
+- **What it can do**: the loop's OpenCode session controls the live training
+  process through the ``weightslab cli`` console. The console is interactive,
+  so the loop pipes in one line per bash call (EOF ends the session), e.g.
+  ``echo "status" | weightslab cli``. The lines its system prompt calls out:
 
-  - ``weightslab pause`` / ``weightslab resume`` — freeze/resume weight updates
-  - ``weightslab discard <sample_id>`` — discard a sample by id
-  - ``weightslab agent query "<natural language>"`` — hands the request to the
-    **backend SDK agent's** own intent pipeline, e.g. ``weightslab agent
-    query "discard samples where loss > 5 and tag them hard_examples"``. This
-    is how the loop reaches back into the database/history: it can't ask the
-    backend agent directly, but it can drive it through the CLI.
-  - ``weightslab status`` — a snapshot of hyperparameters/model/training state
+  - ``pause`` / ``resume``, freeze/resume weight updates
+  - ``discard <sample_id>``, discard a sample by id
+  - ``agent query "<natural language>"``, hands the request to the
+    **backend SDK agent's** own intent pipeline, e.g. ``agent query "discard
+    samples where loss > 5 and tag them hard_examples"``. This is how the loop
+    reaches back into the database/history: it can't ask the backend agent
+    directly, but it can drive it through the console. The same verb builds
+    the experiment report (``agent query "Generate an experiment report."``);
+    later check-ins ask it to *update* that report rather than make a new one.
+  - ``status``, component names and model age only (no metric or
+    hyperparameter values; ask ``agent query`` for those)
 
-  These four are what the loop's system prompt explicitly calls out, but bash
-  access means any other ``weightslab`` CLI verb is reachable too — e.g.
-  ``weightslab report`` to generate a narrative report for the loop to read
-  and act on. It may also read/edit training code directly and attempt to
-  restart a crashed process via bash — this is best-effort (no supervisor or
+  These are console lines, not shell commands: there is no ``weightslab
+  status`` or ``weightslab pause``. Bash access means any other console verb
+  (see :doc:`weights_studio_cli/cli_console`) is reachable the same way. It
+  may also read/edit training code directly and attempt to
+  restart a crashed process via bash, this is best-effort (no supervisor or
   PID handoff): it looks for the process, stops it if still running, and
   re-launches from whatever it can determine (shell history, a run script,
   logs). There is no dedicated restart command.
 - **Concurrency cap**: at most 3 loops at once, shared across both chat
   surfaces (they hit the same registry). A 4th ``/loop start`` is rejected
-  with an error rather than silently stopping an older job — stop one first
+  with an error rather than silently stopping an older job, stop one first
   with ``/loop stop <id>``.
 - **Managing running jobs**: a panel pinned at the top of the chat-history
   window lists every running job with a live countdown to its next check-in,
-  and lets you edit a job's prompt/interval in place or stop it — no need to
+  and lets you edit a job's prompt/interval in place or stop it, no need to
   remember ``/loop stop <id>`` if the panel is in view. ``/loop list``/``/loop
   stop`` also work from the landing-page chat pre-experiment, hitting the
   same registry.
 - **Persistence**: a loop is tied to the running ``weightslab start`` process,
-  not the browser tab — it survives a page reload or closed tab, but not a
+  not the browser tab, it survives a page reload or closed tab, but not a
   full restart of the UI server.
 
 Workflow pattern
@@ -592,7 +597,7 @@ How it works (under the hood)
    return a structured JSON plan (a list of atomic steps).
 3. Safety coercions run on the plan: removal verbs become ``discarded`` flags,
    and any step targeting a protected existing column is refused.
-4. Each step is dispatched to the executor — dataframe ops mutate the shared
+4. Each step is dispatched to the executor, dataframe ops mutate the shared
    view (and persist to the ledger), while model steps reuse the same
    ``ManipulateWeights`` architecture path as the UI controls.
 

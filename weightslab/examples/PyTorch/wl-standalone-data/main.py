@@ -155,7 +155,7 @@ def main(argv=None) -> int:
     print(" DATA-ONLY standalone — attach with `weightslab cli`, UI with `weightslab start`")
     print(f" train={len(train_loader.dataset)} val={len(val_loader.dataset)} log_dir={log_dir}")
     print("=" * 70)
-    wl.start_training(timeout=3)
+    # wl.start_training(timeout=3)
 
     # 1) Curation pass: the tracked loader yields (inputs, ids, targets).
     to_tag: list = []

@@ -81,6 +81,25 @@ def _with_worker_init(kwargs: dict, num_workers: int) -> dict:
     return kwargs
 
 
+def _resolve_pin_memory(pin_memory: Optional[bool]) -> bool:
+    """Pin host memory only when an accelerator can use it.
+
+    Same test PyTorch's DataLoader iterator applies: without an accelerator it
+    drops pin_memory anyway, but first warns "'pin_memory' argument is set as
+    true but no accelerator is found" -- on every iterator it creates (each
+    epoch, eval pass and iterator reset). ``None`` means "pin if useful".
+    """
+    try:
+        accelerator = getattr(torch, "accelerator", None)
+        available = (accelerator.is_available() if accelerator is not None
+                     else torch.cuda.is_available())
+    except Exception:
+        available = False
+    if pin_memory is None:
+        return bool(available)
+    return bool(pin_memory) and bool(available)
+
+
 def _resolve_safe_num_workers(dataset: Any, num_workers: int, loader_name: Optional[str] = None) -> int:
     """Clamp worker count for datasets that cannot be pickled by Windows spawn."""
     try:
@@ -447,7 +466,7 @@ class DataLoaderInterface:
         shuffle: bool = False,
         num_workers: int = 0,
         drop_last: bool = False,
-        pin_memory: bool = True,
+        pin_memory: Optional[bool] = None,
         collate_fn: Optional[Any] = None,
         loader_name: Optional[str] = None,
         register: bool = True,
@@ -465,7 +484,9 @@ class DataLoaderInterface:
             shuffle: Whether to shuffle data if a Dataset is provided.
             num_workers: Number of worker processes for DataLoader.
             drop_last: Whether to drop the last incomplete batch.
-            pin_memory: Whether to use pinned memory for DataLoader.
+            pin_memory: Whether to use pinned memory for DataLoader. Default
+                (None): only when an accelerator is available; True is also
+                dropped without one, since PyTorch would ignore it and warn.
             collate_fn: Optional collate function for DataLoader.
             loader_name: Optional name for registration in the global ledger.
             register: Whether to register this interface in the global ledger.
@@ -552,6 +573,7 @@ class DataLoaderInterface:
                 drop_last=drop_last,
             )
             num_workers = _resolve_safe_num_workers(self.tracked_dataset, num_workers, loader_name)
+            pin_memory = _resolve_pin_memory(pin_memory)
 
             # Finally, construct dataloader using our batch_sampler
             self.dataloader = DataLoader(
@@ -1151,7 +1173,7 @@ class DataLoaderInterface:
                 shuffle = kwargs.pop("shuffle", False)
                 num_workers = kwargs.pop("num_workers", 0)
                 drop_last = kwargs.pop("drop_last", False)
-                pin_memory = kwargs.pop("pin_memory", False)
+                pin_memory = _resolve_pin_memory(kwargs.pop("pin_memory", False))
                 collate_fn = kwargs.pop("collate_fn", None)
                 kwargs.pop("sampler", None)
                 kwargs.pop("drop_last", None)
@@ -1243,7 +1265,7 @@ class DataLoaderInterface:
                 shuffle = kwargs.pop("shuffle", False)
                 num_workers = kwargs.pop("num_workers", 0)
                 drop_last = kwargs.pop("drop_last", False)
-                pin_memory = kwargs.pop("pin_memory", False)
+                pin_memory = _resolve_pin_memory(kwargs.pop("pin_memory", False))
                 collate_fn = kwargs.pop("collate_fn", None)
                 num_workers = _resolve_safe_num_workers(
                     self.tracked_dataset,

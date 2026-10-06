@@ -16,7 +16,10 @@ import importlib
 # package-init side effects below). The banner and logging utilities pull in no
 # heavy scientific stack.
 from .art import _BANNER
-from .utils.logs import setup_logging, set_log_directory, is_main_process
+from .utils.logs import (
+    setup_logging, set_log_directory, is_main_process, get_log_file_path,
+    flush_logs, ensure_logging_intact,
+)
 
 # --- Lazy re-exports (PEP 562) --------------------------------------------- #
 # The training API (`.src`, ledger, guards, seed_everything) transitively
@@ -157,11 +160,11 @@ if _IS_MAIN_PROCESS and grpc_tls_enabled and os.environ.get('WEIGHTSLAB_SKIP_SEC
 
         success, msg = manager.check_and_apply()
         if success:
-            logger.debug(f"Secure environment applied: {msg}")
+            logger.warning(f"Secure environment applied: {msg}")
         else:
-            logger.debug("Running in unsecured mode - no certs found. To set up: weightslab se")
+            logger.warning("Running in unsecured mode - no certs found. To set up: weightslab se")
     except Exception as e:
-        logger.debug(f"Secure environment check skipped: {e}")
+        logger.info(f"Secure environment check skipped: {e}")
 
 # Get Package Metadata. Resolve the version from the most authoritative source
 # available, so a live/editable checkout reports the CURRENT git tag rather than
@@ -249,6 +252,9 @@ __all__ = [
     "signal",
     "compute_signals",
     "set_log_directory",
+    "get_log_file_path",
+    "flush_logs",
+    "ensure_logging_intact",
 	"tag_samples",
   	"discard_samples",
   	"get_samples_by_tag",

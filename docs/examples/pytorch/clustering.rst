@@ -1,4 +1,4 @@
-Clustering — Face Recognition (PyTorch)
+Clustering, Face Recognition (PyTorch)
 =========================================
 
 .. raw:: html
@@ -19,7 +19,7 @@ The goal is to train an embedding network so that embeddings from the same
 person cluster together.
 
 This example shows WeightsLab used in a **contrastive / metric-learning**
-setting where there is no standard per-sample label — the signal of interest
+setting where there is no standard per-sample label, the signal of interest
 is the embedding distance.
 
 Integration walkthrough
@@ -47,7 +47,7 @@ The dataset yields image triplets ``(anchor, positive, negative)`` plus their
 stable UIDs. WeightsLab records which triplets the model has seen and lets you
 inspect the hardest negatives in the studio.
 
-2. Guard contexts — same as classification
+2. Guard contexts, same as classification
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: python

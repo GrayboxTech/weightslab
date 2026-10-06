@@ -379,7 +379,7 @@ def main():
 
     # ================
     # Training Loop
-    wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+    # wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     trainer = pl.Trainer(
         max_epochs=max_epochs,

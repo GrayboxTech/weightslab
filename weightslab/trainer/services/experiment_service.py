@@ -609,6 +609,15 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             # Reply
             if success:
                 logger.info(f"Successfully restored checkpoint: {experiment_hash}")
+                # A restore can change any per-sample column (tags, discards and, for
+                # a sibling root's run in multi-root mode, all of its stats): rebuild
+                # the grid view now; the partial refresh only syncs a few columns.
+                data_service = getattr(self, "data_service", None)
+                if data_service is not None:
+                    try:
+                        data_service._slowUpdateInternals(force=True)
+                    except Exception as e:
+                        logger.debug(f"Grid view refresh after restore failed: {e}")
                 self._log_audit(
                     "checkpoint_restore",
                     "success",

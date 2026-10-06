@@ -1,4 +1,4 @@
-# Interactivity for 100GB+ datasets — register of O(data) operations
+# Interactivity for 100GB+ datasets, register of O(data) operations
 
 Goal: every per-step and per-request operation should cost **O(change)** or
 **O(page)**, never **O(dataset)**. Today several do, so cost grows with the
@@ -18,7 +18,7 @@ Reference measurements (UltraEdit, 3,959,093 rows, ~19 cols, A10G box):
 | bare-torch step (no WL) | 1,162 ms → 20.66 samples/s |
 | with WL, no UI client | ~5.5 samples/s (**3.8× slower**) |
 | with WL + image requests | ~1.5 samples/s (**13.8× slower**) |
-| per-step signal write itself | **4 ms (0.34%)** — already fine |
+| per-step signal write itself | **4 ms (0.34%)**, already fine |
 | grid page latency (64 imgs) | p50 5.2 s, p95 9.6 s |
 
 The signal path is not the problem. Storage write-amplification and the view
@@ -26,20 +26,20 @@ rebuild are.
 
 ---
 
-## A. STORAGE — `data/h5_dataframe_store.py`
+## A. STORAGE, `data/h5_dataframe_store.py`
 
 `upsert()` **receives** only dirty rows but **implements** a full table
 replacement.
 
 | line | operation | cost |
 |---|---|---|
-| 693 | `_create_backup()` — full file copy **before every upsert** | O(file) |
-| 708 | `existing = store.select(key)` — read entire table | O(N) |
+| 693 | `_create_backup()`, full file copy **before every upsert** | O(file) |
+| 708 | `existing = store.select(key)`, read entire table | O(N) |
 | ~768 | `pd.concat([existing, delta])` | O(N) |
-| ~772 | `existing[~existing.index.duplicated()]` — dedupe all rows | O(N) |
+| ~772 | `existing[~existing.index.duplicated()]`, dedupe all rows | O(N) |
 | ~785 | `_decategorize_for_storage(existing)` | O(N) |
-| 801 | `store.remove(key)` — drop table | O(N) |
-| 804 | `store.append(..., data_columns=True)` — rewrite + index **every** column | O(N·cols) |
+| 801 | `store.remove(key)`, drop table | O(N) |
+| 804 | `store.append(..., data_columns=True)`, rewrite + index **every** column | O(N·cols) |
 | 846–883 | same read/remove/rewrite in the column-delete path | O(N) |
 
 **Amplification:** ~5 KB of changed signals per flush → ~200 MB written,
@@ -48,18 +48,18 @@ full-table rewrite about every 2 steps.
 
 Fix direction: append new rows; modify existing rows in place
 (`select_as_coordinates` + `table.modify_rows`). Backup incrementally, not per
-upsert. No `data_columns=True` — no `store.select()` in this file uses `where=`,
+upsert. No `data_columns=True`, no `store.select()` in this file uses `where=`,
 so those per-column indexes are built and never read.
 
 *(A previous attempt to narrow `data_columns` broke the write path entirely —
 678 upsert failures, zero persisted data. Any change here needs a
 write→read→assert-contents check, not just a timing check.)*
 
-## B. SERVING — `trainer/services/data_service.py`
+## B. SERVING, `trainer/services/data_service.py`
 
 `_pull_into_all_data_view_df()` (line 938) runs several full-frame passes.
 
-**Already fixed on dev — do not re-report as wins:**
+**Already fixed on dev, do not re-report as wins:**
 - the collapse no longer re-enters `get_combined_df()`; the pulled frame is
   passed in, so the frame is copied once, not twice
 - `array_proxy` no longer does a per-cell `.apply(convert_to_proxy)` (was
@@ -70,12 +70,12 @@ Remaining, to be **re-measured on this branch**:
 | line | operation | cost (measured @4M) |
 |---|---|---|
 | 946 | `get_combined_df()` → `dataframe_manager:2140 self._df.copy()` | 101 ms–1.2 s |
-| — | `get_collapse_annotations_to_samples_df(df)` — groupby collapse | 6,326 ms* |
-| — | `safe_reset_index(df)` | 1,912 ms |
-| — | `set_index([origin, sample_id])` | O(N) |
+|, | `get_collapse_annotations_to_samples_df(df)`, groupby collapse | 6,326 ms* |
+|, | `safe_reset_index(df)` | 1,912 ms |
+|, | `set_index([origin, sample_id])` | O(N) |
 | 3636 | `updated_df.reindex(target_order)` | 290 ms |
 
-Callers — each one is a full O(N) rebuild: lines **440, 851, 3593, 4605, 4626**,
+Callers, each one is a full O(N) rebuild: lines **440, 851, 3593, 4605, 4626**,
 reached from `GetDataSamples`, `GetMetaData`, `EditDataSample`, `GetDataSplits`.
 
 Held under `_update_lock`, which the trainer also needs → measured lock holds of
@@ -87,7 +87,7 @@ is exactly 1:1) yet still costs 6.3 s per rebuild.
 Fix direction: serve a page from the source frame by index (O(page)); rebuild
 the full view only for genuinely global operations (histogram, global sort);
 apply deltas rather than rebuilding; never hold the writer lock across a
-rebuild — build off-lock and swap the reference.
+rebuild, build off-lock and swap the reference.
 
 ## C. OTHER FULL SCANS
 
@@ -95,10 +95,10 @@ rebuild — build off-lock and swap the reference.
 |---|---|
 | `dataframe_manager:1875` `data_snapshot.iterrows()` | input is O(change), but row-wise Python per flush |
 | `dataframe_manager:2400` `.apply(lambda …)` | per cell |
-| `data_service:1200` `_compute_natural_sort_stats` | builds a list of one Series per row (4M objects). Gated off (`compute_natural_sort=False`) — latent |
-| `data_service:538` PreviewCache | bounded by `WL_MAX_PREVIEW_CACHE_SIZE` — OK |
+| `data_service:1200` `_compute_natural_sort_stats` | builds a list of one Series per row (4M objects). Gated off (`compute_natural_sort=False`), latent |
+| `data_service:538` PreviewCache | bounded by `WL_MAX_PREVIEW_CACHE_SIZE`, OK |
 
-## D. ALREADY O(change) — keep
+## D. ALREADY O(change), keep
 
 - `self._pending` dirty-row set (`dataframe_manager:95, 751, 761`)
 - flush work set: `work = list(self._pending)` (`:1827`)
@@ -117,13 +117,13 @@ reported as:
 1. wall-clock for the 41 steps, vs the bare-torch floor
 2. bytes written to H5 for those steps
 3. grid-page latency (64 images) and training throughput **while** serving
-4. **ledger contents verified** — signal columns present, measured-row count
+4. **ledger contents verified**, signal columns present, measured-row count
 
 (4) is not optional: a previous "10× win" was writes silently failing.
 
 ---
 
-# E. Triage — which call sites need a full reconstruction
+# E. Triage, which call sites need a full reconstruction
 
 `_slowUpdateInternals()` rebuilds the whole view: `copy → collapse → reset_index
 → set_index → reindex`. It has 18 call sites, and almost none of them need
@@ -132,7 +132,7 @@ that. Most just want **fresh values for rows the trainer touched**, which is
 
 `_fastUpdateInternals()` applies only dirty rows, via a maintained
 `sample_id → position` map (`_rebuild_view_pos_map`), and returns `False` —
-falling back to the full rebuild — whenever it cannot safely apply:
+falling back to the full rebuild, whenever it cannot safely apply:
 
 - no view yet, or no position map (first build)
 - a dirty `sample_id` absent from the map (new rows ⇒ structural change)
@@ -142,14 +142,14 @@ So the worst case is today's behaviour, never wrong data.
 
 | site | routing | why |
 |---|---|---|
-| `_bg_view_refresh` | **fast** | exists purely to refresh values after a stale read — the textbook differential case, and the one that holds `_lock` against the trainer |
+| `_bg_view_refresh` | **fast** | exists purely to refresh values after a stale read, the textbook differential case, and the one that holds `_lock` against the trainer |
 | `_process_get_data_samples` | **fast** | grid fetch needs current values, not a new frame |
 | `_compute_custom_signals` | **fast** | writes new signal *values*; schema unchanged |
 | `GetDataSplits` | **fast** | read-only summary |
 | `EditDataSample` ×5 | **fast** | per-sample value edits |
-| `EditDataSample` ×3 (`df.modify`, `df.drop_column`) | **full** | changes the schema — differential cannot add/remove columns |
+| `EditDataSample` ×3 (`df.modify`, `df.drop_column`) | **full** | changes the schema, differential cannot add/remove columns |
 | `ApplyDataQuery` `@reset`/`@clear` | **full** | clears `_is_filtered` to restore the full universe; a differential updates values but cannot restore *dropped rows* |
-| `ApplyDataQuery` filter + agent paths | **full** (deferred) | a forced rebuild preserves `_is_filtered` (`:3691`), so swapping in a differential changes which rows the user sees. Rare, user-initiated, low perf value, high blast radius — not worth the risk until the filter semantics are pinned down |
+| `ApplyDataQuery` filter + agent paths | **full** (deferred) | a forced rebuild preserves `_is_filtered` (`:3691`), so swapping in a differential changes which rows the user sees. Rare, user-initiated, low perf value, high blast radius, not worth the risk until the filter semantics are pinned down |
 | `_compute_natural_sort_stats` | **full** | gated off (`compute_natural_sort=False`); latent |
 | `_manual_save_data_state` | **full** | explicit user save; correctness over speed |
 
@@ -159,7 +159,7 @@ A/B possible from a single tree.
 
 ## Why the no-client benchmark cannot show this
 
-A 41-step run with no UI client attached records **0 rebuild events** — nothing
+A 41-step run with no UI client attached records **0 rebuild events**, nothing
 calls `_slowUpdateInternals` at all, so the fast path has nothing to improve and
 correctly measures as no change. The rebuild cost only materialises when a
 client is attached, which is the case that measured **3.7× slower** with p50

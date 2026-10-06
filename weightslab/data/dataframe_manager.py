@@ -10,13 +10,16 @@ import pandas as pd
 import torch
 
 from datetime import datetime
-from typing import Dict, Sequence, Any, List
+from pathlib import Path
+from typing import Dict, Sequence, Any, List, Iterable, Optional
 
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.data.h5_array_store import H5ArrayStore
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.data.array_proxy import ArrayH5Proxy, convert_dataframe_to_proxies
+from weightslab.data.h5_recovery import load_latest_data_snapshot
 from weightslab.data.data_utils import _filter_columns_by_patterns, get_mask
+from weightslab.utils.tools import widen_column_for
 from weightslab.backend.ledgers import get_dataloaders, get_dataloader
 from weightslab.data.sample_stats import (
     SampleStats,
@@ -29,6 +32,14 @@ from weightslab.backend.ledgers import get_hyperparams
 
 pd.set_option('future.no_silent_downcasting', True)
 logger = logging.getLogger(__name__) # Set up logger
+
+# Per-sample signals land in the ledger under this prefix (``save_signals``
+# writes ``signals//<name>`` for the signal the logger records as ``<name>``),
+# which is how a column is mapped back onto its history curve.
+SIGNAL_COLUMN_PREFIX = "signals//"
+
+# Stand-in for a sample with no recorded history — read-only, never mutated.
+_EMPTY_SAMPLE_STATE: Dict[str, Any] = {"signals": {}}
 
 
 def label_is_empty(value) -> bool:
@@ -213,11 +224,32 @@ class LedgeredDataFrameManager:
             SampleStats.Ex.PREDICTION_RAW.value,
             SampleStats.Ex.TARGET.value,
         ]
+        # Tags/discards to restore per loader after an unreadable data.h5 was
+        # set aside (see set_store / _apply_recovery_snapshot).
+        self._recovery_snapshot = None
 
     def set_store(self, store: H5DataFrameStore):
         with self._lock:
             if self._store is None:
                 self._store = store
+                # A data.h5 HDF5 can't open at all is set aside. It held the user's
+                # edits, so restore tags/discards from the newest checkpoint data
+                # snapshot -- per loader, as each registers its rows.
+                if store.quarantine_if_unopenable() is not None:
+                    snap, info = load_latest_data_snapshot(store.get_path().parent)
+                    self._recovery_snapshot = snap
+                    if snap is None:
+                        logger.error(
+                            "[LedgeredDataFrameManager] No checkpoint data snapshot to restore "
+                            "from: tags and discards start empty."
+                        )
+                    else:
+                        logger.warning(
+                            f"[LedgeredDataFrameManager] Restoring tags and discards from the "
+                            f"checkpoint snapshot {info['path']} (taken {info['timestamp']}); "
+                            "edits made after it are lost, and per-sample signals fill back in "
+                            "as training runs."
+                        )
                 # Auto-create array store in SAME directory (shared, both in parent)
                 if self._array_store is None:
                     # data.h5 is already in checkpoints/data/, so arrays.h5 goes there too
@@ -852,6 +884,115 @@ class LedgeredDataFrameManager:
                         self._df = self._df.sort_index()
             else:
                 logger.warning(f"[LedgeredDataFrameManager] Loaded data missing 'sample_id' column for origin={origin}. Skipping load.")
+        self._apply_recovery_snapshot(origin)
+
+    def _apply_recovery_snapshot(self, origin) -> None:
+        """Restore *origin*'s tags/discards from the snapshot loaded when data.h5
+        had to be set aside. Only rows this loader registered are touched, keyed
+        by (sample_id, annotation_id), so the snapshot needs no loader name."""
+        snap = self._recovery_snapshot
+        if snap is None or snap.empty or self._df is None or self._df.empty:
+            return
+        col = SampleStatsEx.ORIGIN.value
+        if col not in self._df.columns:
+            return
+        mine = self._df.index[(self._df[col] == origin).to_numpy()]
+        if not len(mine):
+            return
+        by_key = {(str(s), int(a)): (s, a) for s, a in zip(mine.get_level_values(0), mine.get_level_values(1))}
+        keys = [(str(s), int(a)) for s, a in zip(snap.index.get_level_values(0), snap.index.get_level_values(1))]
+        take = np.array([k in by_key for k in keys], dtype=bool)
+        if not take.any():
+            return
+        rows = snap[take].copy()
+        rows.index = pd.MultiIndex.from_tuples([by_key[k] for k, t in zip(keys, take) if t],
+                                               names=mine.names)
+        self._recovery_snapshot = snap[~take]
+        self.upsert_df(rows, origin, force_flush=True)
+        logger.warning(
+            f"[LedgeredDataFrameManager] Restored tags/discards for "
+            f"{rows.index.get_level_values(0).nunique()} sample(s) of '{origin}' from the "
+            "checkpoint snapshot."
+        )
+
+    def import_from_store(self, store: H5DataFrameStore | str | Path, origins: Optional[Iterable[str]] = None) -> int:
+        """Replace this ledger's per-sample stats with the ones persisted in
+        another root's H5 store -- e.g. a sibling experiment restored from a
+        multi-root viewer: last signal values, predictions, nb_seen, tags,
+        discarded. ``store`` is only read.
+
+        Only origins already registered here are imported, and only for samples
+        this ledger knows. Signal and tag columns this ledger holds but
+        ``store`` lacks belong to another run, so they are cleared on the
+        imported rows, and dropped once no row holds a value. Array references
+        are skipped: their arrays live in the other root's arrays.h5. Returns
+        the number of rows imported.
+        """
+        if not isinstance(store, H5DataFrameStore):
+            store = H5DataFrameStore(Path(store))
+        if not store.exists():
+            return 0
+
+        with self._lock:
+            if self._df.empty or SampleStats.Ex.ORIGIN.value not in self._df.columns:
+                return 0
+            registered = {str(o) for o in self._df[SampleStats.Ex.ORIGIN.value].dropna().unique()}
+            known_samples = set(self._df.index.get_level_values(0))
+        wanted = registered if origins is None else registered & {str(o) for o in origins}
+
+        # Bring the full category sets of categorical tags along.
+        registry = store.load_tag_registry()
+        if registry:
+            with self._lock:
+                for name, cats in registry.items():
+                    self._merge_categories(name, cats)
+
+        run_column_prefixes = ("signals", "SIGNALS", f"{SampleStats.Ex.TAG.value}:", "TAG:")
+        stale_columns = set()
+        imported = 0
+        for origin in sorted(wanted):
+            loaded = store.load(origin)  # read-only, unlike load_all()
+            if loaded.empty or "sample_id" not in loaded.columns:
+                continue
+            if "annotation_id" in loaded.columns:
+                loaded = loaded.set_index(['sample_id', 'annotation_id'])
+            else:
+                loaded = self._expand_dataframe_with_annotations(loaded.set_index("sample_id"))
+            loaded.index = pd.MultiIndex.from_arrays(
+                [pd.Index([self._normalize_sample_id(v) for v in loaded.index.get_level_values(0)]),
+                 loaded.index.get_level_values(1)],
+                names=['sample_id', 'annotation_id'],
+            )
+            loaded = loaded[loaded.index.get_level_values(0).isin(known_samples)]
+            if loaded.empty:
+                continue
+
+            for col in [c for c in self._array_columns if c in loaded.columns]:
+                if loaded[col].dtype == object and loaded[col].map(lambda v: isinstance(v, str) and '.h5:/' in v).any():
+                    loaded = loaded.drop(columns=col)
+
+            with self._lock:
+                stale = [c for c in self._df.columns
+                         if c not in loaded.columns and str(c).startswith(run_column_prefixes)]
+                for col in stale:
+                    loaded[col] = False if pd.api.types.is_bool_dtype(self._df[col].dtype) else np.nan
+            stale_columns.update(stale)
+
+            self.upsert_df(loaded, origin=origin, force_flush=True)
+            imported += len(loaded)
+
+        # Drop the other run's columns that no row holds anymore (a cleared tag holds False)
+        with self._lock:
+            for col in stale_columns:
+                if col not in self._df.columns:
+                    continue
+                values = self._df[col].astype(object)
+                held = values.notna()
+                if not str(col).startswith(("signals", "SIGNALS")):
+                    held &= values != False
+                if not held.any():
+                    self._df.pop(col)
+        return imported
 
     def upsert_df(self, df_local: List | pd.DataFrame, origin: str = None, force_flush: bool = False):
         if df_local is None or (isinstance(df_local, pd.DataFrame) and df_local.empty) or len(df_local) == 0:
@@ -970,6 +1111,7 @@ class LedgeredDataFrameManager:
                                         _vals = pd.to_numeric(_vals, errors="coerce")
                                 except Exception:
                                     pass
+                                _vals = widen_column_for(self._df, _ci, _vals)
                                 self._df.iloc[_pos, _ci] = _vals
                         else:
                             self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
@@ -1845,6 +1987,106 @@ class LedgeredDataFrameManager:
 
         return values
 
+    def rewind_to_step(self, step: int, per_sample_state: Dict[Any, Dict[str, Any]],
+                       reset_predictions: bool = True) -> int:
+        """Roll per-sample state back to what it was at model age *step*.
+
+        A checkpoint restore can move the model's age backwards, but the ledger
+        keeps whatever the later steps wrote: the signal values, the seen
+        counters and the stored predictions all still describe a model state
+        that no longer exists. Every sample whose ``last_seen`` is ahead of
+        *step* is rewritten from *per_sample_state*
+        (``LoggerQueue.get_per_sample_state_at_step``):
+
+        * each ``signals//<name>`` column gets the last value that signal held
+          at or before *step*, or NaN when it has none that old;
+        * ``last_seen`` / ``nb_seen`` are recomputed from the same history;
+        * ``prediction`` / ``prediction_raw`` are cleared, because they came out
+          of the model state the restore discarded — the sample has no
+          prediction from the restored one until it is seen again.
+
+        Samples already at or behind *step* are left alone: their state was
+        written by a step the restored model still owns.
+
+        Per-instance rows (``annotation_id >= 1``) are not rewound — their
+        values live in the per-instance history, which this does not read.
+
+        Args:
+            step: The model age that was restored.
+            per_sample_state: ``{sample_id: {"signals": {...}, "last_seen": int,
+                "nb_seen": int}}``. A sample missing from it was never seen at
+                or before *step*, so it is reset to "never seen".
+            reset_predictions: Set False to keep the stored predictions.
+
+        Returns:
+            The number of samples rewound.
+        """
+        step = int(step)
+        last_seen_col = SampleStats.Ex.LAST_SEEN.value
+        nb_seen_col = SampleStats.Ex.NB_SEEN.value
+
+        with self._lock:
+            if self._df.empty or last_seen_col not in self._df.columns:
+                return 0
+
+            idx = self._df.index
+            is_multi = isinstance(idx, pd.MultiIndex) and idx.nlevels >= 2
+            # Sample-level columns live on annotation_id 0 only (see
+            # _expand_records_to_multi_index), so instance rows carry no
+            # last_seen to compare and must not be rewritten here.
+            on_sample_row = (np.asarray(idx.get_level_values(1) == 0) if is_multi
+                             else np.ones(len(idx), dtype=bool))
+            # NaN compares False, so a sample that was never seen stays untouched.
+            # Forced to float64 because last_seen can be a nullable Int64 column,
+            # whose pd.NA has no numpy equivalent to compare against.
+            last_seen = pd.to_numeric(self._df[last_seen_col], errors="coerce").to_numpy(
+                dtype="float64", na_value=np.nan)
+            ahead = on_sample_row & (last_seen > step)
+            if not ahead.any():
+                return 0
+
+            stale_index = idx[ahead]
+            sample_ids = list(stale_index.get_level_values(0) if is_multi else stale_index)
+            signal_columns = [c for c in self._df.columns
+                              if str(c).startswith(SIGNAL_COLUMN_PREFIX)]
+            prediction_columns = [c for c in SampleStats.MODEL_INOUT_LIST
+                                  if c != SampleStats.Ex.TARGET.value and c in self._df.columns]
+
+        defaults = SampleStats.DEFAULTS
+        updates: Dict[str, list] = {}
+        for column in signal_columns:
+            metric_name = str(column)[len(SIGNAL_COLUMN_PREFIX):]
+            updates[column] = [
+                per_sample_state.get(sid, _EMPTY_SAMPLE_STATE)["signals"].get(metric_name, np.nan)
+                for sid in sample_ids
+            ]
+        updates[last_seen_col] = [
+            int(per_sample_state.get(sid, _EMPTY_SAMPLE_STATE).get(
+                "last_seen", defaults[last_seen_col]))
+            for sid in sample_ids
+        ]
+        updates[nb_seen_col] = [
+            int(per_sample_state.get(sid, _EMPTY_SAMPLE_STATE).get(
+                "nb_seen", defaults[nb_seen_col]))
+            for sid in sample_ids
+        ]
+        if reset_predictions:
+            for column in prediction_columns:
+                updates[column] = [None] * len(sample_ids)
+
+        frame = pd.DataFrame(updates, index=stale_index)
+        # Object dtype, so `None` reaches the ledger as "no prediction" instead
+        # of being coerced into whatever the column already holds.
+        for column in (prediction_columns if reset_predictions else []):
+            frame[column] = frame[column].astype(object)
+
+        self.upsert_df(frame, force_flush=True)
+        logger.info(
+            f"Rewound {len(sample_ids)} sample(s) to step {step}: "
+            f"{len(signal_columns)} signal column(s), last_seen/nb_seen recomputed"
+            f"{', predictions cleared' if reset_predictions and prediction_columns else ''}")
+        return len(sample_ids)
+
     def get_row(self, origin: str, sample_id: int, annotation_id: int = None) -> pd.Series | pd.DataFrame | None:
         """Get row(s) by sample_id and optional annotation_id.
 
@@ -2434,6 +2676,17 @@ class LedgeredDataFrameManager:
                 logger.debug(f'[{datetime.now().strftime("%H:%M:%S.%f")[:-3]}] [LedgeredDataFrameManager] Flushed {written} rows (origin={origin}) to H5 store.')
             except Exception as e:
                 logger.error(f"[LedgeredDataFrameManager] Error flushing to H5: {e}")
+        # The store set an unreadable data.h5 aside mid-run. The in-memory table
+        # is complete (and newer than any checkpoint snapshot), so rewrite every
+        # row into the fresh file on the next flush.
+        if getattr(self._store, "needs_full_rewrite", False):
+            self._store.needs_full_rewrite = False
+            all_ids = list(self._df.index.get_level_values(0).unique()) if self._df is not None else []
+            self.mark_dirty_batch(all_ids, force_flush=True)
+            logger.warning(
+                f"[LedgeredDataFrameManager] data.h5 was set aside; rewriting all "
+                f"{len(all_ids)} samples from memory into a fresh file."
+            )
 
     def _optimize_dataframe_memory(self, df: pd.DataFrame, categorical_tags: Dict[str, List[str]] | None = None, columns=None) -> pd.DataFrame:
         """Optimize dataframe memory by converting repetitive string columns to categorical.

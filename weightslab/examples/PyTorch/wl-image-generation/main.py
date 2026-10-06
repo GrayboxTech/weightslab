@@ -481,7 +481,7 @@ if __name__ == "__main__":
 
     # ================
     # Training Loop
-    wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+    # wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     # Training runs until YOU stop it -- from the studio's pause button, the CLI,
     # or Ctrl+C. itertools.count() rather than range(training_steps_to_do): a

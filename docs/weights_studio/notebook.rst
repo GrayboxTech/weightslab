@@ -10,7 +10,7 @@ Embedded experiment notebook
 Weights Studio has a Jupyter-like notebook panel built into the UI itself,
 opened via the notebook button just left of the logo. Unlike a standalone
 Jupyter server, it runs in a **shared in-process kernel inside the training
-backend** — every cell sees the exact same live objects your training script
+backend**, every cell sees the exact same live objects your training script
 does (the tracked dataframe ``df``, the model, the checkpoint manager, and
 the live hyperparameters dict), with no serialization or IPC in between.
 
@@ -28,8 +28,8 @@ How it works
 
 - The button is disabled until a backend connects, then becomes clickable.
 - The notebook document persists as ``notebook.ipynb`` under the experiment's
-  ``root_log_dir``. Reopening the panel — even after restarting the UI,
-  as long as it points at the same experiment — reloads the same cells,
+  ``root_log_dir``. Reopening the panel, even after restarting the UI,
+  as long as it points at the same experiment, reloads the same cells,
   their source, and their last-run outputs.
 - Every cell runs against the training process's ONE shared kernel: only one
   cell executes at a time. Clicking Run on a second cell while another is
@@ -42,7 +42,7 @@ How it works
 Cell types
 ----------
 
-Cells can be **code** or **markdown** — toggle a cell's type with the small
+Cells can be **code** or **markdown**, toggle a cell's type with the small
 button in its gutter:
 
 - **Code cells** execute against the shared kernel as described above.
@@ -53,7 +53,7 @@ button in its gutter:
 Asking the agent for code
 --------------------------
 
-A cell whose source starts with ``>`` is not executed as Python — it's sent
+A cell whose source starts with ``>`` is not executed as Python, it's sent
 to the AI agent as a natural-language request for code:
 
 .. code-block:: text
@@ -68,7 +68,7 @@ drop the marker and finish the prompt. Any plain code left in the same cell
 below the ``>`` lines is sent to the agent as extra context, not executed.
 
 If a cell's last run raised an error, an **"AI" debug button** appears on its
-output — click it to send the code and traceback back to the agent and ask
+output, click it to send the code and traceback back to the agent and ask
 for a fix, without retyping it as a ``>`` prompt yourself.
 
 Example
@@ -87,30 +87,30 @@ Followed by, in a second cell:
    > Plot a histogram of the per-sample loss for the current epoch,
    > highlighting samples tagged "hard_examples" in red.
 
-Running that second cell doesn't execute anything yet — it fills the cell
+Running that second cell doesn't execute anything yet, it fills the cell
 with the agent's generated ``matplotlib`` code, which you then run to see
 the plot rendered inline in the cell's output.
 
 What a cell can actually do
 ----------------------------
 
-Every cell shares the *same live objects* the training loop uses — but "same
+Every cell shares the *same live objects* the training loop uses, but "same
 objects" doesn't mean "same guardrails" for every one of them. Concretely:
 
-- **Reading anything is unrestricted** — ``df``, ``model``, ``hp`` (the live
+- **Reading anything is unrestricted**, ``df``, ``model``, ``hp`` (the live
   hyperparameters dict), the checkpoint manager, and any importable module in
   the process are all fair game.
-- **Tagging, discarding, and evaluation work directly** — ``wl.tag_samples(...)``,
+- **Tagging, discarding, and evaluation work directly**, ``wl.tag_samples(...)``,
   ``wl.discard_samples(...)``, ``wl.set_categorical_tag(...)``,
   ``wl.run_pending_evaluation(...)`` etc. mutate the live ledger/dataframe
   immediately, no different from calling them in your training script.
-- **Editing ``hp`` in place changes training** — e.g. ``hp['lr'] = 0.001``
+- **Editing ``hp`` in place changes training**, e.g. ``hp['lr'] = 0.001``
   genuinely takes effect the next time the training loop reads that key,
   since it's the exact same dict object, not a copy.
 - **Setting ``hp['is_training'] = False`` does *not* pause training.** This is
   a real gap, not a design choice you're missing: the sync path that would
   drive the pause controller from that flag isn't wired up. Use the UI's
-  play/pause button, or the chat agent, to actually pause/resume a run — a
+  play/pause button, or the chat agent, to actually pause/resume a run, a
   notebook cell can reach the same effect only by importing the pause
   controller directly (``from weightslab.components.global_monitoring import
   pause_controller; pause_controller.pause()``), which works but bypasses the
@@ -119,7 +119,7 @@ objects" doesn't mean "same guardrails" for every one of them. Concretely:
   that opens a file for writing, or deletes/moves/renames one, is silently
   redirected under ``root_log_dir`` if the path it named was outside it.
   This is a best-effort guard against an accidental ``rm -rf`` or a stray
-  absolute path in generated code — **not** a security boundary against a
+  absolute path in generated code, **not** a security boundary against a
   user deliberately trying to escape it (nothing stops importing ``os`` and
   working around it), and it only applies to files, not to any other
   capability listed above.
@@ -153,5 +153,5 @@ Turning it off
 ---------------
 
 Set ``ENABLE_NOTEBOOK=0`` before ``weightslab start`` to remove both the
-button and the window entirely (dev server: ``VITE_ENABLE_NOTEBOOK`` — see
+button and the window entirely (dev server: ``VITE_ENABLE_NOTEBOOK``, see
 the *Frontend runtime feature toggles* table above).

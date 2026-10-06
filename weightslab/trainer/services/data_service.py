@@ -29,7 +29,7 @@ except ImportError:
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.data.dataframe_manager import (
     merge_instance_labels, fill_missing_labels)
-from weightslab.utils.tools import safe_reset_index
+from weightslab.utils.tools import safe_reset_index, widen_column_for
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.proto.experiment_service_pb2 import SampleEditType
 from weightslab.components.global_monitoring import pause_controller
@@ -4341,7 +4341,12 @@ class DataService:
         _take = _src[_rows]
         for c in sub.columns:
             _ci = view.columns.get_loc(c)
-            view.iloc[_rows, _ci] = sub[c].to_numpy()[_take]
+            _vals = sub[c].to_numpy()[_take]
+            # The view's column may be narrower than the source's now (int ->
+            # floats, float32 -> values it can't hold): widen it first rather
+            # than let pandas do it implicitly with a FutureWarning.
+            _vals = widen_column_for(view, _ci, _vals)
+            view.iloc[_rows, _ci] = _vals
         return True
 
     def _slowUpdateInternals(self, force: bool = False, reset_view: bool = False) -> None:

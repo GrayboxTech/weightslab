@@ -1,4 +1,4 @@
-Generation / Anomaly Detection — MVTec (PyTorch)
+Generation / Anomaly Detection, MVTec (PyTorch)
 =================================================
 
 .. raw:: html
@@ -12,7 +12,7 @@ Generation / Anomaly Detection — MVTec (PyTorch)
      <span class="wl-eg-tag">reconstruction</span>
    </div>
 
-**Example:** ``weightslab/examples/PyTorch/wl-generation/main.py``
+**Example:** ``weightslab/examples/PyTorch/wl-image-generation/main.py``
 
 **Task:** Unsupervised anomaly detection on MVTec capsule images with a
 multi-task UNet (classification head + reconstruction head + contrastive loss).
@@ -39,7 +39,7 @@ Integration walkthrough
 
 ``compute_dependencies=False`` skips the static dependency graph computation
 for the wrapped model. Use this when the model has dynamic control flow,
-multiple outputs, or cannot be traced by ``torch.fx`` — common in
+multiple outputs, or cannot be traced by ``torch.fx``, common in
 encoder-decoder architectures.
 
 2. Dataset with paired samples

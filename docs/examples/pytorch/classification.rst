@@ -1,4 +1,4 @@
-Classification — MNIST (PyTorch)
+Classification, MNIST (PyTorch)
 =================================
 
 .. raw:: html
@@ -137,7 +137,7 @@ disables gradient tracking in the WeightsLab internals.
    )
 
 ``wl.save_signals`` lets you persist any per-sample tensor that does not
-naturally fit into a wrapped criterion or metric — complementary scores,
+naturally fit into a wrapped criterion or metric, complementary scores,
 debug values, custom distances, etc.
 
 7. Start services

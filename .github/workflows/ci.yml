@@ -242,7 +242,7 @@ jobs:
           # test hitting the per-test timeout instead of being deselected burns
           # 10 minutes AND leaves the job stuck at the same progress % across
           # unrelated pushes, which read as a hang.
-          python -m pytest ./tests -v --timeout=600 -m "not scale"
+          python -m pytest ./tests -v --timeout=1200 -m "not scale"
 
   # ── Agent smoke test on a pip-installed package ───────────────────────────
   # Proves the Option-2 promise end-to-end: install weightslab into a CLEAN

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Iterable, Optional, Union
 
 from weightslab.data.sample_stats import SampleStats
+from weightslab.data.h5_recovery import is_file_corruption_error, quarantine_file, unopenable_reason
 
 
 logger = logging.getLogger(__name__) # Initialize logger
@@ -162,6 +163,10 @@ class H5DataFrameStore:
         # In-memory copy of {tag_name: [categories]} so upsert can apply the full
         # category set without re-reading the file (which would re-enter the lock).
         self._tag_registry: dict = {}
+        # Set when an unopenable data.h5 was moved aside (see quarantine_if_unopenable);
+        # needs_full_rewrite asks the manager to rewrite every row into the fresh file.
+        self.quarantined_path: Optional[Path] = None
+        self.needs_full_rewrite = False
 
     # ------------------------------------------------------------------
     # Helpers
@@ -818,11 +823,14 @@ class H5DataFrameStore:
                         if key in store and self._try_inplace(store, key, df_norm):
                             return len(df_norm)
 
-                        # Nothing has been written yet in this call; flush so the
-                        # copy below captures a consistent on-disk file.
-                        store.flush()
-                        backup_path = self._create_backup()
+                    # Back up with the store CLOSED (nothing has been written yet in
+                    # this call, and closing flushes): on Windows HDF5 locks the file
+                    # it holds open, so copying it from a second handle fails with
+                    # "Permission denied" and the rewrite below ran without a backup.
+                    # The inter-process lock above is still held.
+                    backup_path = self._create_backup()
 
+                    with pd.HDFStore(str(self._path), mode="a") as store:
                         existing = pd.DataFrame()
 
                         # Try to load existing data. A ValueError can surface from a
@@ -942,6 +950,11 @@ class H5DataFrameStore:
                     # Attempt restore from backup
                     if backup_path:
                         self._restore_backup(backup_path)
+                    # A file HDF5 can't open at all never recovers and fails every
+                    # later write: set it aside so the next flush writes a fresh one
+                    # (the manager then rewrites every row from memory).
+                    if is_file_corruption_error(exc) and self._quarantine_if_unopenable_locked() is not None:
+                        self.needs_full_rewrite = True
                     return 0
                 finally:
                     # Clean up backup after successful write
@@ -950,6 +963,37 @@ class H5DataFrameStore:
                             backup_path.unlink()
                         except Exception:
                             pass
+
+    def quarantine_if_unopenable(self) -> Optional[Path]:
+        """Move data.h5 aside if HDF5 can't open it at all; returns the new path.
+
+        Such a file fails every later read and write. It is kept (renamed
+        ``data.h5.corrupt-<time>``) and the caller rebuilds the table: the
+        manager restores tags/discards from the newest checkpoint snapshot.
+        A busy/locked file is never moved.
+        """
+        with self._local_lock:
+            with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout,
+                                       poll_interval=self._poll_interval):
+                return self._quarantine_if_unopenable_locked()
+
+    def _quarantine_if_unopenable_locked(self) -> Optional[Path]:
+        reason = unopenable_reason(self._path)
+        if reason is None:
+            return None
+        moved = quarantine_file(self._path)
+        if moved is None:
+            return None
+        self.quarantined_path = moved
+        # Row positions cached for the old file would point in-place updates at
+        # the wrong rows of the fresh one.
+        for cached in [k for k in self._POSMAP_CACHE if k[0] == str(self._path)]:
+            self._POSMAP_CACHE.pop(cached, None)
+        logger.error(
+            f"[H5DataFrameStore] {self._path.name} could not be opened ({reason[:160]}). "
+            f"Moved it to {moved.name}; a fresh file is written from now on."
+        )
+        return moved
 
     def get_path(self) -> Path:
         return self._path

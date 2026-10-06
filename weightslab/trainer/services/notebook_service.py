@@ -31,6 +31,7 @@ import ast
 import sys
 import json
 import time
+import atexit
 import ctypes
 import queue
 import shutil
@@ -48,6 +49,7 @@ import weightslab.proto.experiment_service_pb2 as pb2
 
 from weightslab.backend import ledgers
 from weightslab.trainer.services.utils.tools import safe_grpc
+from weightslab.utils.logs import ensure_logging_intact
 
 logger = logging.getLogger(__name__)
 
@@ -313,11 +315,61 @@ _EMBED_LOCK = threading.Lock()
 # "done" -- keying off "started" makes them give up the instant the attempt is
 # launched, before the kernel has had any chance to write its connection file.
 _EMBED_STATE = {"started": False, "connection_file": None, "kernel_thread_id": None,
-                "done": threading.Event()}
+                "done": threading.Event(), "thread": None}
 # Rebound on every NotebookService construction (i.e. every watchdog restart)
 # so the one long-lived embedded kernel thread always refreshes df/root_log_dir
 # against whichever data_service/root_log_dir is currently live.
 _ACTIVE_BINDING = {"data_service": None, "root_log_dir": None}
+
+
+def _shutdown_embedded_kernel(timeout: float = 5.0) -> None:
+    """Stop the embedded kernel's event loop and wait for its thread to finish.
+
+    Registered with ``atexit`` when the kernel starts, because the thread is a
+    daemon running ``app.start()`` -- a tornado/zmq loop that never returns on
+    its own. Without this, the thread is still live when CPython begins
+    finalizing, and the shutdown sequence races itself: the interpreter closes
+    the zmq sockets, tornado's zmqstream notices ("Got events for stream ...
+    attached to closed socket") and calls ``gen_log.warning``, and logging then
+    writes to a stderr whose buffer lock is already being torn down. That is a
+    hard abort, not an exception::
+
+        Fatal Python error: _enter_buffered_busy: could not acquire lock for
+        <_io.BufferedWriter name='<stderr>'> at interpreter shutdown, possibly
+        due to daemon threads
+        ... Aborted (core dumped)
+
+    It killed a CI run whose tests had all passed -- the suite finished, the
+    process died on the way out, and the job failed on the exit code. It is not
+    test-only: any script that enables the notebook takes the same risk at
+    exit, which is why this lives here and not in tests/conftest.py.
+
+    atexit runs before interpreter finalization, so stopping the loop here lets
+    app.start() return and the thread exit while logging still works.
+    """
+    thread = _EMBED_STATE.get("thread")
+    if thread is None or not thread.is_alive():
+        return
+
+    # Stop the loop app.start() is ACTUALLY blocked on, which is not the one
+    # this module creates: _run_embedded_kernel sets up an asyncio loop for the
+    # thread, but ipykernel builds its own AsyncIOMainLoop underneath
+    # app.io_loop, and that is what runs. Stopping the loop we made is a no-op
+    # -- measured: stored loop id ...692880 vs app's ...181904, and the thread
+    # stayed alive through a 10s join. IOLoop.add_callback is documented
+    # thread-safe, which is what lets us reach into it from here.
+    try:
+        from ipykernel.kernelapp import IPKernelApp
+        io_loop = getattr(IPKernelApp.instance(), "io_loop", None)
+        if io_loop is not None:
+            io_loop.add_callback(io_loop.stop)
+    except Exception:
+        # ipykernel missing, never initialized, or already torn down.
+        pass
+
+    # Bounded: a kernel that refuses to stop must not hang the process on the
+    # way out. Worst case we are back to the old behaviour.
+    thread.join(timeout=timeout)
 
 
 def configure_embedded_kernel(enabled: bool) -> None:
@@ -384,10 +436,17 @@ def ensure_embedded_kernel(data_service, root_log_dir: Path) -> None:
             _EMBED_STATE["done"].set()
             return
         connection_file = _ACTIVE_BINDING["root_log_dir"] / "notebook_kernel.json"
-        threading.Thread(
+        _kernel_thread = threading.Thread(
             target=_run_embedded_kernel, args=(connection_file,),
             name="WL-Embedded-Jupyter-Kernel", daemon=True,
-        ).start()
+        )
+        _EMBED_STATE["thread"] = _kernel_thread
+        # Registered only once the kernel actually starts, and only here --
+        # this is the one place that creates the thread. See
+        # _shutdown_embedded_kernel() for why a daemon thread left running into
+        # interpreter finalization aborts the process.
+        atexit.register(_shutdown_embedded_kernel)
+        _kernel_thread.start()
         try:
             if _wait_for_connection_file(connection_file, timeout=15.0):
                 _EMBED_STATE["connection_file"] = connection_file
@@ -513,7 +572,10 @@ def _run_embedded_kernel(connection_file: Path) -> None:
     # execute_interactive() and blocks waiting for it).
     _EMBED_STATE["kernel_thread_id"] = threading.get_ident()
 
-    # ipykernel's IOLoop needs a running asyncio loop on THIS thread.
+    # ipykernel's IOLoop needs a running asyncio loop on THIS thread. Note this
+    # is NOT the loop app.start() ends up blocked on -- ipykernel builds its own
+    # AsyncIOMainLoop under app.io_loop -- so _shutdown_embedded_kernel() goes
+    # through the app, not through this.
     asyncio.set_event_loop(asyncio.new_event_loop())
 
     ns = build_notebook_namespace(
@@ -542,6 +604,33 @@ def _run_embedded_kernel(connection_file: Path) -> None:
     app.init_signal = lambda: None
     try:
         app.initialize([])
+        # traitlets configures logging while building any Application, and
+        # logging.config.dictConfig CLOSES every handler in the process on its
+        # way in (_clearExistingHandlers -> logging.shutdown) without detaching
+        # them from the root logger. weightslab's file handler therefore keeps
+        # accepting records and silently dropping them: the session log stops
+        # dead right here, mid-run, while the terminal carries on as if nothing
+        # happened. Repair before anything else logs.
+        ensure_logging_intact()
+        # ipykernel's OutStream batches stdout/stderr writes and only ships
+        # them to iopub every `flush_interval` seconds (default 0.2s) -- fine
+        # for a notebook server with many kernels, but sluggish for a single
+        # embedded kernel where we want prints to show up close to instantly.
+        # MUST happen before the wrapping below: once sys.stdout is a
+        # _ThreadRoutedStream, this sets the attribute on the wrapper and the
+        # real OutStream keeps batching at 0.2s -- which stops cell output
+        # streaming live (see test_stdout_streams_live_not_buffered_...).
+        for _stream in (sys.stdout, sys.stderr):
+            if hasattr(_stream, "flush_interval"):
+                _stream.flush_interval = 0.05
+        # Wrap immediately after initialize(), not after the shell/matplotlib
+        # setup below: initialize() has just swapped sys.stdout/sys.stderr for
+        # ipykernel's OutStream, and anything that captures a stream in the gap
+        # is bound to the unrouted one for good. That gap was a couple of
+        # seconds, and the trainer builds its tqdm bar in it -- which is why the
+        # training progress bar disappeared from the terminal once the notebook
+        # kernel was enabled.
+        _install_thread_routed_streams(console_stdout, console_stderr)
         app.shell.colors = "NoColor"
         try:
             app.shell.enable_matplotlib("inline")
@@ -580,17 +669,7 @@ def _run_embedded_kernel(connection_file: Path) -> None:
         app.shell.ns_table["user_global"] = app.shell.user_module.__dict__
         app.shell.ns_table["user_local"] = app.shell.user_ns
         app.shell.set_completer_frame()
-        # ipykernel's OutStream batches stdout/stderr writes and only ships
-        # them to iopub every `flush_interval` seconds (default 0.2s) -- fine
-        # for a notebook server with many kernels, but sluggish for a single
-        # embedded kernel where we want prints to show up close to instantly.
-        import sys as _sys
-        for _stream in (_sys.stdout, _sys.stderr):
-            if hasattr(_stream, "flush_interval"):
-                _stream.flush_interval = 0.05
         _install_kernel_hooks(app.shell)
-        # After initialize() (OutStreams exist), before start() (cells run).
-        _install_thread_routed_streams(console_stdout, console_stderr)
         logger.info("Embedded Jupyter kernel connection file: %s", connection_file)
         app.start()  # blocks this thread forever (event loop)
     except Exception:

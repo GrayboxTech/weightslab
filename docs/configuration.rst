@@ -4,7 +4,7 @@ Configuration
 
 .. _config-sdk:
 
-Part A — Python SDK Parameters
+Part A, Python SDK Parameters
 --------------------------------
 
 Configuration hierarchy
@@ -39,11 +39,11 @@ Config YAML file (``hyperparameters.yaml``)
 When you register a hyperparameter config with
 ``wl.watch_or_edit(config, flag="hyperparameters")``, WeightsLab creates (or
 reads) a YAML file next to your training script.  Edit it while the script is
-running — changes are picked up within one poll interval (default: 1 s).
+running, changes are picked up within one poll interval (default: 1 s).
 
 .. code-block:: yaml
 
-   # hyperparameters.yaml — created automatically, edit freely while training
+   # hyperparameters.yaml, created automatically, edit freely while training
    learning_rate: 0.001
    batch_size: 32
    optimizer: adam
@@ -54,7 +54,7 @@ Any key you add here is accessible inside the training loop via the config
 object returned by ``wl.watch_or_edit()``.  The file is auto-created with the
 ``defaults`` dict you pass as a kwarg on the first run.
 
-``wl.watch_or_edit()`` — common kwargs
+``wl.watch_or_edit()``, common kwargs
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Accepted by every ``flag`` value.
@@ -74,7 +74,7 @@ Accepted by every ``flag`` value.
      - ``None``
      - Override the root directory for checkpoints and logs for this
        object only.  Defaults to ``WEIGHTSLAB_ROOT_LOG_DIR``.  May also point
-       at a parent directory that fans out into several experiment roots —
+       at a parent directory that fans out into several experiment roots,
        see :doc:`checkpointing`.
    * - ``skip_previous_auto_load``
      - ``False``
@@ -88,7 +88,7 @@ Accepted by every ``flag`` value.
 
 .. code-block:: python
 
-   # These kwargs apply to every flag — shown here with flag="model"
+   # These kwargs apply to every flag, shown here with flag="model"
    model = wl.watch_or_edit(
        model,
        flag="model",
@@ -98,7 +98,7 @@ Accepted by every ``flag`` value.
        register=True,                 # default: True
    )
 
-Data loader — ``flag="data"``
+Data loader, ``flag="data"``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. list-table::
@@ -177,7 +177,7 @@ See :ref:`good-practice-heavy-experiment` for the recommended combination.
        Prefer ``False`` + proxies for large datasets.
    * - ``array_return_proxies``
      - ``True``
-     - Return lazy ``ArrayProxy`` objects — the array is only loaded
+     - Return lazy ``ArrayProxy`` objects, the array is only loaded
        when accessed.
    * - ``array_use_cache``
      - ``True``
@@ -197,14 +197,14 @@ See :ref:`good-practice-heavy-experiment` for the recommended combination.
        train_dataset,
        flag="data",
        # ...loader kwargs...
-       array_autoload_arrays=False,   # default: False — keep False for large datasets
+       array_autoload_arrays=False,   # default: False, keep False for large datasets
        array_return_proxies=True,     # default: True
        array_use_cache=True,          # default: True
        preload_labels=True,           # default: True
        preload_metadata=True,         # default: True
    )
 
-Model — ``flag="model"``
+Model, ``flag="model"``
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. list-table::
@@ -246,7 +246,7 @@ Model — ``flag="model"``
        forced_model_wrapping=False,               # default: False
    )
 
-Hyperparameters — ``flag="hyperparameters"``
+Hyperparameters, ``flag="hyperparameters"``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. list-table::
@@ -274,7 +274,7 @@ Hyperparameters — ``flag="hyperparameters"``
    config = wl.watch_or_edit(
        "hyperparameters.yaml",        # path or filename
        flag="hyperparameters",
-       defaults={                     # default: None — written on first run
+       defaults={                     # default: None, written on first run
            "learning_rate": 0.001,
            "batch_size": 32,
            "optimizer": "adam",
@@ -288,7 +288,7 @@ Hyperparameters — ``flag="hyperparameters"``
    # lr = config.learning_rate
    # bs = config.batch_size
 
-Signal / metric / loss — ``flag="loss"`` / ``"metric"`` / ``"signal"``
+Signal / metric / loss, ``flag="loss"`` / ``"metric"`` / ``"signal"``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. list-table::
@@ -349,7 +349,7 @@ Signal / metric / loss — ``flag="loss"`` / ``"metric"`` / ``"signal"``
 
 .. _config-env:
 
-.. rubric:: Part B — Environment Variables
+.. rubric:: Part B, Environment Variables
 
 All variables are optional; the built-in default is used when unset.
 
@@ -359,7 +359,7 @@ Deploying the Studio
 All Weights Studio configuration variables are passed to the UI at launch time
 via ``weightslab start``.  There are two ways to supply them.
 
-**Option 1 — shell exports (quick, per-session)**
+**Option 1, shell exports (quick, per-session)**
 
 .. code-block:: bash
 
@@ -367,7 +367,7 @@ via ``weightslab start``.  There are two ways to supply them.
    export BB_THUMB_RENDER=50
   weightslab start
 
-**Option 2 — ``.env`` file (persistent, version-controllable)**
+**Option 2, ``.env`` file (persistent, version-controllable)**
 
 Create a ``.env`` file next to your training script (or in any parent directory):
 
@@ -410,14 +410,35 @@ Logging
      - Description
    * - ``WEIGHTSLAB_LOG_LEVEL``
      - ``INFO``
-     - Log level for all WeightsLab Python components.
+     - Minimum level printed **to the terminal**. The session log file is not
+       affected: it records everything regardless of this setting (see
+       ``WEIGHTSLAB_LOG_FILE_LEVEL``), so a quiet terminal still leaves a
+       full-fidelity log on disk.
        Accepted values: ``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``, ``WATCHDOG``.
        ``WATCHDOG`` (level 35) sits between WARNING and ERROR and is used for
        watchdog/restart events.
-   * - ``WEIGHTSLAB_LOG_TO_FILE``
+   * - ``WEIGHTSLAB_LOG_FILE_LEVEL``
+     - *(unset, everything)*
+     - Minimum level written to the session log file. Unset means no
+       restriction, which is the point: the terminal is filtered, the file is
+       complete. Set it (e.g. ``INFO``) to cap the file too when the full log
+       is more than you want on disk.
+   * - ``WEIGHTSLAB_TQDM_LOG_INTERVAL``
+     - ``30``
+     - Seconds between snapshots of any live ``tqdm`` progress bar into the
+       session log (``0`` disables). A bar paints itself onto the terminal and
+       never goes through ``logging``, so without this the log file has no
+       record of the run's own progress. Lines are sampled, not streamed: an
+       unchanged bar is not repeated.
+   * - ``WEIGHTSLAB_TQDM_LOG_TO_TERMINAL``
      - ``0``
-     - Write logs to a rotating file in addition to stdout.
-       Set to ``1`` to enable.
+     - By default the sampled progress lines go to the file only, since the
+       live bar is already on the terminal. Set to ``1`` to print them too.
+   * - ``WEIGHTSLAB_LOG_TO_FILE``
+     - ``true``
+     - Write a session log file in addition to stdout. Set to ``false`` to
+       disable. Only the main process writes one, ``DataLoader`` workers and
+       other spawned children keep a terminal-only logger.
    * - ``WEIGHTSLAB_ROOT_LOG_DIR``
      - *(training script dir)*
      - Root directory where training log snapshots are saved.
@@ -425,8 +446,10 @@ Logging
    * - ``WEIGHTSLAB_PROJECTION``
      - *(on)*
      - Live 3-D parametric-UMAP projection of the model's representation
-       (see :doc:`projection`). On by default; set ``0``, ``false``, ``no`` or
-       ``off`` to remove it entirely — no hook, no encoder, no cost.
+       (see :doc:`projection`, beta). On by default; set ``0``, ``false``, ``no``
+       or ``off`` to remove it entirely , no hook, no encoder, no cost. Wins
+       over the per-model ``projection=`` keyword; to turn it off for one model
+       only, pass ``projection=False`` to ``wl.watch_or_edit(..., flag="model")``.
    * - ``WEIGHTSLAB_PROJECTION_EVERY``
      - ``50``
      - Training steps between projection fits. Raise it to make the projection
@@ -436,7 +459,14 @@ Logging
      - Projection output dimensions. ``2`` is drawn on the ``z = 0`` plane.
    * - ``WEIGHTSLAB_PROJECTION_NEIGHBORS``
      - ``15``
-     - UMAP ``n_neighbors`` for the per-batch graph. Clamped to ``batch_size - 1``.
+     - UMAP ``n_neighbors`` for the kNN graph. Clamped to the graph size minus one.
+   * - ``WEIGHTSLAB_PROJECTION_GRAPH``
+     - ``512``
+     - Samples the projection's kNN graph is built over: a rolling buffer of the
+       most recent training samples, so graph quality does not depend on your
+       batch size. Raise it if the cloud is one blob instead of clusters.
+       ``EVERY``, ``DIM``, ``NEIGHBORS`` and ``GRAPH`` can each be overridden per
+       model with ``projection={...}`` (see :doc:`projection`).
    * - ``AUDIT_LOG_FORMAT``
      - ``json``
      - Output format for audit logs tracking all user interactions through gRPC.
@@ -606,7 +636,7 @@ schema, and category-level toggles.
      - ``15``
      - How often (seconds) the monitor samples and logs a new batch of metrics.
    * - ``WL_RESOURCE_MONITOR_CATEGORIES``
-     - *(unset — all on)*
+     - *(unset, all on)*
      - Comma-separated category allowlist (``cpu``, ``memory``, ``disk``,
        ``network``, ``process``, ``gpu``). Anything not listed is disabled.
    * - ``WL_RESOURCE_MONITOR_DISK_PATH``
@@ -647,10 +677,10 @@ Data and Cache
      - ``720``
      - Longest-edge pixel size used when generating preview thumbnails.
    * - ``WL_MODAL_MAX_RESOLUTION``
-     - *(unset — full resolution)*
+     - *(unset, full resolution)*
      - Maximum longest-edge pixel size for images served to the modal
        full-resolution viewer.  When set, the backend downscales images whose
-       longest edge exceeds this value before transmission — reduces bandwidth and
+       longest edge exceeds this value before transmission, reduces bandwidth and
        GPU memory pressure on high-resolution datasets (e.g. medical or satellite
        imagery).  Leave unset to serve images at their original resolution.
    * - ``WL_BATCH_CHUNK_SIZE``
@@ -683,10 +713,10 @@ Data and Cache
      - Maximum number of points returned **per curve** in the *break-by-slices*
        plot. In this view the backend aggregates the matching samples into a single
        **mean curve per experiment** (mean of the metric across the tagged samples
-       at each step) rather than streaming one curve per sample — so a long run
+       at each step) rather than streaming one curve per sample, so a long run
        (e.g. 10k tagged samples × 10k steps) sends one curve instead of millions of
        points. If that mean curve still has more steps than this cap, it is
-       uniformly downsampled — keeping the first and last point and an evenly-spaced
+       uniformly downsampled, keeping the first and last point and an evenly-spaced
        subset in between (no values are interpolated/invented). Set to ``0`` to
        disable the cap and return every step of the mean curve.
    * - ``WL_POINT_CLOUD_CHUNK_BYTES``
@@ -695,8 +725,8 @@ Data and Cache
        (raw ``float32`` point-cloud data is sent as a sequence of binary
        messages). Defaults to ``1048576`` (1 MiB). Larger chunks mean fewer
        gRPC messages but more memory held per message; smaller chunks lower
-       peak memory at the cost of more round-trips. Must be a positive integer
-       — non-positive or non-numeric values fall back to the 1 MiB default.
+       peak memory at the cost of more round-trips. Must be a positive integer,
+       non-positive or non-numeric values fall back to the 1 MiB default.
    * - ``WL_SIGNAL_TRAJ_MAX_POINTS``
      - ``100``
      - Maximum number of points returned **per curve** by the on-demand
@@ -711,6 +741,24 @@ Data and Cache
        ``signal_history(metric, 'list')`` helper returns a per-sample history
        list. Longer histories are downsampled evenly (endpoints kept) to this
        cap.
+   * - ``WL_SIGNAL_MAX_POINTS_PER_CURVE``
+     - ``1000``
+     - Hard cap on the points the plots board gets back **per curve** when it
+       loads signal history. The curve is split into step-buckets inside DuckDB
+       and each bucket emits its minimum-value row, its maximum-value row (so
+       spikes between bucket edges always survive) plus, for each *kind* of
+       special point it holds, one row: evaluation marker, annotated point,
+       outlier-bearing step. Each kind is decimated against its own kind, so a
+       loss with an outlier at nearly every step cannot crowd out the handful
+       of notes on the same curve. The curve's true first and last steps are
+       always kept, so a curve costs at most this many points plus those two
+       endpoints, however large the table behind it is. The bucket count is
+       derived per curve, so a curve with no special points spends the whole
+       budget on value resolution. Each point carries the
+       ``value_min``/``value_max`` band as well as the value, so a plot drawing
+       all three series renders at most ~3x this number. Raise it for more
+       on-screen resolution at the cost of query time, wire bytes and browser
+       heap.
 
 
 Evaluation Mode
@@ -828,14 +876,14 @@ server and the backend SDK agent share. These control where it lives.
      - *(unset)*
      - Adopt an already-running agent server at this URL instead of spawning
        one. Takes precedence over everything else, and configures **both** the
-       UI server and the SDK agent — set it once and the two converge on a
+       UI server and the SDK agent, set it once and the two converge on a
        single process.
    * - ``WEIGHTSLAB_OPENCODE_HOST``
      - ``127.0.0.1``
      - Host the spawned agent server **binds** to. Loopback by default (the
        server has filesystem access and must not be reachable off-machine on a
        normal local run). Set to ``0.0.0.0`` when running in a container reached
-       over an SSH tunnel / published port, so the published port can reach it —
+       over an SSH tunnel / published port, so the published port can reach it,
        the URL handed to the browser stays ``127.0.0.1`` either way. See
        :ref:`studio-bridging`.
    * - ``WEIGHTSLAB_UI_TRUSTED_HOSTS``
@@ -851,14 +899,14 @@ server and the backend SDK agent share. These control where it lives.
 
    The browser talks to the agent server **directly**, not through the UI
    server's proxy. When the studio runs on a different machine from the
-   browser, this port has to be reachable from the browser's side — see
+   browser, this port has to be reachable from the browser's side, see
    :ref:`studio-bridging`.
 
 Agent installation (OpenCode binary)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-WeightsLab provisions the OpenCode standalone binary itself — no Node.js
-required — the first time it is needed (on ``import weightslab``,
+WeightsLab provisions the OpenCode standalone binary itself, no Node.js
+required, the first time it is needed (on ``import weightslab``,
 ``weightslab start``, ``weightslab start example``, or the first agent use).
 It is fetched once into a per-user cache and reused. These control that.
 
@@ -877,7 +925,7 @@ It is fetched once into a per-user cache and reused. These control that.
    * - ``WEIGHTSLAB_OPENCODE_AUTODOWNLOAD``
      - ``1``
      - Master switch for the network fetch. ``0`` forbids all on-demand
-       downloads — an already-provisioned binary is still used, but nothing new
+       downloads, an already-provisioned binary is still used, but nothing new
        is fetched (stricter than ``AUTOINSTALL``, which only gates the
        import/start pre-warm).
    * - ``WEIGHTSLAB_OPENCODE_VERSION``
@@ -1099,7 +1147,7 @@ Point cloud
      - Default
      - Description
    * - ``VITE_WL_PC_MAX_POINTS``
-     - *(unset — no cap)*
+     - *(unset, no cap)*
      - Maximum number of 3-D points rendered per point-cloud sample in the
        modal viewer. Leave unset for no cap. Useful on low-end GPUs.
        **Runtime override:** ``PC_MAX_POINTS`` (env, injected by ``weightslab start``) or
@@ -1118,13 +1166,13 @@ Bounding-box render limits
 Detection samples can carry many bounding boxes per image (dense scenes,
 high-recall predictions). Drawing them all slows rendering and turns the
 overlay into noise, so the number of boxes drawn per image is capped. The cap
-is applied **separately** to ground-truth (GT) and predictions (PRED) — a value
+is applied **separately** to ground-truth (GT) and predictions (PRED), a value
 of ``10`` allows up to 10 GT boxes *and* 10 PRED boxes per image. Boxes beyond
 the cap are simply not drawn (predictions are typically score-ordered, so the
 most confident ones are kept).
 
 These are set as environment variables before ``weightslab start`` and injected
-into ``config.js`` at startup — changing them needs no rebuild, just a
+into ``config.js`` at startup, changing them needs no rebuild, just a
 restart + browser reload. For a local ``vite`` dev server, use the ``VITE_``
 fallbacks shown below. Values are clamped to a hard ceiling of ``10000``.
 
@@ -1149,21 +1197,64 @@ fallbacks shown below. Values are clamped to a hard ceiling of ``10000``.
 
 .. note::
 
-   These caps only affect *rendering* — no sample data is dropped. They apply to
+   These caps only affect *rendering*, no sample data is dropped. They apply to
    detection bounding-box overlays; segmentation masks are unaffected.
+
+
+Plot point budgets
+~~~~~~~~~~~~~~~~~~
+
+How many points the plots board holds per curve. Both are read as ``window.*``
+globals injected at ``weightslab start`` time, so changing them needs a restart
+and a browser reload, not a frontend rebuild.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 12 54
+
+   * - Variable
+     - Default
+     - Description
+   * - ``PLOT_MAX_POINTS_REQUEST``
+     - ``1000``
+     - Points per curve the **initial** full-history load asks for. Also
+       settable as ``WS_PLOT_MAX_POINTS_REQUEST``; dev-server fallback
+       ``VITE_PLOT_MAX_POINTS_REQUEST``.
+   * - ``PLOT_MAX_POINT_BUDGET``
+     - ``1500``
+     - Ceiling on what a **zoom or pan** refetch may ask for. The request itself
+       is derived from the plot's pixel width (about two points per CSS pixel),
+       so this is the cap, not the usual value. It binds mainly in the expanded
+       (full-window) plot view, where the width-derived figure would otherwise
+       reach several thousand points that are then drawn, hit-tested and
+       redrawn on every cursor frame for detail too fine to see. Raise it if you
+       want more on-screen resolution and the plots still feel responsive; set
+       it to the same number as ``PLOT_MAX_POINTS_REQUEST`` to stop the first
+       interaction with a plot fetching a denser curve than the one you loaded
+       with. Also settable as ``WS_PLOT_MAX_POINT_BUDGET``; dev-server fallback
+       ``VITE_PLOT_MAX_POINT_BUDGET``.
+
+.. note::
+
+   A zoom or pan **replaces** a curve's points with the ones for the range now
+   on screen; it does not add to them. So a plot holds at most one budget's
+   worth per curve however long you spend exploring, and zooming or panning
+   back out refetches rather than reusing what was there. Set
+   ``window.WS_DEBUG_PLOT_FETCH = true`` in the browser console to log every
+   such fetch and the resulting point counts.
 
 
 Feature toggles
 ~~~~~~~~~~~~~~~
 
-Whole areas of the Studio UI can be turned off for a given deployment — for
+Whole areas of the Studio UI can be turned off for a given deployment, for
 example a read-only demo that only shows plots, or a labelling-only view with no
 agent. Each toggle **removes the area from the UI** (the elements are hidden)
 **and stops its background work** (auto-refresh timers and gRPC polls are never
 started), so a disabled area costs nothing at runtime.
 
 Like the bounding-box render limits, these are set as environment variables
-before ``weightslab start`` and injected into ``config.js`` at startup —
+before ``weightslab start`` and injected into ``config.js`` at startup,
 changing them needs no rebuild, just a restart + browser reload. For a local
 ``vite`` dev server, use the ``VITE_`` fallbacks shown below. Every toggle
 **defaults to enabled**; set it to ``0`` / ``false`` / ``no`` / ``off`` (any

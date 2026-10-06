@@ -90,6 +90,23 @@ def tmp_csv(tmp_path):
 # Flush behavior
 # ---------------------------------------------------------------------------
 
+class TestWriteDataframeParquetProxies:
+    def test_array_proxy_column_stays_parquet(self, tmp_path):
+        """Lazy ArrayH5Proxy cells (array_return_proxies=True) must not push the
+        dump to the JSON fallback: they are written as their H5 reference."""
+        pytest.importorskip("pyarrow")
+        from weightslab.data.array_proxy import ArrayH5Proxy
+
+        df = _make_df()
+        df["prediction"] = [ArrayH5Proxy(f"arrays.h5:/{i}/prediction") for i in range(len(df))]
+        out = _call(str(tmp_path / "out.parquet"), _make_manager(df))
+
+        assert out.endswith(".parquet")
+        back = pd.read_parquet(out)
+        assert back["prediction"].tolist() == [f"arrays.h5:/{i}/prediction" for i in range(len(df))]
+        assert isinstance(df["prediction"].iloc[0], ArrayH5Proxy)  # input not mutated
+
+
 class TestWriteDataframeFlush:
     def test_flush_called_before_read(self, mgr, tmp_json):
         _call(tmp_json, mgr)

@@ -395,6 +395,54 @@ class TestNotebookKernelEmbedded(_NotebookKernelContractTests, unittest.TestCase
         return NotebookService(_fake_data_service(), root_log_dir=str(self.root))
 
 
+class TestEmbeddedKernelStartupOrder(unittest.TestCase):
+    """Ordering invariants in ``_run_embedded_kernel``'s startup sequence.
+
+    Asserted against the source rather than a live kernel on purpose: the
+    things being ordered are process-wide ``sys.stdout``/``sys.stderr`` swaps,
+    and pytest's own capture replaces those again per test, so inspecting them
+    from inside a test reports whatever capture did last, not what the kernel
+    did. Reading the order directly is deterministic and says exactly what the
+    constraint is.
+    """
+
+    def _source(self):
+        import inspect
+        return inspect.getsource(notebook_service._run_embedded_kernel)
+
+    def test_flush_interval_is_lowered_before_the_streams_are_wrapped(self):
+        # ipykernel's OutStream batches writes to iopub every `flush_interval`
+        # seconds (0.2s default); the kernel lowers it to 0.05s so cell output
+        # streams live instead of arriving in one lump at the end.
+        #
+        # It has to be set while sys.stdout is still the raw OutStream.
+        # _ThreadRoutedStream.__getattr__ delegates reads to the stream it
+        # wraps, so `hasattr(..., "flush_interval")` keeps answering True after
+        # wrapping and the loop still "works" -- but the assignment lands on
+        # the wrapper and the real OutStream keeps its 0.2s. The live streaming
+        # test catches that only through wall-clock timing, which makes it a
+        # close call rather than a clear failure.
+        source = self._source()
+        flush_at = source.index("flush_interval = 0.05")
+        wrap_at = source.index("_install_thread_routed_streams(")
+        self.assertLess(
+            flush_at, wrap_at,
+            "flush_interval must be set on the raw OutStreams, before "
+            "_install_thread_routed_streams wraps them")
+
+    def test_logging_is_repaired_before_anything_else_logs(self):
+        # IPKernelApp.initialize() -> traitlets -> logging.config.dictConfig
+        # closes every handler in the process, killing the session log file.
+        source = self._source()
+        self.assertLess(
+            source.index("app.initialize("), source.index("ensure_logging_intact()"),
+            "logging can only be repaired after initialize() has broken it")
+        self.assertLess(
+            source.index("ensure_logging_intact()"),
+            source.index("_install_thread_routed_streams("),
+            "repair logging before the rest of the startup logs anything")
+
+
 class TestNotebookPersistence(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

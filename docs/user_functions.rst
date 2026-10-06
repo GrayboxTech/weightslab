@@ -21,8 +21,8 @@ Core registration and serving:
 
 Signals:
 
-- ``wl.signal``  *(decorator — custom static/dynamic signals)*
-- ``wl.signal_classifier``  *(decorator — custom trajectory→label classifier)*
+- ``wl.signal``  *(decorator, custom static/dynamic signals)*
+- ``wl.signal_classifier``  *(decorator, custom trajectory→label classifier)*
 - ``wl.resolve_signal_classifier``  *(introspection)*
 - ``wl.compute_signals``
 - ``wl.save_signals``
@@ -37,7 +37,7 @@ Signals:
 - ``wl.get_samples_by_tag``
 - ``wl.get_discarded_samples``
 - ``wl.SignalContext``
-- ``wl.eval_fn``  *(decorator — optional)*
+- ``wl.eval_fn``  *(decorator, optional)*
 - ``wl.run_pending_evaluation``  *(optional, for training-loop integration)*
 - ``wl.trigger_pending_evaluation_async``  *(optional, for the background gRPC/CLI worker)*
 
@@ -51,7 +51,7 @@ History, export and reporting:
 - ``wl.clear_all``
 - ``wl.seed_everything``
 - ``wl.set_log_directory``
-- ``wl.ledger``  *(direct access to the global registry — advanced)*
+- ``wl.ledger``  *(direct access to the global registry, advanced)*
 
 watch_or_edit
 -------------
@@ -96,13 +96,13 @@ Register or wrap models, data loaders, optimizers, loggers, losses/metrics, and 
 
 **Model kwargs for training-dynamics signals**
 
-- ``track_model_signals`` — ``True`` for every model signal, or a list to
+- ``track_model_signals``, ``True`` for every model signal, or a list to
   narrow the set (e.g. ``["grad_norm", "activation_std"]``). Installs the hooks
   that plot gradient norms, weight norms and activation statistics per layer;
   see :ref:`track_model_signals <model-signals>`.
-- ``model_signals_every_n_steps`` *(int, default 1)* — sample those signals
+- ``model_signals_every_n_steps`` *(int, default 1)*, sample those signals
   every Nth step.
-- ``model_signals_layer_ids`` *(iterable, optional)* — restrict them to
+- ``model_signals_layer_ids`` *(iterable, optional)*, restrict them to
   specific layer ids.
 
 .. code-block:: python
@@ -141,19 +141,19 @@ guard_training_context / guard_testing_context
        ...
 
 Both are ready-to-use context-manager **instances** (not classes/functions to
-call) — do not write ``guard_training_context()``.
+call), do not write ``guard_training_context()``.
 
 **Purpose**
 
 Tell WeightsLab which phase a block of code belongs to, so the internals route
 state correctly without any extra bookkeeping in your training loop:
 
-- ``guard_training_context`` — marks the block as a **training** step: the
+- ``guard_training_context``, marks the block as a **training** step: the
   model's age counter advances, signals/losses computed inside are written to
   the train partition of the ledger, and it respects the pause/resume state
   (blocks while paused, honoring ``wl.watch_or_edit(..., flag="hyperparameters")``'s
   ``is_training`` toggle from the CLI/UI).
-- ``guard_testing_context`` — marks the block as **evaluation/inference**:
+- ``guard_testing_context``, marks the block as **evaluation/inference**:
   signals are written to the test/val partition instead, and it does not
   advance the training step counter.
 
@@ -177,7 +177,7 @@ state correctly without any extra bookkeeping in your training loop:
 **Notes**
 
 - Wrap the smallest block that contains the forward pass and the
-  loss/metric calls that should be attributed to that phase — not the whole
+  loss/metric calls that should be attributed to that phase, not the whole
   epoch loop.
 - These are the two context managers referenced throughout the
   :doc:`examples/index` (classification, segmentation, detection, clustering,
@@ -200,7 +200,7 @@ your training loop, optionally blocking first.
 
 **Arguments**
 
-- ``timeout`` *(int, optional)* — if a positive integer, sleep for that many
+- ``timeout`` *(int, optional)*, if a positive integer, sleep for that many
   seconds *before* resuming. ``None`` (default) resumes immediately.
 
 **Typical usage**
@@ -226,16 +226,16 @@ Start Weightslab backend services.
 
 **Arguments**
 
-- ``serving_cli`` *(bool, default ``True``)* — start the interactive CLI
+- ``serving_cli`` *(bool, default ``True``)*, start the interactive CLI
   server (the one ``weightslab cli`` connects to).
-- ``serving_grpc`` *(bool, default ``True``)* — start the gRPC server used by
+- ``serving_grpc`` *(bool, default ``True``)*, start the gRPC server used by
   Weights Studio.
-- ``spawn_cli_client`` *(bool, default ``False``)* — when ``serving_cli`` is
+- ``spawn_cli_client`` *(bool, default ``False``)*, when ``serving_cli`` is
   on, also open the interactive REPL in a new console window immediately.
   Leave ``False`` to start the CLI server **headless**: it still advertises
   its port, so any terminal can attach later with ``weightslab cli`` (see
   :doc:`user_commands`).
-- ``**kwargs`` — extra server options forwarded to the underlying backends,
+- ``**kwargs``, extra server options forwarded to the underlying backends,
   e.g. ``cli_host``, ``cli_port``, ``grpc_port``.
 
 **Typical usage**
@@ -260,9 +260,9 @@ Keep the process alive so background services continue running.
 
 **Arguments**
 
-- ``timeout`` *(int, optional)* — maximum number of seconds to keep running.
+- ``timeout`` *(int, optional)*, maximum number of seconds to keep running.
   ``None`` (default) blocks until interrupted (Ctrl+C).
-- ``release_gpu`` *(bool, default ``True``)* — before entering the wait loop,
+- ``release_gpu`` *(bool, default ``True``)*, before entering the wait loop,
   move tracked torch objects to CPU and release cached CUDA memory, so an idle
   serving process (e.g. between training runs) doesn't hold GPU memory.
 
@@ -274,7 +274,7 @@ The most common way to create a signal is to **wrap a loss or metric** with
 manual ``save_signals`` / ``save_instance_signals`` calls documented below, the
 wrapper hooks the object's ``forward`` (losses / ``nn.Module``) or ``compute``
 (``torchmetrics``) method so that **every call during training computes, logs,
-and persists** the values automatically — you never call ``save_*`` yourself.
+and persists** the values automatically, you never call ``save_*`` yourself.
 
 **Signature**
 
@@ -291,24 +291,24 @@ and persists** the values automatically — you never call ``save_*`` yourself.
 
 **How it works**
 
-- **Naming** — the signal name comes from ``signal_name`` (preferred) or ``name``;
+- **Naming**, the signal name comes from ``signal_name`` (preferred) or ``name``;
   it is stored as a ``signals//<name>`` column and shown in the studio.
-- **Per-call save** — call the wrapped object as usual and pass ``batch_ids=`` so
+- **Per-call save**, call the wrapped object as usual and pass ``batch_ids=`` so
   each value maps to its sample::
 
      loss = watched(preds, targets, batch_ids=ids)
 
   Use ``reduction="none"`` on the loss so it returns one value per sample
   (``[B]``) instead of a pre-reduced scalar.
-- **Routing** — ``per_sample=True`` saves on the sample row (``annotation_id 0``)
+- **Routing**, ``per_sample=True`` saves on the sample row (``annotation_id 0``)
   via ``save_signals``; ``per_instance=True`` saves flat per-instance values at
   ``(sample_id, annotation_id >= 1)`` via ``save_instance_signals``, with the
   instance→sample map taken from a ``batch_idx=`` keyword, a list ``targets``, or
   the ledger. See :ref:`per-sample vs per-instance <per-instance-signals>`.
-- **Aggregate curve** — ``log`` defaults to ``True``, publishing the
+- **Aggregate curve**, ``log`` defaults to ``True``, publishing the
   step-aggregated mean as a metric curve; set ``log=False`` to store per-sample
   values without a dashboard curve.
-- **Return value** — the wrapped call returns the loss/metric output unchanged (a
+- **Return value**, the wrapped call returns the loss/metric output unchanged (a
   tensor for per-sample losses, so you can ``.backward()`` on it; a dict for
   per-instance detection losses, where you ``backward()`` on ``out["batch"]``).
   The caller variable is rebound in place, so the object keeps working exactly as
@@ -385,15 +385,15 @@ sorting and root-cause analysis in the studio).
 - ``min_step``: minimum training step before a dynamic signal starts firing.
   While ``current_step < min_step`` the signal is skipped. Defaults to ``0``
   (fire from the start). Use it when a signal needs enough history to be
-  meaningful — e.g. a loss-shape classifier that should only run once each
+  meaningful, e.g. a loss-shape classifier that should only run once each
   sample has a trajectory (``min_step=505``).
 
 **Static vs dynamic**
 
-- **Static** — computed from the sample itself (``ctx.image`` / ``ctx.data``),
+- **Static**, computed from the sample itself (``ctx.image`` / ``ctx.data``),
   typically over a whole dataset via :func:`compute_signals`. Use for
   input-derived features (brightness, blue-pixel count, sharpness, …).
-- **Dynamic** — reacts to a live training metric via ``subscribe_to``. Use for
+- **Dynamic**, reacts to a live training metric via ``subscribe_to``. Use for
   values that depend on the current model state (e.g. loss-derived signals,
   trajectory features). Dynamic signals can also read previously computed values
   through ``ctx.dataframe``.
@@ -449,7 +449,7 @@ Advanced example with history (coefficient of variation):
 
        return std_dev / abs(mean)
 
-Real-world example — auto-tagging samples by loss-shape:
+Real-world example, auto-tagging samples by loss-shape:
 
 A dynamic signal can do more than return a number: it can drive **side effects**
 such as tagging. The example below subscribes to the per-sample classification
@@ -457,7 +457,7 @@ loss ``train/clsf_sample`` and, every 25 steps, looks at each sample's full loss
 trajectory (via :func:`query_sample_history`), classifies its *shape*, and writes
 the verdict back as the categorical tag ``loss_shape`` (via
 :func:`set_categorical_tag`). This turns raw training curves into a filterable,
-sortable label you can triage in the studio — e.g. surface every ``Flat_high``
+sortable label you can triage in the studio, e.g. surface every ``Flat_high``
 sample to hunt for mislabels.
 
 The seven shapes:
@@ -465,19 +465,19 @@ The seven shapes:
 ==============  ====================================================================
 Label           Meaning
 ==============  ====================================================================
-monotonic       Loss steadily decreasing — the model is learning the sample.
-plateaued       Decreased then leveled off still-high — stuck / hard sample.
-Flat_high       Never moved, stayed high — likely a mislabel or unlearnable.
-high_variance   Noisy oscillation — model uncertain, often an ambiguous label.
-U_Shape         Dipped, then is recovering/still moving — not settled yet.
+monotonic       Loss steadily decreasing, the model is learning the sample.
+plateaued       Decreased then leveled off still-high, stuck / hard sample.
+Flat_high       Never moved, stayed high, likely a mislabel or unlearnable.
+high_variance   Noisy oscillation, model uncertain, often an ambiguous label.
+U_Shape         Dipped, then is recovering/still moving, not settled yet.
 Forgotten       Dipped, then permanently regressed to a new, worse, flat level.
-Spiked          One-step jump that reverts — transient, not a lasting change.
+Spiked          One-step jump that reverts, transient, not a lasting change.
 ==============  ====================================================================
 
 ``U_Shape`` and ``Forgotten`` are the same underlying event (loss improved, then
 got worse again) split on *permanence*: if the trajectory has settled flat at
 the new, worse level it's ``Forgotten`` (catastrophic interference from later
-data); if it's still actively climbing or oscillating, it's ``U_Shape`` — not
+data); if it's still actively climbing or oscillating, it's ``U_Shape``, not
 enough evidence yet to call it permanent. ``Spiked`` is the opposite case: a
 sharp one-step rise that *does* come back down (a one-off data/augmentation
 glitch), as opposed to a rise that sticks.
@@ -531,7 +531,7 @@ glitch), as opposed to a rise that sticks.
    route. If all you want is to **customize the loss-shape classifier**, use
    :func:`signal_classifier` instead: register your rule once and the background
    auto-tagger, :func:`write_signal_shapes` / :func:`write_loss_shapes`, and the
-   live :func:`enable_loss_shape_signal` all use it — no ``subscribe_to`` /
+   live :func:`enable_loss_shape_signal` all use it, no ``subscribe_to`` /
    history / ``set_categorical_tag`` wiring, and no ``classifier=`` argument to
    thread through each call. Labels are free-form:
 
@@ -567,15 +567,15 @@ signal_classifier
 Register a custom signal-shape classifier that **overrides** the built-in
 :func:`classify_loss_shape`. The decorated function receives a sample's ordered
 value trajectory (``list[float]``) and returns a label string, or ``None`` to
-leave the sample untagged. Labels are **free-form** — the seven-way
+leave the sample untagged. Labels are **free-form**, the seven-way
 :data:`LOSS_SHAPES` set is only the built-in's vocabulary; a custom classifier
 may emit any labels (e.g. a binary ``monotonic`` / ``not_monotonic``).
 
 **Binding modes**
 
-- ``@wl.signal_classifier(signal="loss_sample")`` — classify only that one
+- ``@wl.signal_classifier(signal="loss_sample")``, classify only that one
   signal (per-signal).
-- ``@wl.signal_classifier`` / ``@wl.signal_classifier()`` — become the global
+- ``@wl.signal_classifier`` / ``@wl.signal_classifier()``, become the global
   default for every signal without its own per-signal classifier.
 
 **Resolution order** for a signal name: per-signal registered → global
@@ -608,7 +608,7 @@ resolve_signal_classifier
 
 Introspection helper: returns the classifier that is actually **active** for
 *signal_name* right now, following the same resolution order everything else on
-this page uses — its own per-signal :func:`signal_classifier` registration, else
+this page uses, its own per-signal :func:`signal_classifier` registration, else
 the global default (a bare ``@wl.signal_classifier``), else the built-in
 :func:`classify_loss_shape`. Useful to confirm what a report/live signal will use
 before it runs, or to call the resolved classifier yourself.
@@ -637,7 +637,7 @@ the reusable feature layer :func:`classify_loss_shape` is built on. Returns
 :func:`signal_classifier` on top instead of re-deriving these features by hand.
 
 Every ``*_z`` key is a z-score against *this trajectory's own* noise floor, not a
-fraction of some fixed constant — the same underlying change reads as
+fraction of some fixed constant, the same underlying change reads as
 "significant" whether the series lives in the single digits or the thousands, and
 whether the curve is clean or inherently noisy.
 
@@ -688,7 +688,7 @@ classify_loss_shape
 
 **Purpose**
 
-The built-in trajectory classifier — every ``flag="loss"`` signal is classified
+The built-in trajectory classifier, every ``flag="loss"`` signal is classified
 with this by default (see :func:`enable_loss_shape_autotag`). Returns one of the
 seven labels in :data:`LOSS_SHAPES`, or ``None`` when *values* has fewer than 5
 points (see :func:`trajectory_stats`'s ``n``). See the shape table under
@@ -716,17 +716,17 @@ write_signal_shapes
 Report-time (as opposed to live) classification: reads the **full** history of
 *signal_name* once, classifies every sample's trajectory, writes the label as the
 categorical tag *tag_name* via :func:`set_categorical_tag`, and returns the
-resulting ``{label: count}`` distribution. Works for any per-sample signal — loss,
-accuracy, a second loss, any metric — not just losses.
+resulting ``{label: count}`` distribution. Works for any per-sample signal, loss,
+accuracy, a second loss, any metric, not just losses.
 
 **Arguments**
 
-- ``signal_name`` *(str)* — the signal to classify (its full history is read via
+- ``signal_name`` *(str)*, the signal to classify (its full history is read via
   :func:`query_signal_history`).
-- ``tag_name`` *(str, optional)* — categorical tag to write. Defaults to
+- ``tag_name`` *(str, optional)*, categorical tag to write. Defaults to
   ``'<signal_name>_shape'`` (or ``'<signal_name>_loss_shape'`` if *signal_name*
   doesn't already end in ``_loss``).
-- ``classifier`` *(callable, optional)* — overrides what
+- ``classifier`` *(callable, optional)*, overrides what
   :func:`resolve_signal_classifier` would otherwise resolve for this call only.
 
 **Example**
@@ -748,7 +748,7 @@ write_loss_shapes
 **Purpose**
 
 Convenience wrapper over :func:`write_signal_shapes` for the conventional loss
-signal — same behavior, fixed ``tag_name="loss_shape"``.
+signal, same behavior, fixed ``tag_name="loss_shape"``.
 
 **Example**
 
@@ -773,8 +773,8 @@ enable_loss_shape_signal
 **Purpose**
 
 Registers a **live**, per-step ``@wl.signal`` (batched) that classifies each
-sample's loss-trajectory-so-far into an int-coded shape — an index into
-:data:`LOSS_SHAPES`, or ``-1`` before there's enough history — updated every
+sample's loss-trajectory-so-far into an int-coded shape, an index into
+:data:`LOSS_SHAPES`, or ``-1`` before there's enough history, updated every
 *every* steps. This is the live counterpart to :func:`write_loss_shapes`
 (report-time): heavier, since it reads history on every fire, so throttle with
 *every* or prefer the report-time path for a definitive, full-coverage tag.
@@ -802,17 +802,17 @@ Every signal registered via ``wl.watch_or_edit(criterion, flag="loss", ...)`` is
 **already** auto-classified in the background with zero setup: the logger's
 periodic flush thread (``WL_LOGGER_FLUSH_INTERVAL_SECONDS`` env var, default 2s)
 discovers it automatically and re-tags it as ``'<signal>_shape'`` every tick, once
-it has enough per-sample history to classify — no call needed, and no
+it has enough per-sample history to classify, no call needed, and no
 ``write_dataframe(loss_shape_signal=...)`` required either (see
 :func:`auto_loss_shape_signal_names` to inspect that discovery set).
 
 Call ``enable_loss_shape_autotag`` only to **override** the tag name or
-classifier used for one specific *loss_signal* — e.g. it isn't a decreasing loss,
+classifier used for one specific *loss_signal*, e.g. it isn't a decreasing loss,
 so the default classifier is wrong for it. It also re-enables that signal if it
 was previously disabled. ``loss_signal`` is required (raises ``ValueError`` if
 omitted); this call is never needed to turn autotagging *on*.
 
-Call ``disable_loss_shape_autotag`` to stop it — for one *loss_signal*, or for
+Call ``disable_loss_shape_autotag`` to stop it, for one *loss_signal*, or for
 every signal (including ones registered later) if *loss_signal* is ``None``.
 
 **Example**
@@ -840,7 +840,7 @@ auto_loss_shape_signal_names
 
 **Purpose**
 
-Every signal name currently registered via ``flag="loss"`` — the automatic
+Every signal name currently registered via ``flag="loss"``, the automatic
 loss-shape classification target set the background flush thread iterates.
 Read-only introspection/debugging; you don't need to call this to make
 autotagging happen (see :func:`enable_loss_shape_autotag`).
@@ -913,7 +913,7 @@ save_instance_signals
 **Purpose**
 
 Persist **per-instance / per-annotation** signals (and optional per-instance
-targets) for tasks where a sample has multiple instances — detection boxes or
+targets) for tasks where a sample has multiple instances, detection boxes or
 segmentation masks. Values land at ``(sample_id, annotation_id)`` for
 ``annotation_id >= 1`` (``instance_id 0`` is the per-sample row).
 
@@ -958,20 +958,20 @@ save_group_signals
 
 **Purpose**
 
-Persist and broadcast **group-level** statistics — a value that describes a
+Persist and broadcast **group-level** statistics, a value that describes a
 *group* of samples rather than a single one (e.g. a contrastive/pairwise loss
 computed over an image pair, or any metric shared by every member of a group).
 
 **Arguments**
 
-- ``signals`` *(dict)* — ``{name: value}``. Each value is either a scalar
+- ``signals`` *(dict)*, ``{name: value}``. Each value is either a scalar
   (applied to every group) or a batch tensor/list the same length as
   ``group_ids`` (one value per group, broadcast to that group's members).
-- ``group_ids`` *(list of str, or torch.Tensor)* — the group ID each batch
+- ``group_ids`` *(list of str, or torch.Tensor)*, the group ID each batch
   entry belongs to.
-- ``origin`` *(str, default ``"train"``)* — split name (``"train"``, ``"val"``, …).
-- ``step`` *(int, optional)* — training step; defaults to the current model age.
-- ``log`` *(bool, default ``True``)* — also log the mean/scalar value to the
+- ``origin`` *(str, default ``"train"``)*, split name (``"train"``, ``"val"``, …).
+- ``step`` *(int, optional)*, training step; defaults to the current model age.
+- ``log`` *(bool, default ``True``)*, also log the mean/scalar value to the
   Weights Studio metrics dashboard.
 
 **Typical usage**
@@ -988,7 +988,7 @@ computed over an image pair, or any metric shared by every member of a group).
 **Note**
 
 If any member of a group is discarded, the group's signal update for that
-group is skipped for that call (per-sample signals are unaffected — only the
+group is skipped for that call (per-sample signals are unaffected, only the
 group-level write is suppressed).
 
 .. _model-signals:
@@ -1004,7 +1004,7 @@ save_model_signals
 
 **Purpose**
 
-Persist **per-step** scalars that describe the *model*, not any sample — the
+Persist **per-step** scalars that describe the *model*, not any sample, the
 step-keyed sibling of the three verbs above. ``save_signals`` (per sample),
 ``save_instance_signals`` (per annotation) and ``save_group_signals`` (per
 group) all write onto dataframe rows, because every value they record belongs
@@ -1022,12 +1022,12 @@ that was never about them.
 
 **Arguments**
 
-- ``signals`` *(dict)* — ``{name: value}``. Values may be Python numbers, or
+- ``signals`` *(dict)*, ``{name: value}``. Values may be Python numbers, or
   0-d / reducible tensors and arrays (mean-reduced to one scalar). Non-finite
   values (NaN/inf) are dropped rather than plotted, so a diverging run breaks
   the curve instead of rescaling the axis and hiding every healthy point
   before it.
-- ``step`` *(int, optional)* — training step; defaults to the current model
+- ``step`` *(int, optional)*, training step; defaults to the current model
   age, same as every other ``save_*`` verb.
 
 **Naming**
@@ -1052,7 +1052,7 @@ curve and that same layer's freeze/reset controls name the same thing.
    total = sum(p.grad.pow(2).sum() for p in model.parameters() if p.grad is not None)
    wl.save_model_signals({"metrics/global/grad_norm": total.sqrt()})
 
-In practice you rarely write that loop — see ``track_model_signals`` below.
+In practice you rarely write that loop, see ``track_model_signals`` below.
 
 track_model_signals
 --------------------
@@ -1107,17 +1107,17 @@ statistics just duplicate the layer before them.
 
 **Arguments**
 
-- ``model`` — the watched model (what ``watch_or_edit(..., flag="model")``
+- ``model``, the watched model (what ``watch_or_edit(..., flag="model")``
   returned). Resolved from the ledger when omitted.
-- ``metrics`` *(iterable of str)* — which signals to emit; defaults to all of
+- ``metrics`` *(iterable of str)*, which signals to emit; defaults to all of
   them. Narrow it with e.g. ``["grad_norm", "activation_std"]``.
-- ``every_n_steps`` *(int, default 1)* — sample every Nth step. The activation
+- ``every_n_steps`` *(int, default 1)*, sample every Nth step. The activation
   forward hooks are the only per-step cost worth thinking about; on a large
   model raise this to 10–50 and the overhead becomes negligible while the
   curves stay just as readable.
-- ``layer_ids`` *(iterable, optional)* — restrict to these layer ids.
+- ``layer_ids`` *(iterable, optional)*, restrict to these layer ids.
   ``None`` tracks every layer.
-- ``include_global`` *(bool, default ``True``)* — also emit the two
+- ``include_global`` *(bool, default ``True``)*, also emit the two
   ``metrics/global/*`` curves.
 
 **Returns** a ``ModelSignalTracker``. Keep it if you want ``.flush()`` or
@@ -1125,7 +1125,7 @@ statistics just duplicate the layer before them.
 
 **When each value is collected**
 
-- **Weights** are read off ``p.data`` at flush time — they are always there.
+- **Weights** are read off ``p.data`` at flush time, they are always there.
 - **Gradients** come from ``Tensor.register_post_accumulate_grad_hook``
   (torch ≥ 2.1), which fires the instant a parameter's ``.grad`` is final
   during backward. They are deliberately *not* read at flush time: a training
@@ -1134,7 +1134,7 @@ statistics just duplicate the layer before them.
 - **Activations** come from forward hooks, reduced on-device into 0-d tensors
   and held there. The whole step costs **one** host↔device sync no matter how
   many layers are tracked.
-- The flush itself piggybacks on ``optimizer.step()`` — the one point in a step
+- The flush itself piggybacks on ``optimizer.step()``, the one point in a step
   where gradients are guaranteed present and the step is guaranteed finished.
   The optimizer is resolved from the ledger lazily, on the first forward, since
   a script watches its model *before* building the optimizer from
@@ -1143,19 +1143,19 @@ statistics just duplicate the layer before them.
 
 Collection only happens inside ``guard_training_context``, so an evaluation
 pass can never contaminate a gradient or activation curve with values the
-optimizer never saw — this holds even for eval loops that skip
+optimizer never saw, this holds even for eval loops that skip
 ``model.eval()`` or ``torch.no_grad()``.
 
 **Reading the curves**
 
 - ``grad_norm`` collapsing toward 0 in the *early* layers while late ones stay
   healthy is a vanishing gradient: the run keeps "training" and stops learning.
-- ``grad_norm`` spiking by orders of magnitude is the exploding case — pair it
+- ``grad_norm`` spiking by orders of magnitude is the exploding case, pair it
   with the loss curve to see which moved first.
 - ``activation_std`` → 0 on a layer is that layer going constant (dead ReLUs,
   saturated BatchNorm): still consuming compute, contributing nothing.
 - ``weights_norm`` climbing without bound while the loss flattens is the model
-  growing weights instead of learning structure — time to add decay.
+  growing weights instead of learning structure, time to add decay.
 
 See ``examples/Usecases/wl-fashion-mnist-signals`` for a complete runnable
 example, including a startup legend that maps each layer id to its module.
@@ -1168,10 +1168,10 @@ Per-sample vs per-instance watched signals
 ``wl.watch_or_edit`` accepts two routing flags for ``flag="loss"`` /
 ``flag="metric"`` wrappers:
 
-- ``per_sample=True`` — the wrapped object returns one value per sample
+- ``per_sample=True``, the wrapped object returns one value per sample
   (``[B]``); it is logged and saved on the **sample row** (``instance_id 0``)
   via the :func:`save_signals` path.
-- ``per_instance=True`` — the wrapped object returns a **flat** tensor with one
+- ``per_instance=True``, the wrapped object returns a **flat** tensor with one
   value per instance (sample-major); Weightslab auto-saves it at
   ``(sample_id, annotation_id)`` (``annotation_id >= 1``) via
   :func:`save_instance_signals`. The wrapper locates the instance→sample map
@@ -1232,7 +1232,7 @@ Mark samples as discarded (or restore with ``discarded=False``).
    wl.get_samples_by_tag(tag, origin="train_loader", limit=None)
 
 Return IDs matching a tag. ``origin`` is the ``loader_name`` you passed to
-``wl.watch_or_edit(..., flag="data", loader_name=...)`` — not a free-form split
+``wl.watch_or_edit(..., flag="data", loader_name=...)``, not a free-form split
 label. ``None`` (the default) searches every registered split.
 
 **Query discarded**
@@ -1269,7 +1269,7 @@ Attribute                                    Description
 
 **Methods**
 
-- ``ctx.latest(signal_name, default=float("nan"), require_fresh=False)`` — most
+- ``ctx.latest(signal_name, default=float("nan"), require_fresh=False)``, most
   recent value of **another** signal for this sample; lets a signal ingest
   several other signals by calling this once per input and combining the
   results. ``require_fresh=True`` raises :ref:`StaleSignalError
@@ -1329,7 +1329,7 @@ BatchSignalContext
 The batched counterpart of :ref:`SignalContext <signalcontext>`. Pass
 ``batched=True`` to ``@wl.signal(...)`` and the decorated function receives one
 ``BatchSignalContext`` for the **whole batch** instead of being called once per
-sample — ``b.sample_ids`` and ``b.subscribed_values`` are arrays of length ``B``,
+sample, ``b.sample_ids`` and ``b.subscribed_values`` are arrays of length ``B``,
 so the signal computes over every sample with vector ops and returns one array of
 length ``B``. This is also where the speed-up comes from for
 :meth:`BatchSignalContext.history` / :meth:`BatchSignalContext.latest`: each is a
@@ -1339,21 +1339,21 @@ length ``B``. This is also where the speed-up comes from for
 
 - ``sample_ids`` *(list[int], length B)*
 - ``subscribed_values`` *(np.ndarray, shape (B,))*
-- ``logits`` / ``preds`` / ``targets`` — batch-level, same as ``SignalContext``
-- ``inputs`` *(dict)* — ``{signal_name: (B,) array}`` for each declared
+- ``logits`` / ``preds`` / ``targets``, batch-level, same as ``SignalContext``
+- ``inputs`` *(dict)*, ``{signal_name: (B,) array}`` for each declared
   ``@wl.signal(inputs=[...])`` input, aligned to ``sample_ids``
-- ``step`` *(int)* — the step the trigger fired at
+- ``step`` *(int)*, the step the trigger fired at
 
 **Methods**
 
-- ``history(signal_name) -> {sample_id: [values in step order]}`` — per-sample
+- ``history(signal_name) -> {sample_id: [values in step order]}``, per-sample
   history for every sample in the batch, in one query.
-- ``latest(signal_name, default=nan, require_fresh=False) -> np.ndarray`` — most
+- ``latest(signal_name, default=nan, require_fresh=False) -> np.ndarray``, most
   recent value of another signal for each sample, ``(B,)`` aligned to
   ``sample_ids``. ``require_fresh=True`` raises :ref:`StaleSignalError
   <stalesignalerror>` unless *every* sample has a value at the current step.
 
-**Example** — this is exactly how the built-in live shape signal is implemented:
+**Example**, this is exactly how the built-in live shape signal is implemented:
 
 .. code-block:: python
 
@@ -1381,7 +1381,7 @@ StaleSignalError
 Raised by ``ctx.latest(signal_name, require_fresh=True)`` /
 ``b.latest(signal_name, require_fresh=True)`` (see :ref:`SignalContext
 <signalcontext>` / :ref:`BatchSignalContext <batchsignalcontext>`) when a signal
-you're **ingesting** has no value at the current step — it was never logged, or
+you're **ingesting** has no value at the current step, it was never logged, or
 it was written *after* the signal that's trying to read it fires this step.
 
 **When you'd catch it**
@@ -1449,7 +1449,7 @@ Custom evaluation function (``@wl.eval_fn``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Decorate any function with ``@wl.eval_fn`` to override the default.  The
-function receives one argument — a *managed loader* that handles
+function receives one argument, a *managed loader* that handles
 cancellation, timeout, and progress reporting automatically.
 
 .. code-block:: python
@@ -1464,7 +1464,7 @@ cancellation, timeout, and progress reporting automatically.
    val_loader = wl.watch_or_edit(DataLoader(val_dataset, batch_size=64),
                                  flag='data', loader_name='val_loader')
 
-   # Optional override — use the same logic as your test() function
+   # Optional override, use the same logic as your test() function
    @wl.eval_fn
    def eval_pass(loader):
        model.eval()
@@ -1500,7 +1500,7 @@ Result console output
 After each evaluation, WeightsLab prints a summary line to stdout regardless
 of whether Weights Studio is connected::
 
-   [WeightsLab] Evaluation 'val_loader' @ step 1200 — eval_loss=0.2314, accuracy=0.9120
+   [WeightsLab] Evaluation 'val_loader' @ step 1200, eval_loss=0.2314, accuracy=0.9120
 
 eval_fn decorator
 -----------------
@@ -1562,7 +1562,7 @@ there is no pending/running evaluation to service.
 
 - When training is driven purely by the background gRPC/CLI worker (the
   common case when using Weights Studio), you don't need to call this at
-  all — the worker calls it for you.
+  all, the worker calls it for you.
 - Prefer :func:`run_pending_evaluation` for training-loop integration where
   you want the evaluation to run synchronously between steps.
 
@@ -1576,10 +1576,10 @@ Signal history query helpers
 WeightsLab records three layers of signal history that can be queried at
 any point during or after training:
 
-- **Global history** — one aggregated value per training step (the curve
+- **Global history**, one aggregated value per training step (the curve
   shown in Weights Studio).
-- **Per-sample history** — one value per ``(sample_id, step)`` pair.
-- **Per-instance history** — one value per ``(sample_id, annotation_id, step)``
+- **Per-sample history**, one value per ``(sample_id, step)`` pair.
+- **Per-instance history**, one value per ``(sample_id, annotation_id, step)``
   triple (for detection / segmentation tasks).
 
 The functions below give direct access to this data.
@@ -1703,9 +1703,9 @@ Dump signal history to a file for offline analysis or debugging.
 
 **Arguments**
 
-- ``path`` *(str, optional)* — output file path **or** directory.
+- ``path`` *(str, optional)*, output file path **or** directory.
 
-  - ``None`` (default) — uses ``root_log_dir`` from the active checkpoint
+  - ``None`` (default), uses ``root_log_dir`` from the active checkpoint
     manager (the directory passed to ``wl.watch_or_edit(..., flag="hyperparameters")``
     or ``wl.watch_or_edit(..., flag="logger", log_dir=...)``) and
     auto-generates a filename inside it.  Falls back to the current working
@@ -1722,36 +1722,36 @@ Dump signal history to a file for offline analysis or debugging.
     the same directory.
   - The directory is created automatically if it does not exist.
 
-- ``format`` *({"parquet", "json", "csv"}, optional)* — output format. When
+- ``format`` *({"parquet", "json", "csv"}, optional)*, output format. When
   omitted, it is inferred from *path*'s extension (``.parquet`` / ``.json`` /
   ``.csv``), defaulting to ``"parquet"`` when *path* carries no extension (a
-  bare directory or ``None`` — the common periodic-export case). Parquet is
+  bare directory or ``None``, the common periodic-export case). Parquet is
   compact, dtype-preserving, and scales to large per-sample/instance logs far
   better than JSON; it needs a parquet engine (``pip install pyarrow``) and
   falls back to JSON with a warning if none is installed, so a checkpoint
   dump never crashes the run. ``"json"`` keeps the nested per-section shape
   shown below; ``"parquet"`` and ``"csv"`` are flat tables with a ``type``
   column discriminating the sections (see the CSV shape further down).
-- ``type_of_history`` *(str or None)* — which layers to include:
+- ``type_of_history`` *(str or None)*, which layers to include:
 
-  - ``None`` / ``"all"`` — all three layers (global, sample, instance).
-  - ``"global"`` — aggregated training-curve history only.
-  - ``"sample"`` — per-sample history only.
-  - ``"instance"`` / ``"instances"`` — per-instance history only.
+  - ``None`` / ``"all"``, all three layers (global, sample, instance).
+  - ``"global"``, aggregated training-curve history only.
+  - ``"sample"``, per-sample history only.
+  - ``"instance"`` / ``"instances"``, per-instance history only.
 
-- ``graph_name`` *(str or list of str, optional)* — restrict to one or
+- ``graph_name`` *(str or list of str, optional)*, restrict to one or
   more signal / metric names.
-- ``experiment_hash`` *(str, optional)* — ``None`` (default) uses the
+- ``experiment_hash`` *(str, optional)*, ``None`` (default) uses the
   current experiment hash from the checkpoint manager.  ``"all"`` includes
   every hash.  Any other string restricts to that specific run.
-- ``sample_id`` *(str or list of str, optional)* — restrict per-sample and
+- ``sample_id`` *(str or list of str, optional)*, restrict per-sample and
   per-instance rows to one or more sample IDs.  Has no effect on global
   history.
-- ``instance_id`` *(int or list of int, optional)* — restrict per-instance
+- ``instance_id`` *(int or list of int, optional)*, restrict per-instance
   rows to one or more annotation IDs.  Has no effect on global or
   per-sample history.
-- ``orient`` *(str, optional)* — JSON layout for each section, forwarded to
-  ``pandas.DataFrame.to_json``.  Default ``"columns"`` (see below — compact,
+- ``orient`` *(str, optional)*, JSON layout for each section, forwarded to
+  ``pandas.DataFrame.to_json``.  Default ``"columns"`` (see below, compact,
   writes each column name once per section instead of once per row).  Pass
   ``"records"`` for the row-list-of-dicts shape shown further down.  Ignored
   for ``format="csv"``.
@@ -1781,7 +1781,7 @@ Each section maps column name -> {row index -> value}; round-trips with
      "instance": [{"graph_name": "iou",  "experiment_hash": "h1", "sample_id": "img0", "annotation_id": 1, "step": 1, "metric_value": 0.81}]
    }
 
-The row-list-of-dicts shape used before ``orient`` was wired up — repeats
+The row-list-of-dicts shape used before ``orient`` was wired up, repeats
 every column name once per row, so it's larger on disk for many-row
 sections. Pass ``orient="records"`` explicitly to keep using it.
 
@@ -1799,7 +1799,7 @@ type are left empty.
 
 **Examples**
 
-Write all history — directory and filename are inferred automatically
+Write all history, directory and filename are inferred automatically
 (most common usage)::
 
     wl.write_history()   # uses root_log_dir from the checkpoint manager
@@ -1808,7 +1808,7 @@ Write all history to a specific file::
 
     wl.write_history("history.json")
 
-Write to a directory — filename is auto-generated from a hash of the
+Write to a directory, filename is auto-generated from a hash of the
 parameters (e.g. ``a3f2b891_history.json``).  Calling with the same
 filters again overwrites the same file::
 
@@ -1861,7 +1861,7 @@ write_dataframe
 **Purpose**
 
 Dump the WeightsLab sample dataframe to a file for offline analysis.  The
-dataframe holds one row per ``(sample_id, annotation_id)`` pair — sample-level
+dataframe holds one row per ``(sample_id, annotation_id)`` pair, sample-level
 metadata sits at ``annotation_id = 0``; per-instance rows (detection boxes,
 segmentation masks) sit at ``annotation_id ≥ 1``.
 
@@ -1870,9 +1870,9 @@ pending in-memory writes are persisted first.
 
 **Arguments**
 
-- ``path`` *(str, optional)* — output file path **or** directory.
+- ``path`` *(str, optional)*, output file path **or** directory.
 
-  - ``None`` (default) — uses ``root_log_dir`` from the active checkpoint
+  - ``None`` (default), uses ``root_log_dir`` from the active checkpoint
     manager and auto-generates a filename inside it.
   - If *path* has a file extension, the file is written directly.
   - If *path* has no extension or is an existing directory, a filename is
@@ -1882,28 +1882,28 @@ pending in-memory writes are persisted first.
     filters → different file.
   - The directory is created automatically if it does not exist.
 
-- ``format`` *({"parquet", "json", "csv"}, optional)* — output format. When
+- ``format`` *({"parquet", "json", "csv"}, optional)*, output format. When
   omitted, it is inferred from *path*'s extension (``.parquet`` / ``.json`` /
   ``.csv``), defaulting to ``"parquet"`` when *path* carries no extension (a
   bare directory or ``None``). Same parquet/JSON trade-off as
-  :func:`write_history` — see the note there.
+  :func:`write_history`, see the note there.
 
-- ``columns`` *(str or list of str, optional)* — which columns to include
+- ``columns`` *(str or list of str, optional)*, which columns to include
   (index levels ``sample_id`` / ``annotation_id`` are always present):
 
-  - ``None`` / ``"all"`` — every column (default).
-  - ``"tags"`` — only columns prefixed with ``tag:`` (e.g. ``tag:loss_shape``,
+  - ``None`` / ``"all"``, every column (default).
+  - ``"tags"``, only columns prefixed with ``tag:`` (e.g. ``tag:loss_shape``,
     ``tag:weather``).
-  - ``"signals"`` — only columns prefixed with ``signals`` (per-sample signals
+  - ``"signals"``, only columns prefixed with ``signals`` (per-sample signals
     logged via ``wl.watch_or_edit`` or ``wl.save_signals``,
     e.g. ``signals_loss``, ``signals//iou``).
-  - ``"discarded"`` — only the boolean ``discarded`` column.
+  - ``"discarded"``, only the boolean ``discarded`` column.
   - A list mixing any of the above group names with exact column names.
 
-- ``sample_id`` *(str or list of str, optional)* — restrict to one or more
+- ``sample_id`` *(str or list of str, optional)*, restrict to one or more
   sample IDs (index level 0).  ``None`` keeps all.
 
-- ``instance_id`` *(int or list of int, optional)* — restrict to one or more
+- ``instance_id`` *(int or list of int, optional)*, restrict to one or more
   annotation IDs (index level 1).  ``0`` selects sample-level rows only; ``≥ 1``
   selects per-instance rows.  ``None`` keeps all.
 
@@ -1982,19 +1982,19 @@ reference and known limitations (image-path/class-name resolution).
 
 **Arguments**
 
-- ``fmt`` *(str)* — ``"cvat"`` (single XML file), ``"label_studio"`` (single
+- ``fmt`` *(str)*, ``"cvat"`` (single XML file), ``"label_studio"`` (single
   JSON file), or ``"v7"`` (zip of per-image Darwin JSON files).
-- ``path`` *(str, optional)* — output file path **or** directory. ``None``
+- ``path`` *(str, optional)*, output file path **or** directory. ``None``
   (default) uses ``root_log_dir`` from the active checkpoint manager, with
   the format's default filename (e.g. ``annotations_cvat.xml``).
-- ``origin`` *(str, optional)* — restrict to one registered split/loader
+- ``origin`` *(str, optional)*, restrict to one registered split/loader
   (e.g. ``"train_loader"``). ``None`` exports every registered split.
-- ``class_names`` *(dict or list, optional)* — explicit class-id -> name
+- ``class_names`` *(dict or list, optional)*, explicit class-id -> name
   mapping, overriding any auto-detected ``dataset.class_names`` attribute.
   Without either, labels fall back to ``"class_<id>"``.
-- ``use_predictions`` *(bool)* — export model predictions instead of
+- ``use_predictions`` *(bool)*, export model predictions instead of
   ground-truth targets. Default ``False``.
-- ``tags`` *(list of str, optional)* — restrict to samples carrying ANY of
+- ``tags`` *(list of str, optional)*, restrict to samples carrying ANY of
   these tags (``tag:`` prefix optional, e.g. ``["ToReview"]``), matching a
   boolean tag from :func:`tag_samples` or a categorical value from
   :func:`set_categorical_tag`. ``None`` (default) exports every sample.
@@ -2024,23 +2024,23 @@ ai_report_generation
 .. code-block:: python
 
    wl.ai_report_generation(
-       signals=None,          # list[str] | None — default: every signal with >= 2 points
-       output_path=None,      # str | None — default: <root_log_dir>/reports/experiment_report_<stamp>.html
-       root_log_dir=None,     # str | None — default: the active checkpoint manager's dir
+       signals=None,          # list[str] | None, default: every signal with >= 2 points
+       output_path=None,      # str | None, default: <root_log_dir>/reports/experiment_report_<stamp>.html
+       root_log_dir=None,     # str | None, default: the active checkpoint manager's dir
        use_agent=True,        # write the Analysis section with the agent's LLM
    ) -> str                   # the path written
 
-Generates the self-contained HTML experiment report — signal trajectory
+Generates the self-contained HTML experiment report, signal trajectory
 plots, a health label per signal, per-sample outliers, loss-shape tag counts,
-dataset stats, and a written analysis — and returns the file path. This is
+dataset stats, and a written analysis, and returns the file path. This is
 the same artifact, produced by the same code path, as the Weights Studio
 report button, the agent action ("generate a report" in the chat bar), and
 the CLI console's ``report`` command. See :doc:`experiment_reports` for what
 each section contains and how it stays bounded on huge datasets.
 
 The written analysis comes from the agent's LLM (see :doc:`agent` for
-provider setup). If no provider is configured — or no experiment is being
-served in this process, so there is no agent to ask — the report is still
+provider setup). If no provider is configured, or no experiment is being
+served in this process, so there is no agent to ask, the report is still
 written, just without the Analysis prose. Pass ``use_agent=False`` to skip
 the LLM call deliberately (no provider needed, no tokens spent).
 
@@ -2077,7 +2077,7 @@ Point-cloud customization (LiDAR)
 For ``task_type = "detection_pointcloud"`` datasets, Weights Studio previews
 each sample as a server-rendered 2D image (default: bird's-eye view). These
 two decorators let you override how points and boxes get projected into that
-2D preview — see :doc:`examples/usecases/lidar_detection` for the full
+2D preview, see :doc:`examples/usecases/lidar_detection` for the full
 use case.
 
 pointcloud_thumbnail
@@ -2102,7 +2102,7 @@ range/spherical LiDAR-scan projection instead of the default bird's-eye view.
 - A ``render_thumbnail_2d`` method on the dataset itself takes precedence
   over this global registration.
 - ``@wl.3d_pc_thumb`` is not valid Python (identifiers can't start with a
-  digit) — hence the spelled-out name.
+  digit), hence the spelled-out name.
 
 pointcloud_boxes
 ~~~~~~~~~~~~~~~~~
@@ -2148,7 +2148,7 @@ dispatch). Called automatically by :func:`write_dataframe` and
 :func:`write_history` before they read, so their output always reflects the
 latest derived signals. Call it yourself only when you need to read signals
 **mid-run** through some other path (e.g. :func:`query_sample_history`) and the
-worker thread is enabled (``ledger_signal_worker``) — otherwise a just-fired
+worker thread is enabled (``ledger_signal_worker``), otherwise a just-fired
 dynamic signal might not have landed in the ledger yet.
 
 **Example**
@@ -2172,7 +2172,7 @@ clear_all
 
 Clear every WeightsLab registry (models, dataloaders, optimizers, loggers,
 signals, checkpoint managers, hyperparameters). Mainly useful between
-independent runs in the same process — e.g. test suites or notebooks that
+independent runs in the same process, e.g. test suites or notebooks that
 call ``wl.watch_or_edit`` repeatedly and need a clean ledger each time.
 
 seed_everything
@@ -2211,7 +2211,7 @@ call it manually to relocate logs yourself.
 
 **Arguments**
 
-- ``new_log_dir`` *(str)* — destination directory (created if missing).
+- ``new_log_dir`` *(str)*, destination directory (created if missing).
 
 **Typical usage**
 
@@ -2231,7 +2231,7 @@ ledger
 
 ``wl.ledger`` is the global registry (``GLOBAL_LEDGER``) that
 ``wl.watch_or_edit`` and the other functions on this page read from and write
-to. Most workflows never need to touch it directly — it's documented here for
+to. Most workflows never need to touch it directly, it's documented here for
 advanced use (e.g. writing your own CLI-style tooling, or inspecting
 registrations outside the decorators/functions above).
 
@@ -2251,8 +2251,8 @@ registrations outside the decorators/functions above).
 **Notes**
 
 - Registration (``register_model``, ``register_dataloader``, …) is normally
-  done for you by ``wl.watch_or_edit`` — call it directly only if you're
+  done for you by ``wl.watch_or_edit``, call it directly only if you're
   building tooling on top of WeightsLab rather than a training script.
 - This is exactly what powers the ``status`` / ``list_models`` /
   ``list_loaders`` / ``list_optimizers`` / ``dump`` commands in the
-  interactive CLI — see :doc:`weights_studio_cli/cli_console`.
+  interactive CLI, see :doc:`weights_studio_cli/cli_console`.

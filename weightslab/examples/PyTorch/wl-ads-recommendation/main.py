@@ -242,7 +242,7 @@ if __name__ == "__main__":
 
     # ================
     # Training Loop
-    wl.start_training(timeout=3)
+    # wl.start_training(timeout=3)
 
     train_loss = None
     test_loss, test_metric = None, None

@@ -171,7 +171,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    whats_new
 
 
-.. Migration guides — written, but deliberately not published yet. The pages
+.. Migration guides, written, but deliberately not published yet. The pages
 ..    live in docs/migration/ and are reachable by direct link; migration/index.rst
 ..    carries :orphan: so this stays warning-free while commented out. Uncomment
 ..    the toctree below to put them in the sidebar.

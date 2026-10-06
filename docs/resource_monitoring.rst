@@ -1,14 +1,14 @@
 Resource Monitoring
 ====================
 
-WeightsLab automatically tracks system and process resource usage — CPU,
-memory, disk, network, and GPU — for the whole lifetime of a running
+WeightsLab automatically tracks system and process resource usage, CPU,
+memory, disk, network, and GPU, for the whole lifetime of a running
 backend, and logs every value through the same signal pipeline used for
 losses and metrics. The resulting curves appear in Weights Studio exactly
 like any other signal, under graph names prefixed with ``resource/``.
 
 This is enabled by default and requires no setup. It runs independently of
-the training loop — metrics are sampled on a wall-clock interval, not tied
+the training loop, metrics are sampled on a wall-clock interval, not tied
 to training steps, so they keep updating even while training is paused or
 between experiments.
 
@@ -54,17 +54,17 @@ What gets logged
 CPU/memory/disk/network/process metrics come from `psutil
 <https://psutil.readthedocs.io/>`_. GPU metrics come from NVML (the
 ``pynvml`` import name, shipped by the ``nvidia-ml-py`` package) and are
-per-device — multi-GPU machines get one full set of ``gpu`` signals per
+per-device, multi-GPU machines get one full set of ``gpu`` signals per
 device index. On a machine with no NVIDIA driver, the ``gpu`` category
 degrades silently to a no-op; every other category is unaffected.
 
 Sampling is wall-clock driven, but the x value each sample is logged against
-is the **watched model's age** — the same axis your loss and metric curves
+is the **watched model's age**, the same axis your loss and metric curves
 use. That is what lets a resource curve be read directly against a training
 signal (or merged onto one chart with it), and it means resource curves
 restart at 0 when training does instead of carrying on from wherever process
-uptime had reached. One sample is kept per step, so a paused run — whose age
-does not move — leaves the curve waiting rather than stacking points at the
+uptime had reached. One sample is kept per step, so a paused run, whose age
+does not move, leaves the curve waiting rather than stacking points at the
 same x. Before any model is registered, samples land at step 0.
 
 Set ``WL_RESOURCE_MONITOR_STEP_SOURCE=seconds`` (or ``step_source: seconds``
@@ -162,7 +162,7 @@ Environment variables
      - How often (seconds) the monitor samples and logs a new batch of
        metrics. Clamped to a 1-second floor.
    * - ``WL_RESOURCE_MONITOR_CATEGORIES``
-     - *(unset — all categories on)*
+     - *(unset, all categories on)*
      - Comma-separated list of categories to enable
        (``cpu``, ``memory``, ``disk``, ``network``, ``process``, ``gpu``).
        When set, any category not listed is disabled.
@@ -190,7 +190,7 @@ Where it runs
 ---------------
 
 The monitor is started once, alongside the watchdog, from
-``grpc_serve()`` (``weightslab/trainer/trainer_services.py``) — so it covers
+``grpc_serve()`` (``weightslab/trainer/trainer_services.py``), so it covers
 the whole backend server lifetime, not just active training. It is a single
 daemon thread (``WL-ResourceMonitor``) and stops automatically when the
 process exits.

@@ -220,7 +220,7 @@ def main(argv=None) -> int:
     print(" MODEL-ONLY standalone — attach with `weightslab cli`, UI with `weightslab start`")
     print(f" device={device}  parameters={parameter_count(model)}  log_dir={log_dir}")
     print("=" * 70)
-    wl.start_training(timeout=3)
+    # wl.start_training(timeout=3)
 
     batches = iter(train_loader)
     started = time.time()
