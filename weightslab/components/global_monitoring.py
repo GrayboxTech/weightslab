@@ -162,8 +162,7 @@ class PauseController:
         logger.info('\nAttempting to resume training...')
 
         # On resume, first dump any pending changes to checkpoint manager
-        if self.checkpoint_manager == None:
-            self.checkpoint_manager = get_checkpoint_manager()
+        self._get_checkpoint_manager()
         if self.checkpoint_manager != None:
             self.checkpoint_manager.update_experiment_hash(first_time=True)
             self.checkpoint_manager.save_pending_changes() # Write pending change to disk
@@ -187,8 +186,12 @@ class PauseController:
         return not self._event.is_set()
 
     def _get_checkpoint_manager(self):
-        if self.checkpoint_manager is None:
-            self.checkpoint_manager = get_checkpoint_manager()
+        # The manager the ledger holds NOW, never a cached one: clear_all() (a
+        # new experiment in the same process, or simply the next test)
+        # registers a fresh manager behind a fresh proxy, and the old reference
+        # kept dumping this experiment's checkpoints into the previous one's
+        # manifest -- where a reload by the current hash could not find them.
+        self.checkpoint_manager = get_checkpoint_manager()
 
     def _is_hash_computed(self):
         self._get_checkpoint_manager()

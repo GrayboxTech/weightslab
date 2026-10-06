@@ -41,7 +41,8 @@ from weightslab.data.point_cloud_utils import (
     is_point_cloud_detection_task,
 )
 from weightslab.data.video_utils import (
-    describe_clip, is_generation_task, is_video_task,
+    describe_clip, has_playable_media, is_generation_task, is_video_task,
+    select_frame_annotation,
 )
 from weightslab.data import media_store
 from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview, encode_image_to_raw_bytes
@@ -135,6 +136,21 @@ def _point_cloud_chunk_bytes() -> int:
 _DEFAULT_MEDIA_CHUNK_BYTES = 1 << 18 # 256 KiB
 
 
+def _media_entry_bytes(value) -> int:
+    """Payload size of a cached media entry, for the media cache byte budget.
+
+    Entries are dicts whose "data" holds the encoded container; ``len()`` on
+    the dict itself would count keys, not bytes. Module-level rather than a
+    method so anything reusing ``_media_cache_put`` (the gRPC test stubs bind
+    it onto their own class) keeps working.
+    """
+    payload = value.get("data") if isinstance(value, dict) else value
+    try:
+        return len(payload)
+    except TypeError:
+        return 0
+
+
 def _media_chunk_bytes() -> int:
     """Read WL_MEDIA_CHUNK_BYTES; non-positive/invalid falls back to the default."""
     return _env_int("WL_MEDIA_CHUNK_BYTES", _DEFAULT_MEDIA_CHUNK_BYTES)
@@ -146,6 +162,10 @@ def _media_chunk_bytes() -> int:
 # would be both meaningless and ruinously expensive, so they route to the
 # text/scalar branch alongside classification and tabular.
 _NON_MASK_TASKS = ("classification", "tabular")
+
+# Guards the lazy creation of a DataService's projection cache, so two gRPC
+# workers asking at once do not each build the first index.
+_PROJECTION_CACHE_LOCK = threading.Lock()
 
 
 def is_set_flag(value) -> bool:
@@ -182,11 +202,84 @@ def is_set_flag(value) -> bool:
 
 
 def set_flag_mask(series) -> "np.ndarray":
-    """``is_set_flag`` over a whole column, as a numpy bool array."""
+    """``is_set_flag`` over a whole column, as a numpy bool array.
+
+    Vectorised for the dtypes that actually turn up, and only those; anything
+    else still goes through ``is_set_flag`` one value at a time, so the rules
+    that function documents keep holding exactly.
+
+    Worth the branching: this is called once per point on every projection
+    refresh, and the per-element path was the single largest cost of that RPC
+    -- about 15 ms of a 34 ms response over 17k points, repeated every time the
+    camera settles and every ten seconds besides.
+    """
     if series is None:
         return np.zeros(0, dtype=bool)
+
+    dtype = getattr(series, "dtype", None)
+
+    # pandas nullable boolean: NA is not set, everything else is itself.
+    if isinstance(dtype, pd.BooleanDtype):
+        return series.fillna(False).to_numpy(dtype=bool)
+
+    if dtype is not None and not isinstance(dtype, pd.CategoricalDtype):
+        kind = getattr(dtype, "kind", None)
+        # Plain numpy bool: no missing value is representable.
+        if kind == "b":
+            return series.to_numpy(dtype=bool)
+        # Numeric: NaN is missing (NOT True, which is what bool() would say),
+        # and zero is false.
+        if kind in ("i", "u"):
+            return series.to_numpy() != 0
+        if kind == "f":
+            values = series.to_numpy(dtype=np.float64)
+            return np.isfinite(values) & (values != 0)
+        # pandas nullable Int64/Float64 and friends.
+        if isinstance(dtype, pd.api.extensions.ExtensionDtype) and \
+                pd.api.types.is_numeric_dtype(dtype):
+            values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=np.float64)
+            return np.isfinite(values) & (values != 0)
+
     return np.fromiter((is_set_flag(v) for v in series.tolist()),
                        dtype=bool, count=len(series))
+
+
+def _boxes_to_bbox_payload(boxes):
+    """``[N, >=4]`` rows -> the JSON payload the 2-D box renderer reads.
+
+    Shared by the full record path and the preview-cache path, which used to
+    disagree: the preview path had no plain-detection branch at all, so a
+    box array fell through to the segmentation encoder and was PIL-resized
+    into a 64x64 RLE "mask". The first fetch of a sample looked right (it came
+    from the full path) and every fetch after it was served from the poisoned
+    cache.
+    """
+    arr = to_numpy_safe(boxes)
+    if arr is None:
+        try:
+            arr = np.asarray(boxes, dtype=np.float32)
+        except Exception:
+            return None
+    if arr.ndim == 1 and arr.size >= 4:
+        arr = arr.reshape(1, -1)
+    if arr.size == 0 or arr.ndim != 2 or arr.shape[-1] < 4:
+        return None
+    return {"bboxes": arr.tolist(), "format": detect_bbox_format(arr[..., :4])}
+
+
+def _video_frame_count(dataset, task_type=None) -> int:
+    """Frames in this dataset's clips, or 0 when it is not a video dataset.
+
+    Read from the dataset's declared attributes (never by decoding), because
+    this runs per rendered row. 0 means "do not treat annotations as
+    per-frame", which is the right answer for every image dataset.
+    """
+    if dataset is None or not has_playable_media(dataset, task_type):
+        return 0
+    try:
+        return int(describe_clip(dataset).get("frame_count") or 0)
+    except Exception:
+        return 0
 
 
 def _is_non_mask_task(task_type) -> bool:
@@ -832,7 +925,21 @@ class DataService:
                                         value_string=json.dumps(payload)))
                             except Exception as exc:
                                 logger.debug("[PreviewCache] detection_pointcloud target skipped: %s", exc)
+                    elif label is not None and _early_task == "detection":
+                        payload = _boxes_to_bbox_payload(select_frame_annotation(
+                            label, _video_frame_count(dataset, _early_task)))
+                        if payload:
+                            stats.append(create_data_stat(
+                                'target', 'string', shape=[1],
+                                value_string=json.dumps(payload)))
                     elif label is not None:
+                        # Video segmentation annotates every frame. Reduce to
+                        # the poster frame FIRST: the ndim>2 branch below reads
+                        # a 3-D array as [H, W, C] and takes [:, :, 0], which
+                        # on a [T, H, W] mask stack is a frames x height strip
+                        # — a silently wrong overlay, not an error.
+                        label = select_frame_annotation(
+                            label, _video_frame_count(dataset, _early_task))
                         label_arr = to_numpy_safe(label)
                         if label_arr is None:
                             try:
@@ -864,7 +971,17 @@ class DataService:
                                         value_string=json.dumps(payload)))
                             except Exception as exc:
                                 logger.debug("[PreviewCache] detection_pointcloud pred skipped: %s", exc)
+                    elif pred is not None and _early_task == "detection":
+                        payload = _boxes_to_bbox_payload(select_frame_annotation(
+                            pred, _video_frame_count(dataset, _early_task)))
+                        if payload:
+                            stats.append(create_data_stat(
+                                'pred', 'string', shape=[1],
+                                value_string=json.dumps(payload)))
                     elif pred is not None:
+                        # Same poster-frame reduction as the GT above.
+                        pred = select_frame_annotation(
+                            pred, _video_frame_count(dataset, _early_task))
                         pred_arr = to_numpy_safe(pred)
                         if pred_arr is None:
                             try:
@@ -946,6 +1063,13 @@ class DataService:
         _task = next((st.value_string for st in rec.data_stats if st.name == "task_type"), "")
         if is_point_cloud_detection_task(_task):
             return self._refresh_preview_boxes_3d_from_row(rec, row)
+        # Plain 2-D detection carries box rows, which are no more rasterizable
+        # than point-cloud boxes are. Without this they fell through to the
+        # mask encoder below and a [N, 6] box array was PIL-resized into a
+        # 64x64 RLE "mask" — so a detection sample rendered correctly on its
+        # first fetch and as garbage from the preview cache thereafter.
+        if str(_task).strip().lower() == "detection":
+            return self._refresh_preview_boxes_2d_from_row(rec, row)
 
         # Infer preview dimensions from cached raw_data shape; fallback to 64x64.
         target_h, target_w = 64, 64
@@ -996,6 +1120,41 @@ class DataService:
         pred_rle, pred_shape = _encode_row_mask(row.get(SampleStatsEx.PREDICTION.value))
         _upsert_mask_stat('pred_mask', pred_rle, pred_shape)
 
+        return rec
+
+    def _refresh_preview_boxes_2d_from_row(self, rec: "pb2.DataRecord", row: pd.Series) -> "pb2.DataRecord":
+        """Refresh GT/pred box JSON of a plain (2-D) detection preview record.
+
+        Video detection annotates every frame, so the rows are reduced to the
+        poster frame first — the same frame the cached thumbnail shows.
+        """
+        origin = next((st.value_string for st in rec.data_stats if st.name == "origin"), None)
+        dataset = self._get_dataset(origin) if origin else None
+        frames = _video_frame_count(dataset, "detection")
+
+        def _upsert_box_stat(stat_name: str, value_like) -> None:
+            payload = _boxes_to_bbox_payload(
+                select_frame_annotation(value_like, frames))
+            if not payload:
+                return
+            new_stat = create_data_stat(
+                stat_name, 'string', shape=[1], value_string=json.dumps(payload))
+            for i, st in enumerate(rec.data_stats):
+                if st.name == stat_name:
+                    rec.data_stats[i].CopyFrom(new_stat)
+                    return
+            rec.data_stats.append(new_stat)
+
+        # A stale mask stat from an earlier encode would otherwise sit next to
+        # the boxes and be drawn as an overlay.
+        for name in ("target", "pred_mask"):
+            for i, st in enumerate(rec.data_stats):
+                if st.name == name and st.type == "rle_mask":
+                    del rec.data_stats[i]
+                    break
+
+        _upsert_box_stat('target', row.get(SampleStatsEx.TARGET.value))
+        _upsert_box_stat('pred', row.get(SampleStatsEx.PREDICTION.value))
         return rec
 
     def _refresh_preview_boxes_3d_from_row(self, rec: "pb2.DataRecord", row: pd.Series) -> "pb2.DataRecord":
@@ -1674,6 +1833,13 @@ class DataService:
                 if label_raw is None and dataset is not None:
                     label_raw = load_label(dataset, sample_id)
 
+                # Video segmentation/detection annotates every frame, but the
+                # grid and the modal's still view draw exactly one — the
+                # poster. Take that frame's annotation, or the renderer gets a
+                # 3-D stack RLE'd into a stat it reads as 2-D.
+                label_raw = select_frame_annotation(
+                    label_raw, _video_frame_count(dataset, task_type))
+
                 # Handle 3D (point cloud) detection: metric boxes are sent both
                 # as raw 3D rows (for the interactive viewer) and projected to
                 # the BEV image frame (legacy 'bboxes' key, so the existing 2D
@@ -1944,6 +2110,11 @@ class DataService:
 
             if not _is_non_mask_task(task_type) and pred is not None:
                 t0_pmask = time.time()
+                # Same poster-frame rule as the ground truth above: a
+                # prediction drawn on the still must describe the frame the
+                # still actually shows.
+                pred = select_frame_annotation(
+                    pred, _video_frame_count(dataset, task_type))
 
                 # 3D (point cloud) detection predictions: same dual payload as
                 # the GT path (BEV-projected 'bboxes' + raw 'bboxes_3d').
@@ -2322,7 +2493,14 @@ class DataService:
                     # frame, so advertise the clip's shape here. This lets the
                     # grid badge the cell and the modal size its player without
                     # anyone paying for a GetMedia round-trip first.
-                    if is_video_task(task_type):
+                    # Keyed on the dataset's media kind, not just the task
+                    # type: a video *classification* dataset declares
+                    # media_kind="video" and keeps its own task type, and its
+                    # poster already routes through is_video_sample. Gating
+                    # this on video_generation alone left those samples
+                    # playable over GetMedia but never advertised as such, so
+                    # the UI rendered them as stills.
+                    if has_playable_media(dataset, task_type):
                         media_info = describe_clip(dataset)
                         if media_info:
                             data_stats.append(
@@ -2440,6 +2618,42 @@ class DataService:
         except Exception as e:
             logger.debug(f"Error building categorical tag defs: {e}")
         return defs
+
+    def _apply_projection_selection(self, query: str) -> pb2.DataQueryResponse:
+        """Narrow the data board to a lasso selection made in the projection
+        (``@projection_selection <token>``).
+
+        The selection is computed and kept by the projection cache because it
+        can hold millions of samples -- the drawn ones and the many the
+        level-of-detail view never sent -- which no query string can carry. A
+        ``sample_id.isin([...])`` of a million ids took longer to parse than
+        the rest of the round trip.
+        """
+        parts = query.split()
+        token = parts[1] if len(parts) > 1 else ""
+        cache = getattr(self, "_projection_cache", None)
+        if cache is None or not token or cache.selection(token) is None:
+            return pb2.DataQueryResponse(
+                success=False,
+                message="That projection selection has expired -- draw the lasso again.")
+        # Picked from the whole dataset: the live view when nothing narrows it,
+        # else the frame the projection indexed the whole dataset from. Either
+        # is usually the very frame the lasso was drawn on, whose rows the
+        # selection already holds.
+        base = self._all_datasets_df
+        if self._is_filtered or base is None or base.empty:
+            base = cache.full_frame()
+            if base is None:
+                base = self._pull_into_all_data_view_df()
+        df = base.iloc[cache.selection_rows(token, base)]
+        with self._watched_lock("_lock[ApplyDataQuery/projection]"):
+            self._all_datasets_df = df
+            self._is_filtered = True
+        return self._build_success_response(
+            df=df,
+            message=f"{len(df)} samples selected in the projection",
+            intent_type=pb2.INTENT_FILTER,
+        )
 
     def _build_success_response(
         self,
@@ -4139,32 +4353,54 @@ class DataService:
 
         # Only rows the view actually holds; a structural change (new sample)
         # must still fall back to the full rebuild rather than be invented here.
-        SID = SampleStatsEx.SAMPLE_ID.value
-        _names = list(getattr(view.index, "names", []) or [])
-        view_keys = (view.index.get_level_values(SID)
-                     if isinstance(view.index, pd.MultiIndex) and SID in _names
-                     else view.index)
-        # Looked up the other way round -- `sub` (deduplicated just above, so
-        # unique) is the index being searched, and the VIEW's keys are the
-        # target. Searching the view's keys instead raised
-        # InvalidIndexError("Reindexing only valid with uniquely valued Index
-        # objects") whenever one sample_id appeared under two origins, which
-        # the view's own (origin, sample_id) index exists precisely to allow --
-        # and the differential refresh then failed every time, silently falling
-        # back to the full rebuild. This direction also updates BOTH rows of
-        # such a sample, which is the only thing the source (indexed by
-        # sample_id alone) can mean.
-        _view_keys = pd.Index(view_keys.astype(str))
+        #
+        # The view's keys as strings are built once per view INDEX, not once
+        # per call: converting every row cost ~3 s per refresh at 10M samples,
+        # for a delta of a few thousand. An Index is immutable and every new
+        # view brings a new one, so identity is a safe cache key.
+        _cached = getattr(self, "_fast_view_keys", None)
+        if _cached is not None and _cached[0] is view.index:
+            _view_keys = _cached[1]
+        else:
+            SID = SampleStatsEx.SAMPLE_ID.value
+            _names = list(getattr(view.index, "names", []) or [])
+            view_keys = (view.index.get_level_values(SID)
+                         if isinstance(view.index, pd.MultiIndex) and SID in _names
+                         else view.index)
+            _view_keys = pd.Index(view_keys.astype(str))
+            self._fast_view_keys = (view.index, _view_keys)
         _sub_keys = pd.Index(sub.index.astype(str))
-        _src = _sub_keys.get_indexer(_view_keys)      # sub row per view row, -1 if none
-        _rows = np.flatnonzero(_src >= 0)
-        if _rows.size == 0:
-            return True
-        # A dirty sample the view does not hold is a structural change (a new
-        # sample): only the full rebuild can add it.
-        if len(set(_sub_keys)) != len(set(_view_keys[_rows])):
-            return False
-        _take = _src[_rows]
+        if _view_keys.is_unique:
+            # O(delta): each dirty sample looked up in the view's own hash
+            # index (built once with the cached keys above, then reused).
+            _pos = _view_keys.get_indexer(_sub_keys)
+            _found = _pos >= 0
+            if not _found.any():
+                return True
+            # A dirty sample the view does not hold is a structural change (a
+            # new sample): only the full rebuild can add it.
+            if not _found.all():
+                return False
+            _rows = _pos
+            _take = np.arange(len(_pos))
+        else:
+            # Looked up the other way round -- `sub` (deduplicated just above,
+            # so unique) is the index being searched, and the VIEW's keys are
+            # the target. Searching the view's keys instead raised
+            # InvalidIndexError("Reindexing only valid with uniquely valued
+            # Index objects") whenever one sample_id appeared under two origins,
+            # which the view's own (origin, sample_id) index exists precisely to
+            # allow -- and the differential refresh then failed every time,
+            # silently falling back to the full rebuild. This direction also
+            # updates BOTH rows of such a sample, which is the only thing the
+            # source (indexed by sample_id alone) can mean.
+            _src = _sub_keys.get_indexer(_view_keys)      # sub row per view row, -1 if none
+            _rows = np.flatnonzero(_src >= 0)
+            if _rows.size == 0:
+                return True
+            if len(set(_sub_keys)) != len(set(_view_keys[_rows])):
+                return False
+            _take = _src[_rows]
         for c in sub.columns:
             _ci = view.columns.get_loc(c)
             _vals = sub[c].to_numpy()[_take]
@@ -5255,6 +5491,10 @@ class DataService:
                             success=True,
                             message="View has been reset successfully.",
                         )
+                elif request.query.strip().lower().startswith("@projection_selection"):
+                    logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Projection selection: {request.query[:100]}")
+                    return self._apply_projection_selection(request.query)
+
                 elif request.query.lower().replace("'''", "\"\"\"").replace('\"\"\"', "").replace('\'\'\'', "").replace(" ", "").startswith("@overview"):
                     logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct overview operation: {request.query[:100]}...")
                     # Force view reset
@@ -5421,6 +5661,60 @@ class DataService:
                 data_records=[]
             )
 
+    def GetProjection(self, request, context):
+        """Points of the live 3-D projection inside the client's view box.
+
+        Follows the data board's filter when ``request.follow_view`` is set,
+        which is the ordinary case: filtering the view (by hand or via the
+        agent) narrows the projection with it.
+
+        The exception is a filter the projection itself produced. A lasso
+        pushes a sample_id query into the data board; re-reading that here
+        would collapse the cloud to the points just selected and leave nothing
+        to select from next, so the client clears the flag for that one
+        refresh and the whole dataset is served instead.
+
+        Grid Overview (``follow_view`` with ``restrict_sample_ids``) is the
+        exception the other way: the cloud is exactly the samples the grid is
+        rendering, served whole, whether or not the data view is also filtered
+        -- what is on screen is the truth, and a subset's page is a subset of
+        that subset.
+
+        All the slicing/decimation lives in projection_service; this is the RPC
+        shell around it. The index it answers from is built and refreshed by
+        ``ProjectionCache``, outside ``_lock``: holding the lock for a whole
+        projection request stalled every other board for as long as it took.
+        """
+        try:
+            from weightslab.trainer.services import projection_service
+            if self._all_datasets_df is None:
+                self._initialize_data_service()
+            cache = getattr(self, "_projection_cache", None)
+            if cache is None:
+                with _PROJECTION_CACHE_LOCK:
+                    cache = getattr(self, "_projection_cache", None)
+                    if cache is None:
+                        cache = self._projection_cache = projection_service.ProjectionCache()
+
+            def refreshed_view():
+                # The view brought up to date first: what an index is built
+                # from. Called when the cache (re)builds, not on every request.
+                with self._watched_lock("_lock[GetProjection]"):
+                    if not self._fastUpdateInternals():
+                        self._slowUpdateInternals()
+                    return self._all_datasets_df
+
+            return cache.serve(
+                request,
+                view=lambda: self._all_datasets_df,
+                is_filtered=lambda: bool(self._is_filtered),
+                refresh_view=refreshed_view,
+                pull_full=self._pull_into_all_data_view_df,
+            )
+        except Exception as e:
+            logger.error("Error in GetProjection: %s", str(e), exc_info=True)
+            return pb2.ProjectionResponse(success=False, message=str(e))
+
     def GetHistogram(self, request, context):
         """Server-side histogram binning of one column (typed RPC).
 
@@ -5448,10 +5742,10 @@ class DataService:
                 """Series for *name* whether it is a column or an index level."""
                 if name in frame.columns:
                     return frame[name]
-                names = list(getattr(frame.index, "names", []) or [])
-                if name in names:
-                    return pd.Series(frame.index.get_level_values(name),
-                                     index=frame.index)
+                # names = list(getattr(frame.index, "names", []) or [])
+                # if name in names:
+                #     return pd.Series(frame.index.get_level_values(name),
+                #                      index=frame.index)
                 if getattr(frame.index, "name", None) == name:
                     return pd.Series(frame.index, index=frame.index)
                 return None
@@ -5602,9 +5896,16 @@ class DataService:
 
     # Same, for GetMedia (already-compressed MP4/WAV bytes per message).
     _MEDIA_CHUNK_BYTES = _media_chunk_bytes()
-    # How many encoded clips to keep. Clips are megabytes each, so this only
-    # needs to cover "the sample the user is currently looking at".
-    _MEDIA_CACHE_ENTRIES = 3
+    # How many encoded clips to keep, and how many bytes they may occupy.
+    #
+    # This used to be 3, sized for "the sample the user is looking at". That
+    # made the studio's modal prefetch window (6 neighbours) evict its own
+    # entries before they could be used, and re-muxing a clip costs an ffmpeg
+    # round-trip on the training process. Sized now to cover a browsing window;
+    # the byte budget is what actually bounds memory, since clip sizes vary by
+    # orders of magnitude between datasets.
+    _MEDIA_CACHE_ENTRIES = _env_int("WL_MEDIA_CACHE_ENTRIES", 32)
+    _MEDIA_CACHE_BYTES = _env_int("WL_MEDIA_CACHE_MB", 512) * 1024 * 1024
 
     def _locate_sample(self, sample_id: int, origin: str = ""):
         """Resolve ``sample_id`` to ``(dataset, ds_index, member_rank)``.
@@ -5789,15 +6090,23 @@ class DataService:
     def _media_cache_put(self, key, value) -> None:
         """Insert into the encoded-media LRU, evicting the oldest entries.
 
-        Encoded clips are large, so this is deliberately tiny — it exists to
-        make re-opening and scrubbing the *same* sample free, not to hold a
-        working set.
+        Bounded by BOTH entry count and total bytes: the count keeps a
+        browsing window resident so the studio's prefetch is not wasted, and
+        the byte budget is what stops a dataset of large clips from pinning
+        the training process's memory. The newest entry is never evicted —
+        someone is about to stream it.
         """
         with self._media_cache_lock:
             self._media_cache.pop(key, None)  # keep re-puts from double-counting
             self._media_cache[key] = value
-            while len(self._media_cache) > self._MEDIA_CACHE_ENTRIES:
-                self._media_cache.pop(next(iter(self._media_cache)))
+            total = sum(_media_entry_bytes(v) for v in self._media_cache.values())
+            while len(self._media_cache) > 1 and (
+                    len(self._media_cache) > self._MEDIA_CACHE_ENTRIES
+                    or total > self._MEDIA_CACHE_BYTES):
+                oldest = next(iter(self._media_cache))
+                if oldest == key:
+                    break
+                total -= _media_entry_bytes(self._media_cache.pop(oldest))
 
     def GetPointCloud(self, request, context):
         """Stream one sample's raw point cloud as binary float32 chunks.

@@ -183,6 +183,9 @@ weightslab = [
   # project config from the directory it is started in, which is that same
   # workspace; this one points `instructions` at AGENTS.md.
   "opencode.json",
+  # Last release tag, kept current by release.yml; the final fallback for
+  # weightslab.__version__ (see _resolve_version in __init__.py).
+  "VERSION",
 ]
 
 [tool.setuptools.exclude-package-data]

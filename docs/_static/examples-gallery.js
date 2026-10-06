@@ -24,6 +24,13 @@
     },
     {
       badge: 'PyTorch', color: 'pytorch',
+      title: 'Classification, Fashion-MNIST + UMAP',
+      desc: 'Train with the live parametric UMAP, reload the 1000-step weights, discard the lowest-loss samples, then compare a PCA you write yourself with the UMAP.',
+      tags: ['classification', 'fashion-mnist', 'projection', 'umap', 'pca', 'checkpoint', 'beta'],
+      url: 'examples/pytorch/fashion_mnist_umap.html'
+    },
+    {
+      badge: 'PyTorch', color: 'pytorch',
       title: 'Segmentation, BDD100k',
       desc: 'Per-pixel semantic segmentation with a UNet. Track per-sample IoU and visualise mask overlays directly in the studio.',
       tags: ['segmentation', 'semantic', 'bdd100k', 'masks', 'dense prediction'],
@@ -90,6 +97,13 @@
       desc: 'Per-step training dynamics: global and per-layer gradient norms, weight norms and activation statistics, from one argument on the model wrap.',
       tags: ['model signals', 'gradient norm', 'activations', 'per-layer', 'training dynamics'],
       url: 'examples/usecases/model_signals.html'
+    },
+    {
+      badge: 'Usecase', color: 'usecase',
+      title: 'Projections, Fashion-MNIST',
+      desc: 'The built-in live UMAP while training, then a run that pauses itself at convergence and plugs a notebook-written t-SNE into the Projection Board.',
+      tags: ['projection', 'umap', 't-sne', 'notebook', 'beta'],
+      url: 'examples/usecases/projection_fashion_mnist.html'
     }
   ];
 

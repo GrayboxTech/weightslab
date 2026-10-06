@@ -1209,6 +1209,99 @@ class CheckpointManager:
         # rest of the state (cheap CHECKPOINT; replaces the old JSON snapshot).
         self.flush_logger_to_disk()
 
+    @staticmethod
+    def projection_sidecar_path(checkpoint_file) -> "Path":
+        """Where a checkpoint's projection encoder lives.
+
+        In a ``projection/`` SUBDIRECTORY, not beside the checkpoint. The
+        weight-checkpoint scanner globs ``<hash>_step_*.pt`` over the model
+        directory, and a sibling named ``<ckpt>.projection.pt`` matches that
+        glob -- it was picked up as a weight checkpoint, its step failed to
+        parse, and checkpoint selection returned None. A subdirectory cannot
+        collide with that glob however the sidecar is named.
+        """
+        from pathlib import Path as _Path
+        path = _Path(checkpoint_file)
+        return path.parent / "projection" / (path.stem + ".pt")
+
+    def _save_projection_sidecar(self, checkpoint_file) -> None:
+        """Write the live projection encoder next to *checkpoint_file*.
+
+        Best-effort and silent on failure: a checkpoint that saved the model is
+        a successful checkpoint whether or not a projection happened to exist.
+        """
+        try:
+            from weightslab.projection import encoder_state, get_tracker, save_projection
+            tracker = get_tracker()
+            state = encoder_state(tracker)
+            if state is None:
+                return
+            import torch as _th
+            target = self.projection_sidecar_path(checkpoint_file)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _th.save(state, target)
+            # Also refresh the run-level copy, which is what a plain restart
+            # (no explicit checkpoint restore) picks up.
+            save_projection(tracker)
+        except Exception as exc:
+            logger.debug(f"Could not save projection sidecar: {exc}")
+
+    def _load_projection_sidecar(self, checkpoint_file) -> bool:
+        """Bring the projection encoder to the moment *checkpoint_file* was taken.
+
+        Delegates to :func:`weightslab.projection.restore_from_checkpoint`,
+        which also covers the start-up order (weights restored before the
+        projection is attached) and resets the layout when the checkpoint
+        predates the first fit. True when an encoder was, or will be, restored.
+        """
+        try:
+            from weightslab.projection import restore_from_checkpoint
+            return restore_from_checkpoint(self.projection_sidecar_path(checkpoint_file))
+        except Exception as exc:
+            logger.debug(f"Could not load projection sidecar: {exc}")
+            return False
+
+    def _save_custom_projections_sidecar(self, checkpoint_file) -> None:
+        """Write the user's own projections (t-SNE, PCA, ...) beside the weights.
+
+        They are plain per-sample columns, not part of the model, so without
+        this a restore would leave them describing a model state that no longer
+        exists. Best-effort and silent on failure, like the encoder sidecar.
+        """
+        try:
+            from weightslab.projection import snapshots
+            dfm = ledgers.get_dataframe()
+            snapshots.save_sidecar(checkpoint_file, dfm.get_df_view())
+        except Exception as exc:
+            logger.debug(f"Could not save custom projection sidecar: {exc}")
+
+    def _restore_custom_projections(self, checkpoint_file) -> None:
+        """Make the run's custom projections the ones saved with *checkpoint_file*.
+
+        Those computed later are cleared and leave the picker. A checkpoint with
+        no sidecar (written before this existed) changes nothing.
+        """
+        if checkpoint_file is None:
+            return
+        try:
+            from weightslab.projection import snapshots
+            saved = snapshots.load_sidecar(checkpoint_file)
+            if saved is None:
+                return
+            dfm = ledgers.get_dataframe()
+            snapshots.apply(saved, dfm.get_df_view())
+        except Exception as exc:
+            logger.debug(f"Could not restore custom projections: {exc}")
+
+    @staticmethod
+    def _reattach_projection(model) -> None:
+        """Re-hook the live projection on a model object that replaced the old one."""
+        try:
+            from weightslab.projection import reattach_projection
+            reattach_projection(model)
+        except Exception as exc:
+            logger.debug(f"Could not re-attach projection: {exc}")
+
     def save_model_checkpoint(
         self,
         model: Optional[th.nn.Module] = None,
@@ -1303,6 +1396,15 @@ class CheckpointManager:
         try:
             th.save(checkpoint, checkpoint_file)
             logger.info(f"Saved model checkpoint: {checkpoint_file.name}")
+
+            # The projection encoder rides ALONGSIDE the checkpoint, in a
+            # sibling file -- never inside it, so a weights file stays a
+            # weights file. Pairing them per checkpoint is what makes a restore
+            # coherent: rolling the model back to step 1000 while the encoder
+            # is still the step-5000 one would place old features through a
+            # newer map and silently draw a layout that never existed.
+            self._save_projection_sidecar(checkpoint_file)
+            self._save_custom_projections_sidecar(checkpoint_file)
 
             # Update manifest with latest weight checkpoint for this experiment
             if update_manifest:
@@ -2103,6 +2205,14 @@ class CheckpointManager:
                     result['loaded_components'].add('weights')
                     step = result['weights'].get('step', 0)
 
+                    # Bring the projection back to the same moment as these
+                    # weights (see _save_projection_sidecar). Without it the
+                    # restored model's features would be read through an
+                    # encoder trained on a later one.
+                    if self._load_projection_sidecar(checkpoint_file_to_load):
+                        result['loaded_components'].add('projection')
+                    self._last_loaded_checkpoint_file = checkpoint_file_to_load
+
                     # Extract RNG state from model checkpoint if available
                     checkpoint_rng_state = result['weights'].get('rng_state')
                     if checkpoint_rng_state:
@@ -2285,6 +2395,7 @@ class CheckpointManager:
         logger.info(f"{'='*60}")
 
         # Load checkpoint data
+        self._last_loaded_checkpoint_file = None  # set only if weights load below
         checkpoint_data = self.load_checkpoint(
             exp_hash=exp_hash,
             load_model=load_model,
@@ -2315,6 +2426,9 @@ class CheckpointManager:
 
                 # Register in ledger
                 ledgers.register_model(model)
+                # A NEW model object: the projection's hook is still on the
+                # old one, which nothing calls any more.
+                self._reattach_projection(model)
 
                 # Set Model Training Guard
                 guard_training_context.model = model # Train
@@ -2391,6 +2505,7 @@ class CheckpointManager:
                 try:
                     model = model_data['model']
                     ledgers.register_model(model)
+                    self._reattach_projection(model)
                     weights = checkpoint_data['weights']
                     if model and weights and 'model_state_dict' in weights:
                         model.load_state_dict(weights['model_state_dict'])
@@ -2540,6 +2655,10 @@ class CheckpointManager:
         # Last, so it reads a dataframe that already has the snapshot applied and
         # a logger history that is done loading.
         self._rewind_sample_state(exp_hash, applied_step)
+        # And the user's own projections, after the rewind: it blanks every
+        # signal column of the samples it rolls back, custom coordinates
+        # included, so what the checkpoint saved is put back on top of that.
+        self._restore_custom_projections(getattr(self, '_last_loaded_checkpoint_file', None))
 
         # Update current experiment hash after everything is loaded
         success = len(self.error_loading_checkpoint) == 0

@@ -55,7 +55,7 @@ _MISSING_EXTRA = {
 }
 # Everything re-exported straight from .src (attribute name == export name).
 for _name in (
-    "watch_or_edit", "start_training", "serve", "keep_serving", "save_signals",
+    "watch_or_edit", "start_training", "pause_training", "serve", "keep_serving", "save_signals",
     "save_instance_signals", "save_group_signals", "save_media", "tag_samples",
     "save_model_signals", "track_model_signals",
     "register_categorical_tag", "set_categorical_tag", "discard_samples",
@@ -70,7 +70,8 @@ for _name in (
     "auto_loss_shape_signal_names",
     "signal_classifier", "resolve_signal_classifier",
     "LOSS_SHAPES", "get_current_experiment_hash", "pointcloud_thumbnail",
-    "pointcloud_boxes", "ai_report_generation",
+    "pointcloud_boxes", "ai_report_generation", "project_dataset",
+    "save_projection_coords",
 ):
     _LAZY_EXPORTS[_name] = (".src", _name)
 del _name
@@ -173,7 +174,9 @@ if _IS_MAIN_PROCESS and grpc_tls_enabled and os.environ.get('WEIGHTSLAB_SKIP_SEC
 # why the banner used to show an old version. Preference order:
 #   1. live git checkout  -> derive from the current (or nearest older) git tag
 #   2. built/installed pkg -> the generated _version.py, else dist metadata
-#   3. last resort         -> a UTC timestamp (keeps import from ever failing)
+#   3. committed release   -> weightslab/VERSION, the last release tag, written
+#                             onto main/dev by release.yml (sync-version-file)
+#   4. last resort         -> a UTC timestamp (keeps import from ever failing)
 def _resolve_version() -> str:
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.dirname(pkg_dir)
@@ -221,7 +224,18 @@ def _resolve_version() -> str:
     except Exception:
         pass
 
-    # 3. Never let version resolution break the import.
+    # 3. Committed release file: reached only with no git, no build and no
+    # install (e.g. a source copy without .git), so it never masks the more
+    # precise versions above — it is the last release, not this commit.
+    try:
+        with open(os.path.join(pkg_dir, "VERSION"), encoding="utf-8") as fh:
+            _v = fh.read().strip()
+        if _v:
+            return _v
+    except Exception:
+        pass
+
+    # 4. Never let version resolution break the import.
     from datetime import datetime
     return datetime.utcnow().strftime("%Y%m%d%H%M%S")
 
@@ -272,6 +286,7 @@ __all__ = [
     "guard_testing_context",
     "ledger",
 	"start_training",
+    "pause_training",
 	"register_categorical_tag",
 	"set_categorical_tag",
     "get_current_experiment_hash",
@@ -283,6 +298,8 @@ __all__ = [
     "write_dataframe",
     "export_annotations",
     "ai_report_generation",
+    "project_dataset",
+    "save_projection_coords",
     "classify_loss_shape",
     "write_loss_shapes",
     "write_signal_shapes",

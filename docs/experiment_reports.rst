@@ -21,7 +21,7 @@ Experiment Reports
 Ask the AI agent how your experiment is doing and it can produce a
 self-contained HTML report: signal trajectory plots, an automatic health
 classification per signal, dataset stats (sample counts, discard rate, tag
-distribution), and a written analysis grounded in those exact numbers —
+distribution), and a written analysis grounded in those exact numbers,
 branded with the WeightsLab logo.
 
 
@@ -143,7 +143,7 @@ persist across separate sessions.
 Python/CLI callers that want the same overwrite-in-place behavior can pass
 the previous run's own path back in as ``output_path``
 (:func:`ai_report_generation`) / ``--output`` (the CLI's ``report`` command)
-— they already have direct control over the file, so there's no separate
+, they already have direct control over the file, so there's no separate
 "update" flag for them.
 
 - **Weights Studio button**: the bar-chart icon immediately left of the
@@ -216,7 +216,7 @@ Light / dark mode
 
 The report follows the browser's ``prefers-color-scheme`` automatically, and
 also has its own toggle button (top-right of the banner) for overriding that
-— the choice is remembered (via ``localStorage``, scoped to that report file)
+, the choice is remembered (via ``localStorage``, scoped to that report file)
 so reopening the same report keeps the theme you picked. Signal/distribution
 plots are rendered once by matplotlib on a fixed white canvas, so they sit in
 a small always-light thumbnail card in either theme, this keeps their own

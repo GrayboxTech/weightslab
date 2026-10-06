@@ -38,6 +38,15 @@ from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
 from weightslab.backend.ledgers import register_signal
 from weightslab.components.global_monitoring import pause_controller as pause_ctrl, get_active_origin
+from weightslab.projection import (
+    attach_projection as _attach_projection,
+    detach_projection as _detach_projection,
+    observe_batch as _projection_observe_batch,
+    # Re-exported: `wl.project_dataset` / `wl.save_projection_coords` resolve
+    # through this module (see _LAZY_EXPORTS in weightslab/__init__.py).
+    project_dataset as project_dataset,
+    save_projection_coords as save_projection_coords,
+)
 
 
 def _rebind_caller_local(original_obj: Any, new_obj: Any) -> None:
@@ -883,6 +892,12 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
     # User parameters
     batch_ids = wl_kw.get('batch_ids')
+    # Snapshot the SAMPLE-level ids now. The per_instance branch below rebinds
+    # batch_ids to one entry per annotation (detection/segmentation), which is
+    # the right thing for save_instance_signals but would silently break the
+    # projection's positional feature<->id pairing, since the forward hook saw
+    # one feature row per SAMPLE.
+    sample_batch_ids = batch_ids
     group_ids = wl_kw.get('group_id')
     batch_scalar = wl_kw.get('signals')
     preds = wl_kw.get('preds')
@@ -972,6 +987,13 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
             logger.debug(f"Per-instance signal save failed for {reg_name}: {e}")
     else:
         _log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
+
+    # Live 3-D projection. The forward hook captured this batch's penultimate
+    # features but cannot see sample ids; we have the ids but not the
+    # activations. Both describe the same batch in the same order, so this is
+    # where they get paired -- the same arrangement ctx.logits already uses.
+    # No-op (one attribute read) unless a projection is attached.
+    _projection_observe_batch(sample_batch_ids, step)
 
     # CHECK FOR SUBSCRIBERS (Dynamic Signals)
     # Allows @wl.signal(subscribe_to="metric_name")
@@ -1254,6 +1276,12 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             if key in kwargs
         }
 
+        # Live 3-D projection options, popped for the same reason: it is a hook
+        # ON a wrapped model, not part of what wrapping means. False opts out;
+        # a dict steers layer/dim/cadence; a string is shorthand for
+        # {'layer': ...}; absent (or True) means "the env var decides".
+        projection_opts = kwargs.pop('projection', None)
+
         # Now construct the wrapper and let it register into the ledger.
         wrapper = ModelInterface(obj, **kwargs) if forced_model_wrapping or _model == None else _model
 
@@ -1280,6 +1308,33 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 # script fails to start -- the run is still fully usable
                 # without these curves.
                 logger.warning(f"Could not install model signal tracking: {exc}")
+
+        # Live parametric-UMAP projection of the penultimate features. On by
+        # default (WEIGHTSLAB_PROJECTION=0 removes the hook entirely); pass
+        # projection={'layer': 'backbone.fc', ...} to steer it, or
+        # projection=False to opt this one model out. Same failure contract as
+        # the signal tracking above: a projection that cannot install is a lost
+        # view, never a failed run.
+        if projection_opts is False:
+            # One projection per process, and this is THE model now: a hook
+            # left from a previous wrap would keep fitting on a model nobody
+            # trains, and a checkpoint restore parked for it would be applied
+            # to the next one that opts in.
+            _detach_projection()
+            from weightslab.projection import clear_pending_restore
+            clear_pending_restore()
+            logger.info("Live projection off for this model (projection=False)")
+        else:
+            try:
+                if isinstance(projection_opts, dict):
+                    opts = dict(projection_opts)
+                elif isinstance(projection_opts, str):
+                    opts = {'layer': projection_opts}
+                else:
+                    opts = {}
+                _attach_projection(obj, layer=opts.pop('layer', None), **opts)
+            except Exception as exc:
+                logger.warning(f"Could not install live projection: {exc}")
 
         # Prefer returning the proxy (if one exists) so external callers hold
         # a stable reference that will see updates. If no proxy was
@@ -1621,6 +1676,23 @@ def start_training(timeout: int = None) -> None:
     # safeguard. Bypass it only when no dataloader is registered; data-backed
     # workflows retain the existing hash-completeness check.
     pause_ctrl.resume(force=not ledgers.list_dataloaders())
+
+
+def pause_training() -> None:
+    """Pause training from your own code — the Studio's pause button, as a call.
+
+    The counterpart of :func:`start_training`. Takes effect at the next
+    ``with wl.guard_training_context:``, which blocks until training is resumed
+    (the Play button in the Studio header, or :func:`start_training`). The step
+    in flight is not interrupted. While paused, the gRPC server, the Studio and
+    the notebook keep running against the live model and data — which is the
+    point: pause once the run has converged, then inspect it.
+
+    Example:
+        >>> if converged:
+        ...     wl.pause_training()   # the next training step waits for Play
+    """
+    pause_ctrl.pause()
 
 
 def _register_pid_with_ui_server() -> None:
@@ -2405,6 +2477,7 @@ def save_signals(
     step: int | None = None,
     log: bool = False,
     _react: bool = True,
+    _seen: bool = True,
 ):
     """Save **per-sample** statistics to the tracked dataset.
 
@@ -2421,11 +2494,20 @@ def save_signals(
     Shapes / formats:
         - ``signals`` values: shape ``(B,)`` (one scalar per sample) or
           ``(B, ...)`` — extra dims are mean-reduced to ``(B,)`` before storage.
+          Accepted types are ``th.Tensor``, ``np.ndarray``, ``list`` and scalar
+          numbers; anything else raises ``TypeError`` rather than creating a
+          column that is never written to.
         - ``batch_ids``: length ``B``; the i-th entry names the sample the i-th
           row of every other array belongs to. Coerced to ``str`` internally.
         - ``preds`` / ``preds_raw`` / ``targets``: array of length ``B`` (or a
           ``dict`` of such arrays, or a ``list`` of length ``B`` for
           inhomogeneous per-sample shapes). 1-D arrays get a trailing axis.
+
+    Raises:
+        TypeError: a value in *signals* is of a type that cannot be turned into
+            one number per sample. This is deliberately loud: such a value used
+            to be silently dropped, leaving a column in the dataframe that stayed
+            empty forever with nothing anywhere saying why.
 
     Args:
         signals (dict | th.Tensor): ``{name: values}`` where ``values`` is a
@@ -2532,38 +2614,82 @@ def save_signals(
             return [to_numpy(t) for t in x]
         if isinstance(x, th.Tensor):
             return to_numpy(x)
+        # A bare numpy array is as ordinary an input as a tensor -- half of
+        # WeightsLab's own signal helpers compute in numpy. Returning None for
+        # it (as this used to) created the column and then wrote nothing into
+        # it, which surfaces as a metric that silently stays empty forever.
+        if isinstance(x, np.ndarray):
+            return to_numpy(x)
+        # Scalars, so a caller who computed one value per sample in a Python
+        # list-comprehension is not silently dropped either.
+        if isinstance(x, (int, float, np.number)):
+            return to_numpy(np.asarray(x))
         return None
 
     preds_np = normalize(preds)
     preds_raw_np = normalize(preds_raw)
     target_np = normalize(targets)
 
+    def _reduce_signal(arr):
+        """Collapse a per-sample signal to one value per sample."""
+        if isinstance(arr, np.ndarray) and arr.ndim > 1:
+            return arr.mean(axis=tuple(range(1, arr.ndim)))
+        return arr
+
+    def _coerce_signal(name, value):
+        """Normalize one signal value, and REFUSE to write nothing.
+
+        Anything ``normalize`` cannot make sense of used to come back as
+        ``None``, which ``enqueue_batch`` happily accepted: the column appeared
+        in the dataframe, held no values, and nothing anywhere said why. That
+        is the worst possible failure for an observability feature -- the user
+        sees a column and concludes the metric is broken, not the call. Fail
+        loudly at the call site that can still be fixed instead.
+        """
+        coerced = value.detach().cpu().numpy() if hasattr(value, 'detach') else normalize(value)
+        if coerced is None:
+            raise TypeError(
+                f"save_signals: signal {name!r} has unsupported type "
+                f"{type(value).__name__}. Pass a torch.Tensor, a numpy array, a "
+                f"list, or a scalar -- one value per sample, aligned with "
+                f"batch_ids. (A value of None would create the column and never "
+                f"write to it.)"
+            )
+        return _reduce_signal(coerced)
+
     # Processing signals
     if isinstance(signals, dict):
         losses_data = {
-            'signals//' + k: (lambda arr: arr.mean(axis=tuple(range(1, arr.ndim))) if isinstance(arr, np.ndarray) and arr.ndim > 1 else arr)(
-                v.detach().cpu().numpy() if hasattr(v, 'detach') else normalize(v)
-            )
-            for k, v in signals.items()
+            'signals//' + k: _coerce_signal(k, v) for k, v in signals.items()
         }
     elif signals is not None and isinstance(signals, (th.Tensor, np.ndarray, list)):
-        losses_data = {
-            "signals//default": (lambda arr: arr.mean(axis=tuple(range(1, arr.ndim))) if isinstance(arr, np.ndarray) and arr.ndim > 1 else arr)(
-                signals.detach().cpu().numpy() if hasattr(signals, 'detach') else normalize(signals)
-            )
-        }
+        losses_data = {"signals//default": _coerce_signal("default", signals)}
     else:
         losses_data = None
 
-    # Enqueue to dataframe manager buffer for efficiency
+    # Enqueue to dataframe manager buffer for efficiency.
+    #
+    # _seen=False (internal) writes the values WITHOUT a step, which is what
+    # bumps a sample's nb_seen/last_seen: projection coordinates describe where
+    # a sample sits in a picture, not a step at which the model saw it.
     DATAFRAME_M.enqueue_batch(
         sample_ids=batch_ids_np,
         preds_raw=preds_raw_np if preds_raw_np is not None else preds_raw,
         preds=preds_np if preds_np is not None else preds,
         targets=target_np if target_np is not None else targets,
         losses=losses_data,
-        step=step
+        step=step if _seen else None
     )
+
+    # Live 3-D projection, for the usecases that never register a flag="loss"
+    # criterion and write their per-sample values straight here (YOLO/Ultralytics
+    # wrappers, custom eval loops, anything hand-rolled). Between this and the
+    # loss wrapper, every supported way of producing a per-sample value feeds
+    # the projection. Re-entrancy safe: the projection's own coordinate
+    # write-back lands in this same function and is guarded there. Not for a
+    # _seen=False write, which carries no batch the model just ran.
+    if _seen:
+        _projection_observe_batch(batch_ids, step)
 
     # Reactive signals: these just-logged signals may satisfy an inputs=[...]
     # signal. Only logged (queryable) signals can be inputs. _react=False on the
@@ -3315,7 +3441,20 @@ def track_model_signals(model=None, **kwargs):
 
 def clear_all():
     """Clear all WeightsLab registries (models, dataloaders, etc.)."""
+    global DATAFRAME_M
     ledgers.clear_all()
+    # The cached dataframe handle is a ledger Proxy that clear_all just
+    # orphaned: the next registration creates a NEW proxy, and save_signals
+    # kept writing to the dead one ("Proxy target not set"). Re-resolve lazily.
+    DATAFRAME_M = None
+    # The projection hooks the model the ledger just let go of; a later wrap
+    # would re-attach anyway, but until then nothing should keep capturing its
+    # forward passes, nor apply a parked checkpoint restore to the next model.
+    _detach_projection()
+    from weightslab.projection import clear_pending_restore
+    from weightslab.projection.registry import clear_registry
+    clear_pending_restore()
+    clear_registry()
 
 
 def _unpack_batch(batch, device=None):
@@ -3377,6 +3516,61 @@ def _unpack_batch(batch, device=None):
 # EVALUATION MODE PUBLIC API
 # ##############################################################################################################
 
+def _resolve_module_device(module):
+    """Where a module's tensors live: parameters, else buffers, else the GPU.
+
+    Returns None only when there is genuinely nothing to go on (no torch, no
+    tensors, no accelerator) — in which case leaving the batch where it is, is
+    the only honest option.
+    """
+    try:
+        import torch as _th
+    except Exception:
+        return None
+
+    for getter in ("parameters", "buffers"):
+        try:
+            fn = getattr(module, getter, None)
+            if fn is None:
+                continue
+            for tensor in fn():
+                return tensor.device
+        except Exception:
+            continue
+
+    # A module with neither (or a proxy that forwards neither) still has to
+    # meet its batch somewhere: prefer the accelerator, since a CPU batch
+    # reaching a CUDA model is the failure this exists to prevent.
+    try:
+        if _th.cuda.is_available():
+            return _th.device("cuda")
+    except Exception:
+        pass
+    return None
+
+
+def _move_to_device(value, device):
+    """Move tensors to ``device``, descending into tuples/lists/dicts.
+
+    Anything that is not a tensor (ids, strings, metadata dicts) is returned
+    unchanged, and a failure to move is not fatal — the caller still reports
+    the forward error, which is more informative than a half-moved batch.
+    """
+    if device is None or value is None:
+        return value
+    if hasattr(value, "to") and hasattr(value, "device"):
+        try:
+            return value.to(device)
+        except Exception:
+            return value
+    if isinstance(value, dict):
+        return {k: _move_to_device(v, device) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        moved = [_move_to_device(v, device) for v in value]
+        return type(value)(moved) if isinstance(value, list) else tuple(moved)
+    return value
+
+
 def _make_default_eval_fn(model):
     """Return a default evaluation callable that uses all registered ledger signals.
 
@@ -3411,11 +3605,28 @@ def _make_default_eval_fn(model):
             no_grad_ctx = None
 
         try:
-            device = None
-            try:
-                device = next(model.parameters()).device
-            except (StopIteration, Exception):
-                pass
+            # Resolve where the model actually lives, and put the batch there.
+            #
+            # This used to read the first parameter and swallow every failure,
+            # leaving device=None — and a None device means the batch is never
+            # moved, so a CUDA model meets a CPU batch and every forward dies
+            # with "found at least two devices". Fall back through buffers (a
+            # model can be all-buffers) and then to the accelerator, so the
+            # answer is CUDA whenever CUDA is in play.
+            device = _resolve_module_device(model)
+
+            # Re-home the module onto that device. Non-persistent buffers are
+            # absent from a state_dict, so a checkpoint restore can leave them
+            # behind on CPU while the parameters are on CUDA; .to() is a no-op
+            # for anything already there and fixes exactly that case.
+            if device is not None:
+                try:
+                    model.to(device)
+                except Exception:
+                    pass
+
+            # Signals retired mid-pass because they raised (see below).
+            _failed_signals = set()
 
             # Resolve registered signals once before the loop.
             signal_names = []
@@ -3431,22 +3642,19 @@ def _make_default_eval_fn(model):
                     if inputs is None:
                         continue
 
-                    if device is not None and hasattr(inputs, "to"):
-                        try:
-                            inputs = inputs.to(device)
-                        except Exception:
-                            pass
-                    if targets is not None and device is not None and hasattr(targets, "to"):
-                        try:
-                            targets = targets.to(device)
-                        except Exception:
-                            pass
+                    # Move recursively: a model can take a tuple/list/dict of
+                    # tensors, and a top-level hasattr(x, "to") check silently
+                    # leaves every one of those on the CPU.
+                    inputs = _move_to_device(inputs, device)
+                    targets = _move_to_device(targets, device)
 
                     preds = model(inputs) # infer predictions
 
                     # Call each registered signal so its wrapped forward/compute
                     # fires and feeds into the evaluation-mode logger buffer.
                     for sig_name in signal_names:
+                        if sig_name in _failed_signals:
+                            continue
                         try:
                             sig = get_signal(sig_name)
                             if sig is None:
@@ -3480,12 +3688,43 @@ def _make_default_eval_fn(model):
                             if not attempted:
                                 sig(preds)
                         except Exception as _se:
-                            logger.debug(
-                                "[wl.default_eval] signal '%s' failed: %s\nAre you sure signal {%s} is compatible with weightslab?", sig_name, _se, sig_name
+                            # Retire the signal for the rest of this pass.
+                            #
+                            # These calls hand a signal the model's RAW output,
+                            # which not every metric accepts: a binary metric
+                            # given [B, num_classes] indexes out of bounds. On
+                            # CPU that is the IndexError we just caught; on
+                            # CUDA the same index is a device-side assert that
+                            # poisons the context for the WHOLE process, so the
+                            # next training step dies somewhere unrelated.
+                            # Repeating it once per batch turns one bad
+                            # contract into a guaranteed kill.
+                            _failed_signals.add(sig_name)
+                            logger.warning(
+                                "[wl.default_eval] signal '%s' failed and is "
+                                "skipped for this evaluation: %s | preds=%s "
+                                "targets=%s. Signals are called with the "
+                                "model's raw output — a metric that needs a "
+                                "different shape must adapt it in update().",
+                                sig_name, _se,
+                                tuple(getattr(preds, "shape", ())) or "n/a",
+                                tuple(getattr(targets, "shape", ())) or "n/a",
                             )
 
                 except Exception as _be:
-                    logger.debug("[wl.default_eval] batch forward failed: %s", _be)
+                    # A device mismatch here used to surface as a bare debug
+                    # line repeated once per batch, with nothing saying WHICH
+                    # tensor was where. Name the devices so the next one is
+                    # diagnosable from the log alone.
+                    _where = ""
+                    if "two devices" in str(_be):
+                        try:
+                            _where = (f" (model on {_resolve_module_device(model)}, "
+                                      f"inputs on {getattr(inputs, 'device', 'n/a')})")
+                        except Exception:
+                            pass
+                    logger.warning(
+                        "[wl.default_eval] batch forward failed: %s%s", _be, _where)
         finally:
             if no_grad_ctx is not None:
                 try:

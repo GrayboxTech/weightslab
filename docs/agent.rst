@@ -166,7 +166,7 @@ Remote provider, OpenRouter
      - Ask for a schema-validated plan instead of free-form JSON + repair. More
        reliable, but only on routes that support JSON-schema output (Gemini, GPT-4o).
    * - ``fallback_to_local``
-     - —
+     -,
      - ``true`` (the shipped ``agent_config.yaml`` sets ``false``)
      - Also set up Ollama, so a failing/absent cloud key still leaves a working agent.
 

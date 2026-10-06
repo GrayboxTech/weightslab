@@ -98,6 +98,12 @@ service ExperimentService {
   // (or a zip, for formats that need one file per image) comes back as bytes
   // in a single response.
   rpc ExportAnnotations (ExportAnnotationsRequest) returns (ExportAnnotationsResponse);
+  // The live parametric-UMAP projection of the model's representation, as a
+  // 3-D point per sample. Level-of-detail is server-side and driven by the
+  // client's current view box: narrowing the box as the user zooms in buys
+  // finer detail for the SAME point budget, instead of ever shipping the whole
+  // dataset. See ProjectionRequest.
+  rpc GetProjection (ProjectionRequest) returns (ProjectionResponse);
 }
 
 // --- Logger Data Sync ---
@@ -755,6 +761,10 @@ message DataSplitsResponse {
 message AgentHealthResponse {
   bool available = 1;
   string message = 2;
+  // The model the NEXT query will use, re-resolved from OpenCode's config.
+  // Health is polled, so this is how the studio notices a model chosen from
+  // the CLI (or by another client) instead of only knowing what it set itself.
+  string current_model = 3;
 }
 
 // --- Agent Onboarding ---
@@ -794,6 +804,9 @@ message GetAgentModelsResponse {
   bool success = 1;
   repeated string models = 2;
   string message = 3;
+  // Which of `models` is active right now, so the picker can preselect it
+  // rather than opening on whatever the client last set.
+  string current_model = 4;
 }
 
 message ResetAgentResponse {
@@ -988,4 +1001,132 @@ message ExportAnnotationsResponse {
   string filename = 4;  // suggested filename (with extension), e.g. "annotations_cvat.xml"
   string mime_type = 5; // e.g. "application/xml", "application/json", "application/zip"
   int32 image_count = 6; // number of images included, for UI feedback
+}
+
+// --- Live 3-D projection (parametric UMAP) ---
+
+// A request for the points visible in one view box.
+//
+// The whole level-of-detail scheme lives in the pairing of `bounds` with
+// `max_points`: the client sends the box its camera currently frames and a
+// budget it can actually draw, and the server decimates what falls inside that
+// box down to the budget. Zooming in shrinks the box, so the same budget buys
+// progressively finer detail -- which is why a multi-million-sample projection
+// never needs to cross the wire.
+message ProjectionRequest {
+  bool has_bounds = 1;   // false => whole extent (the initial, fully zoomed-out view)
+  float min_x = 2;
+  float min_y = 3;
+  float min_z = 4;
+  float max_x = 5;
+  float max_y = 6;
+  float max_z = 7;
+  int32 max_points = 8;      // client render budget; 0 => server default
+  string color_column = 9;   // optional dataframe column to colour points by ("" = by split)
+  string prefix = 10;        // coordinate signal prefix; "" => "umap"
+
+  // Follow the data board's current filter.
+  //
+  // True for an ordinary refresh: a filter the user (or the agent) applied to
+  // the data view should narrow the projection with it. False only when the
+  // projection ITSELF produced the active filter -- a lasso pushes a sample_id
+  // query into the data board, and re-reading it here would collapse the cloud
+  // to the points just selected, leaving nothing to select from next.
+  bool follow_view = 11;
+
+  // The samples the data grid is rendering right now (its current page).
+  //
+  // Honoured whenever follow_view is set: the cloud narrows to exactly these
+  // samples, filtered data view or not. An empty list means "no restriction".
+  // Served in full: no view box, no budget -- a grid page is small.
+  repeated string restrict_sample_ids = 12;
+
+  // The camera's view frustum, as 6 planes of 4 floats each (nx, ny, nz, d):
+  // a point p is on screen when n.p + d >= 0 for every plane.
+  //
+  // Sent alongside the min/max box, which is then the frustum's bounding box
+  // clipped to the cloud. The box alone is a poor stand-in for a perspective
+  // view: it either cuts off points that are on screen or spends the budget on
+  // points that are not. Empty => the box is the whole region.
+  repeated float frustum_planes = 13;
+
+  // --- Lasso selection ------------------------------------------------------
+  // With a mode set, the request is a SELECTION rather than a view: every
+  // sample whose screen position falls inside `lasso_px` -- drawn or not, since
+  // the view only ever draws a subsample -- is selected on the server and kept
+  // there under ProjectionResponse.selection_token, because a selection over
+  // millions of samples cannot travel as a list of ids. The box and planes
+  // above then describe the lasso's own sub-frustum and only narrow the
+  // candidates.
+  ProjectionLassoMode lasso_mode = 14;
+  repeated float lasso_px = 15;          // polygon, x,y pairs in canvas pixels
+  repeated float lasso_viewport = 16;    // canvas width, height in pixels
+  repeated float view_projection = 17;   // camera projection * view, column-major 4x4
+}
+
+enum ProjectionLassoMode {
+  PROJECTION_LASSO_NONE = 0;     // an ordinary view request
+  PROJECTION_LASSO_REPLACE = 1;  // the selection becomes what is inside the loop
+  PROJECTION_LASSO_ADD = 2;      // ... plus what was selected before
+  // ... minus what is outside it: only what was selected before AND is inside
+  // the loop. Drawn from another angle, this carves a 3-D volume out of the
+  // column a single loop selects.
+  PROJECTION_LASSO_REFINE = 3;
+}
+
+// Coordinates come back as PACKED parallel arrays rather than one message per
+// point: at a 50k budget the per-message framing of a `repeated ProjectionPoint`
+// costs more than the coordinates themselves, and Float32Array/typed-array
+// upload into a three.js BufferGeometry is exactly the shape the renderer wants.
+message ProjectionResponse {
+  bool success = 1;
+  string message = 2;
+
+  repeated string sample_ids = 3;            // length N; identifies each point for selection
+  repeated float coords = 4;                 // length 3N: x,y,z triples, point-major
+  repeated int32 origin_ids = 5;             // length N; index into `origins`
+  repeated string origins = 6;               // split names, for colouring
+  repeated float color_values = 7;           // length N when color_column was numeric; else empty
+  repeated string color_labels = 8;          // length N when color_column was categorical; else empty
+
+  int64 returned = 9;                        // N
+  int64 total_in_view = 10;                  // rows inside the box BEFORE decimation
+  int64 total_available = 11;                // rows that have coordinates at all
+
+  // Full extent of the projection (NOT of the requested box), so the client can
+  // frame the whole cloud on first load and show how far in the current view is.
+  float extent_min_x = 12;
+  float extent_min_y = 13;
+  float extent_min_z = 14;
+  float extent_max_x = 15;
+  float extent_max_y = 16;
+  float extent_max_z = 17;
+
+  int32 fits = 18;          // encoder fits so far, so the UI can say how fresh this is
+  int32 dims = 19;          // 2 or 3
+
+  // Every projection stored on this dataset, by prefix ("umap", plus anything
+  // wl.project_dataset() wrote under its own name). Offline re-projections are
+  // the whole reason this exists: having re-projected from a different layer,
+  // the user needs to be able to SWITCH to it, and only the server knows which
+  // ones are present. Feed one back as ProjectionRequest.prefix.
+  repeated string available_prefixes = 20;
+
+  // Per-point discarded flag (length N). Discarded samples are drawn grey
+  // rather than in their class/split colour: they are still part of the
+  // representation and worth seeing in place, but they are not training the
+  // model, so they must not read as live members of a cluster.
+  repeated bool discarded = 21;
+
+  // Lasso requests only: how many samples the selection holds, and the token
+  // that applies it to the data board -- send the data query
+  // "@projection_selection <token>". The ids themselves stay on the server.
+  int64 selected = 22;
+  string selection_token = 23;
+
+  // View requests: per point (length N), whether it is in the current lasso
+  // selection. Sent so a point that only arrives with a later zoom is drawn
+  // selected too -- the client never holds the whole selection. Empty when
+  // nothing is selected.
+  repeated bool in_selection = 24;
 }

@@ -74,7 +74,7 @@ Accepted by every ``flag`` value.
      - ``None``
      - Override the root directory for checkpoints and logs for this
        object only.  Defaults to ``WEIGHTSLAB_ROOT_LOG_DIR``.  May also point
-       at a parent directory that fans out into several experiment roots —
+       at a parent directory that fans out into several experiment roots,
        see :doc:`checkpointing`.
    * - ``skip_previous_auto_load``
      - ``False``
@@ -440,13 +440,33 @@ Logging
        disable. Only the main process writes one, ``DataLoader`` workers and
        other spawned children keep a terminal-only logger.
    * - ``WEIGHTSLAB_ROOT_LOG_DIR``
-     - *(temporary directory)*
-     - Experiment directory (checkpoints, reports, notebook, logs). Also what
-       ``weightslab start [DIR]`` exports. The session log starts in
-       ``<dir>/weightslab_logs/`` and, when it is unset, starts in a temporary
-       directory and is **moved** into ``<root_log_dir>/weightslab_logs/`` as
-       soon as the experiment's ``root_log_dir`` resolves, so the log always
-       ends up beside the checkpoints. The path is printed when the process exits.
+     - *(training script dir)*
+     - Root directory where training log snapshots are saved.
+       Defaults to a ``root_log_dir/`` folder next to your training script.
+   * - ``WEIGHTSLAB_PROJECTION``
+     - *(on)*
+     - Live 3-D parametric-UMAP projection of the model's representation
+       (see :doc:`projection`, beta). On by default; set ``0``, ``false``, ``no``
+       or ``off`` to remove it entirely , no hook, no encoder, no cost. Wins
+       over the per-model ``projection=`` keyword; to turn it off for one model
+       only, pass ``projection=False`` to ``wl.watch_or_edit(..., flag="model")``.
+   * - ``WEIGHTSLAB_PROJECTION_EVERY``
+     - ``50``
+     - Training steps between projection fits. Raise it to make the projection
+       cheaper, lower it to make it track a fast-moving representation.
+   * - ``WEIGHTSLAB_PROJECTION_DIM``
+     - ``3``
+     - Projection output dimensions. ``2`` is drawn on the ``z = 0`` plane.
+   * - ``WEIGHTSLAB_PROJECTION_NEIGHBORS``
+     - ``15``
+     - UMAP ``n_neighbors`` for the kNN graph. Clamped to the graph size minus one.
+   * - ``WEIGHTSLAB_PROJECTION_GRAPH``
+     - ``512``
+     - Samples the projection's kNN graph is built over: a rolling buffer of the
+       most recent training samples, so graph quality does not depend on your
+       batch size. Raise it if the cloud is one blob instead of clusters.
+       ``EVERY``, ``DIM``, ``NEIGHBORS`` and ``GRAPH`` can each be overridden per
+       model with ``projection={...}`` (see :doc:`projection`).
    * - ``AUDIT_LOG_FORMAT``
      - ``json``
      - Output format for audit logs tracking all user interactions through gRPC.
@@ -863,7 +883,7 @@ server and the backend SDK agent share. These control where it lives.
      - Host the spawned agent server **binds** to. Loopback by default (the
        server has filesystem access and must not be reachable off-machine on a
        normal local run). Set to ``0.0.0.0`` when running in a container reached
-       over an SSH tunnel / published port, so the published port can reach it —
+       over an SSH tunnel / published port, so the published port can reach it,
        the URL handed to the browser stays ``127.0.0.1`` either way. See
        :ref:`studio-bridging`.
    * - ``WEIGHTSLAB_UI_TRUSTED_HOSTS``
@@ -1234,7 +1254,7 @@ agent. Each toggle **removes the area from the UI** (the elements are hidden)
 started), so a disabled area costs nothing at runtime.
 
 Like the bounding-box render limits, these are set as environment variables
-before ``weightslab start`` and injected into ``config.js`` at startup —
+before ``weightslab start`` and injected into ``config.js`` at startup,
 changing them needs no rebuild, just a restart + browser reload. For a local
 ``vite`` dev server, use the ``VITE_`` fallbacks shown below. Every toggle
 **defaults to enabled**; set it to ``0`` / ``false`` / ``no`` / ``off`` (any

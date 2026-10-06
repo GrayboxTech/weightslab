@@ -37,8 +37,10 @@ import queue
 import shutil
 import logging
 import builtins
+import hashlib
 import threading
 import traceback
+from concurrent.futures import Future, TimeoutError as FuturesTimeoutError
 import contextlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -50,6 +52,17 @@ from weightslab.trainer.services.utils.tools import safe_grpc
 from weightslab.utils.logs import ensure_logging_intact
 
 logger = logging.getLogger(__name__)
+
+# How long a finished GenerateNotebookCode result stays collectable by a client
+# that reconnects (a browser refresh mid-generation). Long enough to cover a
+# reload plus the user reopening the notebook, short enough that a later
+# identical re-ask is a genuine new generation rather than a replay.
+_GEN_CACHE_TTL_S = float(os.environ.get("WL_NOTEBOOK_GEN_TTL_S", "900"))
+# Longest a single RPC blocks waiting on a generation. The OpenCode chain has
+# its own (shorter) timeout, so reaching this means something is wedged; the
+# entry stays cached either way, so the client can re-ask and collect it.
+_GEN_WAIT_TIMEOUT_S = float(os.environ.get("WL_NOTEBOOK_GEN_WAIT_S", "180"))
+
 
 # The notebook file lives directly under root_log_dir so it travels with the
 # experiment's checkpoints/logs.
@@ -663,6 +676,59 @@ def _run_embedded_kernel(connection_file: Path) -> None:
         logger.error("Embedded notebook kernel crashed during startup", exc_info=True)
 
 
+# How long a cell waits for the training step in flight to finish once it has
+# paused training (see pause_training_for_cell).
+_PAUSE_BARRIER_TIMEOUT_S = 30.0
+
+PAUSED_FOR_CELL_NOTE = (
+    "[WeightsLab] Training paused to run this cell -- press Play in the header "
+    "to resume.\n")
+
+
+def pause_training_for_cell(timeout_s: float = _PAUSE_BARRIER_TIMEOUT_S):
+    """Pause a running training before a notebook cell executes.
+
+    A cell runs in the SAME process as the training loop, against the live
+    model, dataframe and checkpoints. Letting the loop keep stepping underneath
+    it means a cell that reads features, computes a t-SNE, or inspects weights
+    sees a model that changes mid-cell -- the numbers describe no single state
+    of the run. So executing a cell pauses training first, exactly like the
+    header's pause button (same controller, so the UI shows it paused), and it
+    STAYS paused: resuming is the user's call, via Play.
+
+    pause() only stops the loop at its next step; the step in flight runs to
+    the end, holding the training lock. Taking that lock once (and releasing it
+    at once) is the barrier that waits it out -- the next step then blocks in
+    wait_if_paused() before it can take the lock again.
+
+    Returns the note to print in the cell's output when it paused a running
+    training, else None (already paused, or no training at all).
+    """
+    try:
+        from weightslab.components.global_monitoring import (
+            pause_controller, weightslab_rlock)
+    except Exception:
+        return None
+    try:
+        if pause_controller.is_paused():
+            return None
+        pause_controller.pause()
+    except Exception as exc:
+        logger.warning("notebook: could not pause training before the cell: %s", exc)
+        return None
+    note = PAUSED_FOR_CELL_NOTE
+    try:
+        if weightslab_rlock.acquire(timeout=timeout_s):
+            weightslab_rlock.release()
+        else:
+            note += ("[WeightsLab] (the training step in progress had not finished "
+                     f"after {timeout_s:.0f}s; it completes alongside this cell.)\n")
+    except Exception:
+        pass
+    logger.info("notebook: training paused to run a cell")
+    return note
+
+
 def _install_kernel_hooks(shell) -> None:
     """Bracket every cell with the same write-guard + df-refresh the legacy
     kernel applies -- but as IPython events, which run ON the kernel's own
@@ -674,6 +740,12 @@ def _install_kernel_hooks(shell) -> None:
         # This hook runs on the thread that executes the cell -- the one
         # _ThreadRoutedStream lets through to the notebook.
         _CELL_THREAD["ident"] = threading.get_ident()
+        # Code reaching the embedded kernel some other way than the Studio's
+        # RunNotebookCell (`jupyter console --existing`) pauses training too.
+        # From the Studio this is a no-op: RunNotebookCell already paused it.
+        note = pause_training_for_cell()
+        if note:
+            print(note, end="")
         try:
             shell.user_ns["df"] = get_df(_ACTIVE_BINDING["data_service"])
         except Exception:
@@ -1062,6 +1134,10 @@ class NotebookService:
         # Base name (file stem, no .ipynb) of the notebook currently in use this
         # session. None until the first Get/Save resolves it.
         self._active_name = None
+        # In-flight and recently-finished GenerateNotebookCode calls, keyed by
+        # the hash of (prompt, context_code). See GenerateNotebookCode.
+        self._gen_lock = threading.Lock()
+        self._generations = {}
         # Eager: start (or rebind) the embedded kernel as soon as we know
         # data_service/root_log_dir, so external tools (`jupyter console
         # --existing <file>`) and the studio panel can both attach without
@@ -1248,6 +1324,12 @@ class NotebookService:
         started = time.perf_counter()
         exec_count = 0
         ok = True
+        # Before the kernel starts: the cell must see one state of the run, not
+        # a model the training loop keeps stepping underneath it.
+        note = pause_training_for_cell()
+        if note:
+            self._audit("notebook_pause_training", "success", {"cell_id": cell_id})
+            yield pb2.NotebookCellChunk(cell_id=cell_id, stdout=note)
         try:
             kernel = self._get_kernel()
             for kind, payload in kernel.run_streaming(code):
@@ -1329,14 +1411,95 @@ class NotebookService:
 
     @safe_grpc(lambda msg: pb2.GenerateNotebookCodeResponse(code="", explanation="", ok=False, error=msg))
     def GenerateNotebookCode(self, request, context):
+        """Propose code for a ">" notebook cell.
+
+        Deduplicated and cached by the hash of (prompt, context_code), which is
+        what lets a generation survive a browser refresh. The call used to be a
+        plain blocking invoke: refreshing the studio cancelled the grpc-web
+        request, but gRPC never interrupts a running sync handler, so OpenCode
+        finished the work, the audit log recorded a success, and the generated
+        code was written to a stream nobody was reading -- unrecoverable, since
+        OpenCodeChat creates a fresh session per call and agent.history keeps
+        only breadcrumbs, never the code.
+
+        Now the work runs on its own thread behind a Future, and the request
+        key is what identifies it. The reloaded page replays the identical
+        request, so it either attaches to the still-running generation or picks
+        up its finished result immediately. Entries expire after
+        _GEN_CACHE_TTL_S so a stale key can never shadow a genuine re-ask.
+        """
         agent = self._agent
         if agent is None:
             return pb2.GenerateNotebookCodeResponse(
                 code="", explanation="", ok=False, error="Agent backend is not running.")
+
+        prompt = request.prompt or ""
+        context_code = request.context_code or ""
+        key = hashlib.sha256(
+            f"{len(prompt)}:{prompt}{context_code}".encode("utf-8", "replace")).hexdigest()
+
+        future, started = self._generation_future(agent, key, prompt, context_code)
+        if started:
+            logger.debug("GenerateNotebookCode: started generation %s", key[:8])
+        else:
+            logger.debug("GenerateNotebookCode: joined existing generation %s", key[:8])
+
         try:
-            code, explanation = agent.generate_code(request.prompt or "", request.context_code or "")
+            code, explanation = future.result(timeout=_GEN_WAIT_TIMEOUT_S)
+        except FuturesTimeoutError:
+            # The work is still running and stays cached -- the client can ask
+            # again with the same key and pick it up rather than restarting it.
+            return pb2.GenerateNotebookCodeResponse(
+                code="", explanation="", ok=False,
+                error="Still generating — this cell will pick up the result shortly.")
         except Exception as exc:
             logger.info("GenerateNotebookCode failed: %s", exc)
-            return pb2.GenerateNotebookCodeResponse(code="", explanation="", ok=False, error=str(exc))
-        self._audit("notebook_generate_code", "success", {"prompt": (request.prompt or "")[:500]})
-        return pb2.GenerateNotebookCodeResponse(code=code, explanation=explanation, ok=True, error="")
+            return pb2.GenerateNotebookCodeResponse(
+                code="", explanation="", ok=False, error=str(exc))
+
+        # Audited once per generation, by the thread that produced it, not once
+        # per client that collects it (see _run_generation).
+        return pb2.GenerateNotebookCodeResponse(
+            code=code, explanation=explanation, ok=True, error="")
+
+    def _generation_future(self, agent, key, prompt, context_code):
+        """Future for this request key, starting the work if nobody has yet.
+
+        Returns ``(future, started_here)``. Expired entries are swept on the
+        way through, which is enough: the cache only grows on real requests.
+        """
+        now = time.time()
+        with self._gen_lock:
+            for stale in [k for k, e in self._generations.items()
+                          if now - e["at"] > _GEN_CACHE_TTL_S and e["future"].done()]:
+                self._generations.pop(stale, None)
+
+            entry = self._generations.get(key)
+            if entry is not None:
+                return entry["future"], False
+
+            future = Future()
+            self._generations[key] = {"future": future, "at": now}
+
+        thread = threading.Thread(
+            target=self._run_generation,
+            args=(agent, key, prompt, context_code, future),
+            name=f"wl-notebook-gen-{key[:8]}",
+            daemon=True,
+        )
+        thread.start()
+        return future, True
+
+    def _run_generation(self, agent, key, prompt, context_code, future):
+        """Run one generation to completion regardless of who is still waiting."""
+        try:
+            code, explanation = agent.generate_code(prompt, context_code)
+        except Exception as exc:
+            # Drop the entry so a retry actually retries instead of replaying
+            # the same failure for the rest of the TTL.
+            with self._gen_lock:
+                self._generations.pop(key, None)
+            future.set_exception(exc)
+            return
+        self._audit("notebook_generate_code", "success", {"prompt": prompt[:500]})
+        future.set_result((code, explanation))
