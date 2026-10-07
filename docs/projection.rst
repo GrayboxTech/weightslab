@@ -72,6 +72,7 @@ Variable                                Default    Meaning
 ``WEIGHTSLAB_PROJECTION_DIM``           ``3``      Output dimensions (2 draws on the z = 0 plane).
 ``WEIGHTSLAB_PROJECTION_NEIGHBORS``     ``15``     UMAP ``n_neighbors``.
 ``WEIGHTSLAB_PROJECTION_GRAPH``         ``512``    Samples the kNN graph is built over (see below).
+``WEIGHTSLAB_PROJECTION_MAX_POINTS``    ``70000``  Points the board draws per view, at most 400,000.
 ======================================  =========  ==================================================
 
 Per model, through the ``projection`` keyword of

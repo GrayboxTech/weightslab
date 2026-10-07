@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import threading
 import time
 import uuid
@@ -48,10 +49,14 @@ from weightslab.proto import experiment_service_pb2 as pb2
 logger = logging.getLogger(__name__)
 
 DEFAULT_PREFIX = "umap"
-DEFAULT_MAX_POINTS = 50_000
+# How many points one view returns when the client does not ask for a number
+# (the board does not, unless a browser overrides it): see default_max_points.
+ENV_MAX_POINTS = "WEIGHTSLAB_PROJECTION_MAX_POINTS"
+DEFAULT_MAX_POINTS = 70_000
 # Above this the browser's main thread spends longer packing the typed arrays
 # than the GPU spends drawing them; the client can ask for less, never more.
 HARD_MAX_POINTS = 400_000
+_WARNED_MAX_POINTS: set = set()
 AXES = ("x", "y", "z")
 # The most distinct values a label column may have and still count as "the
 # clusters" for stratification.
@@ -71,6 +76,30 @@ GRID_CELLS = {2: 256, 3: 32}
 # cells; a bigger one walks the priority order and stops at the budget, which
 # for a region that big is the shorter walk.
 CELL_PATH_SHARE = 1 / 8
+
+
+def default_max_points() -> int:
+    """How many points a view returns when the client leaves it to the server.
+
+    ``WEIGHTSLAB_PROJECTION_MAX_POINTS`` if set to a positive integer, else
+    ``DEFAULT_MAX_POINTS`` (70,000); capped at ``HARD_MAX_POINTS``. Read on every
+    request rather than once, so setting it from the Studio's notebook
+    (``os.environ[...] = "150000"``) applies at the next camera move.
+    """
+    raw = os.environ.get(ENV_MAX_POINTS, "").strip()
+    if not raw:
+        return DEFAULT_MAX_POINTS
+    try:
+        value = int(raw)                      # "150000" and "150_000" both parse
+    except ValueError:
+        value = 0
+    if value <= 0:
+        if raw not in _WARNED_MAX_POINTS:     # once per value, not per camera move
+            _WARNED_MAX_POINTS.add(raw)
+            logger.warning(f"[projection] {ENV_MAX_POINTS}={raw!r} is not a positive "
+                           f"integer; drawing {DEFAULT_MAX_POINTS:,} points per view")
+        return DEFAULT_MAX_POINTS
+    return min(value, HARD_MAX_POINTS)
 
 
 def coordinate_columns(frame: pd.DataFrame, prefix: str = DEFAULT_PREFIX) -> list:
@@ -1038,7 +1067,7 @@ class ProjectionIndex:
     def respond(self, request, selection: "_Selection | None" = None) -> pb2.ProjectionResponse:
         """Answer *request* from this index. *selection* (the current lasso
         selection) flags the returned points that belong to it."""
-        budget = int(request.max_points) or DEFAULT_MAX_POINTS
+        budget = int(request.max_points) or default_max_points()
         budget = max(1, min(budget, HARD_MAX_POINTS))
         positions, in_view = self.select(ViewRegion.from_request(request, self.dims), budget)
         rows = self.rows[positions]

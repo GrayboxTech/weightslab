@@ -467,6 +467,14 @@ Logging
        batch size. Raise it if the cloud is one blob instead of clusters.
        ``EVERY``, ``DIM``, ``NEIGHBORS`` and ``GRAPH`` can each be overridden per
        model with ``projection={...}`` (see :doc:`projection`).
+   * - ``WEIGHTSLAB_PROJECTION_MAX_POINTS``
+     - ``70000``
+     - Points the Projection Board draws per view, at most 400,000. A bigger
+       projection is drawn as a subsample of this many points; zooming in spends
+       them on a smaller region. Read by the training process (it serves the
+       board), on every request: ``os.environ[...] = "150000"`` in the Studio
+       notebook applies at the next camera move. A browser can override it for
+       itself (see :doc:`weights_studio_ui/main_area`).
    * - ``AUDIT_LOG_FORMAT``
      - ``json``
      - Output format for audit logs tracking all user interactions through gRPC.
