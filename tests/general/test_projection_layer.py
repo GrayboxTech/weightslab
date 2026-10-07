@@ -5,6 +5,7 @@ last conv") landed on the Detect head's frozen DFL box decoder, which training
 never runs, and validation ran on an EMA copy built before the hook existed.
 """
 import copy
+import importlib.util
 import json
 import os
 import shutil
@@ -13,7 +14,6 @@ import unittest
 
 import numpy as np
 import pandas as pd
-import pytest
 import torch as th
 import torch.nn as nn
 
@@ -318,10 +318,13 @@ class TestTheBoardIsToldTheLayer(_Isolated):
 # ---------------------------------------------------------------------------
 # Ultralytics
 # ---------------------------------------------------------------------------
+# unittest's own skip, not pytest.importorskip: the release workflow runs this
+# suite with `python -m unittest`, which reports pytest's Skipped as an error.
+@unittest.skipUnless(importlib.util.find_spec("ultralytics") is not None,
+                     "ultralytics not installed")
 class TestUltralyticsLayer(_Isolated):
 
     def setUp(self):
-        pytest.importorskip("ultralytics")
         super().setUp()
         from ultralytics.nn.tasks import DetectionModel
         self.model = DetectionModel("yolo11n.yaml", nc=2, verbose=False)
