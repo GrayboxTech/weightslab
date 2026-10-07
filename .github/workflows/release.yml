@@ -203,6 +203,16 @@ jobs:
           echo "publish_version=${PUBLISH_VERSION}" >> $GITHUB_OUTPUT
           echo "Tag ${GITHUB_REF_NAME} @ ${SHORT_SHA_HEX} -> TestPyPI version ${PUBLISH_VERSION}"
 
+      # The packaged weightslab/VERSION states the version being published, so
+      # the artifact agrees with itself before it is uploaded (the commit back
+      # to dev/main is sync-version-file's job, after the release).
+      - name: Write weightslab/VERSION
+        env:
+          PUBLISH_VERSION: ${{ steps.compute_version.outputs.publish_version }}
+        run: |
+          printf '%s\n' "${PUBLISH_VERSION}" > weightslab/VERSION
+          echo "weightslab/VERSION -> $(cat weightslab/VERSION)"
+
       - name: Build distributions
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION_FOR_WEIGHTSLAB: ${{ steps.compute_version.outputs.publish_version }}
@@ -608,7 +618,24 @@ jobs:
       - name: Install build tools
         run: python -m pip install --upgrade pip build twine
 
+      # The packaged weightslab/VERSION states the version being published:
+      # the tag's own, PEP 440-normalized (v2.0.3 -> 2.0.3). The commit back to
+      # main/dev is sync-version-file's job, after the release.
+      #
+      # The build is then pinned to that same version. Writing the file dirties
+      # the checkout, and setuptools_scm's guess-next-dev turns a dirty tree at
+      # a tag into the NEXT dev version (2.0.4.dev0) instead of the tag's.
+      - name: Write weightslab/VERSION
+        id: release_version
+        run: |
+          VERSION="$(python -c 'import os; from packaging.version import Version; print(Version(os.environ["GITHUB_REF_NAME"]))')"
+          printf '%s\n' "${VERSION}" > weightslab/VERSION
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "weightslab/VERSION -> ${VERSION}"
+
       - name: Build distributions
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION_FOR_WEIGHTSLAB: ${{ steps.release_version.outputs.version }}
         run: python -m build
 
       - name: Capture version from wheel
