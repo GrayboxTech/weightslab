@@ -1243,6 +1243,21 @@ class ProjectionCache:
         self._selection: _Selection | None = None
         self._selection_lookup = SampleIdLookup()
 
+    def note_edit(self) -> None:
+        """Samples were edited (discarded, tagged): what a pulled copy of the
+        dataset says about them is now stale.
+
+        While the data view is filtered or sorted, the whole-dataset cloud is
+        drawn from such a copy, re-pulled at most every FULL_PULL_SECONDS --
+        so a sample discarded in the grid stayed un-greyed in the projection
+        for up to a minute. The next request refreshes instead; the refresh
+        still runs in the background, so the request itself does not wait.
+        """
+        with self._lock:
+            for entry in self._entries.values():
+                entry.pulled_at = 0.0
+                entry.checked_at = 0.0
+
     def serve(self, request, *, view, is_filtered, refresh_view=None, pull_full=None):
         """Answer *request*.
 

@@ -1323,6 +1323,30 @@ class TestProjectionCache(unittest.TestCase):
             time.sleep(0.02)
         self.assertIsNot(cache._entries[("full", "")].index, before)
 
+    def test_an_edit_reaches_a_cloud_drawn_from_a_pulled_copy(self):
+        # A sorted or filtered grid: the whole-dataset cloud is drawn from a
+        # pulled copy, re-pulled only every FULL_PULL_SECONDS. A discard made
+        # in the grid used to stay un-greyed in the projection that long.
+        frame = self._frame(200)
+        frame["discarded"] = False
+        cache = ps.ProjectionCache()
+        kwargs = dict(view=lambda: frame, is_filtered=lambda: True,
+                      pull_full=lambda: frame.copy())
+
+        def flags():
+            resp = cache.serve(pb2.ProjectionRequest(max_points=1000), **kwargs)
+            return dict(zip(resp.sample_ids, resp.discarded))
+
+        self.assertFalse(flags()["7"])
+        frame.loc[("train_loader", "7"), "discarded"] = True     # the grid's edit
+        time.sleep(0.1)
+        self.assertFalse(flags()["7"])      # the copy is not re-pulled by itself
+        cache.note_edit()                   # what EditDataSample now does
+        deadline = time.time() + 10
+        while not flags()["7"] and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(flags()["7"])
+
     def test_non_numeric_ids_rank_stably_whatever_else_is_in_the_array(self):
         a = ps._stable_rank(np.array(["cat", "dog"]))
         b = ps._stable_rank(np.array(["cat", "a-much-longer-sample-name", "dog"]))
