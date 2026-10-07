@@ -4,17 +4,42 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# The interpreter: PYTHON_BIN, else the activated venv, else the first Python on
+# PATH that can build -- one that already has Sphinx, or has pip to install it.
+#
+# The .exe names matter on Windows: from PowerShell, `bash` is WSL's bash, where
+# python3 is often a Linux Python with no pip, while the venv activated in that
+# PowerShell is reachable only as python.exe (WSL runs Windows programs by their
+# full name). Every path handed to the interpreter below is relative to
+# ROOT_DIR, so a Windows Python never sees a /mnt/c/... path.
+can_build() {
+  "$@" -c "import sphinx, furo, myst_parser, sphinx_design, sphinxcontrib.mermaid" >/dev/null 2>&1 ||
+    "$@" -m pip --version >/dev/null 2>&1
+}
+
+PYTHON_CMD=()
 if [[ -n "${PYTHON_BIN:-}" ]]; then
   PYTHON_CMD=("$PYTHON_BIN")
-elif command -v python3 >/dev/null 2>&1; then
-  PYTHON_CMD=(python3)
-elif command -v python >/dev/null 2>&1; then
-  PYTHON_CMD=(python)
-elif command -v py >/dev/null 2>&1; then
-  PYTHON_CMD=(py -3)
 else
-  echo "[weightslab-docs] ERROR: no Python interpreter found in PATH."
-  echo "[weightslab-docs] Set PYTHON_BIN explicitly and retry."
+  candidates=()
+  if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+    candidates+=("$VIRTUAL_ENV/bin/python" "$VIRTUAL_ENV/Scripts/python.exe")
+  fi
+  candidates+=("python3" "python" "py -3" "python.exe" "py.exe -3")
+  for candidate in "${candidates[@]}"; do
+    read -r -a cmd <<< "$candidate"
+    if command -v "${cmd[0]}" >/dev/null 2>&1 && can_build "${cmd[@]}"; then
+      PYTHON_CMD=("${cmd[@]}")
+      break
+    fi
+  done
+fi
+
+if [[ ${#PYTHON_CMD[@]} -eq 0 ]]; then
+  echo "[weightslab-docs] ERROR: no Python with Sphinx or pip found in PATH"
+  echo "[weightslab-docs] (tried python3, python, py, python.exe, py.exe)."
+  echo "[weightslab-docs] Set PYTHON_BIN to one and retry, e.g.:"
+  echo "  PYTHON_BIN=/path/to/venv/bin/python bash docs/build_docs.sh"
   exit 1
 fi
 
@@ -69,8 +94,22 @@ fi
 DOCS_HOST="${WEIGHTSLAB_DOCS_HOST:-127.0.0.1}"
 DOCS_PORT_REQUESTED="${WEIGHTSLAB_DOCS_PORT:-8000}"
 
+# Serving needs only the standard library. When the build ran on a Windows
+# python.exe from WSL, a native Python serves instead if there is one: `kill`
+# from this shell cannot reliably stop a Windows process, so Ctrl+C would leave
+# the server running.
+SERVE_CMD=("${PYTHON_CMD[@]}")
+if [[ "${PYTHON_CMD[0]}" == *.exe ]]; then
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "import http.server" >/dev/null 2>&1; then
+      SERVE_CMD=("$candidate")
+      break
+    fi
+  done
+fi
+
 # Pick the requested port, or the first free one above it.
-DOCS_PORT="$("${PYTHON_CMD[@]}" - "$DOCS_HOST" "$DOCS_PORT_REQUESTED" <<'PY' || true
+DOCS_PORT="$("${SERVE_CMD[@]}" - "$DOCS_HOST" "$DOCS_PORT_REQUESTED" <<'PY' || true
 import socket
 import sys
 
@@ -110,7 +149,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "[weightslab-docs] Serving $HTML_DIR at $DOCS_URL"
-"${PYTHON_CMD[@]}" -m http.server "$DOCS_PORT" --bind "$DOCS_HOST" --directory "$HTML_DIR" >/dev/null 2>&1 &
+"${SERVE_CMD[@]}" -m http.server "$DOCS_PORT" --bind "$DOCS_HOST" --directory docs/_build/html >/dev/null 2>&1 &
 SERVER_PID=$!
 
 # Wait for the socket to accept connections before pointing a browser at it.
@@ -119,7 +158,7 @@ for _ in $(seq 1 100); do
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then
     break
   fi
-  if "${PYTHON_CMD[@]}" - "$DOCS_HOST" "$DOCS_PORT" <<'PY' >/dev/null 2>&1
+  if "${SERVE_CMD[@]}" - "$DOCS_HOST" "$DOCS_PORT" <<'PY' >/dev/null 2>&1
 import socket
 import sys
 

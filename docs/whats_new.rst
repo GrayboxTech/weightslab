@@ -207,7 +207,7 @@ list lives.
      > Re-opened from #265 with the Ultralytics example notebooks excluded (kept on
      ``dev`` only, not ready for this release).
 
-     **WeightsLab v1.4.0, **
+     **WeightsLab v1.4.0**
 
      Release Notes
 
