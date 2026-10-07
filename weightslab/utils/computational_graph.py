@@ -1,3 +1,4 @@
+import inspect
 import tempfile
 import torch.nn as nn
 import torch as th
@@ -40,6 +41,12 @@ def _export_model_to_onnx_temp(
     """
 
     onnx_file_path = tempfile.mkstemp(suffix='.onnx')[1]
+    # The classic (TorchScript) exporter, explicitly. Since torch 2.9 the default
+    # is the dynamo exporter, which ignores training=/do_constant_folding= and
+    # optimizes the graph -- a BatchNorm folded into the conv before it -- so the
+    # layers the dependency walk reads were gone: a grouped conv's constraint no
+    # longer reached its BN. `dynamo` itself only exists from torch 2.5.
+    legacy = {"dynamo": False} if "dynamo" in inspect.signature(th.onnx.export).parameters else {}
     try:
         th.onnx.export(
             model,
@@ -51,7 +58,8 @@ def _export_model_to_onnx_temp(
             input_names=['input'],
             training=_C_onnx.TrainingMode.PRESERVE,
             output_names=['output'],
-            verbose=False
+            verbose=False,
+            **legacy,
         )
         logger.info(f"Model exported to {onnx_file_path} (opset {opset_version})")
     except Exception as e:
