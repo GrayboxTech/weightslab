@@ -79,6 +79,30 @@ def _plain_get_value(value: Any) -> Any:
     return _KEEP_AS_PROXY
 
 
+# `is_a_loop` on a loader says that some `for batch in proxy:` is iterating it,
+# so the epoch must END (StopIteration) rather than silently restart. It is a
+# count of such loops, not a flag: the training script's own `for batch in
+# test_loader:` and an evaluation the Studio triggered on that same loader can
+# be in flight together (the first paused mid-epoch). With a flag, the loop that
+# finished first cleared it under the other, which then never saw its epoch end
+# and ran forever: training froze after a test-split evaluation.
+_FOR_LOOPS_LOCK = threading.RLock()
+
+
+def _for_loop_started(it) -> None:
+    with _FOR_LOOPS_LOCK:
+        count = getattr(it, "_active_for_loops", 0) + 1
+        it._active_for_loops = count
+        it.is_a_loop = True
+
+
+def _for_loop_ended(it) -> None:
+    with _FOR_LOOPS_LOCK:
+        count = max(0, getattr(it, "_active_for_loops", 1) - 1)
+        it._active_for_loops = count
+        it.is_a_loop = count > 0
+
+
 class Proxy:
     """A small forwarding proxy that holds a mutable reference to an object.
 
@@ -556,17 +580,27 @@ class Proxy:
         class _ProxyIterator:
             def __init__(self, it):
                 self._it = it
-                self._it.is_a_loop = True
+                self._ended = False
+                _for_loop_started(it)
 
             def __iter__(self):
                 return self
+
+            def close(self):
+                """Release this loop's hold on the loader, once: at its
+                StopIteration, or when it is abandoned or stopped early."""
+                with _FOR_LOOPS_LOCK:
+                    if self._ended:
+                        return
+                    self._ended = True
+                    _for_loop_ended(self._it)
 
             def __next__(self):
                 try:
                     return next(self._it)
                 except StopIteration:
                     # Let StopIteration propagate naturally
-                    self._it.is_a_loop = False # Loop ends here
+                    self.close()  # Loop ends here
                     raise
                 except KeyError:
                     # Quiet by default; only surface this diagnostic when the user
@@ -577,6 +611,7 @@ class Proxy:
                             "KeyError during Proxy iteration. This may indicate the underlying object was modified during iteration. Returning StopIteration to end iteration gracefully." +
                             "\nOtherwise there is a missmatch between data metadata returned, e.g., some metadata has augmentation parameters and other not. Please initialize all metadata with the same keys and types to avoid this error."
                         )
+                    self.close()
                     raise StopIteration
 
             def __del__(self):
@@ -589,7 +624,7 @@ class Proxy:
                 # propagates StopIteration once per epoch instead of
                 # transparently auto-resetting.
                 try:
-                    self._it.is_a_loop = False
+                    self.close()
                 except Exception:
                     pass
         return _ProxyIterator(underlying_iter)
