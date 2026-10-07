@@ -41,8 +41,7 @@ from weightslab.data.point_cloud_utils import (
     is_point_cloud_detection_task,
 )
 from weightslab.data.video_utils import (
-    describe_clip, has_playable_media, is_generation_task, is_video_task,
-    select_frame_annotation,
+    describe_clip, has_playable_media, is_generation_task, select_frame_annotation,
 )
 from weightslab.data import media_store
 from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview, encode_image_to_raw_bytes
