@@ -41,8 +41,7 @@ from weightslab.data.point_cloud_utils import (
     is_point_cloud_detection_task,
 )
 from weightslab.data.video_utils import (
-    describe_clip, has_playable_media, is_generation_task, is_video_task,
-    select_frame_annotation,
+    describe_clip, has_playable_media, is_generation_task, select_frame_annotation,
 )
 from weightslab.data import media_store
 from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview, encode_image_to_raw_bytes
@@ -6335,6 +6334,24 @@ class DataService:
         )
 
     def EditDataSample(self, request, context):
+        """Edit sample metadata; see :meth:`_edit_data_sample`.
+
+        A successful edit also tells the projection, whose whole-dataset cloud
+        may be drawn from a copy pulled before it (ProjectionCache.note_edit):
+        a sample discarded in the grid is greyed in the projection within
+        seconds, not at the next scheduled pull.
+        """
+        response = self._edit_data_sample(request, context)
+        if getattr(response, "success", False):
+            cache = getattr(self, "_projection_cache", None)
+            if cache is not None:
+                try:
+                    cache.note_edit()
+                except Exception as exc:
+                    logger.debug(f"[projection] could not mark the cache stale: {exc}")
+        return response
+
+    def _edit_data_sample(self, request, context):
         """
         Edit sample metadata (tags and discarded).
 

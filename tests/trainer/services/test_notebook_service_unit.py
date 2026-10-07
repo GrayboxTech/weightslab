@@ -719,5 +719,63 @@ class TestEmbeddedKernelWait(unittest.TestCase):
         self.assertLess(elapsed, 1.0, "a failed embed must not burn the whole timeout")
 
 
+class TestDefaultProjectionLayerCell(unittest.TestCase):
+    """The default notebook's second cell: the model's layers, and how to
+    point the live projection at another one."""
+
+    def _run(self, source, live=None):
+        """Execute *source* as the kernel would, on a small model; returns
+        (stdout, the project_dataset mock)."""
+        import contextlib
+        import torch.nn as nn
+        from unittest import mock
+        import weightslab as wl
+        import weightslab.projection as projection
+        from weightslab.backend import ledgers
+
+        model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
+        project = MagicMock(return_value={"samples": 400, "columns": ["signals//umap_x"]})
+        out = io.StringIO()
+        with mock.patch.object(projection, "get_tracker", return_value=live), \
+                mock.patch.object(wl, "project_dataset", project), \
+                mock.patch.object(ledgers, "list_dataloaders", return_value=["test_loader", "train_loader"]), \
+                mock.patch.object(ledgers, "get_dataloader", side_effect=lambda name: f"<{name}>"), \
+                contextlib.redirect_stdout(out):
+            exec(compile(source, "<cell>", "exec"), {"wl": wl, "model": model})
+        return out.getvalue(), project
+
+    def test_it_is_the_second_cell_and_the_blank_one_stays_last(self):
+        cells = NotebookService._default_notebook()["cells"]
+        self.assertEqual(cells[1]["source"], notebook_service._PROJECTION_LAYER_CELL)
+        self.assertEqual(cells[-1]["source"], "")
+
+    def test_lists_every_layer_and_marks_the_one_the_projection_reads(self):
+        live = SimpleNamespace(layer_name="2", layer_detail="Linear input", signal_prefix="umap")
+        printed, project = self._run(notebook_service._PROJECTION_LAYER_CELL, live)
+        self.assertIn("The projection reads 2 (Linear input) -> 'umap'", printed)
+        rows = [line for line in printed.splitlines() if "params" in line]
+        self.assertEqual([r.split()[1] for r in rows], ["0", "1", "2"])   # names
+        self.assertIn("<- projection", rows[2])
+        self.assertNotIn("<- projection", rows[0])
+        project.assert_not_called()                 # inert until LAYER is set
+
+    def test_setting_layer_by_index_reprojects_the_training_split(self):
+        live = SimpleNamespace(layer_name="2", layer_detail="Linear input", signal_prefix="umap")
+        source = notebook_service._PROJECTION_LAYER_CELL.replace(
+            'LAYER = None            # e.g. "fc1", or 12', "LAYER = 0")
+        printed, project = self._run(source, live)
+        project.assert_called_once()
+        args, kwargs = project.call_args
+        self.assertEqual(args[1], "<train_loader>")
+        self.assertEqual(kwargs["layer"], "0")
+        self.assertEqual(kwargs["prefix"], "umap")  # the live prefix: training adopts it
+        self.assertIn("400 train_loader samples re-projected from 0", printed)
+
+    def test_without_a_live_projection_it_still_lists_the_layers(self):
+        printed, _ = self._run(notebook_service._PROJECTION_LAYER_CELL, live=None)
+        self.assertIn("No live projection in this run", printed)
+        self.assertEqual(sum("params" in line for line in printed.splitlines()), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

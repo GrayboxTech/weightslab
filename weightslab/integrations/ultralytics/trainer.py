@@ -42,6 +42,7 @@ from ultralytics.models.yolo.segment import SegmentationTrainer
 
 import weightslab as wl
 from weightslab.backend import ledgers
+from weightslab.projection import mirror_projection
 
 from .collate import wl_ul_dict_collate
 from .dataset import WLAwareDataset, WLAwareSegmentationDataset
@@ -84,6 +85,22 @@ _WL_VAL_METRICS = {
 }
 
 
+def _embedding_layer(model):
+    """The layer the live projection reads on a UL model: the last block before
+    the head (``model.model[-2]``, the P5 neck output for YOLO detect/segment),
+    whose output is pooled over H x W. Same layer UL's own ``YOLO.embed()``
+    pools. ``None`` when *model* is not a UL layer stack (auto-pick then).
+
+    Passed explicitly because the auto-pick ("input of the last conv") lands
+    in the head, on one scale's class branch at best -- and before frozen
+    layers were skipped, on the DFL box decoder, which training never runs.
+    """
+    layers = getattr(model, "model", None)
+    if isinstance(layers, torch.nn.Sequential) and len(layers) >= 2:
+        return layers[-2]
+    return None
+
+
 class _WLTrainerMixin:
     """Shared WL callback wiring + dataloader construction for UL trainers.
 
@@ -117,10 +134,17 @@ class _WLTrainerMixin:
         def _on_train_start(trainer):
             underlying = trainer.model
             trainer.optimizer = wl.watch_or_edit(trainer.optimizer, flag="optimizer")
+            embedding = _embedding_layer(underlying)
             trainer.model = wl.watch_or_edit(
                 trainer.model, flag="model", forced_model_wrapping=True,
                 compute_dependencies=False,
+                **({"projection": {"layer": embedding}} if embedding is not None else {}),
             )
+            # Validation runs on UL's EMA shadow, which `_setup_train` built
+            # BEFORE this callback hooked the model -- so it carries no
+            # projection hook, and no val sample would ever be placed.
+            if getattr(trainer, "ema", None) is not None:
+                mirror_projection(trainer.ema.ema)
 
             # Get signals configuration from ledger
             signals_cfg = ledgers.get_hyperparams().get('signals_cfg', {})

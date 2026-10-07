@@ -1323,6 +1323,30 @@ class TestProjectionCache(unittest.TestCase):
             time.sleep(0.02)
         self.assertIsNot(cache._entries[("full", "")].index, before)
 
+    def test_an_edit_reaches_a_cloud_drawn_from_a_pulled_copy(self):
+        # A sorted or filtered grid: the whole-dataset cloud is drawn from a
+        # pulled copy, re-pulled only every FULL_PULL_SECONDS. A discard made
+        # in the grid used to stay un-greyed in the projection that long.
+        frame = self._frame(200)
+        frame["discarded"] = False
+        cache = ps.ProjectionCache()
+        kwargs = dict(view=lambda: frame, is_filtered=lambda: True,
+                      pull_full=lambda: frame.copy())
+
+        def flags():
+            resp = cache.serve(pb2.ProjectionRequest(max_points=1000), **kwargs)
+            return dict(zip(resp.sample_ids, resp.discarded))
+
+        self.assertFalse(flags()["7"])
+        frame.loc[("train_loader", "7"), "discarded"] = True     # the grid's edit
+        time.sleep(0.1)
+        self.assertFalse(flags()["7"])      # the copy is not re-pulled by itself
+        cache.note_edit()                   # what EditDataSample now does
+        deadline = time.time() + 10
+        while not flags()["7"] and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(flags()["7"])
+
     def test_non_numeric_ids_rank_stably_whatever_else_is_in_the_array(self):
         a = ps._stable_rank(np.array(["cat", "dog"]))
         b = ps._stable_rank(np.array(["cat", "a-much-longer-sample-name", "dog"]))
@@ -1454,6 +1478,49 @@ class TestLassoSelection(unittest.TestCase):
             names=frame.index.names)
         found = ps.SampleIdLookup().rows(as_text, [str(i) for i in picked[:50]])
         self.assertEqual(len(found), 50)
+
+
+class TestDefaultViewBudget(unittest.TestCase):
+    """WEIGHTSLAB_PROJECTION_MAX_POINTS: how many points a view returns when the
+    client leaves the number to the server, which the board does by default."""
+
+    def setUp(self):
+        self._saved = os.environ.pop(ps.ENV_MAX_POINTS, None)
+
+    def tearDown(self):
+        os.environ.pop(ps.ENV_MAX_POINTS, None)
+        if self._saved is not None:
+            os.environ[ps.ENV_MAX_POINTS] = self._saved
+
+    def test_the_default_is_70k(self):
+        self.assertEqual(ps.default_max_points(), 70_000)
+
+    def test_the_variable_sets_it_and_is_read_on_every_request(self):
+        os.environ[ps.ENV_MAX_POINTS] = "1500"
+        self.assertEqual(ps.default_max_points(), 1500)
+        os.environ[ps.ENV_MAX_POINTS] = "150_000"
+        self.assertEqual(ps.default_max_points(), 150_000)
+
+    def test_it_is_capped_and_a_bad_value_falls_back(self):
+        os.environ[ps.ENV_MAX_POINTS] = "10000000"
+        self.assertEqual(ps.default_max_points(), ps.HARD_MAX_POINTS)
+        for bad in ("0", "-5", "lots", "70,000"):
+            os.environ[ps.ENV_MAX_POINTS] = bad
+            self.assertEqual(ps.default_max_points(), 70_000, bad)
+
+    def test_a_view_returns_that_many_unless_the_client_asks_for_a_number(self):
+        rng = np.random.default_rng(3)
+        n = 5_000
+        index = pd.MultiIndex.from_arrays([["train_loader"] * n, np.arange(n)],
+                                          names=["origin", "sample_id"])
+        frame = pd.DataFrame({f"signals//umap_{a}": rng.normal(0, 5, n) for a in "xyz"},
+                             index=index)
+        frame["target"] = rng.integers(0, 4, n)
+        built, failure = ps.ProjectionIndex.build(frame, "umap", "")
+        self.assertIsNone(failure)
+        os.environ[ps.ENV_MAX_POINTS] = "1234"
+        self.assertEqual(built.respond(pb2.ProjectionRequest()).returned, 1234)
+        self.assertEqual(built.respond(pb2.ProjectionRequest(max_points=300)).returned, 300)
 
 
 if __name__ == "__main__":

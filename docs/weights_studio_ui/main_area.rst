@@ -468,9 +468,33 @@ Level of detail
 ~~~~~~~~~~~~~~~
 
 The board never downloads the whole dataset. It asks for the points its camera
-can see — the view frustum — up to a render budget (50,000 by default), and
+can see — the view frustum — up to a render budget (70,000 by default), and
 the server answers with that many of them; zooming in narrows the frustum, so
 the same budget buys finer detail. Every camera move that settles asks again.
+The subtitle says how many are drawn; hovering it says of how many in view.
+
+The budget is set where the projection is served, for every viewer at once:
+``WEIGHTSLAB_PROJECTION_MAX_POINTS`` in the training process's environment, at
+most 400,000.
+
+.. code-block:: bash
+
+   WEIGHTSLAB_PROJECTION_MAX_POINTS=150000 python train.py
+
+It is read on every request, so in a run that is already going, setting it from
+the Studio notebook applies at the next camera move:
+
+.. code-block:: python
+
+   import os
+   os.environ["WEIGHTSLAB_PROJECTION_MAX_POINTS"] = "150000"
+
+One browser can override it for itself, in its developer console (remove the
+key to go back to the server's value):
+
+.. code-block:: javascript
+
+   localStorage.setItem('projection-render-budget-v1', '200000')
 
 Two properties follow from the sampling being deterministic rather than random:
 repeated requests pick the same points (the cloud does not boil when you nudge

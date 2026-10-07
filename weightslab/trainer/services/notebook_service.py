@@ -1123,6 +1123,53 @@ class NotebookKernel:
 # Service
 # ---------------------------------------------------------------------------
 
+# The default notebook's second cell: the model's layers, which one the live
+# projection reads, and how to point it at another. Inert until LAYER is set:
+# re-projecting reads a whole split, which no "run all" should start by itself.
+_PROJECTION_LAYER_CELL = '''\
+# Projection: which layer the parametric UMAP reads, and how to change it.
+# `model` is the live model's ledger handle; resolve_module finds the real
+# nn.Module behind it, whose named_modules() are the layers to choose from.
+from weightslab.backend import ledgers
+
+net = wl.projection.resolve_module(model) if model is not None else None
+live = wl.projection.get_tracker()
+current = getattr(live, "layer_name", None)
+if live is not None:
+    print(f"The projection reads {current} ({getattr(live, 'layer_detail', '')})"
+          f" -> '{live.signal_prefix}'\\n")
+else:
+    print("No live projection in this run (projection=False, or no model yet).\\n")
+
+# a) Every layer, by index and name.
+layers = [(n, m) for n, m in net.named_modules() if n] if net is not None else []
+for i, (name, module) in enumerate(layers):
+    own = sum(p.numel() for p in module.parameters(recurse=False))
+    mark = "   <- projection" if name == current else ""
+    print(f"{i:4d}  {name:<40} {type(module).__name__:<18} {own:>12,} params{mark}")
+
+# b) Re-project from another layer: set LAYER to a name above, or to its
+#    index, and run this cell again. It reads that layer's features over the
+#    whole split and fits the UMAP encoder on them. Written to the live
+#    prefix, training then carries on from this fit (on a large dataset, pass
+#    max_samples= to fit on fewer samples first).
+LAYER = None            # e.g. "fc1", or 12
+loaders = ledgers.list_dataloaders()
+SPLIT = "train_loader" if "train_loader" in loaders else (loaders[0] if loaders else None)
+
+if LAYER is not None:
+    name = layers[LAYER][0] if isinstance(LAYER, int) else LAYER
+    result = wl.project_dataset(
+        model, ledgers.get_dataloader(SPLIT), layer=name,
+        prefix=live.signal_prefix if live is not None else "umap",
+        # prefix="umap_" + name.replace(".", "_"),  # or keep both, to compare in the board's picker
+    )
+    print(f"{result['samples']:,} {SPLIT} samples re-projected from {name} -> {result['columns']}")
+    # For this run. To start from that layer next time, give it to the script:
+    #   wl.watch_or_edit(model, flag="model", projection={"layer": name})
+'''
+
+
 class NotebookService:
     """gRPC facade for notebook cell execution, persistence, and code generation."""
 
@@ -1240,8 +1287,9 @@ class NotebookService:
 
     @staticmethod
     def _default_notebook() -> dict:
-        """A minimal nbformat v4 notebook shown on first open: one worked
-        example (df + logger + checkpoint hash, all live ledger calls) and one
+        """A minimal nbformat v4 notebook shown on first open: two worked
+        examples -- df + logger + checkpoint hash, then the model's layers and
+        which one the projection reads (see _PROJECTION_LAYER_CELL) -- and one
         blank cell whose placeholder text (rendered client-side, see the
         studio's CodeMirror setup) demonstrates the "> ..." agent convention."""
         def code(src):
@@ -1295,6 +1343,7 @@ class NotebookService:
                 "# checkpoint manager (also a live ledger call, like df and logger above).\n"
                 "print(\"Current experiment hash:\", cm.get_current_experiment_hash() if cm is not None else None)"
             ),
+            code(_PROJECTION_LAYER_CELL),
             code(""),
         ]
         return {

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import threading
 import time
 import uuid
@@ -48,10 +49,14 @@ from weightslab.proto import experiment_service_pb2 as pb2
 logger = logging.getLogger(__name__)
 
 DEFAULT_PREFIX = "umap"
-DEFAULT_MAX_POINTS = 50_000
+# How many points one view returns when the client does not ask for a number
+# (the board does not, unless a browser overrides it): see default_max_points.
+ENV_MAX_POINTS = "WEIGHTSLAB_PROJECTION_MAX_POINTS"
+DEFAULT_MAX_POINTS = 70_000
 # Above this the browser's main thread spends longer packing the typed arrays
 # than the GPU spends drawing them; the client can ask for less, never more.
 HARD_MAX_POINTS = 400_000
+_WARNED_MAX_POINTS: set = set()
 AXES = ("x", "y", "z")
 # The most distinct values a label column may have and still count as "the
 # clusters" for stratification.
@@ -71,6 +76,30 @@ GRID_CELLS = {2: 256, 3: 32}
 # cells; a bigger one walks the priority order and stops at the budget, which
 # for a region that big is the shorter walk.
 CELL_PATH_SHARE = 1 / 8
+
+
+def default_max_points() -> int:
+    """How many points a view returns when the client leaves it to the server.
+
+    ``WEIGHTSLAB_PROJECTION_MAX_POINTS`` if set to a positive integer, else
+    ``DEFAULT_MAX_POINTS`` (70,000); capped at ``HARD_MAX_POINTS``. Read on every
+    request rather than once, so setting it from the Studio's notebook
+    (``os.environ[...] = "150000"``) applies at the next camera move.
+    """
+    raw = os.environ.get(ENV_MAX_POINTS, "").strip()
+    if not raw:
+        return DEFAULT_MAX_POINTS
+    try:
+        value = int(raw)                      # "150000" and "150_000" both parse
+    except ValueError:
+        value = 0
+    if value <= 0:
+        if raw not in _WARNED_MAX_POINTS:     # once per value, not per camera move
+            _WARNED_MAX_POINTS.add(raw)
+            logger.warning(f"[projection] {ENV_MAX_POINTS}={raw!r} is not a positive "
+                           f"integer; drawing {DEFAULT_MAX_POINTS:,} points per view")
+        return DEFAULT_MAX_POINTS
+    return min(value, HARD_MAX_POINTS)
 
 
 def coordinate_columns(frame: pd.DataFrame, prefix: str = DEFAULT_PREFIX) -> list:
@@ -1038,7 +1067,7 @@ class ProjectionIndex:
     def respond(self, request, selection: "_Selection | None" = None) -> pb2.ProjectionResponse:
         """Answer *request* from this index. *selection* (the current lasso
         selection) flags the returned points that belong to it."""
-        budget = int(request.max_points) or DEFAULT_MAX_POINTS
+        budget = int(request.max_points) or default_max_points()
         budget = max(1, min(budget, HARD_MAX_POINTS))
         positions, in_view = self.select(ViewRegion.from_request(request, self.dims), budget)
         rows = self.rows[positions]
@@ -1082,7 +1111,31 @@ class ProjectionIndex:
                 response.fits = int(tracker.steps_trained)
         except Exception:
             pass
+        response.layer, response.layer_detail = projection_layer(self.prefix)
         return response
+
+
+def projection_layer(prefix: str) -> tuple:
+    """``(layer, layer_detail)`` that *prefix*'s coordinates were computed from,
+    ``("", "")`` when unknown (a projection the user computed themselves).
+
+    The live tracker answers for its own prefix -- it may have re-attached to
+    another layer since it registered; the registry for everything else.
+    """
+    try:
+        from weightslab.projection import get_tracker
+        tracker = get_tracker()
+        if (tracker is not None and tracker.signal_prefix == prefix
+                and tracker.layer_name):
+            return tracker.layer_name, tracker.layer_detail or ""
+    except Exception:
+        pass
+    try:
+        from weightslab.projection.registry import prefix_info
+        info = prefix_info(prefix)
+    except Exception:
+        info = {}
+    return info.get("layer", ""), info.get("layer_detail", "")
 
 
 def build_projection_response(frame, request) -> pb2.ProjectionResponse:
@@ -1189,6 +1242,21 @@ class ProjectionCache:
         self._selections: dict = {}
         self._selection: _Selection | None = None
         self._selection_lookup = SampleIdLookup()
+
+    def note_edit(self) -> None:
+        """Samples were edited (discarded, tagged): what a pulled copy of the
+        dataset says about them is now stale.
+
+        While the data view is filtered or sorted, the whole-dataset cloud is
+        drawn from such a copy, re-pulled at most every FULL_PULL_SECONDS --
+        so a sample discarded in the grid stayed un-greyed in the projection
+        for up to a minute. The next request refreshes instead; the refresh
+        still runs in the background, so the request itself does not wait.
+        """
+        with self._lock:
+            for entry in self._entries.values():
+                entry.pulled_at = 0.0
+                entry.checked_at = 0.0
 
     def serve(self, request, *, view, is_filtered, refresh_view=None, pull_full=None):
         """Answer *request*.

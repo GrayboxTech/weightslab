@@ -4450,12 +4450,20 @@ class _EvalManagedLoader:
             # that stuck flag makes the next plain `next(train_loader)` call
             # in the user's training loop wrongly propagate StopIteration at
             # the next epoch boundary instead of transparently auto-resetting.
+            #
+            # Release only THIS loop's hold (the proxy iterator's close()), never
+            # the flag outright: the training script may be mid-way through its
+            # own `for batch in` the same loader, and clearing the flag under it
+            # turned that loop endless.
+            close = getattr(it, 'close', None)
             underlying = getattr(it, '_it', None)
-            if underlying is not None:
-                try:
+            try:
+                if callable(close):
+                    close()
+                elif underlying is not None:
                     underlying.is_a_loop = False
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
 
 # ##############################################################################################################
