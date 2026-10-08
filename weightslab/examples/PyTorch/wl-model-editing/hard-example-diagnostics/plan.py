@@ -8,21 +8,45 @@ import json
 from pathlib import Path
 
 
-def build_plan(config: dict) -> dict:
-    """Produce paired jobs with a shared baseline identifier for each seed."""
-    if config["schema_version"] != 1:
+def validate_config(config: dict) -> None:
+    """Reject plans that silently corrupt the paired experimental control."""
+    if type(config.get("schema_version")) is not int or config["schema_version"] != 1:
         raise ValueError("Unsupported experiment schema version")
-    seeds = config["seeds"]
-    arms = config["arms"]
-    if not seeds or len(set(seeds)) != len(seeds):
-        raise ValueError("Seeds must be nonempty and unique")
+    seeds = config.get("seeds")
+    if (not isinstance(seeds, list) or not seeds
+            or any(type(seed) is not int or seed < 0 for seed in seeds)
+            or len(set(seeds)) != len(seeds)):
+        raise ValueError("Seeds must be nonempty, unique, nonnegative integers")
+    for key in ("baseline_training_steps", "training_steps_to_do"):
+        if type(config.get(key)) is not int or config[key] <= 0:
+            raise ValueError(f"{key} must be a positive integer")
+    arms = config.get("arms")
+    if not isinstance(arms, list) or not arms:
+        raise ValueError("A nonempty list of intervention arms is required")
+    for arm in arms:
+        if not isinstance(arm, dict) or not isinstance(arm.get("name"), str) or not arm["name"].strip():
+            raise ValueError("Each arm needs a nonempty name")
+        if type(arm.get("add_neurons")) is not int or arm["add_neurons"] < 0:
+            raise ValueError("add_neurons must be a nonnegative integer")
+        if arm.get("sampling") not in ("original", "group_balanced"):
+            raise ValueError("Unsupported sampling policy")
     names = [arm["name"] for arm in arms]
     if len(set(names)) != len(names) or "continue" not in names:
         raise ValueError("Unique arms including the continued-training control are required")
-    if config["training_steps_to_do"] <= 0:
-        raise ValueError("Each arm needs a positive, matched training budget")
+    control = next(arm for arm in arms if arm["name"] == "continue")
+    if control["add_neurons"] != 0 or control["sampling"] != "original":
+        raise ValueError("The continued-training control must not edit capacity or sampling")
+    if config.get("optimizer_at_fork") != "fresh_identical_optimizer_in_all_arms":
+        raise ValueError("This proposal requires an identical optimizer-reset policy in all arms")
+
+
+def build_plan(config: dict) -> dict:
+    """Produce paired jobs with a shared baseline identifier for each seed."""
+    validate_config(config)
+    seeds = config["seeds"]
+    arms = config["arms"]
     fingerprint = hashlib.sha256(
-        json.dumps(config, sort_keys=True).encode()
+        json.dumps(config, sort_keys=True, allow_nan=False).encode()
     ).hexdigest()
     jobs = []
     for seed in seeds:

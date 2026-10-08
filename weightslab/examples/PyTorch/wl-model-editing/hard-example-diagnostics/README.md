@@ -2,11 +2,15 @@
 
 Planning draft for the project after the model-editing API. Read the
 [meeting brief](../../../../../docs/proposals/hard-example-diagnostics.md) first.
+For presentation, use the shorter
+[meeting handout](../../../../../docs/proposals/hard-example-meeting-2026-10-08.md).
 
 ## What runs today
 
 - `plan.py`: expands `experiment.json` into 12 planned Waterbirds runs; standard
-  library only. It does not download data or launch training.
+  library only. Rejects an edited control, duplicate seeds/arms, invalid budgets
+  and mismatched optimizer policy. It does not download data or launch training.
+- `test_plan.py`: standard-library tests for the paired plan and its guardrails.
 - `smoke.py`: runs two actual CPU training branches on a tiny synthetic fixture,
   starting from identical weights. One continues unchanged; the other uses the
   public WeightsLab neuron-addition API. Exports predictions, graph snapshots,
@@ -21,6 +25,8 @@ data download is implemented in this scaffold.
 From the repository root, with WeightsLab's dependencies installed:
 
 ```bash
+python weightslab/examples/PyTorch/wl-model-editing/hard-example-diagnostics/test_plan.py
+
 python weightslab/examples/PyTorch/wl-model-editing/hard-example-diagnostics/plan.py \
   --output /tmp/weightslab-hard-example-plan.json
 

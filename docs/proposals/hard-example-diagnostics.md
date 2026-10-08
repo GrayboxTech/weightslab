@@ -1,8 +1,11 @@
 # Make one failure understandable — and test whether we can fix it
 
-**WeightsLab · meeting brief · 25 September 2026**
+**WeightsLab · project brief · updated 8 October 2026**
 
 **Status:** proposal and runnable scaffolding; real-data results are pending.
+
+For the short presentation and decision checklist, open the
+[8 October meeting handout](hard-example-meeting-2026-10-08.md).
 
 **Foundation:** [merged model-editing API, PR #287](https://github.com/GrayboxTech/weightslab/pull/287).
 
