@@ -2,6 +2,10 @@
 
 WeightsLab · 8 October 2026 · meeting handout
 
+Update: the first pilot has now executed. Use the
+[measured results and demo script](waterbirds-demo-results-2026-10-08.md) for
+presentation; this handout records the original proposal and decision checklist.
+
 **Decision requested:** agree one controlled failure-mode experiment and the
 smallest useful inspection/comparison workflow. This is a proposal, not a
 report of measured improvement.

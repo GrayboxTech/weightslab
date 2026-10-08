@@ -2,7 +2,9 @@
 
 **WeightsLab · project brief · updated 8 October 2026**
 
-**Status:** proposal and runnable scaffolding; real-data results are pending.
+**Status:** the first real-data pilot and offline demo have now run. See the
+[measured results and presentation script](waterbirds-demo-results-2026-10-08.md).
+The roadmap below retains the original proposal; live Studio integration remains pending.
 
 For the short presentation and decision checklist, open the
 [8 October meeting handout](hard-example-meeting-2026-10-08.md).

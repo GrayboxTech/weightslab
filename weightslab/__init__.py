@@ -32,6 +32,7 @@ _LAZY_EXPORTS = {
     "seed_everything": (".utils.tools", "seed_everything"),
     "guard_training_context": (".components.global_monitoring", "guard_training_context"),
     "guard_testing_context": (".components.global_monitoring", "guard_testing_context"),
+    "compare_predictions": (".diagnostics", "compare_predictions"),
 }
 # Everything re-exported straight from .src (attribute name == export name).
 for _name in (
@@ -210,6 +211,7 @@ __maintainer__ = 'Guillaume PELLUET'
 __credits__ = 'GrayBx'
 __license__ = 'BSD 2-clause'
 __all__ = [
+    "compare_predictions",
     "watch_or_edit",
     "serve",
     "keep_serving",
