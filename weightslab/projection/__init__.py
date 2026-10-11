@@ -7,6 +7,10 @@ coordinates back as ordinary per-sample signals.
 Your own: any projection you compute (t-SNE, umap-learn, PCA...) plugs into the
 same board through :func:`save_projection_coords`, or through
 ``project_dataset(..., method=...)`` (see :mod:`custom`).
+
+Per box: on a detection set, :func:`project_instances` places every labelled
+box (and every unlabelled prediction) instead of every image (see
+:mod:`instances`).
 """
 
 from weightslab.projection.parametric_umap import (  # noqa: F401
@@ -41,6 +45,12 @@ from weightslab.projection.parametric_umap import (  # noqa: F401
     save_projection,
 )
 from weightslab.projection.custom import save_projection_coords  # noqa: F401
+from weightslab.projection.instances import (  # noqa: F401
+    InstanceAdapter,
+    InstanceTable,
+    project_instances,
+    save_instance_projection_coords,
+)
 
 __all__ = [
     "ENV_ENABLED",
@@ -73,4 +83,8 @@ __all__ = [
     "restore_from_checkpoint",
     "save_projection",
     "save_projection_coords",
+    "InstanceAdapter",
+    "InstanceTable",
+    "project_instances",
+    "save_instance_projection_coords",
 ]

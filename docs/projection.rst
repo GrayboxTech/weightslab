@@ -291,6 +291,91 @@ Three runnable examples:
   into the run directory that computes a t-SNE written from scratch and plugs it
   into the board.
 
+.. _projection-instances:
+
+One point per box (detection)
+------------------------------
+
+On a detection set the interesting question is usually about objects, not
+images: are the boxes labelled ``truck`` sitting in the middle of the ``car``
+cluster? ``wl.project_instances`` places every **box**: every labelled box, and
+every confident prediction with no label under it, train and validation on the
+same map.
+
+.. code-block:: python
+
+   wl.project_instances(model, {"train": train_loader, "val": val_loader},
+                        prefix="instances")            # method="umap" | "pca" | TSNE(...)
+
+With Ultralytics nothing needs writing: put an ``instance_projection`` section
+in the hyperparameters and ``wl.WLAwareTrainer`` runs it at the end of every
+``every_n_epochs`` epochs, with the EMA model:
+
+.. code-block:: yaml
+
+   instance_projection:
+     every_n_epochs: 1
+     prefix: instances
+     method: umap        # or pca
+     conf: 0.25          # a prediction needs this confidence to count
+     match_iou: 0.5      # IoU above which a prediction sits on a label
+     max_instances: 50000
+
+**How a box becomes a point.** One vector per box, read from the maps the
+detection head reads (P3/P4/P5 on a YOLO model): the box is pooled out of
+every level with ``torchvision.ops.roi_align`` (no crops, no second model),
+each level is L2-normalised and the levels are concatenated. Every box is read
+from every level, so a 63-px and a 65-px car land in the same feature space (one
+level per box size would cluster by size before class). Labels and predictions
+are pooled the same way: an unlabelled car the model found lands among the
+labelled cars.
+
+**Labels against predictions.** Predictions are matched to labels (IoU above
+``match_iou``, one to one, class-agnostic, best pair first). Each point gets a
+*match*:
+
+==================  ============================================================
+``consistent``      a label with a prediction of the same class on it
+``wrong class``     a label with a prediction of ANOTHER class on it
+``no prediction``   a label nothing was predicted on (spurious, or shifted box)
+``missing label``   a confident prediction with no label under it
+==================  ============================================================
+
+A matched prediction is not a point of its own (it would sit on its label); its
+class, confidence and IoU are carried by the label's point.
+
+**In the Studio.** The prefix is listed in the board's picker beside the
+per-image ones. The board says *boxes* instead of *pts*; points are coloured by
+the box's class, and the colour picker adds the per-box columns: *Match*,
+*Kind* (label / prediction), *Predicted class*, *Confidence*, *IoU with
+prediction*, *Box area*. Any data-board column also works (each box takes its
+image's value). A lasso selects the **images** its boxes are in, so the Data
+board filters exactly as for a per-image projection. A double click on a box
+opens its image with that box singled out.
+
+In list mode, a detection sample's row has a **+** that lists its boxes under it
+(crop, class, match, predicted class, confidence, IoU, and every per-box signal
+from ``wl.save_instance_signals``). The **Instances only** button beside the
+grid/list toggle lists every box of the page, one row each, sortable; a double
+click opens the box.
+
+**Bring your own coordinates** with
+``wl.save_instance_projection_coords(coords, sample_ids, annotation_ids,
+prefix=..., class_ids=..., class_names=..., matches=..., boxes=...)``. An
+annotation id is the box's place in the sample's target list (1-based, the id
+of its instance row); give a prediction with no label a negative id.
+
+**Where it is stored.** Not in the dataframe (predictions have no row there):
+``<root_log_dir>/projection/instances/<prefix>.npz``, registered with
+``level: "instance"`` in ``prefixes.json``. Writing the prefix again replaces
+the projection.
+
+Use a model that has learnt something (a pretrained or early-epoch checkpoint):
+a randomly initialised network places boxes by colour and size, not by what
+they are. Other frameworks plug in with an ``InstanceAdapter`` (see
+``weightslab/projection/instances.py``): it says how to batch the data, run the
+model, and which feature maps to pool.
+
 Checkpoints and restarts
 -------------------------
 

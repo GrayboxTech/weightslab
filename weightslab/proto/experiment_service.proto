@@ -1137,4 +1137,21 @@ message ProjectionResponse {
   // WeightsLab did not compute (wl.save_projection_coords).
   string layer = 25;
   string layer_detail = 26;
+
+  // --- Instance-level projections (one point per BOX) -----------------------
+  // Set when the prefix is an instance projection (wl.project_instances):
+  // `sample_ids` then repeats an image once per box, and the fields below say
+  // which box each point is. A lasso still selects SAMPLES (the images the
+  // boxes are in), so the data board filters exactly as before.
+  bool instance_level = 27;
+  // Length N. A labelled box's annotation id (1-based: its place in the
+  // sample's target list, the id of its instance row), or -(k+1) for the k-th
+  // prediction with no label under it.
+  repeated int32 instance_ids = 28;
+  // Length 4N: x1, y1, x2, y2 per point, normalised to the image -- the box the
+  // modal highlights when the point is opened.
+  repeated float instance_boxes = 29;
+  // Per-box columns the points can be coloured by, besides the data board's
+  // own: instance_class, instance_match, instance_kind, instance_confidence...
+  repeated string instance_columns = 30;
 }

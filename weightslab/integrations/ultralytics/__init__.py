@@ -31,6 +31,7 @@ Minimal user surface:
 See README.md for the supported-setup matrix.
 """
 from .dataset import WLAwareDataset, WLAwareSegmentationDataset
+from .instances import UltralyticsInstanceAdapter, project_trainer_instances
 from .trainer import WLAwareSegmentationTrainer, WLAwareTrainer
 
 __all__ = [
@@ -38,4 +39,6 @@ __all__ = [
     "WLAwareSegmentationTrainer",
     "WLAwareDataset",
     "WLAwareSegmentationDataset",
+    "UltralyticsInstanceAdapter",
+    "project_trainer_instances",
 ]

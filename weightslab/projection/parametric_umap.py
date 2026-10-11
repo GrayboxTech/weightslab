@@ -1179,6 +1179,65 @@ def _frozen_age(model):
                 pass
 
 
+def _fit_offline(tracker, feats, fit_device, *, epochs: int, fit_batch: int,
+                 n_neighbors: int, verbose: bool):
+    """Fit *tracker*'s encoder on every row of *feats*, then encode them all.
+
+    Each epoch draws its neighbourhoods from shuffled minibatches of the WHOLE
+    collection (see :func:`project_dataset`). Returns ``(coords ndarray,
+    final_loss)``.
+    """
+    tracker._ensure_encoder(feats.shape[1], th.device(fit_device))
+    n = feats.shape[0]
+    step = max(4, min(int(fit_batch), n))
+    final_loss = None
+    epoch_bar = tqdm(range(max(1, int(epochs))), desc="[projection] fit",
+                     unit="epoch", disable=not verbose, leave=False)
+    for epoch in epoch_bar:
+        order = th.randperm(n)
+        epoch_loss, batches = 0.0, 0
+        for start in range(0, n - 3, step):
+            chunk = feats[order[start:start + step]].to(fit_device)
+            if chunk.shape[0] < 4:
+                continue
+            graph = membership_high_dim(chunk, n_neighbors)
+            tracker._optimizer.zero_grad(set_to_none=True)
+            loss = tracker._umap_loss(chunk, graph)
+            loss.backward()
+            tracker._optimizer.step()
+            epoch_loss += float(loss.detach().item())
+            batches += 1
+        final_loss = epoch_loss / max(1, batches)
+        tracker.steps_trained += batches
+        epoch_bar.set_postfix(loss=f"{final_loss:.4f}")
+    epoch_bar.close()
+
+    coords = []
+    with th.no_grad():
+        for start in tqdm(range(0, n, step), desc="[projection] encode",
+                          unit="chunk", disable=not verbose, leave=False):
+            coords.append(tracker._encoder(feats[start:start + step].to(fit_device)).cpu())
+    return th.cat(coords, dim=0).numpy(), final_loss
+
+
+def fit_umap_offline(feats, *, out_dim: int = 3, epochs: int = 10, fit_batch: int = 512,
+                     n_neighbors: int = 15, lr: float = 1e-3, min_dist: float = 0.1,
+                     spread: float = 1.0, device=None, verbose: bool = True):
+    """``(N, F)`` features -> ``(N, out_dim)`` coordinates with a fresh parametric
+    UMAP encoder fitted offline. Nothing is written, saved or adopted: for
+    callers that store the coordinates themselves (instance projections)."""
+    feats = feats if isinstance(feats, th.Tensor) else th.as_tensor(feats)
+    feats = feats.float()
+    if feats.shape[0] < 4:
+        raise RuntimeError(f"need at least 4 points to fit a UMAP, got {feats.shape[0]}")
+    tracker = ProjectionTracker(out_dim=out_dim, n_neighbors=n_neighbors, lr=lr,
+                                min_dist=min_dist, spread=spread, signal_prefix="_offline")
+    fit_device = th.device(device) if device is not None else feats.device
+    coords, _ = _fit_offline(tracker, feats, fit_device, epochs=epochs, fit_batch=fit_batch,
+                             n_neighbors=n_neighbors, verbose=verbose)
+    return coords.astype(np.float32)
+
+
 def _default_unpack(batch):
     """``(inputs, sample_ids)`` from a WeightsLab batch.
 
@@ -1435,42 +1494,14 @@ def project_dataset(model, dataloader, layer=None, prefix: str | None = None,
             fit_device = next(module.parameters()).device
         except StopIteration:
             fit_device = feats.device
-    tracker._ensure_encoder(feats.shape[1], th.device(fit_device))
     if verbose:
         logger.info(
             f"[projection] offline fit: {feats.shape[0]} samples x {feats.shape[1]} "
             f"features from {type(target).__name__}, {epochs} epochs -> '{prefix}'")
-
     n = feats.shape[0]
-    step = max(4, min(int(fit_batch), n))
-    final_loss = None
-    epoch_bar = tqdm(range(max(1, int(epochs))), desc="[projection] fit",
-                     unit="epoch", disable=not verbose, leave=False)
-    for epoch in epoch_bar:
-        order = th.randperm(n)
-        epoch_loss, batches = 0.0, 0
-        for start in range(0, n - 3, step):
-            chunk = feats[order[start:start + step]].to(fit_device)
-            if chunk.shape[0] < 4:
-                continue
-            graph = membership_high_dim(chunk, n_neighbors)
-            tracker._optimizer.zero_grad(set_to_none=True)
-            loss = tracker._umap_loss(chunk, graph)
-            loss.backward()
-            tracker._optimizer.step()
-            epoch_loss += float(loss.detach().item())
-            batches += 1
-        final_loss = epoch_loss / max(1, batches)
-        tracker.steps_trained += batches
-        epoch_bar.set_postfix(loss=f"{final_loss:.4f}")
-    epoch_bar.close()
-
-    coords = []
-    with th.no_grad():
-        for start in tqdm(range(0, n, step), desc="[projection] encode",
-                          unit="chunk", disable=not verbose, leave=False):
-            coords.append(tracker._encoder(feats[start:start + step].to(fit_device)).cpu())
-    coords = th.cat(coords, dim=0).numpy()
+    coords, final_loss = _fit_offline(tracker, feats, fit_device, epochs=epochs,
+                                      fit_batch=fit_batch, n_neighbors=n_neighbors,
+                                      verbose=verbose)
 
     tracker._write_coords(ids, coords, step=0)
     tracker.last_loss = final_loss

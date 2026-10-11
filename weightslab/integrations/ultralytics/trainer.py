@@ -46,6 +46,7 @@ from weightslab.projection import mirror_projection
 
 from .collate import wl_ul_dict_collate
 from .dataset import WLAwareDataset, WLAwareSegmentationDataset
+from .instances import instance_projection_config, project_trainer_instances
 from .signals import install_per_sample_signals, install_per_sample_val_signals
 
 
@@ -219,12 +220,35 @@ class _WLTrainerMixin:
                 if ul_key in rd and wl_key in ch:
                     ch[wl_key](torch.tensor([float(rd[ul_key])]))
 
+        def _on_fit_epoch_end(trainer):
+            # Opt-in box-level projection (hyperparameters "instance_projection"):
+            # every box of train + val, placed from the EMA model's neck.
+            cfg = instance_projection_config(ledgers.get_hyperparams())
+            if not cfg.get("enabled"):
+                return
+            every = max(1, int(cfg.get("every_n_epochs") or 1))
+            if (int(getattr(trainer, "epoch", 0)) + 1) % every:
+                return
+            try:
+                project_trainer_instances(
+                    trainer, prefix=cfg.get("prefix"), method=cfg.get("method"),
+                    conf=cfg.get("conf"), match_iou=cfg.get("match_iou"),
+                    include_predictions=cfg.get("include_predictions"),
+                    max_instances=cfg.get("max_instances"), epochs=cfg.get("epochs"),
+                    verbose=False,
+                )
+            except Exception as exc:
+                # Never into training: the projection is a picture of it.
+                print(f"[{type(trainer).__name__}] instance projection skipped: {exc}",
+                      flush=True)
+
         self.add_callback("on_train_start", _on_train_start)
         self.add_callback("on_train_batch_start", _on_train_batch_start)
         self.add_callback("on_train_batch_end", _on_train_batch_end)
         self.add_callback("on_val_batch_start", _on_val_batch_start)
         self.add_callback("on_val_batch_end", _on_val_batch_end)
         self.add_callback("on_val_end", _on_val_end)
+        self.add_callback("on_fit_epoch_end", _on_fit_epoch_end)
 
     def validate(self):
         # UL's metrics.process does np.concatenate([]) → ValueError when val

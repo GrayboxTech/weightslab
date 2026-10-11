@@ -328,6 +328,21 @@ board (3-D scatter, zoom = server-side level-of-detail, click/lasso selection �
   prefix="umap_layer3", epochs=20)` re-projects offline from a restored checkpoint —
   no training step, weights/mode untouched. Different `prefix` values coexist as
   separate columns; the board's picker (fed by `available_prefixes`) switches between them.
+- **One point per BOX (detection):** `wl.project_instances(model, {"train": tl, "val": vl},
+  prefix="instances", method="umap"|"pca"|TSNE(...))` places every labelled box and every
+  confident unlabelled prediction, train + val on one map. Features: the Detect head's
+  input maps (P3/P4/P5), `roi_align`-pooled per box from EVERY level. Predictions are
+  matched to labels (IoU > 0.5, one-to-one, class-agnostic) → per-point `match`:
+  consistent / wrong class / no prediction / missing label. Ultralytics: just add an
+  `instance_projection: {every_n_epochs, prefix, method, conf}` hyperparameter section —
+  `WLAwareTrainer` runs it after each N epochs. Stored as
+  `<root_log_dir>/projection/instances/<prefix>.npz` (registry `level: "instance"`),
+  not in the dataframe. Bring your own: `wl.save_instance_projection_coords(coords,
+  sample_ids, annotation_ids, prefix=...)` (annotation id = 1-based box index; negative
+  for an unlabelled prediction). Studio: a lasso selects the boxes' IMAGES; double click
+  opens the image with the box highlighted; colour by `instance_match` etc. List mode:
+  a row's "+" lists its boxes; "Instances only" (beside the grid/list toggle) = one row
+  per box. Other frameworks: subclass `InstanceAdapter` (`projection/instances.py`).
 - Full page: `weightslab/docs/projection.rst`; example:
   `examples/Usecases/wl-parametric-umap/`.
 

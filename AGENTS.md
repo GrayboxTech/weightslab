@@ -147,6 +147,7 @@ Recording values (pick by what the value is *about*, not by convenience):
 | a group of samples | `wl.save_group_signals(signals={...}, group_ids=[...])` | a pair's contrastive loss |
 | one training **step** | `wl.save_model_signals(signals={...})` | a gradient norm |
 | a sample's place in a 2-D/3-D **projection** | `wl.save_projection_coords(coords, batch_ids=ids, prefix="tsne")` | your own t-SNE / umap-learn layout |
+| a BOX's place in a projection (detection) | `wl.project_instances(model, {"train": tl, "val": vl})`, or `wl.save_instance_projection_coords(coords, sample_ids, annotation_ids, prefix=...)` | truck boxes inside the car cluster; see `docs/projection.rst` "One point per box" |
 
 The first three write dataframe rows (sortable/filterable in the grid); the
 fourth only plots a curve. Never fake a step-level value by broadcasting it

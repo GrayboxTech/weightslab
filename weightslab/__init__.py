@@ -71,7 +71,7 @@ for _name in (
     "signal_classifier", "resolve_signal_classifier",
     "LOSS_SHAPES", "get_current_experiment_hash", "pointcloud_thumbnail",
     "pointcloud_boxes", "ai_report_generation", "project_dataset",
-    "save_projection_coords",
+    "save_projection_coords", "project_instances", "save_instance_projection_coords",
 ):
     _LAZY_EXPORTS[_name] = (".src", _name)
 del _name
@@ -300,6 +300,8 @@ __all__ = [
     "ai_report_generation",
     "project_dataset",
     "save_projection_coords",
+    "project_instances",
+    "save_instance_projection_coords",
     "classify_loss_shape",
     "write_loss_shapes",
     "write_signal_shapes",

@@ -47,6 +47,12 @@ from weightslab.projection import (
     project_dataset as project_dataset,
     save_projection_coords as save_projection_coords,
 )
+from weightslab.projection.instances import (  # noqa: E402
+    # Re-exported like the two above: `wl.project_instances` /
+    # `wl.save_instance_projection_coords` (one point per box).
+    project_instances as project_instances,
+    save_instance_projection_coords as save_instance_projection_coords,
+)
 
 
 def _rebind_caller_local(original_obj: Any, new_obj: Any) -> None:

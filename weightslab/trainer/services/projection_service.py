@@ -30,6 +30,14 @@ answering (see :class:`ProjectionCache`). A view query then reads a few cells or
 a short prefix of the order instead of every sample. Recomputing the sample
 over the whole frame on every request took 18-45 s at 3M samples, which is
 what this layout exists to avoid.
+
+**A projection may place boxes instead of samples.** An instance-level prefix
+(``wl.project_instances``) is not stored on the sample frame: its table (see
+:mod:`weightslab.projection.instances`) is turned into a frame with one row per
+box -- indexed by the box's SAMPLE id, joined to the sample frame for split,
+discarded flag and colour -- and that frame goes through exactly the same
+index, level of detail and lasso as any other. A lasso therefore selects the
+images its boxes are in, and the data board filters by sample as before.
 """
 
 from __future__ import annotations
@@ -40,6 +48,7 @@ import os
 import threading
 import time
 import uuid
+from collections import OrderedDict
 
 import numpy as np
 import pandas as pd
@@ -154,8 +163,209 @@ def available_prefixes(frame: pd.DataFrame) -> list:
         registered = None
     if registered is not None:
         found = {p for p in found if p in registered or p == DEFAULT_PREFIX}
+    # Box-level projections live in their own tables, not in columns here.
+    found |= set(_instance_prefixes())
     ordered = sorted(found - {DEFAULT_PREFIX})
     return ([DEFAULT_PREFIX] if DEFAULT_PREFIX in found else []) + ordered
+
+
+def _instance_prefixes() -> list:
+    try:
+        from weightslab.projection.instances import instance_prefixes
+        return instance_prefixes()
+    except Exception:
+        return []
+
+
+def is_instance_prefix(prefix: str) -> bool:
+    """Whether *prefix* names an instance-level (one point per box) projection."""
+    prefix = (prefix or "").strip()
+    if not prefix:
+        return False
+    try:
+        from weightslab.projection.instances import is_instance_prefix as _is_instance
+        return _is_instance(prefix)
+    except Exception:
+        return False
+
+
+# ------------------------------------------------------- instance-level frames
+#: Per-box columns an instance frame carries, offered for colouring.
+INSTANCE_COLUMNS = (
+    "instance_class",
+    "instance_match",
+    "instance_kind",
+    "instance_pred_class",
+    "instance_confidence",
+    "instance_iou",
+    "instance_area",
+)
+#: What an instance frame is coloured by when the client asks for nothing.
+INSTANCE_DEFAULT_COLOR = "instance_class"
+#: Colour requests that mean "the class" -- of the box, on an instance frame.
+_INSTANCE_CLASS_ALIASES = ("", "target", "signals//target")
+_INSTANCE_ID = "_instance_id"
+_BOX_COLUMNS = ("_box_x1", "_box_y1", "_box_x2", "_box_y2")
+
+_SOURCES_LOCK = threading.Lock()
+# id(instance frame) -> (instance frame, sample frame): the sample frame an
+# instance frame (or a slice of it) was joined from, for the prefixes list and
+# for the data board's "whole dataset" frame. The frames are held, so an id
+# cannot be reused while its entry is alive; bounded, oldest out.
+_SOURCES: "OrderedDict[int, tuple]" = OrderedDict()
+_SOURCES_KEPT = 64
+
+
+def register_instance_frame(frame, sample_frame) -> None:
+    with _SOURCES_LOCK:
+        _SOURCES[id(frame)] = (frame, sample_frame)
+        _SOURCES.move_to_end(id(frame))
+        while len(_SOURCES) > _SOURCES_KEPT:
+            _SOURCES.popitem(last=False)
+
+
+def sample_frame_of(frame):
+    """The sample frame *frame* was built from, when it is an instance frame;
+    else None."""
+    with _SOURCES_LOCK:
+        entry = _SOURCES.get(id(frame))
+    if entry is not None and entry[0] is frame:
+        return entry[1]
+    return None
+
+
+def _ids_like_frame(sample_ids: np.ndarray, sample_frame) -> np.ndarray:
+    """The table's (string) sample ids as the dtype *sample_frame* holds them
+    -- integers on most frames -- so every lookup compares like with like."""
+    level = _index_level(sample_frame, "sample_id")
+    values = level if level is not None else (
+        sample_frame.index.get_level_values(0) if isinstance(sample_frame.index, pd.MultiIndex)
+        else sample_frame.index)
+    if len(values) and values.dtype.kind in "iu":
+        numbers = pd.to_numeric(pd.Series(sample_ids, dtype=object), errors="coerce")
+        return numbers.to_numpy(dtype=np.float64)
+    return np.asarray(sample_ids, dtype=object)
+
+
+def build_instance_frame(table, sample_frame, prefix: str, color_column: str = "") -> pd.DataFrame:
+    """One row per box of *table* whose image is in *sample_frame*.
+
+    Indexed by sample id (repeated once per box). Columns: the coordinates
+    under the prefix's usual names, the per-box :data:`INSTANCE_COLUMNS`, the
+    point's instance id and box, and -- joined from *sample_frame* by sample id
+    -- ``origin``, ``discarded`` and *color_column* when it is a sample column.
+    Boxes of images *sample_frame* does not hold (filtered out of the view, or
+    gone) are left out.
+    """
+    n = len(table)
+    ids = _ids_like_frame(np.asarray(table.sample_ids), sample_frame) if n else np.zeros(0)
+    sample_ids = _sample_ids(sample_frame) if sample_frame is not None and len(sample_frame) else np.zeros(0)
+    lookup = pd.Index(sample_ids)
+    if not lookup.is_unique:
+        # A view holds one row per sample; a raw ledger frame holds instance
+        # rows too -- the first row of each id is its sample row.
+        first = ~lookup.duplicated(keep="first")
+        lookup = lookup[first]
+        positions_of = np.flatnonzero(first)
+    else:
+        positions_of = None
+    pos = lookup.get_indexer(ids) if n and len(lookup) else np.full(n, -1)
+    keep = pos >= 0
+    pos = pos[keep]
+    if positions_of is not None:
+        pos = positions_of[pos]
+
+    coords = np.asarray(table.coords, dtype=np.float32)
+    dims = coords.shape[1] if coords.ndim == 2 and len(coords) == n else 0
+    data = {}
+    for j, axis in enumerate(AXES[:dims]):
+        data[f"signals//{prefix}_{axis}"] = coords[keep, j]
+    boxes = np.asarray(table.boxes, dtype=np.float32).reshape(-1, 4)[keep]
+    class_names = table.class_labels(np.asarray(table.class_ids)[keep])
+    pred_names = table.class_labels(np.asarray(table.pred_class_ids)[keep])
+    data["instance_class"] = class_names
+    data["instance_match"] = np.asarray(table.matches, dtype=object)[keep]
+    data["instance_kind"] = table.kinds[keep]
+    data["instance_pred_class"] = np.where(pred_names == "", "-", pred_names).astype(object)
+    data["instance_confidence"] = np.asarray(table.confidences, dtype=np.float32)[keep]
+    data["instance_iou"] = np.asarray(table.ious, dtype=np.float32)[keep]
+    data["instance_area"] = np.clip(boxes[:, 2] - boxes[:, 0], 0, None) * np.clip(boxes[:, 3] - boxes[:, 1], 0, None)
+    data[_INSTANCE_ID] = np.asarray(table.instance_ids, dtype=np.int64)[keep].astype(np.int32)
+    for j, name in enumerate(_BOX_COLUMNS):
+        data[name] = boxes[:, j]
+
+    origin = _as_series(sample_frame, "origin") if sample_frame is not None else None
+    if origin is not None:
+        data["origin"] = origin.to_numpy()[pos]
+    else:
+        data["origin"] = np.asarray(table.origins, dtype=object)[keep]
+    discarded = _as_series(sample_frame, "discarded") if sample_frame is not None else None
+    if discarded is not None:
+        data["discarded"] = discarded.to_numpy()[pos]
+    color_column = (color_column or "").strip()
+    if color_column and color_column not in data and color_column not in ("origin", "split"):
+        joined = _as_series(sample_frame, color_column) if sample_frame is not None else None
+        if joined is not None:
+            data[color_column] = joined.to_numpy()[pos]
+
+    kept_ids = ids[keep]
+    if kept_ids.dtype.kind == "f":
+        kept_ids = kept_ids.astype(np.int64)
+    frame = pd.DataFrame(data, index=pd.Index(kept_ids, name="sample_id"))
+    register_instance_frame(frame, sample_frame)
+    return frame
+
+
+class InstanceFrames:
+    """The instance frame of each (prefix, sample frame, colour) being looked
+    at, so the same view hands back the same frame object -- which is what lets
+    :class:`ProjectionCache` reuse an index (it compares frames by identity) --
+    and a rewritten table (new file stamp) builds a new one."""
+
+    KEPT = 8
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._frames: "OrderedDict[tuple, tuple]" = OrderedDict()
+
+    def frame_for(self, prefix: str, sample_frame, color_column: str = ""):
+        """The instance frame, or None when the prefix has no table."""
+        from weightslab.projection.instances import load_instance_table, table_stamp
+
+        if sample_frame is None:
+            return None
+        stamp = table_stamp(prefix)
+        if stamp is None:
+            return None
+        color = (color_column or "").strip()
+        # A colour that is a per-box column needs no join: one frame serves them all.
+        join = "" if (not color or color in INSTANCE_COLUMNS) else color
+        key = (prefix, id(sample_frame), stamp, join)
+        with self._lock:
+            cached = self._frames.get(key)
+            if cached is not None and cached[0] is sample_frame:
+                self._frames.move_to_end(key)
+                return cached[1]
+        table = load_instance_table(prefix)
+        if table is None:
+            return None
+        frame = build_instance_frame(table, sample_frame, prefix, join)
+        with self._lock:
+            self._frames[key] = (sample_frame, frame)
+            while len(self._frames) > self.KEPT:
+                self._frames.popitem(last=False)
+        return frame
+
+
+def _fill_instances(response, frame: pd.DataFrame, rows: np.ndarray) -> None:
+    """The box behind each point, when *frame* is an instance frame."""
+    if _INSTANCE_ID not in frame.columns:
+        return
+    response.instance_level = True
+    response.instance_ids.extend(np.asarray(frame[_INSTANCE_ID].to_numpy()[rows], dtype=np.int64).tolist())
+    boxes = np.stack([np.asarray(frame[c].to_numpy()[rows], dtype=np.float32) for c in _BOX_COLUMNS], axis=1)
+    response.instance_boxes.extend(np.nan_to_num(boxes, nan=0.0).reshape(-1).tolist())
+    response.instance_columns.extend(INSTANCE_COLUMNS)
 
 
 def grouping_key(frame: pd.DataFrame, coords: np.ndarray, color_column: str,
@@ -793,8 +1003,12 @@ class ProjectionIndex:
     """
 
     def __init__(self, *, frame, prefix, columns, rows, xyz, lo, hi, cells,
-                 color_column, group_column, fingerprint, build_seconds):
+                 color_column, group_column, fingerprint, build_seconds,
+                 sample_frame=None):
         self.frame = frame
+        # For an instance frame (one row per box): the sample frame it was
+        # joined from -- what the prefixes list and the data board read.
+        self.sample_frame = sample_frame
         self.prefix = prefix
         self.columns = columns
         self.dims = len(columns)
@@ -811,6 +1025,12 @@ class ProjectionIndex:
     @property
     def n(self) -> int:
         return len(self.rows)
+
+    @property
+    def prefix_frame(self):
+        """The frame whose projections the picker lists: the sample frame, for
+        an instance frame (which only holds its own prefix's columns)."""
+        return self.sample_frame if self.sample_frame is not None else self.frame
 
     def ensure_cells(self) -> None:
         """Build the cell grid if it was deferred (see :meth:`build`)."""
@@ -839,7 +1059,8 @@ class ProjectionIndex:
         # Listed even on the failure paths below, so a user who asked for a prefix
         # that isn't there is told which ones ARE -- the common case right after an
         # offline re-projection under a new name.
-        prefixes = available_prefixes(frame)
+        sample_frame = sample_frame_of(frame)
+        prefixes = available_prefixes(sample_frame if sample_frame is not None else frame)
         # No preference from the client means "whatever there is": the live
         # projection when it exists, else the first stored one. Defaulting blindly
         # to "umap" failed the first request of every run that turned the built-in
@@ -912,6 +1133,7 @@ class ProjectionIndex:
             lo=lo.astype(np.float64), hi=hi.astype(np.float64), cells=cells,
             color_column=color_column, group_column=group_column,
             fingerprint=fingerprint, build_seconds=time.perf_counter() - started,
+            sample_frame=sample_frame,
         ), None
 
     # ------------------------------------------------------------------ query
@@ -1083,7 +1305,7 @@ class ProjectionIndex:
             total_in_view=in_view,
             total_available=self.n,
             dims=self.dims,
-            available_prefixes=available_prefixes(frame),
+            available_prefixes=available_prefixes(self.prefix_frame),
         )
         # Extent of the WHOLE projection, not of the region: the client frames
         # the full cloud from this on first load and fits its grid walls to it.
@@ -1099,6 +1321,7 @@ class ProjectionIndex:
             _fill_origins(response, sub)
         _fill_colors(response, sub, request.color_column)
         _fill_discarded(response, sub)
+        _fill_instances(response, frame, rows)
         if selection is not None and len(selection.ids) and len(ids):
             response.in_selection.extend(selection.flags(frame, rows, ids).tolist())
 
@@ -1242,6 +1465,7 @@ class ProjectionCache:
         self._selections: dict = {}
         self._selection: _Selection | None = None
         self._selection_lookup = SampleIdLookup()
+        self._instance_frames = InstanceFrames()
 
     def note_edit(self) -> None:
         """Samples were edited (discarded, tagged): what a pulled copy of the
@@ -1266,6 +1490,17 @@ class ProjectionCache:
         *pull_full* builds the whole, unfiltered dataset (expensive);
         *is_filtered* says whether the view is narrowed by a filter.
         """
+        prefix = (request.prefix or "").strip()
+        if is_instance_prefix(prefix):
+            # One point per box: every source frame becomes its instance frame.
+            request, (view, refresh_view, pull_full) = self._instance_sources(
+                request, prefix, view, refresh_view, pull_full)
+            if view() is None:
+                return pb2.ProjectionResponse(
+                    success=False,
+                    message=f"instance projection '{prefix}' has no stored boxes",
+                    available_prefixes=available_prefixes(pd.DataFrame()),
+                )
         follow = bool(request.follow_view)
         grid_ids = list(request.restrict_sample_ids) if follow else []
         if grid_ids:
@@ -1278,6 +1513,26 @@ class ProjectionCache:
         with self._lock:
             selection = self._selection
         return entry.index.respond(request, selection)
+
+    def _instance_sources(self, request, prefix, view, refresh_view, pull_full):
+        """*request* and the three frame sources, turned instance-level."""
+        if (request.color_column or "").strip() in _INSTANCE_CLASS_ALIASES:
+            # Coloured by class unless asked otherwise: what box clusters MEAN.
+            # "Class" on the board is the sample's `target`, which on a
+            # detection set is its whole box list -- per box, it is the box's.
+            plain = pb2.ProjectionRequest()
+            plain.CopyFrom(request)
+            plain.color_column = INSTANCE_DEFAULT_COLOR
+            request = plain
+        color = request.color_column
+        frames = self._instance_frames
+
+        def wrap(source):
+            if source is None:
+                return None
+            return lambda: frames.frame_for(prefix, source(), color)
+
+        return request, (wrap(view), wrap(refresh_view), wrap(pull_full))
 
     def _entry_for(self, request, sources):
         """``(entry, None)`` for the projection *request* looks at, or
@@ -1343,14 +1598,15 @@ class ProjectionCache:
             while len(self._selections) > self.KEPT_SELECTIONS:
                 self._selections.pop(next(iter(self._selections)))
         ids = selection.ids
+        boxes = f"{len(rows)} boxes in " if index.sample_frame is not None else ""
         return pb2.ProjectionResponse(
             success=True,
-            message=f"{len(ids)} selected",
+            message=f"{boxes}{len(ids)} selected",
             selected=len(ids),
             selection_token=token,
             total_available=index.n,
             dims=index.dims,
-            available_prefixes=available_prefixes(index.frame),
+            available_prefixes=available_prefixes(index.prefix_frame),
         )
 
     def selection(self, token: str):
@@ -1376,7 +1632,7 @@ class ProjectionCache:
         with self._lock:
             for (kind, _prefix), entry in self._entries.items():
                 if kind == "full":
-                    return entry.index.frame
+                    return entry.index.prefix_frame
         return None
 
     def rows_of(self, frame, sample_ids) -> np.ndarray:
@@ -1395,7 +1651,11 @@ class ProjectionCache:
                 success=False,
                 message=(f"None of the {len(grid_ids)} samples in "
                          "the grid are in the projection data."))
-        return _respond_in_full(frame.iloc[rows], request)
+        page = frame.iloc[rows]
+        source = sample_frame_of(frame)
+        if source is not None:
+            register_instance_frame(page, source)
+        return _respond_in_full(page, request)
 
     @staticmethod
     def _source(kind, sources):

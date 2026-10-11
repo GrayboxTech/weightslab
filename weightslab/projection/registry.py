@@ -97,19 +97,22 @@ def _write_file(path, entries: dict) -> None:
 
 
 def register_prefix(prefix: str, root_log_dir=None, layer=None,
-                    layer_detail=None) -> None:
+                    layer_detail=None, level=None) -> None:
     """Record *prefix* as a projection. Best effort: never raises.
 
     *layer* (a ``named_modules()`` name) and *layer_detail* (e.g. ``"C3k2
     output"``) say where its features came from. Left out, whatever was
     recorded before is kept: a projection the caller computed itself
     (:func:`save_projection_coords`) has no layer WeightsLab knows of.
+
+    *level* is ``"instance"`` for a projection with one point per box (see
+    :mod:`weightslab.projection.instances`); a per-sample one records none.
     """
     prefix = str(prefix).strip()
     if not prefix:
         return
     info = {key: str(value) for key, value in
-            (("layer", layer), ("layer_detail", layer_detail)) if value}
+            (("layer", layer), ("layer_detail", layer_detail), ("level", level)) if value}
     with _LOCK:
         new = prefix not in _REGISTERED
         _REGISTERED.add(prefix)
@@ -130,8 +133,8 @@ def register_prefix(prefix: str, root_log_dir=None, layer=None,
 
 
 def prefix_info(prefix: str, root_log_dir=None) -> dict:
-    """What is recorded about *prefix*: ``{"layer": ..., "layer_detail": ...}``,
-    either key absent when unknown. Never raises."""
+    """What is recorded about *prefix*: ``{"layer": ..., "layer_detail": ...,
+    "level": ...}``, any key absent when unknown. Never raises."""
     prefix = str(prefix).strip()
     with _LOCK:
         info = dict(_INFO.get(prefix, {}))
