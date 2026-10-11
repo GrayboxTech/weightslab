@@ -1,0 +1,70 @@
+# Global configuration
+device: auto
+experiment_name: det_YOLO_instances
+training_steps_to_do: null
+# root_log_dir:   # empty -> a temporary directory, or a path to keep logs and checkpoints
+
+checkpoint_manager:
+  load_config: false
+  load_data: true
+  load_model: true
+
+# A COCO-pretrained YOLO: its features already mean "car", "truck", "person"...
+# so the box map is worth reading from the first epoch.
+model:
+  name: yolo11n.pt
+
+# Any Ultralytics dataset YAML. coco128 (128 images, 80 classes, ~7 MB) is
+# downloaded by Ultralytics on first use; coco8 is the 8-image smoke test.
+data_root: coco128.yaml
+image_size: 320
+epochs: 3
+
+eval_full_to_train_steps_ratio: 16
+experiment_dump_to_train_steps_ratio: 8
+tqdm_display: true
+is_training: true   # start right away (false: wait for Play in the Studio)
+
+serving_grpc: true
+serving_cli: false
+
+ledger_enable_flushing_threads: true
+ledger_enable_h5_persistence: true
+ledger_flush_max_rows: 50
+ledger_flush_interval: 30.0
+
+data:
+  train_loader:
+    batch_size: 8
+    shuffle: true
+    preload_labels: true
+    preload_metadata: true
+    drop_last: false
+    num_workers: 0
+  val_loader:
+    batch_size: 8
+    shuffle: false
+    preload_labels: true
+    preload_metadata: true
+    drop_last: false
+    num_workers: 0
+
+signals_cfg:
+  train_nms:
+    conf_thres: 0.25
+    iou_thres: 0.45
+    max_nms: 30
+
+# --- The point of this example -----------------------------------------------
+# One projection point per BOX (wl.project_instances), train and val on one map.
+# WLAwareTrainer runs it at the end of every `every_n_epochs` epochs, with the
+# EMA model; the prefix appears in the Projection board's picker.
+instance_projection:
+  every_n_epochs: 1
+  prefix: instances
+  method: umap            # or pca
+  epochs: 20              # UMAP fitting passes over the collected boxes
+  conf: 0.25              # confidence a prediction needs to count
+  match_iou: 0.5          # IoU above which a prediction sits on a label
+  include_predictions: true
+  max_instances: 50000

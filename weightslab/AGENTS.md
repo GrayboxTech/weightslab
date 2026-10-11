@@ -342,7 +342,10 @@ board (3-D scatter, zoom = server-side level-of-detail, click/lasso selection �
   for an unlabelled prediction). Studio: a lasso selects the boxes' IMAGES; double click
   opens the image with the box highlighted; colour by `instance_match` etc. List mode:
   a row's "+" lists its boxes; "Instances only" (beside the grid/list toggle) = one row
-  per box. Other frameworks: subclass `InstanceAdapter` (`projection/instances.py`).
+  per box. Other frameworks: subclass `InstanceAdapter` (`projection/instances.py`;
+  `tracked_batches(loader, collate_fn)` sweeps a split in order). Examples:
+  `examples/Ultralytics/wl-detection-instances` (config-only) and
+  `examples/PyTorch/wl-detection-instances` (custom adapter for SmallDetector).
 - Full page: `weightslab/docs/projection.rst`; example:
   `examples/Usecases/wl-parametric-umap/`.
 
@@ -377,6 +380,7 @@ The automatic `tag:loss_shape` tag (§3.6) uses these same primitives.
 | Reactive signals / custom loss-shape tagging | `Usecases/wl-classification-signals_shape_classification`, `Usecases/ws-signals-mnist` | §3.6; the latter is the minimal variant with no custom classifier. |
 | PyTorch Lightning | `Lightning/wl-classification` | Same `watch_or_edit` calls as plain PyTorch; guards wrap `training_step`/`validation_step` bodies; `Trainer(log_every_n_steps=0, enable_checkpointing=False, logger=False)`. |
 | Ultralytics YOLO (detect/segment) | `Ultralytics/wl-detection` | Don't call `watch_or_edit` for model/optimizer/data/loss/metric — pass `trainer=wl.WLAwareTrainer` (or `wl.WLAwareSegmentationTrainer`) to `YOLO(...).train(...)`. It wires everything via UL callbacks; you only watch the run config as `flag="hyperparameters"`. |
+| Box-level projection (truck boxes in the car cluster) | `Ultralytics/wl-detection-instances` (UL: `instance_projection` hyperparameter section) or `PyTorch/wl-detection-instances` (custom detector: an `InstanceAdapter`, ~60 lines) | `wl.project_instances`; see §3.6b. |
 
 ### 3.10 Verifying an integration headlessly
 

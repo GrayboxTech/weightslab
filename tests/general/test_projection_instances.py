@@ -324,6 +324,104 @@ class TestCollect(_Isolated):
             inst.resolve_adapter(nn.Linear(2, 2))
 
 
+class TestTrackedBatches(unittest.TestCase):
+    """The sweep an adapter does: the whole split, in order, any loader shape."""
+
+    class _Wrapper:
+        def __init__(self, n):
+            self.n = n
+
+        def __len__(self):
+            return self.n
+
+        def __getitem__(self, i):
+            return (f"img{i}", str(100 + i), [i], {})
+
+    class _Loader:
+        def __init__(self, n):
+            self.tracked_dataset = TestTrackedBatches._Wrapper(n)
+
+        def __iter__(self):     # a sweep must never read the training iterator
+            raise AssertionError("the loader's own iterator was used")
+
+    def test_reads_the_tracked_dataset_in_order(self):
+        batches = list(inst.tracked_batches(self._Loader(5), batch_size=2))
+        self.assertEqual([len(b) for b in batches], [2, 2, 1])
+        self.assertEqual([item[1] for b in batches for item in b], ["100", "101", "102", "103", "104"])
+
+    def test_collates(self):
+        got = list(inst.tracked_batches(self._Loader(3), collate_fn=lambda items: [i[1] for i in items],
+                                        batch_size=8))
+        self.assertEqual(got, [["100", "101", "102"]])
+
+    def test_a_dataset_or_a_torch_loader(self):
+        dataset = self._Wrapper(2)
+        self.assertEqual(len(list(inst.tracked_batches(dataset))), 1)
+        from torch.utils.data import DataLoader
+        self.assertEqual(len(list(inst.tracked_batches(DataLoader(list(range(3)), batch_size=1)))), 1)
+
+
+EXAMPLE_DIR = os.path.join(os.path.dirname(inst.__file__), "..", "examples", "PyTorch")
+
+
+def _load(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestPyTorchExampleAdapter(_Isolated):
+    """examples/PyTorch/wl-detection-instances: the adapter on the real
+    SmallDetector (no pretrained weights) and synthetic images, no download."""
+
+    def setUp(self):
+        super().setUp()
+        import importlib
+        import sys
+        import types
+        # The example's utils/ (relative imports inside), as a package of its
+        # own name: a bare `utils` would clash with other test helpers.
+        if "wl_example_det_utils" not in sys.modules:
+            package = types.ModuleType("wl_example_det_utils")
+            package.__path__ = [os.path.join(EXAMPLE_DIR, "wl-detection", "utils")]
+            sys.modules["wl_example_det_utils"] = package
+        self.model_mod = importlib.import_module("wl_example_det_utils.model")
+        self.crit_mod = importlib.import_module("wl_example_det_utils.criterions")
+        self.data_mod = importlib.import_module("wl_example_det_utils.data")
+        self.adapter_mod = _load(os.path.join(EXAMPLE_DIR, "wl-detection-instances", "instance_adapter.py"),
+                                 "wl_example_instance_adapter")
+
+    def _dataset(self, n=6):
+        th.manual_seed(0)
+        items = []
+        for i in range(n):
+            target = np.array([[0.1, 0.2, 0.4, 0.9, 0, 1], [0.5, 0.1, 0.8, 0.95, 0, 1]], np.float32)
+            items.append((th.rand(3, 64, 64), f"s{i}", target, {}))
+        return items
+
+    def test_projects_every_box(self):
+        model = self.model_mod.SmallDetector(num_classes=1, image_size=64, grid_size=4,
+                                             pretrained=False, freeze_backbone=True)
+        adapter = self.adapter_mod.SmallDetectorInstanceAdapter(
+            4, collate_fn=self.data_mod.det_collate,
+            decode_predictions=self.crit_mod.decode_predictions, batch_size=4)
+        feats, table = inst.collect_instances(model, {"train_loader": self._dataset()}, adapter,
+                                              conf=0.0, verbose=False)
+        labels = table.instance_ids > 0
+        self.assertEqual(int(labels.sum()), 12)                    # 2 boxes x 6 images
+        self.assertEqual(sorted(set(table.instance_ids[labels].tolist())), [1, 2])
+        self.assertEqual(feats.shape[1], 128)                      # the neck's channels
+        self.assertEqual(table.class_names, ["person"])
+        self.assertEqual(table.layer, "neck")
+        # Label boxes come back normalised, as the dataset gave them.
+        first = np.flatnonzero((table.sample_ids == "s0") & (table.instance_ids == 1))[0]
+        np.testing.assert_allclose(table.boxes[first], [0.1, 0.2, 0.4, 0.9], atol=1e-5)
+        stats = inst.project_instances(model, {"train_loader": self._dataset()}, adapter=adapter,
+                                       prefix="pt_boxes", method="pca", conf=0.0, verbose=False)
+        self.assertEqual(stats["labels"], 12)
+
+
 # ---------------------------------------------------------------------------
 # serving
 # ---------------------------------------------------------------------------

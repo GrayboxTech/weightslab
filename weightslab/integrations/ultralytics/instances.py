@@ -40,6 +40,8 @@ from weightslab.projection.instances import (
     InstanceForward,
     _named_loaders,
     project_instances,
+    tracked_batches,
+    tracked_dataset_of,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,16 +76,7 @@ def _detect_head(module):
 def _tracked_dataset(loader):
     """``(tracking wrapper, Ultralytics dataset)`` behind a WeightsLab loader,
     a plain DataLoader or a dataset."""
-    tracked = None
-    for attr in ("tracked_dataset", "dataset"):
-        try:
-            tracked = getattr(loader, attr, None)
-        except Exception:
-            tracked = None
-        if tracked is not None:
-            break
-    if tracked is None:
-        tracked = loader
+    tracked = tracked_dataset_of(loader)
     inner = getattr(tracked, "wrapped_dataset", tracked)
     return tracked, inner
 
@@ -126,15 +119,9 @@ class UltralyticsInstanceAdapter(InstanceAdapter):
     def batches(self, loader) -> Iterator[InstanceBatch]:
         from .collate import wl_ul_dict_collate
 
-        tracked, dataset = _tracked_dataset(loader)
-        n = len(tracked)
+        _, dataset = _tracked_dataset(loader)
         with _eval_transforms(dataset):
-            for start in range(0, n, self.batch_size):
-                items = [tracked[i] for i in range(start, min(n, start + self.batch_size))]
-                items = [it for it in items if isinstance(it, (tuple, list)) and len(it) >= 4]
-                if not items:
-                    continue
-                batch = wl_ul_dict_collate(items)
+            for batch in tracked_batches(loader, wl_ul_dict_collate, self.batch_size):
                 yield self._to_instance_batch(batch)
 
     @staticmethod

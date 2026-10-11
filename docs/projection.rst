@@ -370,6 +370,12 @@ of its instance row); give a prediction with no label a negative id.
 ``level: "instance"`` in ``prefixes.json``. Writing the prefix again replaces
 the projection.
 
+Two runnable examples: ``examples/Ultralytics/wl-detection-instances`` (YOLO on
+coco128, wired from the hyperparameters, see
+:doc:`examples/ultralytics/detection_instances`) and
+``examples/PyTorch/wl-detection-instances`` (a plain-PyTorch detector with its
+own ``InstanceAdapter``, see :doc:`examples/pytorch/detection_instances`).
+
 Use a model that has learnt something (a pretrained or early-epoch checkpoint):
 a randomly initialised network places boxes by colour and size, not by what
 they are. Other frameworks plug in with an ``InstanceAdapter`` (see

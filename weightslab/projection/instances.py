@@ -551,6 +551,41 @@ class InstanceAdapter:
         return "", ""
 
 
+def tracked_dataset_of(loader):
+    """The dataset behind *loader*: a WeightsLab loader's tracking wrapper, a
+    torch ``DataLoader``'s dataset, or *loader* itself when it is a dataset."""
+    for attr in ("tracked_dataset", "dataset"):
+        try:
+            found = getattr(loader, attr, None)
+        except Exception:
+            found = None
+        if found is not None:
+            return found
+    return loader
+
+
+def tracked_batches(loader, collate_fn=None, batch_size: int = 16):
+    """Every sample of *loader*, in dataset order, in batches of *batch_size*.
+
+    What an :class:`InstanceAdapter` sweeps: the dataset is read item by item,
+    not through the loader's iterator, so the sweep neither depends on nor
+    disturbs where a training loop is in its epoch, and it is never shuffled.
+    A WeightsLab loader's items come with their sample ids (``(item, uid,
+    target, ...)``). Discarded samples are included -- the board draws them
+    grey. *collate_fn* (the loader's own, typically) turns a list of items into
+    a batch; without one the list itself is yielded.
+    """
+    dataset = tracked_dataset_of(loader)
+    n = len(dataset)
+    step = max(1, int(batch_size))
+    for start in range(0, n, step):
+        items = [dataset[i] for i in range(start, min(n, start + step))]
+        items = [item for item in items if item is not None]
+        if not items:
+            continue
+        yield collate_fn(items) if collate_fn is not None else items
+
+
 def _origin_of(name, loader) -> str:
     """The split name a loader's samples belong to."""
     if name:

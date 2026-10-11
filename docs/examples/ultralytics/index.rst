@@ -17,3 +17,4 @@ no model changes, no loop changes.
    :maxdepth: 1
 
    detection
+   detection_instances

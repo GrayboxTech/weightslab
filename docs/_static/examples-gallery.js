@@ -47,6 +47,13 @@
     },
     {
       badge: 'PyTorch', color: 'pytorch',
+      title: 'Detection, one point per box',
+      desc: 'The Penn-Fudan detector with a box-level projection: an InstanceAdapter for a custom model, labels vs predictions, and the unlabelled pedestrians it finds.',
+      tags: ['detection', 'projection', 'instances', 'penn-fudan', 'beta'],
+      url: 'examples/pytorch/detection_instances.html'
+    },
+    {
+      badge: 'PyTorch', color: 'pytorch',
       title: 'Clustering, Face Recognition',
       desc: 'Metric learning with triplet loss on face datasets. Store and explore high-dimensional embeddings per sample in the studio.',
       tags: ['clustering', 'unsupervised', 'embeddings', 'face recognition', 'metric learning'],
@@ -75,6 +82,13 @@
       tags: ['detection', 'yolo', 'object detection', 'mAP'],
       url: 'examples/ultralytics/detection.html',
       colab: COLAB + 'Ultralytics/wl-how-to-train-ultralytics-yolo-on-kitti-detection-dataset.ipynb'
+    },
+    {
+      badge: 'Ultralytics', color: 'ultralytics',
+      title: 'Detection, YOLO: one point per box',
+      desc: 'Every box of coco128 on one map, train and val, from WLAwareTrainer: truck boxes in the car cluster, labels vs predictions, lasso to the images.',
+      tags: ['detection', 'yolo', 'projection', 'instances', 'coco', 'beta'],
+      url: 'examples/ultralytics/detection_instances.html'
     },
     {
       badge: 'Usecase', color: 'usecase',

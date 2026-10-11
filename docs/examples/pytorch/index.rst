@@ -20,5 +20,6 @@ computer vision task with WeightsLab fully wired in.
    fashion_mnist_umap
    segmentation
    detection
+   detection_instances
    clustering
    generation
