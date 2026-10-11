@@ -49,12 +49,24 @@ WeightsLab hooks into your existing PyTorch training loop and exposes a live UI 
 
 ## Quickstart
 
+> [!TIP]
+> Quick examples to get started
+> ```bash
+> weightslab start example            # classification (default)
+> weightslab start example --cls      # classification
+> weightslab start example --seg      # segmentation
+> weightslab start example --det      # detection
+> weightslab start example --clus     # clustering
+> ```
+> Explore our [sandbox](https://sandbox.graybx.com/).
+For a detailed installation guide and advanced configuration: [Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
+
 **1. Install & Launch**
 ```bash
 pip install weightslab
 ```
 ```bash
-weightslab start  # launch the UI
+weightslab start ./my_experiment_directory # launch the UI
 ```
 
 **2. Start in the cloud**
@@ -75,24 +87,11 @@ loader = wl.watch_or_edit(dataset, flag='data', loader_name="train")
 wl.serve(serving_grpc=True, serving_cli=False)
 ...
 ```
-
-> [!TIP]
-> Quick examples to get started
-> ```bash
-> weightslab start example            # classification (default)
-> weightslab start example --cls      # classification
-> weightslab start example --seg      # segmentation
-> weightslab start example --det      # detection
-> weightslab start example --clus     # clustering
-> ```
-> Explore our [sandbox](https://sandbox.graybx.com/).
-For a detailed installation guide and advanced configuration: [Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
-
 <br>
 
 ## How can you use it ?
 
-<h4>1. Find bad data fast</h4> Pause training mid-run, sort samples by loss, spot mislabels and outliers before they impact your model.
+<h4>1. Find bad data fast</h4> Pause training mid-run before bad data are learnt, sort samples by loss, spot mislabels and outliers before they impact your model.
 
 <h4>2. Fix and resume without re-starting</h4> Relabel or drop samples live, then continue training from the same checkpoint.
 
@@ -222,102 +221,13 @@ if __name__ == "__main__":
 </details>
 
 <details>
-<summary><b>Migrating from Weights & Biases?</b></summary>
+<summary><b>Migrating ?</b></summary>
 
-## WeightsLab vs Weights & Biases
-
-Weights & Biases (wandb) tracks experiments. WeightsLab connects training signals back to
-the exact samples causing them — so you can fix your data, not just log it.
-
-<br>
-
-```diff
---- train_baseline.py
-+++ train_wl.py
-@@ -1,11 +1,12 @@
- import argparse
- import torch
- import torch.nn as nn
--from torch.utils.data import DataLoader
- from torchvision import datasets, transforms, models
- from torchmetrics.classification import MulticlassAccuracy
-
--import wandb
-+import weightslab as wl
-+
-+@wl.signal(name="byte_adjusted_loss", subscribe_to="loss/CE")
-+def byte_adjusted_loss(ctx): return ctx.subscribed_value / ctx.image_bytes
-+
- def main():
-@@ -15,29 +16,38 @@
-     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-     parameters = {"batch_size": 128, "lr": 1e-3}
-
--    wandb.init(project="cifar10")
--
-     transform = transforms.Compose([...])
-     train_set = datasets.CIFAR10("./data", train=True,  download=True, transform=transform)
-     test_set  = datasets.CIFAR10("./data", train=False, download=True, transform=transform)
--    train_loader = DataLoader(train_set, batch_size=parameters["batch_size"], shuffle=True, num_workers=2)
--    test_loader  = DataLoader(test_set,  batch_size=256, num_workers=2)
-+    wl.watch_or_edit(parameters, flag="hyperparameters")  # live-editable in UI
-+
-+    train_loader = wl.watch_or_edit(
-+        train_set, flag="data", loader_name="train_loader",
-+        batch_size=parameters["batch_size"], shuffle=True, is_training=True)
-+    test_loader  = wl.watch_or_edit(
-+        test_set,  flag="data", loader_name="test_loader",
-+        batch_size=256, shuffle=False, is_training=False)
-
-     model     = models.resnet18(weights=None)
-     model.fc  = nn.Linear(model.fc.in_features, 10)
-     optimizer = torch.optim.Adam(model.parameters(), lr=parameters["lr"])
-
--    criterion = nn.CrossEntropyLoss()
--    accuracy  = MulticlassAccuracy(num_classes=10).to(device)
-+    criterion = wl.watch_or_edit(nn.CrossEntropyLoss(), flag="loss", signal_name="loss/CE")
-+    accuracy  = wl.watch_or_edit(MulticlassAccuracy(num_classes=10).to(device), flag="metric", signal_name="acc")
-+
-+    wl.serve(serving_grpc=True)
-
-     for epoch in range(1, args.epochs + 1):
-         model.train()
-         for x, y in train_loader:
-+            with wl.guard_training_context:
-                 logits = model(x.to(device))
-                 loss   = criterion(logits, y.to(device))
-                 optimizer.zero_grad(); loss.backward(); optimizer.step()
-                 accuracy.update(logits, y)
--            wandb.log({"train/loss": loss.item()})
--        wandb.log({"train/acc": accuracy.compute().item(), "epoch": epoch})
-+            wl.save_signals(preds_raw=logits, targets=y,
-+                            signals={"metric/accuracy": accuracy.compute().item()})
-
-         model.eval()
-         with torch.no_grad():
-             for x, y in test_loader:
-+                with wl.guard_testing_context:
-                     accuracy.update(model(x.to(device)), y)
--        wandb.log({"test/acc": accuracy.compute().item(), "epoch": epoch})
-+                wl.save_signals(preds_raw=logits, targets=y,
-+                                signals={"metric/accuracy": accuracy.compute().item()})
-
--    wandb.finish()
-+    wl.keep_serving()
-```
+See more details at https://grayboxtech.github.io/weightslab/latest/quickstart.html#local-integration-in-your-own-python-script-mnist.
 
 </details>
 
-<details>
-<summary><b>Documentation (API + SDK)</b></summary>
-
-<br>
-
-Find our documentation [online](https://grayboxtech.github.io/weightslab/latest/index.html).
-
-</details>
-
-<details>
+<details open>
 <summary><b>Agent: chat with your training run (OpenCode)</b></summary>
 
 <br>
@@ -331,9 +241,7 @@ reference.
 
 </details>
 
-</details>
-
-<details>
+<details open>
 <summary><b>Contributing & Onboarding</b></summary>
 
 <br>
@@ -345,7 +253,7 @@ any single file. It's the fastest way to orient before a first change and contri
 
 </details>
 
-<details>
+<details open>
 <summary><b>Community</b></summary>
 
 <br>
@@ -354,14 +262,17 @@ We're building a community of ML engineers around data-centric training tooling.
 Interested in contributing or just want to say hi? → hello [at] graybx [dot] com
 
 </details>
+
+## Citation
 If WeightsLab is part of your development process / project / publication, please cite us ❤️:
 
+```latex
 @misc{wl2024,
-title = {WeightsLab - A monitoring platform for ML teams building real‑world AI at scale},
-year = {2024},
-note = {Software available from http://github.com/GrayboTech/weightslab},
-url={https://graybx.com},
-author = {GrayBx},
+  title = {WeightsLab - A monitoring platform for ML teams building real‑world AI at scale},
+  year = {2024},
+  note = {Software available from http://github.com/GrayboTech/weightslab},
+  url={https://graybx.com},
+  author = {GrayBx}
 }
-
+```
 </details>
