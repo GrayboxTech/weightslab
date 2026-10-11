@@ -32,6 +32,8 @@
   <a href="https://youtu.be/pSng0aIXGCY">Demo (VLA)</a>
   ·
   <a href="https://youtu.be/WetZU_J7Tg8">Demo (LiDAR)</a>
+  ·
+  <a href="https://youtu.be/WetZU_J7Tg8">Demo (LLM/Coming soon)</a>
 
 </p>
 
