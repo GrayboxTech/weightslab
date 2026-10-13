@@ -50,17 +50,6 @@ WeightsLab hooks into your existing PyTorch training loop and exposes a live UI 
 </div>
 
 ## Quickstart
-
-> [!TIP]
-> Quick examples to get started
-> ```bash
-> weightslab start example            # classification (default)
-> weightslab start example --cls      # classification
-> weightslab start example --seg      # segmentation
-> weightslab start example --det      # detection
-> weightslab start example --clus     # clustering
-> ```
-> Explore our [sandbox](https://sandbox.graybx.com/).
 For a detailed installation guide and advanced configuration: [Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
 
 **1. Install & Launch**
@@ -71,9 +60,22 @@ pip install weightslab
 weightslab start ./my_experiment_directory # launch the UI
 ```
 
-**2. Start in the cloud**
+**2. Start**
+> [!TIP]
+> Quick examples to get started
+> ```bash
+> weightslab start example            # classification (default)
+> weightslab start example --cls      # classification
+> weightslab start example --seg      # segmentation
+> weightslab start example --det      # detection
+> weightslab start example --clus     # clustering
+> ```
+> Explore our [sandbox](https://sandbox.graybx.com/).
+
+**In the cloud directly**
 
 [![Start coding with GCollab](https://img.shields.io/badge/Start_coding_with_GCollab-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=white)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/Colab/wl-colab-quickstart.ipynb)
+
 
 **OR Wrap your training script locally**
 ```python
@@ -90,19 +92,6 @@ wl.serve(serving_grpc=True, serving_cli=False)
 ...
 ```
 
-> [!TIP]
-> Quick examples to get started
-> ```bash
-> weightslab start example            # classification (default)
-> weightslab start example --cls      # classification
-> weightslab start example --seg      # segmentation
-> weightslab start example --det      # detection
-> weightslab start example --clus     # clustering
-> ```
-For a detailed installation guide and advanced configuration: [Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
-
-<br>
-
 ## How can you use it ?
 
 <h4>1. Find bad data fast</h4> Pause training mid-run before bad data are learnt, sort samples by loss, spot mislabels and outliers before they impact your model.
@@ -111,14 +100,9 @@ For a detailed installation guide and advanced configuration: [Documentation](ht
 
 <h4>3. Catch model regressions early on</h4> Analyze per-sample loss trajectories to see exactly where the model is struggling.
 
-<br>
-<br>
-
 ## Resources & Community
 <details>
 <summary><b>Training script with Weightslab - Step-by-Step Integration</b></summary>
-
-<br>
 
 1. **Add the import** at the top of your script:
 ```python
@@ -151,8 +135,6 @@ For a detailed installation guide and advanced configuration: [Documentation](ht
 
 <details>
 <summary><b>Training script with Weightslab - Full Example</b></summary>
-
-<br>
 
 ```python
 #!/usr/bin/env python3
@@ -244,9 +226,7 @@ See more details at https://grayboxtech.github.io/weightslab/latest/quickstart.h
 <details open>
 <summary><b>Agent: chat with your training run (OpenCode)</b></summary>
 
-<br>
-
-WeightsLab ships two distinct agent surfaces — the backend SDK agent for data-manipulation
+WeightsLab ships two distinct agent surfaces: the backend SDK agent for data-manipulation
 queries, and a local [OpenCode](https://opencode.ai)-backed agent with a full bash/file
 toolset that can restart training, edit your code, and run recurring `/loop` monitoring
 jobs. See the [Agent docs](https://grayboxtech.github.io/weightslab/latest/agent.html) for
@@ -255,27 +235,19 @@ reference.
 
 </details>
 
-<details open>
-<summary><b>Contributing & Onboarding</b></summary>
 
-<br>
+## Contributing and OnBoarding
 
-New here (human or AI coding agent)? Start with [AGENTS.md](AGENTS.md) — it
+New here (human or AI coding agent)? Start with [AGENTS.md](AGENTS.md); it
 captures the cross-repo architecture (weightslab backend ↔ weights_studio
 frontend via the shared proto), the module maps, the integration pattern, where tests live, and the gotchas that aren't obvious from
 any single file. It's the fastest way to orient before a first change and contribution.
 
-</details>
-
-<details open>
-<summary><b>Community</b></summary>
-
-<br>
+## Community
 
 We're building a community of ML engineers around data-centric training tooling.
 Interested in contributing or just want to say hi? → hello [at] graybx [dot] com
 
-</details>
 
 ## Citation
 If WeightsLab is part of your development process / project / publication, please cite us ❤️:
