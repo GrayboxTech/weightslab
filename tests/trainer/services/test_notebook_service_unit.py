@@ -442,6 +442,22 @@ class TestEmbeddedKernelStartupOrder(unittest.TestCase):
             source.index("_install_thread_routed_streams("),
             "repair logging before the rest of the startup logs anything")
 
+    def test_exit_hook_is_registered_after_ipykernels_own(self):
+        # app.initialize() registers ipykernel's atexit hooks; app.close closes
+        # every socket and terminates the zmq context. atexit runs the last
+        # registered hook first, so the hook that stops the kernel's loop must
+        # come after initialize(). Registered before it, app.close ran first
+        # under the still-running loop and CI died with a core dump after every
+        # test had passed.
+        import inspect
+        source = self._source()
+        hook = "atexit.register(_shutdown_embedded_kernel)"
+        self.assertIn(hook, source, "the kernel thread registers its own exit hook")
+        self.assertLess(source.index("app.initialize("), source.index(hook))
+        self.assertNotIn(
+            "atexit.register", inspect.getsource(notebook_service.ensure_embedded_kernel),
+            "registered once, from the kernel thread -- not also at thread creation")
+
 
 class TestNotebookPersistence(unittest.TestCase):
     def setUp(self):

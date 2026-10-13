@@ -108,8 +108,8 @@ class TestTracker(unittest.TestCase):
             loss.backward()
             tracker._optimizer.step()
             if step == 0:
-                first = float(loss)
-        self.assertLess(float(loss), first)
+                first = loss.item()
+        self.assertLess(loss.item(), first)
 
         with th.no_grad():
             emb = tracker._encoder(feats).numpy()

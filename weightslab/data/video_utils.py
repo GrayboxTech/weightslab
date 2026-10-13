@@ -320,15 +320,15 @@ def video_frame_at(frames, index: int) -> Image.Image:
 def _frame_to_pil(frame: np.ndarray) -> Image.Image:
     """One [H, W, C] uint8 frame -> PIL image."""
     if frame.ndim == 2:
-        return Image.fromarray(frame, mode="L")
+        return Image.fromarray(frame)
     channels = frame.shape[-1]
     if channels == 1:
-        return Image.fromarray(frame[..., 0], mode="L")
+        return Image.fromarray(frame[..., 0])
     if channels == 4:
-        return Image.fromarray(frame, mode="RGBA")
+        return Image.fromarray(frame)
     if channels == 3:
-        return Image.fromarray(frame, mode="RGB")
-    return Image.fromarray(frame[..., 0], mode="L")
+        return Image.fromarray(frame)
+    return Image.fromarray(frame[..., 0])
 
 
 def video_poster_frame(dataset, frames) -> Image.Image:

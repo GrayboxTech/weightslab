@@ -25,6 +25,7 @@ Wire-up (in ExperimentService):
 """
 
 import io
+import gc
 import os
 import re
 import ast
@@ -346,6 +347,15 @@ def _shutdown_embedded_kernel(timeout: float = 5.0) -> None:
 
     atexit runs before interpreter finalization, so stopping the loop here lets
     app.start() return and the thread exit while logging still works.
+
+    It must also run BEFORE ipykernel's own atexit hooks: ``app.initialize()``
+    registers ``app.close`` (closes every socket and terminates the zmq
+    context) and ``IOPubThread.stop``. atexit runs handlers last-registered
+    first, so _run_embedded_kernel registers this one right after
+    initialize(). Registered before it (it used to be, at thread creation),
+    app.close ran first and pulled the sockets out from under the
+    still-running loop -- the same warnings as above, then ``terminate called
+    without an active exception`` and a core dump on Linux CI.
     """
     thread = _EMBED_STATE.get("thread")
     if thread is None or not thread.is_alive():
@@ -358,9 +368,11 @@ def _shutdown_embedded_kernel(timeout: float = 5.0) -> None:
     # -- measured: stored loop id ...692880 vs app's ...181904, and the thread
     # stayed alive through a 10s join. IOLoop.add_callback is documented
     # thread-safe, which is what lets us reach into it from here.
+    app = None
     try:
         from ipykernel.kernelapp import IPKernelApp
-        io_loop = getattr(IPKernelApp.instance(), "io_loop", None)
+        app = IPKernelApp.instance()
+        io_loop = getattr(app, "io_loop", None)
         if io_loop is not None:
             io_loop.add_callback(io_loop.stop)
     except Exception:
@@ -370,6 +382,15 @@ def _shutdown_embedded_kernel(timeout: float = 5.0) -> None:
     # Bounded: a kernel that refuses to stop must not hang the process on the
     # way out. Worst case we are back to the old behaviour.
     thread.join(timeout=timeout)
+
+    # IPythonKernel adds a gc callback and never removes it. A collection
+    # during finalization then calls it with the threading module already torn
+    # down: "Exception ignored while calling GC callback ... 'NoneType' object
+    # has no attribute 'enumerate'" after an otherwise clean exit.
+    try:
+        gc.callbacks.remove(app.kernel._clean_thread_parent_frames)
+    except (AttributeError, ValueError):
+        pass  # no kernel, or an ipykernel that never registered it
 
 
 def configure_embedded_kernel(enabled: bool) -> None:
@@ -441,11 +462,8 @@ def ensure_embedded_kernel(data_service, root_log_dir: Path) -> None:
             name="WL-Embedded-Jupyter-Kernel", daemon=True,
         )
         _EMBED_STATE["thread"] = _kernel_thread
-        # Registered only once the kernel actually starts, and only here --
-        # this is the one place that creates the thread. See
-        # _shutdown_embedded_kernel() for why a daemon thread left running into
-        # interpreter finalization aborts the process.
-        atexit.register(_shutdown_embedded_kernel)
+        # The atexit hook that stops this thread is registered by the thread
+        # itself, after ipykernel's own -- see _shutdown_embedded_kernel().
         _kernel_thread.start()
         try:
             if _wait_for_connection_file(connection_file, timeout=15.0):
@@ -604,6 +622,11 @@ def _run_embedded_kernel(connection_file: Path) -> None:
     app.init_signal = lambda: None
     try:
         app.initialize([])
+        # After initialize(), which registers ipykernel's own atexit hooks, so
+        # this one runs before them (atexit is LIFO). See
+        # _shutdown_embedded_kernel() for why the order decides between a clean
+        # exit and a core dump.
+        atexit.register(_shutdown_embedded_kernel)
         # traitlets configures logging while building any Application, and
         # logging.config.dictConfig CLOSES every handler in the process on its
         # way in (_clearExistingHandlers -> logging.shutdown) without detaching
@@ -631,7 +654,8 @@ def _run_embedded_kernel(connection_file: Path) -> None:
         # training progress bar disappeared from the terminal once the notebook
         # kernel was enabled.
         _install_thread_routed_streams(console_stdout, console_stderr)
-        app.shell.colors = "NoColor"
+        # Lowercase: IPython 9 deprecates "NoColor"; IPython 8 matches caselessly.
+        app.shell.colors = "nocolor"
         try:
             app.shell.enable_matplotlib("inline")
         except Exception:

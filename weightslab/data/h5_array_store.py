@@ -167,7 +167,7 @@ class _ReadWriteLock:
         try:
             self._readers -= 1
             if self._readers == 0:
-                self._read_ready.notifyAll()
+                self._read_ready.notify_all()
         finally:
             self._read_ready.release()
 
@@ -190,7 +190,7 @@ class _ReadWriteLock:
         self._read_ready.acquire()
         try:
             self._writers -= 1
-            self._read_ready.notifyAll()
+            self._read_ready.notify_all()
         finally:
             self._read_ready.release()
 
