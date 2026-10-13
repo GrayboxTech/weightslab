@@ -281,6 +281,47 @@ def _video_frame_count(dataset, task_type=None) -> int:
         return 0
 
 
+def is_set_flag(value) -> bool:
+    """True only for a boolean column value that is really SET and true.
+
+    Two traps, both hit in production, both of them "a missing value read as
+    set":
+
+    * ``bool(float("nan")) is True`` in Python, and a nullable flag column is
+      full of NaN -- ``discarded`` for a sample nothing has written yet, or a
+      ``tag:*`` column for every sample that does not carry the tag. Reading it
+      with ``bool()`` / ``astype(bool)`` reported all of them as set: samples
+      greyed out as discarded while the dataframe said False, and every sample
+      wearing every tag.
+    * ``bool("False") is True`` as well, and a boolean column that has been
+      through the H5 store (where these columns become categorical) can come
+      back holding the STRINGS "True"/"False".
+
+    So: missing is false, a string is read as a word, everything else falls
+    back to ``bool()``.
+    """
+    try:
+        if value is None or pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        # pd.isna raises for some array-likes; those are not missing.
+        pass
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y", "t")
+    try:
+        return bool(value)
+    except Exception:  # noqa: BLE001 -- an exotic value is not a set flag
+        return False
+
+
+def set_flag_mask(series) -> "np.ndarray":
+    """``is_set_flag`` over a whole column, as a numpy bool array."""
+    if series is None:
+        return np.zeros(0, dtype=bool)
+    return np.fromiter((is_set_flag(v) for v in series.tolist()),
+                       dtype=bool, count=len(series))
+
+
 def _is_non_mask_task(task_type) -> bool:
     """True when labels/predictions for this task must not be read as masks."""
     return task_type in _NON_MASK_TASKS or is_generation_task(task_type)
