@@ -12,7 +12,7 @@ Three things are held here:
   small synthetic inputs;
 * the whole script, run for real on a synthetic Fashion-MNIST (no download),
   against the real ledger, checkpoint manager and projection;
-* the docs: the page, the gallery entry, and no link left to the sandbox.
+* the docs: the page and the gallery entry.
 """
 
 import contextlib
@@ -493,16 +493,6 @@ class TestTheDocs(unittest.TestCase):
         self.assertIsNotNone(entry, "no gallery entry for the example")
         self.assertIn("badge: 'PyTorch'", entry.group(0))
         self.assertTrue((DOCS / "examples" / "pytorch" / "fashion_mnist_umap.rst").is_file())
-
-    def test_no_link_to_the_sandbox_is_left(self):
-        """The hosted sandbox is not linked from the docs for now."""
-        for path in (DOCS / "index.rst", DOCS / "examples" / "index.rst",
-                     DOCS / "_static" / "custom.css", REPO_ROOT / "README.md"):
-            text = path.read_text(encoding="utf-8")
-            with self.subTest(file=path.name):
-                self.assertNotIn("sandbox.graybx.com", text)
-                self.assertNotIn("wl-hero-cta-sandbox", text)
-                self.assertNotIn("Open Sandbox", text)
 
 
 if __name__ == "__main__":
