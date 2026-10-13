@@ -91,7 +91,6 @@ loader = wl.watch_or_edit(dataset, flag='data', loader_name="train")
 wl.serve(serving_grpc=True, serving_cli=False)
 ...
 ```
-<br>
 
 ## How can you use it ?
 
@@ -101,14 +100,9 @@ wl.serve(serving_grpc=True, serving_cli=False)
 
 <h4>3. Catch model regressions early on</h4> Analyze per-sample loss trajectories to see exactly where the model is struggling.
 
-<br>
-<br>
-
 ## Resources & Community
 <details>
 <summary><b>Training script with Weightslab - Step-by-Step Integration</b></summary>
-
-<br>
 
 1. **Add the import** at the top of your script:
 ```python
@@ -141,8 +135,6 @@ wl.serve(serving_grpc=True, serving_cli=False)
 
 <details>
 <summary><b>Training script with Weightslab - Full Example</b></summary>
-
-<br>
 
 ```python
 #!/usr/bin/env python3
@@ -233,8 +225,6 @@ See more details at https://grayboxtech.github.io/weightslab/latest/quickstart.h
 
 <details open>
 <summary><b>Agent: chat with your training run (OpenCode)</b></summary>
-
-<br>
 
 WeightsLab ships two distinct agent surfaces: the backend SDK agent for data-manipulation
 queries, and a local [OpenCode](https://opencode.ai)-backed agent with a full bash/file
