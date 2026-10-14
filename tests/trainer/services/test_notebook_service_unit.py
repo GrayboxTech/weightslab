@@ -5,6 +5,8 @@ code-generation gRPC surfaces with a lightweight fake DataService, mirroring the
 style of test_agent_service_unit.py.
 """
 
+import io
+import sys
 import json
 import time
 import tempfile
@@ -99,6 +101,37 @@ class _NotebookKernelContractTests:
             f"first stdout chunk ({first_stdout_at:.3f}s) arrived too close to "
             f"the end ({total:.3f}s) -- looks buffered, not streamed live",
         )
+
+    def test_other_threads_output_does_not_land_in_the_cell(self):
+        # Regression: the kernel shares its process with the trainer, and
+        # both kernels swap sys.stdout process-wide (redirect_stdout() in the
+        # legacy one, ipykernel's OutStream in the embedded one) -- so a
+        # training loop's tqdm bar, its own thread writing the whole time,
+        # surfaced in the output of whatever cell happened to be running.
+        stop = threading.Event()
+
+        def _trainer():
+            # Resolved per write, exactly as print() does, so this thread sees
+            # the kernel's swapped stream while a cell is running.
+            while not stop.is_set():
+                print("Training: 193497 steps | train_loss=1.4612", file=sys.stdout)
+                time.sleep(0.01)
+
+        noise = threading.Thread(target=_trainer, daemon=True)
+        noise.start()
+        try:
+            chunks = _run(
+                self.service,
+                "import time\nprint('cell-own-output')\ntime.sleep(0.3)",
+            )
+        finally:
+            stop.set()
+            noise.join(timeout=2)
+
+        outs = "".join(c.stdout for c in chunks if c.WhichOneof("payload") == "stdout")
+        self.assertIn("cell-own-output", outs, "the cell's own print was lost")
+        self.assertNotIn("Training:", outs,
+                         "another thread's output leaked into the cell")
 
     def test_interrupt_reports_false_when_nothing_running(self):
         resp = self.service.InterruptNotebookCell(pb2.InterruptNotebookCellRequest(), None)
@@ -310,6 +343,35 @@ class TestNotebookKernelLegacy(_NotebookKernelContractTests, unittest.TestCase):
     def _make_service(self):
         return NotebookService(_fake_data_service(), root_log_dir=str(self.root))
 
+    def test_other_threads_output_still_reaches_the_console(self):
+        # The flip side of the contract test above: writes the cell may not
+        # publish are handed to the stream that was in place before
+        # redirect_stdout(), not dropped on the floor -- the trainer's logs
+        # must keep showing up in the terminal while a cell runs.
+        console = io.StringIO()
+        stop = threading.Event()
+
+        def _trainer():
+            while not stop.is_set():
+                print("Training: 193497 steps", file=sys.stdout)
+                time.sleep(0.01)
+
+        real_stdout = sys.stdout
+        sys.stdout = console
+        noise = threading.Thread(target=_trainer, daemon=True)
+        noise.start()
+        try:
+            chunks = _run(self.service, "import time\ntime.sleep(0.3)")
+        finally:
+            stop.set()
+            noise.join(timeout=2)
+            sys.stdout = real_stdout
+
+        outs = "".join(c.stdout for c in chunks if c.WhichOneof("payload") == "stdout")
+        self.assertNotIn("Training:", outs)
+        self.assertIn("Training:", console.getvalue(),
+                      "the other thread's output never reached the console")
+
 
 @unittest.skipUnless(_IPYKERNEL_AVAILABLE, "ipykernel/jupyter_client not installed")
 class TestNotebookKernelEmbedded(_NotebookKernelContractTests, unittest.TestCase):
@@ -331,6 +393,54 @@ class TestNotebookKernelEmbedded(_NotebookKernelContractTests, unittest.TestCase
 
     def _make_service(self):
         return NotebookService(_fake_data_service(), root_log_dir=str(self.root))
+
+
+class TestEmbeddedKernelStartupOrder(unittest.TestCase):
+    """Ordering invariants in ``_run_embedded_kernel``'s startup sequence.
+
+    Asserted against the source rather than a live kernel on purpose: the
+    things being ordered are process-wide ``sys.stdout``/``sys.stderr`` swaps,
+    and pytest's own capture replaces those again per test, so inspecting them
+    from inside a test reports whatever capture did last, not what the kernel
+    did. Reading the order directly is deterministic and says exactly what the
+    constraint is.
+    """
+
+    def _source(self):
+        import inspect
+        return inspect.getsource(notebook_service._run_embedded_kernel)
+
+    def test_flush_interval_is_lowered_before_the_streams_are_wrapped(self):
+        # ipykernel's OutStream batches writes to iopub every `flush_interval`
+        # seconds (0.2s default); the kernel lowers it to 0.05s so cell output
+        # streams live instead of arriving in one lump at the end.
+        #
+        # It has to be set while sys.stdout is still the raw OutStream.
+        # _ThreadRoutedStream.__getattr__ delegates reads to the stream it
+        # wraps, so `hasattr(..., "flush_interval")` keeps answering True after
+        # wrapping and the loop still "works" -- but the assignment lands on
+        # the wrapper and the real OutStream keeps its 0.2s. The live streaming
+        # test catches that only through wall-clock timing, which makes it a
+        # close call rather than a clear failure.
+        source = self._source()
+        flush_at = source.index("flush_interval = 0.05")
+        wrap_at = source.index("_install_thread_routed_streams(")
+        self.assertLess(
+            flush_at, wrap_at,
+            "flush_interval must be set on the raw OutStreams, before "
+            "_install_thread_routed_streams wraps them")
+
+    def test_logging_is_repaired_before_anything_else_logs(self):
+        # IPKernelApp.initialize() -> traitlets -> logging.config.dictConfig
+        # closes every handler in the process, killing the session log file.
+        source = self._source()
+        self.assertLess(
+            source.index("app.initialize("), source.index("ensure_logging_intact()"),
+            "logging can only be repaired after initialize() has broken it")
+        self.assertLess(
+            source.index("ensure_logging_intact()"),
+            source.index("_install_thread_routed_streams("),
+            "repair logging before the rest of the startup logs anything")
 
 
 class TestNotebookPersistence(unittest.TestCase):

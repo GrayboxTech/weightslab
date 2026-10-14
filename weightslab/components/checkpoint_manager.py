@@ -46,6 +46,7 @@ from datetime import datetime
 
 from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
 from weightslab.components.experiment_hash import ExperimentHashGenerator
+from weightslab.data.h5_recovery import read_snapshot_table
 from weightslab.components.experiment_naming import generate_experiment_name
 from weightslab.backend.ledgers import (
     get_model,
@@ -606,13 +607,15 @@ class CheckpointManager:
         except Exception:
             return None
 
-    def _select_weight_checkpoint_file(self, exp_hash: str, target_step: Optional[int] = None) -> Optional[Path]:
+    def _select_weight_checkpoint_file(self, exp_hash: str, target_step: Optional[int] = None,
+                                       models_dir: Optional[Path] = None) -> Optional[Path]:
         """Select weight checkpoint file for an experiment hash.
 
         - If target_step is None: returns latest checkpoint.
         - If target_step is provided: returns closest step; tie breaks toward higher step.
+        - models_dir: where to look (default: this root's; a sibling root's in multi-root mode).
         """
-        model_dir = self.models_dir / exp_hash[8:-8]
+        model_dir = (models_dir or self.models_dir) / exp_hash[8:-8]
         if not model_dir.exists():
             return None
 
@@ -1444,24 +1447,9 @@ class CheckpointManager:
         and the legacy inline format (a ``data`` list embedded in the JSON), so
         checkpoints written before the parquet change still load.
         """
-        # Legacy inline format: the table was embedded in the metadata JSON.
-        if 'data' in snapshot_data:
-            return pd.DataFrame(snapshot_data.get('data', []))
-
-        data_file = snapshot_data.get('data_file')
-        if not data_file:
-            return pd.DataFrame()
-
-        sidecar = data_dir / data_file
-        if not sidecar.exists():
-            logger.warning(f"Data snapshot sidecar not found: {sidecar}")
-            return pd.DataFrame()
-
-        fmt = (snapshot_data.get('data_format') or '').lower()
-        if fmt == 'parquet' or str(data_file).endswith('.parquet'):
-            return pd.read_parquet(sidecar)
-        # JSON sidecar is written with orient="columns" (see _write_snapshot_table).
-        return pd.read_json(sidecar, orient='columns')
+        # Shared with data.h5 recovery (weightslab.data.h5_recovery), which
+        # rebuilds tags/discards from the newest snapshot.
+        return read_snapshot_table(snapshot_data, data_dir)
 
     def save_data_snapshot(self, force_new_state: bool = False) -> Optional[Path]:
         """Save a snapshot of data state (sample_id, tags, discarded) + RNG state.
@@ -1718,6 +1706,35 @@ class CheckpointManager:
                 logger.warning(f"Failed to load manifest: {e}")
         return {'experiments': {}, 'latest_hash': None}
 
+    def _locate_experiment(self, exp_hash: str) -> Optional[tuple]:
+        """Find the checkpoint root that owns *exp_hash*.
+
+        Returns ``(checkpoints_dir, manifest)``: the effective root's when its
+        manifest lists the hash (the usual, single-root case). In multi-root mode
+        the other discovered roots only contribute curves to the logger, while
+        their checkpoints stay in their own directories; when the hash belongs to
+        one of them, return that root's checkpoints directory and manifest so the
+        hash can still be restored. If several siblings list the same hash (e.g.
+        copies of one run), the most recently updated one wins, consistent with
+        :meth:`_resolve_effective_root_dir`. ``None`` if no discovered root has it.
+        """
+        manifest = self._load_manifest()
+        if exp_hash in (manifest.get('experiments') or {}):
+            return self.checkpoints_dir, manifest
+
+        siblings = [d for d in self.discovered_root_dirs if d != self.root_log_dir]
+        ranked = sorted(siblings, key=lambda d: (self._read_root_manifest_timestamp(d), str(d)), reverse=True)
+        for root in ranked:
+            try:
+                with open(root / "checkpoints" / "manifest.yaml", 'r') as f:
+                    sibling_manifest = yaml.safe_load(f) or {}
+            except Exception as e:
+                logger.debug(f"Skipping unreadable manifest under sibling root {root}: {e}")
+                continue
+            if exp_hash in (sibling_manifest.get('experiments') or {}):
+                return root / "checkpoints", sibling_manifest
+        return None
+
     def _load_manager_state(self):
         """Load manager state if available"""
         state_file = self.root_log_dir / ".checkpoint_manager_state.json"
@@ -1948,6 +1965,8 @@ class CheckpointManager:
                 - 'weights': Checkpoint dict with weights and metadata
                 - 'config': Loaded config (if changed and load_config=True)
                 - 'data_state': Loaded data state (if changed and load_data=True)
+                - 'data_store': Data store (data.h5) of the sibling root owning the
+                  hash, in multi-root mode (if load_data=True)
                 - 'loaded_components': Set of components that were loaded
                 - 'exp_hash': The experiment hash that was loaded
         """
@@ -1956,16 +1975,24 @@ class CheckpointManager:
             'weights': None,
             'config': None,
             'data_state': None,
+            'data_store': None,
             'rng_state': None,
             'loaded_components': set(),
             'exp_hash': exp_hash
         }
 
-        # Load manifest to get component hashes
-        manifest = self._load_manifest()
-        if exp_hash not in manifest.get('experiments', {}):
+        # Find the root that owns this hash: this root, or in multi-root mode the
+        # sibling root it came from. Everything below is read from that root.
+        located = self._locate_experiment(exp_hash)
+        if located is None:
             logger.error(f"Experiment hash {exp_hash} not found in manifest")
             return result
+        checkpoints_dir, manifest = located
+        models_base = checkpoints_dir / "models"
+        hp_base = checkpoints_dir / "HP"
+        data_base = checkpoints_dir / "data"
+        if checkpoints_dir != self.checkpoints_dir:
+            logger.info(f"Hash {exp_hash[:16]} belongs to sibling root {checkpoints_dir.parent}; loading it from there")
         exp_info = manifest['experiments'][exp_hash]
         target_hp_hash = exp_info.get('hp_hash')
         target_model_hash = exp_info.get('model_hash')
@@ -1985,7 +2012,7 @@ class CheckpointManager:
         # Load model architecture if different, or load only RNG state for reproducibility if model hash is unchanged
         model_rng_loaded = False
         if load_model and (target_model_hash != current_model_hash or force):
-            model_dir = self.models_dir / exp_hash[8:-8]
+            model_dir = models_base / exp_hash[8:-8]
             arch_ref_file = model_dir / f"{exp_hash[8:-8]}_architecture_ref.json"
 
             # First check if this is a reference to architecture
@@ -2000,7 +2027,7 @@ class CheckpointManager:
                     logger.warning(f"Failed to load architecture reference: {e}")
 
             # Now load from actual location
-            actual_arch_file = self.models_dir / actual_arch_hash / f"{actual_arch_hash}_architecture.pkl"
+            actual_arch_file = models_base / actual_arch_hash / f"{actual_arch_hash}_architecture.pkl"
 
             if actual_arch_file.exists():
                 try:
@@ -2022,7 +2049,7 @@ class CheckpointManager:
 
         elif load_model and (target_model_hash == current_model_hash and not force):
             # Try to load only the RNG state from the latest model checkpoint for reproducibility
-            model_dir = self.models_dir / exp_hash[8:-8]
+            model_dir = models_base / exp_hash[8:-8]
             checkpoint_files = sorted(model_dir.glob(f"{exp_hash}_step_*.pt"))
             if not checkpoint_files:
                 checkpoint_files = sorted(model_dir.glob(f"{exp_hash[8:-8]}_step_*.pt"))
@@ -2045,7 +2072,7 @@ class CheckpointManager:
 
         # Load model weights (always if requested)
         if load_weights:
-            model_dir = self.models_dir / exp_hash[8:-8]
+            model_dir = models_base / exp_hash[8:-8]
 
             # First, try to get the weight checkpoint from manifest for this specific experiment
             checkpoint_file_to_load = None
@@ -2060,7 +2087,7 @@ class CheckpointManager:
 
             # Fallback: scan for weight files (old behavior for backward compatibility)
             if checkpoint_file_to_load is None:
-                checkpoint_file_to_load = self._select_weight_checkpoint_file(exp_hash, target_step=target_step)
+                checkpoint_file_to_load = self._select_weight_checkpoint_file(exp_hash, target_step=target_step, models_dir=models_base)
                 if checkpoint_file_to_load is not None:
                     if target_step is None:
                         logger.debug(f" Using latest weight checkpoint from directory scan: {checkpoint_file_to_load.name}")
@@ -2105,7 +2132,7 @@ class CheckpointManager:
 
         # Load config if different
         if load_config and (target_hp_hash != current_hp_hash or force):
-            hp_dir = self.hp_dir / exp_hash[:8]
+            hp_dir = hp_base / exp_hash[:8]
             config_file = hp_dir / f"{exp_hash[:8]}_config.yaml"
 
             if config_file.exists():
@@ -2124,7 +2151,7 @@ class CheckpointManager:
 
         # Load data snapshot if different, or if only RNG state changed (for reproducibility)
         if load_data:
-            data_dir = self.data_checkpoint_dir / exp_hash[-8:]
+            data_dir = data_base / exp_hash[-8:]
             json_file = data_dir / f"{exp_hash[-8:]}_data_snapshot.json"
 
             # Always try to load RNG state for reproducibility, even if data hash is unchanged
@@ -2162,8 +2189,69 @@ class CheckpointManager:
             else:
                 logger.warning(f" [WARNING] Data snapshot file not found: {json_file}")
 
+            # The snapshot only holds sample ids, tags and discards. The rest of a
+            # sibling root's per-sample stats (last signal values, predictions...)
+            # lives in its own data store, which this root never loaded.
+            if checkpoints_dir != self.checkpoints_dir and (data_base / "data.h5").exists():
+                result['data_store'] = data_base / "data.h5"
+
         logger.info(f"Loaded components: {result['loaded_components']}")
         return result
+
+    def _rewind_sample_state(self, exp_hash: str, step: Optional[int]) -> int:
+        """Bring the per-sample view back in line with a restored model age.
+
+        Restoring weights moves the model's age backwards, but the dataframe
+        still holds what the steps after it wrote — signal values, the
+        ``last_seen``/``nb_seen`` counters and the stored predictions. Those
+        describe a model state the restore just discarded, so the grid would
+        show a sample's loss from step 900 next to a model that is back at 400.
+
+        Rebuilds them from the signal history as it stood at *step*
+        (``LoggerQueue.get_per_sample_state_at_step`` →
+        ``DataFrameManager.rewind_to_step``).
+
+        Only runs when *exp_hash* is the experiment already loaded: step numbers
+        are only comparable within one experiment, so rewinding a dataframe that
+        belongs to a different run would compare two unrelated step axes. A
+        cross-experiment load replaces the per-sample state from that run's own
+        snapshot instead.
+
+        Returns the number of samples rewound (0 when nothing applied).
+        """
+        if step is None:
+            return 0
+        if not exp_hash or exp_hash != self.current_exp_hash:
+            logger.debug(
+                f"Skipping per-sample rewind: {exp_hash} is not the loaded experiment "
+                f"({self.current_exp_hash}); its per-sample state comes from its own snapshot")
+            return 0
+
+        try:
+            dfm = ledgers.get_dataframe()
+            lg = ledgers.get_logger()
+            if dfm is None or lg is None or not hasattr(lg, 'get_per_sample_state_at_step'):
+                return 0
+
+            state = lg.get_per_sample_state_at_step(step, exp_hash=exp_hash)
+            if not state:
+                # No history to rebuild from (a logger that was never loaded, or
+                # a run that logged no per-sample signals). Clearing the
+                # dataframe off the back of that would destroy values that are
+                # still on disk, so leave it and say why.
+                logger.warning(
+                    f"No per-sample history at or before step {step} for {exp_hash[:16]}; "
+                    "leaving the sample view as it is. Signals, last_seen/nb_seen and "
+                    "predictions may still show state from after the restored step.")
+                return 0
+
+            rewound = dfm.rewind_to_step(step, state)
+            if rewound:
+                logger.info(f"[OK] Rewound {rewound} sample(s) to step {step}")
+            return rewound
+        except Exception as e:
+            logger.warning(f"Could not rewind per-sample state to step {step}: {e}")
+            return 0
 
     def load_state(
         self,
@@ -2210,6 +2298,9 @@ class CheckpointManager:
             logger.warning("No components were loaded")
             return False
 
+        # Model age the restore lands on, for the per-sample rewind below.
+        applied_step = None
+
         # Apply model (architecture + weights)
         if 'model' in checkpoint_data['loaded_components']:
             try:
@@ -2235,6 +2326,7 @@ class CheckpointManager:
                 if loaded_step is not None:
                     loaded_step = int(loaded_step)
                     self._model_init_step = loaded_step
+                    applied_step = loaded_step
                     try:
                         setattr(model, 'current_step', loaded_step)
                     except Exception:
@@ -2261,6 +2353,7 @@ class CheckpointManager:
 
                     logger.info(f"[OK] Applied weights to existing model (step {step})")
                     self._model_init_step = step
+                    applied_step = step
                     if 'optimizer_state_dict' in weights:
                         try:
                             optimizer = get_optimizer()
@@ -2309,6 +2402,7 @@ class CheckpointManager:
                         # model.update_optimizer() # Update optimizer with new model parameters if needed
                         logger.info(f"[OK] Applied weights to reloaded model (step {step})")
                         self._model_init_step = step
+                        applied_step = step
                         logger.info("Successfully recovered by reloading full checkpoint with architecture and weights")
 
                     # Set Model Training Guard
@@ -2330,6 +2424,17 @@ class CheckpointManager:
             except Exception as e:
                 logger.error(f"[ERROR] Failed to apply config: {e}")
                 self.error_loading_checkpoint.append('config') if 'config' not in self.error_loading_checkpoint else None # Reset first_time to allow future auto-resume attempts if config application failed
+
+        # Multi-root: load the sibling run's per-sample stats first, so the
+        # checkpoint's own tags and discards (the snapshot below) apply on top
+        if checkpoint_data.get('data_store') is not None:
+            try:
+                dfm = ledgers.get_dataframe()
+                if dfm != None:
+                    rows = dfm.import_from_store(checkpoint_data['data_store'])
+                    logger.info(f"[OK] Loaded per-sample stats from {checkpoint_data['data_store']} ({rows} rows)")
+            except Exception as e:
+                logger.warning(f"[WARNING] Could not load per-sample stats from {checkpoint_data['data_store']}: {e}")
 
         # Apply data (merge snapshot columns into current dataframe)
         if 'data' in checkpoint_data['loaded_components']:
@@ -2431,6 +2536,11 @@ class CheckpointManager:
                 logger.warning(f"Failed to restore logger snapshot for {exp_hash}: {e}")
                 self.error_loading_checkpoint.append('logger') if 'logger' not in self.error_loading_checkpoint else None
 
+        # Rewind the per-sample view onto the age the model just came back to.
+        # Last, so it reads a dataframe that already has the snapshot applied and
+        # a logger history that is done loading.
+        self._rewind_sample_state(exp_hash, applied_step)
+
         # Update current experiment hash after everything is loaded
         success = len(self.error_loading_checkpoint) == 0
         if success:
@@ -2438,8 +2548,10 @@ class CheckpointManager:
             self.current_exp_hash = exp_hash
             self.previous_exp_hash = old_hash
 
-            # Keep hash generator in sync with loaded experiment
-            manifest = self._load_manifest()
+            # Keep hash generator in sync with loaded experiment (in multi-root
+            # mode its manifest may live in a sibling root)
+            located = self._locate_experiment(exp_hash)
+            manifest = located[1] if located else self._load_manifest()
             exp_info = manifest.get('experiments', {}).get(exp_hash, {})
             component_hashes = {
                 'hp': exp_info.get('hp_hash'),

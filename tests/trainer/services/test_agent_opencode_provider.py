@@ -58,6 +58,118 @@ def _make_agent(df=None):
 
     return agent_mod, agent
 
+def _agent_module():
+    with mock.patch.dict(sys.modules, _install_agent_dependency_stubs(), clear=False):
+        return importlib.import_module("weightslab.trainer.services.agent.agent")
+
+
+def _bare_agent(mod, model="opencode/ling-3.0-flash-fin-free"):
+    """An agent with just the OpenCode attributes _setup_providers touches.
+
+    Sidesteps the full DataManipulationAgent construction (schema build, ctx,
+    handler registry) -- these tests are about the model plumbing only.
+    """
+    agent = mod.DataManipulationAgent.__new__(mod.DataManipulationAgent)
+    agent.opencode_url = "http://127.0.0.1:4096"
+    agent.opencode_model = model
+    agent.opencode_workspace_dir = "."
+    agent._opencode_url_explicit = False
+    agent._opencode_model_explicit = False
+    agent._config_source_path = "(test)"
+    agent.preferred_provider = "opencode"
+    return agent
+
+
+def _fake_chat(publish_ok=True, configured="opencode/ling-3.0-flash-fin-free"):
+    chat = MagicMock()
+    chat.base_url = "http://127.0.0.1:4096"
+    chat.model_is_explicit = False
+    chat.publish_model.return_value = publish_ok
+    # What the shared config would hand back if it were consulted.
+    chat.resolve_model.return_value = (configured, "opencode-config")
+    return chat
+
+
+class TestModelSwitchAndReporting(unittest.TestCase):
+    """`agent model X` must actually switch to X, and `agent status` must name
+    the model the NEXT query will use.
+
+    Regression: the shared-config re-read that lets the studio's model picker
+    move the backend also ran on the explicit switch path, overwriting the model
+    the caller had just asked for -- `agent model opencode/big-pickle` replied
+    "Model switched to opencode/ling-3.0-flash-fin-free".
+    """
+
+    def test_change_model_switches_and_publishes_the_choice(self):
+        mod = _agent_module()
+        agent = _bare_agent(mod)
+        chat = _fake_chat(publish_ok=True)
+        with mock.patch.object(mod, "OpenCodeChat", return_value=chat):
+            ok, message = agent.change_model("opencode/big-pickle")
+
+        self.assertTrue(ok)
+        self.assertEqual(agent.opencode_model, "opencode/big-pickle")
+        self.assertIn("opencode/big-pickle", message)
+        self.assertNotIn("ling-3.0", message)
+        chat.publish_model.assert_called_once_with("opencode/big-pickle")
+        # The shared config must NOT be consulted on an explicit switch.
+        chat.resolve_model.assert_not_called()
+        # Published, so later turns keep following the config (the studio can
+        # still move it) rather than being pinned to this backend.
+        self.assertFalse(agent._opencode_model_explicit)
+        self.assertEqual(agent._opencode_model_source, "user-published")
+
+    def test_change_model_pins_when_the_config_refuses_the_write(self):
+        mod = _agent_module()
+        agent = _bare_agent(mod)
+        chat = _fake_chat(publish_ok=False)
+        with mock.patch.object(mod, "OpenCodeChat", return_value=chat):
+            ok, message = agent.change_model("opencode/big-pickle")
+
+        self.assertTrue(ok)
+        self.assertEqual(agent.opencode_model, "opencode/big-pickle")
+        self.assertTrue(agent._opencode_model_explicit)
+        self.assertTrue(chat.model_is_explicit)
+        self.assertEqual(agent._opencode_model_source, "user-pinned")
+        self.assertIn("pinned", message)
+
+    def test_change_model_rejects_an_empty_model(self):
+        mod = _agent_module()
+        agent = _bare_agent(mod)
+        ok, message = agent.change_model("   ")
+        self.assertFalse(ok)
+        self.assertIn("empty", message.lower())
+
+    def test_startup_without_a_request_follows_the_shared_config(self):
+        mod = _agent_module()
+        agent = _bare_agent(mod, model="")
+        chat = _fake_chat(configured="opencode/muse-spark-1.3-contributor-free")
+        with mock.patch.object(mod, "OpenCodeChat", return_value=chat):
+            agent._setup_providers()
+
+        chat.resolve_model.assert_called_once_with(publish_default=True)
+        self.assertEqual(agent.opencode_model, "opencode/muse-spark-1.3-contributor-free")
+        self.assertEqual(agent._opencode_model_source, "opencode-config")
+
+    def test_current_model_reports_a_studio_pick_made_after_start_up(self):
+        mod = _agent_module()
+        agent = _bare_agent(mod, model="opencode/big-pickle")
+        chat = _fake_chat(configured="openrouter/openai/gpt-5-mini")
+        agent._opencode_chat = chat
+
+        self.assertEqual(agent.current_model(), "openrouter/openai/gpt-5-mini")
+        self.assertEqual(agent.opencode_model, "openrouter/openai/gpt-5-mini")
+
+    def test_current_model_keeps_the_last_known_model_when_the_server_is_down(self):
+        mod = _agent_module()
+        agent = _bare_agent(mod, model="opencode/big-pickle")
+        chat = _fake_chat()
+        chat.resolve_model.side_effect = OSError("refused")
+        agent._opencode_chat = chat
+
+        self.assertEqual(agent.current_model(), "opencode/big-pickle")
+
+
 @unittest.skip("Not ready yet -- OpenCodeChat is still a stub, and the test suite needs to be reworked to support it")
 class TestOpenCodeConfigLoading(unittest.TestCase):
     def test_opencode_url_and_model_default(self):
@@ -118,11 +230,16 @@ class TestSetupProvidersOpenCode(unittest.TestCase):
             mock_cls.return_value.as_runnable.return_value = fake_runnable
             initialized = agent._setup_providers()
 
+        # seed_model carries agent_config.yaml's opencode_model, which SEEDS
+        # the shared choice instead of pinning it (a model picked in the studio
+        # wins over it); model/model_is_explicit carry OPENCODE_MODEL, which
+        # does pin.
         mock_cls.assert_called_once_with(
             agent.opencode_url, agent.opencode_model,
             workspace_dir=agent.opencode_workspace_dir,
             url_is_explicit=agent._opencode_url_explicit,
             model_is_explicit=agent._opencode_model_explicit,
+            seed_model=agent._opencode_model_seed,
         )
         self.assertTrue(initialized)
         self.assertIs(agent.chain_opencode, fake_runnable)

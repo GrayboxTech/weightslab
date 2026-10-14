@@ -41,6 +41,39 @@ def _get_user_profile() -> str:
     return os.environ.get('HOME') or os.path.expanduser('~')
 
 
+_WARNED_CERTS_DIRS: set = set()
+
+
+def _warn_once(message: str) -> None:
+    """Log a certs-dir warning once per process (the resolver runs several times)."""
+    if message not in _WARNED_CERTS_DIRS:
+        _WARNED_CERTS_DIRS.add(message)
+        logger.warning(message)
+
+
+def env_certs_dir() -> Optional[str]:
+    """Return ``$WEIGHTSLAB_CERTS_DIR`` as a usable path, or None.
+
+    None when the variable is unset or empty, and also when it is not an
+    absolute path (after ``~`` expansion and WSL/Git-Bash normalization): a
+    relative value resolves against each process's current directory, so the
+    UI, the backend and ``weightslab se`` would each look somewhere else. Such
+    a value is ignored with a warning and callers fall back to
+    ``~/.weightslab-certs``.
+    """
+    raw = (os.environ.get('WEIGHTSLAB_CERTS_DIR') or '').strip().strip("'\"")
+    if not raw:
+        return None
+    value = _normalize_native_path(os.path.expanduser(raw))
+    if not Path(value).is_absolute():
+        _warn_once(
+            f"Ignoring WEIGHTSLAB_CERTS_DIR={raw!r}: not an absolute path. "
+            "Falling back to ~/.weightslab-certs."
+        )
+        return None
+    return value
+
+
 def _generate_hex_token(byte_count: int = 32) -> str:
     """Generate a strong hex token using secure random."""
     import secrets
@@ -310,8 +343,23 @@ class CertAuthManager:
 
     @staticmethod
     def from_env_or_default(enable_auth: bool = True) -> 'CertAuthManager':
-        """Create manager using environment variables or defaults."""
-        certs_dir = os.environ.get('WEIGHTSLAB_CERTS_DIR')
-        if certs_dir is not None:
-            certs_dir = certs_dir.strip().strip("'\"")
-        return CertAuthManager(certs_dir=certs_dir, enable_auth=enable_auth)
+        """Create a manager for the certs directory to use.
+
+        Looks in ``$WEIGHTSLAB_CERTS_DIR`` first, then ``~/.weightslab-certs``:
+        when the env directory has no cert set but the default one does, the
+        default wins, so a stale value cannot hide certs that exist. With certs
+        in neither, the env directory (when usable) is kept so messages point
+        at the directory the user chose.
+        """
+        default = CertAuthManager(certs_dir=None, enable_auth=enable_auth)
+        env_dir = env_certs_dir()
+        if env_dir is None:
+            return default
+        manager = CertAuthManager(certs_dir=env_dir, enable_auth=enable_auth)
+        if manager.has_valid_certs() or not default.has_valid_certs():
+            return manager
+        _warn_once(
+            f"No certs in WEIGHTSLAB_CERTS_DIR={env_dir}; using {default.certs_dir}, "
+            "which has them."
+        )
+        return default

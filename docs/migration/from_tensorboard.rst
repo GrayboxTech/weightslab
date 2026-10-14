@@ -4,7 +4,7 @@ From TensorBoard
 =================
 
 TensorBoard is a scalar recorder with a viewer attached. The port is the
-smallest of the four — and the payoff is the largest, because almost
+smallest of the four, and the payoff is the largest, because almost
 everything TensorBoard cannot do is what WeightsLab exists for.
 
 Migration notes
@@ -20,7 +20,7 @@ the number, and it reports itself.
    writer = SummaryWriter(log_dir="runs/exp1")
    writer.add_scalar("train/loss", loss.item(), step)
 
-   # WeightsLab — no writer, no step bookkeeping
+   # WeightsLab, no writer, no step bookkeeping
    criterion = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"),
                                 flag="loss", signal_name="train-loss-CE", log=True)
    loss_per_sample = criterion(outputs, targets, batch_ids=ids)
@@ -39,7 +39,7 @@ away before it is ever written.
 
 **Images are not something you log.** ``add_image`` uploads a tensor you chose
 in advance. WeightsLab reads images from the dataset you already wrapped, so
-every sample is browsable — not just the ones you remembered to log:
+every sample is browsable, not just the ones you remembered to log:
 
 .. code-block:: python
 
@@ -66,14 +66,14 @@ Replaced parts
    * - ``writer.add_scalars(...)``
      - Several watched signals; merge them onto one chart in the UI
    * - ``writer.add_image(tag, img, step)``
-     - ``wl.watch_or_edit(dataset, flag="data", ...)`` — every sample, browsable
+     - ``wl.watch_or_edit(dataset, flag="data", ...)``, every sample, browsable
    * - ``writer.add_histogram(...)``
      - Any metadata/signal column → histogram, from the UI
    * - ``writer.add_graph(model, input)``
      - ``wl.watch_or_edit(model, flag="model")``; ``plot_model`` in the CLI
        console
    * - ``writer.add_hparams(...)``
-     - ``wl.watch_or_edit(parameters, flag="hyperparameters")`` — **editable
+     - ``wl.watch_or_edit(parameters, flag="hyperparameters")``, **editable
        while training**
    * - ``writer.flush()`` / ``writer.close()``
      - ``wl.drain_signals()``; ``wl.write_history()`` /
@@ -86,7 +86,7 @@ Replaced parts
 Updated examples
 ----------------
 
-**Before** — TensorBoard:
+**Before**, TensorBoard:
 
 .. code-block:: python
    :emphasize-lines: 3,12,13,14,15,17
@@ -109,7 +109,7 @@ Updated examples
 
    writer.close()
 
-**After** — WeightsLab:
+**After**, WeightsLab:
 
 .. code-block:: python
    :emphasize-lines: 5,7,13,17,18,21,29
@@ -144,7 +144,7 @@ Updated examples
 
    wl.write_history(); wl.write_dataframe(); wl.keep_serving()
 
-The loop body has no reporting code left in it at all — and the ``if step %
+The loop body has no reporting code left in it at all, and the ``if step %
 100`` block, which existed only to keep TensorBoard's write volume down,
 is gone with it.
 
@@ -158,13 +158,13 @@ Expanded UI documentation
    * - In TensorBoard you would…
      - In Weights Studio
    * - Read the SCALARS tab
-     - The :ref:`plots board <studio-plots>` — with smoothing, an error band
+     - The :ref:`plots board <studio-plots>`, with smoothing, an error band
        of real batch extremes, and merged comparison plots
    * - Use the smoothing slider
      - Per-plot settings; and the error band deliberately does the *opposite*
        of smoothing, so a one-sample outlier gets more visible, not less
    * - Scrub the IMAGES tab
-     - The :ref:`data board <studio-data-board>` — every sample, with ground
+     - The :ref:`data board <studio-data-board>`, every sample, with ground
        truth and prediction overlays
    * - Squint at the HISTOGRAMS tab
      - Right-click any metadata column → histogram
@@ -173,4 +173,4 @@ Expanded UI documentation
    * - Read HPARAMS across runs
      - Edit hyperparameters live in the left panel and watch the curve respond
    * - Restart training to change something
-     - Change it in place — the run keeps going
+     - Change it in place, the run keeps going

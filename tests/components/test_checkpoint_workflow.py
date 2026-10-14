@@ -1552,6 +1552,132 @@ class CheckpointMultiRootTests(unittest.TestCase):
         finally:
             lg.stop_background_flush()
 
+    def _write_viewer_root(self, root_dir, timestamp):
+        """An empty root with the newest manifest -- e.g. a read-only viewer's own
+        folder next to finished experiment roots -- so the manager adopts it as
+        the effective root and every experiment lives in a sibling root."""
+        checkpoints_dir = root_dir / "checkpoints"
+        checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        with open(checkpoints_dir / "manifest.yaml", 'w') as f:
+            yaml.dump({'experiments': {}, 'latest_hash': None, 'last_updated': timestamp}, f)
+
+    def test_load_checkpoint_resolves_hash_from_sibling_root(self):
+        """A sibling root only contributes its curves to the effective root, but
+        its checkpoints stay where they are: loading one of its hashes must read
+        its weights from that sibling (latest, and closest to a target step)."""
+        parent = self.tmp_dir / "compare_exp"
+        root_a = parent / "goldset"
+        root_b = parent / "signal"
+        hash_a = "aaaa0010" + "bbbb0010" + "cccc0010"
+        hash_b = "aaaa0011" + "bbbb0011" + "cccc0011"
+        self._write_experiment_root(root_a, hash_a, step=20, timestamp="2024-01-01T00:00:00", loss_values=[0.3])
+        extra = CheckpointManager(root_log_dir=str(root_a), load_model=False, load_config=False, load_data=False)
+        extra.current_exp_hash = hash_a
+        extra.save_model_checkpoint(model=nn.Sequential(nn.Linear(2, 2)), step=60, save_optimizer=False)
+        ledgers.clear_all()
+        self._pin_manifest_timestamp(root_a, hash_a, "2024-01-01T00:00:00")
+        self._write_experiment_root(root_b, hash_b, step=80, timestamp="2024-02-01T00:00:00", loss_values=[0.4])
+
+        manager = CheckpointManager(root_log_dir=str(parent), load_model=False, load_config=False, load_data=False)
+        self.assertEqual(manager.root_log_dir, root_b.absolute(), "the most recent root is the effective one")
+
+        latest = manager.load_checkpoint(hash_a, load_model=False, load_config=False, load_data=False)
+        self.assertIn('weights', latest['loaded_components'], "the sibling root's weights should be found")
+        self.assertEqual(latest['weights'].get('step'), 60)
+
+        at_step = manager.load_checkpoint(hash_a, load_model=False, load_config=False, load_data=False, target_step=25)
+        self.assertEqual(at_step['weights'].get('step'), 20, "closest checkpoint to the target step, in the sibling")
+
+        own = manager.load_checkpoint(hash_b, load_model=False, load_config=False, load_data=False)
+        self.assertEqual(own['weights'].get('step'), 80, "the effective root's own hashes are unaffected")
+
+    def test_load_state_restores_sibling_hash_from_an_empty_viewer_root(self):
+        """The reported case: the effective root is an empty viewer folder and the
+        experiment lives in a sibling root. Restoring its hash must apply the
+        weights and sync the current hash and component hashes with it."""
+        parent = self.tmp_dir / "viewer_exp"
+        root_a = parent / "goldset_6pct"
+        hash_a = "aaaa0012" + "bbbb0012" + "cccc0012"
+        self._write_experiment_root(root_a, hash_a, step=6000, timestamp="2024-01-01T00:00:00", loss_values=[0.2])
+        self._write_viewer_root(parent / "_studio", timestamp="2025-01-01T00:00:00")
+
+        manager = CheckpointManager(root_log_dir=str(parent), load_model=False, load_config=False, load_data=False)
+        self.assertEqual(manager.root_log_dir, (parent / "_studio").absolute())
+        self.assertTrue(manager.is_multi_root)
+
+        model = nn.Sequential(nn.Linear(2, 2))
+        ledgers.register_model(model)
+        ledgers.register_checkpoint_manager(manager)
+        lg = LoggerQueue(register=True)  # a live session always has one; load_state reads its length
+        try:
+            ok = manager.load_state(hash_a, load_model=False, load_config=False, load_data=False, load_logger=False)
+        finally:
+            lg.stop_background_flush()
+        self.assertTrue(ok, "a hash living in a sibling root should be restorable")
+        self.assertEqual(manager.current_exp_hash, hash_a)
+
+        saved = th.load(root_a / "checkpoints" / "models" / "bbbb0012" / f"{hash_a}_step_006000.pt", weights_only=False)
+        for name, tensor in saved['model_state_dict'].items():
+            self.assertTrue(th.equal(model.state_dict()[name], tensor), f"weights of {name} should be restored")
+
+        components = manager.hash_generator.get_component_hashes()
+        self.assertEqual((components['hp'], components['model'], components['data']),
+                         ("aaaa0012", "bbbb0012", "cccc0012"))
+
+    def test_load_state_brings_the_sibling_runs_per_sample_stats(self):
+        """The data snapshot only holds sample ids, tags and discards; a run's
+        per-sample stats (last loss, prediction, nb_seen...) live in its root's
+        data.h5. Restoring a sibling's hash must load them into the dataframe."""
+        from weightslab.data.dataframe_manager import LedgeredDataFrameManager
+        from weightslab.data.h5_dataframe_store import H5DataFrameStore
+
+        parent = self.tmp_dir / "viewer_df_exp"
+        root_a = parent / "goldset_6pct"
+        hash_a = "aaaa0014" + "bbbb0014" + "cccc0014"
+        self._write_experiment_root(root_a, hash_a, step=6000, timestamp="2024-01-01T00:00:00", loss_values=[0.2])
+        H5DataFrameStore(root_a / "checkpoints" / "data" / "data.h5").upsert("train_loader", pd.DataFrame({
+            "sample_id": [0, 1, 2],
+            "annotation_id": [0, 0, 0],
+            "discarded": [False, True, False],
+            "nb_seen": [8, 0, 8],
+            "signals//train-loss-CE": [0.1, float("nan"), 2.5],
+        }).set_index(["sample_id", "annotation_id"]))
+        self._write_viewer_root(parent / "_studio", timestamp="2025-01-01T00:00:00")
+
+        manager = CheckpointManager(root_log_dir=str(parent), load_model=False, load_config=False, load_data=False)
+        dfm = LedgeredDataFrameManager(enable_flushing_threads=False, enable_h5_persistence=False)
+        dfm.upsert_df(pd.DataFrame({"sample_id": [0, 1, 2], "annotation_id": [0, 0, 0], "origin": "train_loader",
+                                    "discarded": False}).set_index(["sample_id", "annotation_id"]),
+                      origin="train_loader")
+        ledgers.register_dataframe(dfm)
+        ledgers.register_model(nn.Sequential(nn.Linear(2, 2)))
+        ledgers.register_checkpoint_manager(manager)
+        lg = LoggerQueue(register=True)
+        try:
+            ok = manager.load_state(hash_a, load_model=False, load_config=False, load_data=True, load_logger=False)
+        finally:
+            lg.stop_background_flush()
+
+        self.assertTrue(ok)
+        df = dfm.get_df_view()
+        self.assertAlmostEqual(df.loc[("0", 0), "signals//train-loss-CE"], 0.1)
+        self.assertAlmostEqual(df.loc[("2", 0), "signals//train-loss-CE"], 2.5)
+        self.assertEqual(int(df.loc[("0", 0), "nb_seen"]), 8)
+        self.assertTrue(bool(df.loc[("1", 0), "discarded"]))
+
+    def test_unknown_hash_is_still_reported_missing_in_multiroot_mode(self):
+        parent = self.tmp_dir / "unknown_hash_exp"
+        self._write_experiment_root(parent / "a", "aaaa0013" + "bbbb0013" + "cccc0013", step=5,
+                                    timestamp="2024-01-01T00:00:00", loss_values=[0.1])
+        self._write_viewer_root(parent / "_studio", timestamp="2025-01-01T00:00:00")
+        manager = CheckpointManager(root_log_dir=str(parent), load_model=False, load_config=False, load_data=False)
+
+        unknown = "ffff0000" + "eeee0000" + "dddd0000"
+        result = manager.load_checkpoint(unknown, load_model=False, load_data=False)
+        self.assertEqual(result['loaded_components'], set())
+        self.assertFalse(manager.load_state(unknown, load_logger=False))
+        self.assertNotEqual(manager.current_exp_hash, unknown)
+
     def test_sibling_merge_is_idempotent_across_call_sites(self):
         """merge_from_disk can be triggered from more than one init-ordering
         call site (logger created before vs. after the checkpoint manager);

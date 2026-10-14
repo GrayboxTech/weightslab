@@ -1,4 +1,4 @@
-Classification — MNIST (PyTorch Lightning)
+Classification, MNIST (PyTorch Lightning)
 ==========================================
 
 .. raw:: html
@@ -55,7 +55,7 @@ so the module receives already-tracked objects:
            self.metric          = metric
 
        def training_step(self, batch, batch_idx):
-           with guard_training_context:
+           with wl.guard_training_context:
                x, ids, y, _ = batch
                logits = self.model(x)
                preds  = torch.argmax(logits, dim=1)
@@ -64,7 +64,7 @@ so the module receives already-tracked objects:
                return loss.mean()
 
        def validation_step(self, batch, batch_idx):
-           with guard_testing_context:
+           with wl.guard_testing_context:
                x, ids, y, _ = batch
                logits = self.model(x)
                preds  = torch.argmax(logits, dim=1)
@@ -75,8 +75,8 @@ so the module receives already-tracked objects:
            return self.optimizer
 
 The guard contexts replace the manual ``with guard_training_context:`` blocks
-from the raw PyTorch loop. Everything else — loss calls, signal routing,
-ledger writes — is identical.
+from the raw PyTorch loop. Everything else, loss calls, signal routing,
+ledger writes, is identical.
 
 3. Trainer setup
 ~~~~~~~~~~~~~~~~
@@ -116,4 +116,3 @@ Multi-GPU (DDP)
 ---------------
 
 See :doc:`/pytorch_lightning` for the full multi-GPU trainer setup.
-

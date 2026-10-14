@@ -563,10 +563,10 @@ class TestUIStartPortResolution(unittest.TestCase):
         self.assertEqual(port, 61236)
         self.assertEqual(source, "WL_LAST_UI_PORT")
 
-    def test_default_is_50051(self):
+    def test_default_is_8080(self):
         args = argparse.Namespace(port=None, config=None)
         port, source = wl_cli._resolve_ui_port(args)
-        self.assertEqual(port, 50051)
+        self.assertEqual(port, 8080)
         self.assertEqual(source, "default")
 
 

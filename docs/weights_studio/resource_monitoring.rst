@@ -48,13 +48,13 @@ The signals, by category:
    * - ``gpu``
      - ``resource/gpu/<index>/memory_clock_mhz``, ``…/sm_clock_mhz``,
        ``…/memory_allocated_bytes``, ``…/memory_allocated_percent``,
-       ``…/temperature_celsius`` — one full set **per device**
+       ``…/temperature_celsius``, one full set **per device**
 
 Reading them next to your own curves
 ------------------------------------
 
 Sampling runs on a wall-clock cadence, but each sample is logged against the
-**model's age** — the same x axis your loss and metric curves use. That is what
+**model's age**, the same x axis your loss and metric curves use. That is what
 makes these plots worth having in the same board rather than a separate one:
 
 - :ref:`Merge <legacy-studio-plots>` a resource curve with a training signal
@@ -65,7 +65,7 @@ makes these plots worth having in the same board rather than a separate one:
   across restarts instead of carrying on from wherever process uptime had
   reached.
 - While training is paused the model's age doesn't move, so samples don't stack
-  into a vertical smear at one x — the curve simply waits.
+  into a vertical smear at one x, the curve simply waits.
 
 Set ``WL_RESOURCE_MONITOR_STEP_SOURCE=seconds`` to plot against elapsed seconds
 since the monitor started instead. Useful when you care about wall-clock
@@ -107,7 +107,7 @@ want to keep everything on and disable one thing:
        disk: false        # everything else stays on
        network: false
 
-The env var takes a comma-separated **allowlist** — anything not named is off —
+The env var takes a comma-separated **allowlist**, anything not named is off —
 while the YAML takes **per-category booleans**, so reach for the file when you
 only want to switch one category off.
 
@@ -127,7 +127,7 @@ Practical settings
      - Raise ``interval_seconds``. At the default of 15s an overnight run logs
        thousands of points per signal.
    * - No NVIDIA GPU
-     - Nothing — the ``gpu`` category detects the missing driver and no-ops.
+     - Nothing, the ``gpu`` category detects the missing driver and no-ops.
        Every other category is unaffected.
    * - Profiling a memory leak
      - ``step_source: seconds``, so the axis tracks wall-clock uptime rather
@@ -136,5 +136,5 @@ Practical settings
      - Narrow ``WL_RESOURCE_MONITOR_CATEGORIES`` to what the container can
        actually read.
 
-See :doc:`../resource_monitoring` for the full reference — the config lookup order,
+See :doc:`../resource_monitoring` for the full reference, the config lookup order,
 every environment variable, and where the monitor thread runs.

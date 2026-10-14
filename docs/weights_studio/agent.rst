@@ -3,19 +3,19 @@
 Agent
 =====
 
-.. warning:: Unstable — in active development
+.. warning:: Unstable, in active development
 
    The agent is **experimental**, and that applies to every surface on this
    page: the docked chat bar, the Agent Window, ``/loop`` jobs, and
    :ref:`report generation <legacy-studio-report-generation>`. Behaviour and results
    change between releases and vary with the connected model provider. Check
    what it did before relying on it, particularly for actions that modify data
-   or the model — all of which are also available by hand through quick
+   or the model, all of which are also available by hand through quick
    filters, the grid's context menu, the left panel, and the CLI console.
 
 Weights Studio has a docked agent bar and an expandable, tabbed agent window.
 Both are backed entirely by a local OpenCode server (`opencode.ai
-<https://opencode.ai>`_) — see :doc:`../agent` for the full action list, and
+<https://opencode.ai>`_), see :doc:`../agent` for the full action list, and
 for the distinction between this chat-bar agent and the separate
 ``/loop``/landing-page OpenCode agent.
 
@@ -36,7 +36,7 @@ Agent Window
 
 Expanding the chat history opens a tabbed window:
 
-- **Frontend Agent** — the main conversation, carried over from the landing
+- **Frontend Agent**, the main conversation, carried over from the landing
   page when the backend connected. Replies to the docked chat bar land in this
   same transcript, so there is one conversation rather than two.
 - **One tab per running** ``/loop`` **job**, created when the job starts and
@@ -64,7 +64,7 @@ Commands
    * - ``/compact``
      - Compact the conversation so a long session keeps its context.
    * - ``/loop <minutes> <prompt>``
-     - Run a prompt on a repeating interval as a background job — for example
+     - Run a prompt on a repeating interval as a background job, for example
        ``/loop 10 check whether train loss has plateaued and tag the worst
        samples``. ``/loop list`` shows the running jobs; ``/loop stop <id>``
        ends one.
@@ -85,7 +85,7 @@ and the input placeholder tells you to type ``/init``.
 Typical setup:
 
 1. Authenticate OpenCode once, if you haven't already: ``opencode auth login``
-   (or the landing page's login modal) — OpenRouter, Anthropic, a local Ollama
+   (or the landing page's login modal), OpenRouter, Anthropic, a local Ollama
    endpoint, anything OpenCode supports.
 2. Start WeightsLab (``wl.serve(serving_grpc=True)``).
 3. Start Weights Studio (``weightslab start``).
@@ -102,7 +102,7 @@ The ``/init`` flow itself:
 .. tip::
 
    On a remote machine, the browser reaches the OpenCode server **directly**
-   rather than through the studio's proxy — so its port has to be reachable
+   rather than through the studio's proxy, so its port has to be reachable
    too. See :ref:`legacy-studio-bridging`.
 
 History behavior

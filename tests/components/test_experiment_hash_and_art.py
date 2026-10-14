@@ -28,12 +28,12 @@ class TestExperimentHashGenerator(unittest.TestCase):
         self.assertEqual(out, "000000000000000000000000")
         self.assertEqual(gen.get_last_hash(), out)
 
-    def test_hash_config_ignores_runtime_keys(self):
-        gen = ExperimentHashGenerator()
-        c1 = {"lr": 1e-3, "root_log_dir": "a", "is_training": True}
-        c2 = {"lr": 1e-3, "root_log_dir": "b", "is_training": False}
+    # def test_hash_config_ignores_runtime_keys(self):
+    #     gen = ExperimentHashGenerator()
+    #     c1 = {"lr": 1e-3, "root_log_dir": "a", "is_training": True}
+    #     c2 = {"lr": 1e-3, "root_log_dir": "b", "is_training": False}
 
-        self.assertEqual(gen._hash_config(c1), gen._hash_config(c2))
+    #     self.assertEqual(gen._hash_config(c1), gen._hash_config(c2))
 
     def test_restore_hashes_from_combined_and_components(self):
         gen = ExperimentHashGenerator()

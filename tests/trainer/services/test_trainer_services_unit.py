@@ -283,6 +283,8 @@ class TestExperimentServiceUnit(unittest.TestCase):
         checkpoint_manager.load_state.assert_called_once()
         _, kwargs = checkpoint_manager.load_state.call_args
         self.assertEqual(kwargs.get("target_step"), 5)
+        # The grid view is rebuilt so every restored per-sample column shows up
+        service.data_service._slowUpdateInternals.assert_called_once_with(force=True)
 
     def _make_save_service(self, components):
         ctx = _DummyCtx(components=components)

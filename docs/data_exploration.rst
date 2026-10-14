@@ -107,7 +107,7 @@ CLI and UI surfaces
 CLI:
 
 - ``list_loaders``
-- ``list_uids [loader] [--discarded] [--limit N]`` — real sample ids, tags and
+- ``list_uids [loader] [--discarded] [--limit N]``, real sample ids, tags and
   discard state, read from the tracked sample dataframe
 - ``discard <uid...>`` / ``undiscard <uid...>``
 - ``add_tag <sample_id> <tag> ...``

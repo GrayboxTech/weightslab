@@ -11,30 +11,30 @@ extra examples drawn from the live experiment.
 Discovery and help
 --------------------
 
-- ``help`` / ``h`` / ``?`` — show all command syntaxes and examples.
-- ``status`` — compact snapshot: registered models, dataloaders, optimizers,
+- ``help`` / ``h`` / ``?``, show all command syntaxes and examples.
+- ``status``, compact snapshot: registered models, dataloaders, optimizers,
   hyperparameters, and the current model age.
-- ``ledger`` / ``ledgers`` / ``snapshot`` — same registry snapshot as
+- ``ledger`` / ``ledgers`` / ``snapshot``, same registry snapshot as
   ``status``, without the model-age lookup.
-- ``dump`` / ``d`` — sanitized dump of dataloaders, optimizers, and
+- ``dump`` / ``d``, sanitized dump of dataloaders, optimizers, and
   hyperparameters (models are omitted to avoid printing huge weight dumps).
-- ``ledger_dump`` / ``dump_ledger`` / ``dump_ledger_all`` — like ``dump``,
+- ``ledger_dump`` / ``dump_ledger`` / ``dump_ledger_all``, like ``dump``,
   but **includes models** too. Can be large.
 
 Training control
 -------------------
 
-- ``pause`` / ``p`` — pause training and set ``is_training=False``.
-- ``resume`` / ``r`` — resume training and set ``is_training=True``.
+- ``pause`` / ``p``, pause training and set ``is_training=False``.
+- ``resume`` / ``r``, resume training and set ``is_training=True``.
 
 Registry inspection
 ----------------------
 
-- ``list_models`` — registered model names.
-- ``list_optimizers`` — registered optimizer names.
-- ``list_loaders`` / ``loaders`` / ``list_dataloaders`` — registered
+- ``list_models``, registered model names.
+- ``list_optimizers``, registered optimizer names.
+- ``list_loaders`` / ``loaders`` / ``list_dataloaders``, registered
   dataloader names.
-- ``plot_model [model_name]`` (aliases: ``plot_arch``, ``plot``) — ASCII tree
+- ``plot_model [model_name]`` (aliases: ``plot_arch``, ``plot``), ASCII tree
   of the model's architecture. Omit ``model_name`` to use the default
   registered model.
 
@@ -76,8 +76,8 @@ all-loaders-fallback behavior as ``discard``.
 Hyperparameter operations
 ----------------------------
 
-- ``hp`` (alias: ``hyperparams``) — list registered hyperparameter set names.
-- ``hp <name>`` — show one set's values. ``hp show <name>`` also works.
+- ``hp`` (alias: ``hyperparams``), list registered hyperparameter set names.
+- ``hp <name>``, show one set's values. ``hp show <name>`` also works.
 - ``set_hp [hp_name] <key.path> <value>`` (aliases: ``sethp``, ``set-hp``) —
   update one key path. ``hp_name`` may be omitted only when exactly one
   hyperparameter set is registered. ``value`` is parsed as JSON first
@@ -91,19 +91,19 @@ Hyperparameter operations
    hp
    hp fashion_mnist
    set_hp fashion_mnist data.train_loader.batch_size 32
-   set_hp optimizer.lr 0.0005    # hp_name omitted — only valid with one hp set
+   set_hp optimizer.lr 0.0005    # hp_name omitted, only valid with one hp set
 
 Evaluation
 ------------
 
 - ``evaluate [split_name] [--steps N] [--tags tag1,tag2]`` (aliases: ``eval``,
-  ``ev``) — pause training and trigger a background evaluation pass. Default
+  ``ev``), pause training and trigger a background evaluation pass. Default
   split: the first registered dataloader. ``--tags`` restricts evaluation to
   samples carrying any of the given tags (and implies not using the full
   set); ``--steps`` caps the number of batches evaluated.
-- ``eval_status`` (aliases: ``es``, ``evaluation_status``) — poll progress
+- ``eval_status`` (aliases: ``es``, ``evaluation_status``), poll progress
   of the current evaluation.
-- ``cancel_eval`` (aliases: ``ce``, ``cancel_evaluation``) — cancel a running
+- ``cancel_eval`` (aliases: ``ce``, ``cancel_evaluation``), cancel a running
   or pending evaluation.
 
 **Examples**
@@ -141,7 +141,7 @@ prints the current state.
 AI Agent
 ----------
 
-**Syntax**: ``agent <status|init|model|models|reset|query> ...`` — shortcuts:
+**Syntax**: ``agent <status|init|model|models|reset|query> ...``, shortcuts:
 ``query <prompt>`` / ``ask <prompt>`` for ``agent query``.
 
 Initializes and drives the same natural-language agent used by Weights
@@ -164,9 +164,9 @@ Experiment report
 **Syntax**: ``report [signal ...] [--signals a,b] [--output PATH] [--no-agent]
 [--distributions a,b]`` (alias: ``reports``)
 
-Generates the HTML experiment report — signal trajectory plots, a health
+Generates the HTML experiment report, signal trajectory plots, a health
 label per signal, per-sample outliers, loss-shape tag counts, dataset stats,
-and an analysis written by the agent's LLM — under
+and an analysis written by the agent's LLM, under
 ``<root_log_dir>/reports/``, and replies with the path, how many signals went
 in, and whether the analysis was included. Same artifact and same code path
 as the Weights Studio report button and :func:`ai_report_generation`; see
@@ -192,9 +192,9 @@ configured the report is still written, just without the analysis
 Session control
 ------------------
 
-- ``exit`` / ``quit`` — close the client connection (handled server-side;
+- ``exit`` / ``quit``, close the client connection (handled server-side;
   the server replies then closes the socket).
-- ``clear`` / ``cls`` — clear the local terminal screen. Handled entirely by
+- ``clear`` / ``cls``, clear the local terminal screen. Handled entirely by
   the **client**, not sent to the server.
 
 What's missing on purpose
@@ -202,6 +202,6 @@ What's missing on purpose
 
 Editing hyperparameters (``set_hp``) is the only supported mutation path for
 architecture-level state. There is no console command to freeze/unfreeze
-layers or resize a model — that lives in :doc:`../agent` (``agent query
+layers or resize a model, that lives in :doc:`../agent` (``agent query
 freeze layer 3``) and Weights Studio, and in the Python API
 (:doc:`../model_interaction`).

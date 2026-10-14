@@ -14,7 +14,7 @@ Model wrapping parameters (``flag="model"``)
 --------------------------------------------
 
 - Observe training signals at batch/sample granularity.
-- Watch the model's own training dynamics — gradients, weights, activations —
+- Watch the model's own training dynamics, gradients, weights, activations —
   per layer and per step (see `Training-dynamics signals`_).
 - Keep a stable ledger/proxy handle across runtime updates.
 - Enable dynamic controls without rewriting your loop architecture.
@@ -206,7 +206,7 @@ Training-dynamics signals
 
 A loss curve tells you *whether* the model is learning. It does not tell you
 **where** in the model something went wrong. Wrapping the model with
-``track_model_signals=True`` adds that second view — one curve per layer, per
+``track_model_signals=True`` adds that second view, one curve per layer, per
 step, for the three quantities that explain most training failures:
 
 .. code-block:: python
@@ -239,7 +239,7 @@ then act on.
 What each one catches:
 
 - ``grad_norm`` collapsing toward 0 in the **early** layers while the late ones
-  stay healthy is a vanishing gradient — the run keeps "training" and stops
+  stay healthy is a vanishing gradient, the run keeps "training" and stops
   learning. Freeze or reinitialize from the layer where it dies.
 - ``grad_norm`` spiking by orders of magnitude is the exploding case; compare
   against the loss curve to see which moved first.
@@ -247,7 +247,7 @@ What each one catches:
   ReLUs, saturated BatchNorm). It is still consuming compute and contributing
   nothing.
 - ``weights_norm`` climbing without bound while the loss flattens is the model
-  growing weights instead of learning structure — time to add decay.
+  growing weights instead of learning structure, time to add decay.
 
 Collection only happens inside ``guard_training_context``, so an evaluation
 pass can never contaminate these curves with values the optimizer never saw.
@@ -266,7 +266,7 @@ Best practices
 - Pause training before structural edits so model and optimizer updates happen
   at a safe boundary.
 - Give each layer its own attribute (rather than burying it in an
-  ``nn.Sequential``) if you want per-layer curves — a Sequential block resolves
+  ``nn.Sequential``) if you want per-layer curves, a Sequential block resolves
   to a single layer id, and therefore a single curve.
 - Raise ``model_signals_every_n_steps`` before dropping metrics: the activation
   forward hooks are the only per-step cost worth thinking about, and sampling
@@ -277,7 +277,7 @@ Standalone model-only integration (UI + CLI ready)
 
 A complete, runnable MNIST script that wraps **only** the model and its
 optimizer. Data loading is plain ``torch.utils.data``, the loss is a plain
-``nn.CrossEntropyLoss``, and no hyperparameters are registered — the model level
+``nn.CrossEntropyLoss``, and no hyperparameters are registered, the model level
 alone drives the CLI and the studio.
 
 **Bundled example:** ``weightslab/examples/PyTorch/wl-standalone-model/main.py``
@@ -310,7 +310,7 @@ into the experiment history:
    * - ``model/grad_norm``
      - Global L2 norm of the gradients that were just computed.
    * - ``model/parameters``
-     - Trainable parameter count — it steps whenever an architecture operation
+     - Trainable parameter count, it steps whenever an architecture operation
        resizes a layer.
 
 Those are what make a model-only run non-empty in the studio, in
@@ -330,7 +330,7 @@ Two details make the level self-sufficient:
 .. note::
 
    ``FREEZE`` and ``RESET`` keep layer shapes, so the loop above trains straight
-   through them — that is why ``--op freeze`` is the example's default. ``ADD``
+   through them, that is why ``--op freeze`` is the example's default. ``ADD``
    and ``PRUNE`` do resize the layer (the printed parameter count proves it), but
    the autograd graph of an already-running loop still refers to the pre-op
    tensors, so the backward passes right after them are dropped by the guard.
@@ -351,4 +351,3 @@ UI:
 - model architecture and layer inspection
 - model operations through controls/agent
 - version/load interactions via experiment state
-

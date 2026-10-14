@@ -8,7 +8,7 @@ Signals and storage
 Choose this based on storage budget, task complexity (e.g., number of classes, annotation density) and how often you need overlays during
 training.
 
-**Light mode** — train keeps only per-sample loss, eval keeps full data:
+**Light mode**, train keeps only per-sample loss, eval keeps full data:
 
 .. code-block:: python
 
@@ -28,7 +28,7 @@ inspection in Studio.
    The studio will not store the full arrays for train, but it will still let you inspect the loss per sample and history.
 
 
-**Standard mode** — both train and eval store full data:
+**Standard mode**, both train and eval store full data:
 
 .. code-block:: python
 

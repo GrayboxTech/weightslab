@@ -3,8 +3,8 @@
 Main area
 =========
 
-The main area is the boards themselves — plots on one side, the data grid on
-the other — plus everything you can open from them (the detail modal, quick
+The main area is the boards themselves, plots on one side, the data grid on
+the other, plus everything you can open from them (the detail modal, quick
 filters, selections).
 
 .. _studio-plots:
@@ -35,15 +35,15 @@ Error-band details
    :width: 100%
 
 Each point on a curve is the **mean** of that step's batch. The band around it
-is not a standard deviation — it is the batch's **actual lowest and highest
+is not a standard deviation, it is the batch's **actual lowest and highest
 sample values**. A step containing one bad outlier makes the band spike out to
 it, so the anomaly becomes *more* visible rather than being smoothed away.
 
 From a point on the curve:
 
-- **Highlight step samples** — filters the data grid to the whole batch behind
+- **Highlight step samples**, filters the data grid to the whole batch behind
   that point, so you can look at what produced the spike.
-- **Save step snapshot** — freezes that step's per-sample values into their own
+- **Save step snapshot**, freezes that step's per-sample values into their own
   metadata column. Worth knowing: per-sample metadata otherwise only holds the
   *latest* value logged for a sample, so a spike from several epochs ago is
   unrecoverable by the time you notice it. Snapshot it before you move on.
@@ -56,7 +56,7 @@ Signals curves merged
    :width: 100%
 
 Merge two signals onto one chart to compare them directly; the merged card is
-titled ``A <> B``. Merges compose — merging again gives ``A <> B <> C``, with
+titled ``A <> B``. Merges compose, merging again gives ``A <> B <> C``, with
 no nesting and no limit.
 
 Merged plots are a **UI-only** construct: the backend never hears about them,
@@ -72,10 +72,10 @@ Signals curves search
 
 Search lives in the plots board header:
 
-- **While typing** — a centred popup previews the matching plots. The real
+- **While typing**, a centred popup previews the matching plots. The real
   cards are *moved* into it, so the preview is live; closing it puts every card
   back exactly where it was.
-- **On Enter** — the popup closes and the board reorders itself with matches
+- **On Enter**, the popup closes and the board reorders itself with matches
   first. Nothing is hidden.
 
 Two inline toggles control matching: **Aa** for case sensitivity and **Reg**
@@ -98,7 +98,7 @@ dashboard: the curves land in the plots board like any other signal, named
 with a ``resource/`` prefix. This is on by default and needs no setup.
 
 Type ``resource/`` into the plots board search above to pull every resource
-curve to the front of the board. Narrow it from there — ``resource/gpu`` for
+curve to the front of the board. Narrow it from there, ``resource/gpu`` for
 the accelerators, ``resource/process`` for the backend process itself, or
 ``resource/gpu|resource/memory`` to compare both at once (search is regex by
 default).
@@ -127,7 +127,7 @@ The signals, by category:
    * - ``gpu``
      - ``resource/gpu/<index>/memory_clock_mhz``, ``…/sm_clock_mhz``,
        ``…/memory_allocated_bytes``, ``…/memory_allocated_percent``,
-       ``…/temperature_celsius`` — one full set **per device**
+       ``…/temperature_celsius``, one full set **per device**
 
 Reading them next to your own curves:
 
@@ -139,7 +139,7 @@ Reading them next to your own curves:
   across restarts instead of carrying on from wherever process uptime had
   reached.
 - While training is paused the model's age doesn't move, so samples don't stack
-  into a vertical smear at one x — the curve simply waits.
+  into a vertical smear at one x, the curve simply waits.
 
 Set ``WL_RESOURCE_MONITOR_STEP_SOURCE=seconds`` to plot against elapsed seconds
 since the monitor started instead. Useful when you care about wall-clock
@@ -178,7 +178,7 @@ want to keep everything on and disable one thing:
        disk: false        # everything else stays on
        network: false
 
-The env var takes a comma-separated **allowlist** — anything not named is off —
+The env var takes a comma-separated **allowlist**, anything not named is off —
 while the YAML takes **per-category booleans**, so reach for the file when you
 only want to switch one category off.
 
@@ -195,7 +195,7 @@ only want to switch one category off.
      - Raise ``interval_seconds``. At the default of 15s an overnight run logs
        thousands of points per signal.
    * - No NVIDIA GPU
-     - Nothing — the ``gpu`` category detects the missing driver and no-ops.
+     - Nothing, the ``gpu`` category detects the missing driver and no-ops.
        Every other category is unaffected.
    * - Profiling a memory leak
      - ``step_source: seconds``, so the axis tracks wall-clock uptime rather
@@ -204,7 +204,7 @@ only want to switch one category off.
      - Narrow ``WL_RESOURCE_MONITOR_CATEGORIES`` to what the container can
        actually read.
 
-See :doc:`../resource_monitoring` for the full reference — the config lookup order,
+See :doc:`../resource_monitoring` for the full reference, the config lookup order,
 every environment variable, and where the monitor thread runs.
 
 .. _studio-data-board:
@@ -230,11 +230,11 @@ List mode for data exploration
    :alt: Data exploration board in list view
    :width: 100%
 
-The same data as a table — one row per sample, a leading image column, and one
+The same data as a table, one row per sample, a leading image column, and one
 column per visible metadata field. This is the view for sorting and comparing
 numbers rather than looking at pictures:
 
-- **Click a column header** to sort — it cycles descending → ascending → off.
+- **Click a column header** to sort, it cycles descending → ascending → off.
 - **Click the lock icon** to pin a column so it survives later sorts.
 - **Right-click a header** for clone, delete, reset, and histogram.
 - **Click a row** to open that sample's detail modal.
@@ -249,7 +249,7 @@ Quick filters
    :alt: Quick filters bar
    :width: 100%
 
-Filter and sort **without going through the agent** — no LLM in the loop, no
+Filter and sort **without going through the agent**, no LLM in the loop, no
 waiting. Build conditions from a column, an operator
 (``==``, ``!=``, ``>``, ``<``, ``>=``, ``<=``, ``between``, ``contains``,
 ``has_tag``, ``not_has_tag``) and a value, stack several, and add a sort.
@@ -278,7 +278,7 @@ Selection and the context menu
   samples, restore discarded ones.
 
 Discarding removes samples from the model's active set without deleting
-anything — the counter in the bottom bar shows *total* against *active*, and
+anything, the counter in the bottom bar shows *total* against *active*, and
 a discard is always reversible.
 
 Tagging modal
@@ -302,7 +302,7 @@ Bottom bar
 
 The batch slider walks through the dataset a page at a time, with the start and
 end sample indices either side of it. On the right: **total available samples**
-and **active samples used by the model** — the gap between them is exactly what
+and **active samples used by the model**, the gap between them is exactly what
 you have discarded.
 
 .. _studio-detail-modal:
@@ -332,8 +332,8 @@ Overlays
 Independent toggles for **raw**, **ground truth**, **prediction**, plus two
 comparison modes:
 
-- **diff** — ground truth against prediction in one image.
-- **split** — the two side by side.
+- **diff**, ground truth against prediction in one image.
+- **split**, the two side by side.
 
 For detection runs, a bounding-box info control reports what is drawn; the
 number of boxes rendered is capped by ``BB_MODAL_RENDER`` (and
@@ -348,7 +348,7 @@ The modal adapts to the sample's modality.
    :alt: Interactive 3D point cloud viewer
    :width: 100%
 
-**Point clouds** open in an interactive 3D viewer — orbit, zoom, and expand it
+**Point clouds** open in an interactive 3D viewer, orbit, zoom, and expand it
 to fill the screen. Cap the rendered points with ``PC_MAX_POINTS`` on very
 dense scans.
 

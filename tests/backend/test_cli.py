@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from weightslab.cli import (
+    _EXAMPLES,
     _convert_to_git_bash_path,
     _ensure_scripts_executable,
     _generate_certs_with_fallback,
@@ -25,6 +26,7 @@ from weightslab.cli import (
     _install_example_requirements,
     _make_executable,
     _resolve_experiment_dir,
+    _resolve_ui_port,
     example_start,
     main,
     ui_secure_environment,
@@ -87,9 +89,20 @@ class TestPathConversion(unittest.TestCase):
         )
 
 
+class TestPersistCertsDir(unittest.TestCase):
+    @patch("weightslab.cli.subprocess.run")
+    def test_refuses_relative_path(self, mock_run):
+        from weightslab.cli import _persist_certs_dir
+        with patch("weightslab.cli.Path.home") as mock_home:
+            _persist_certs_dir("<MagicMock name='x.certs_dir' id='1'>")
+        mock_run.assert_not_called()      # no setx
+        mock_home.assert_not_called()     # no ~/.bashrc write
+
+
 class TestCertGeneration(unittest.TestCase):
+    @patch("weightslab.cli._is_windows", return_value=False)
     @patch("weightslab.cli._run_shell_script", return_value=0)
-    def test_generate_certs_forwards_certs_dir(self, mock_shell):
+    def test_generate_certs_forwards_certs_dir(self, mock_shell, _mock_win):
         rc = _generate_certs_with_fallback(force_certs=False, certs_dir="/custom/certs")
         self.assertEqual(rc, 0)
         env_vars = mock_shell.call_args.args[2]
@@ -97,13 +110,79 @@ class TestCertGeneration(unittest.TestCase):
         self.assertIn("WEIGHTSLAB_CERTS_DIR", env_vars)
         self.assertIn("custom/certs", env_vars["WEIGHTSLAB_CERTS_DIR"].replace("\\", "/"))
 
+    @patch("weightslab.cli._is_windows", return_value=False)
     @patch("weightslab.cli._run_shell_script", return_value=0)
-    def test_generate_certs_without_dir_passes_no_env(self, mock_shell):
+    def test_generate_certs_without_dir_passes_no_env(self, mock_shell, _mock_win):
         _generate_certs_with_fallback(force_certs=False)
         self.assertIsNone(mock_shell.call_args.args[2])
 
+    @patch("weightslab.cli._is_windows", return_value=True)
+    @patch("weightslab.cli._run_shell_script", return_value=0)
+    @patch("weightslab.cli._run_powershell_script", return_value=0)
+    def test_windows_defaults_to_powershell_with_native_path(self, mock_ps, mock_shell, _mock_win):
+        certs_dir = r"C:\Users\testuser\.weightslab-certs"
+        rc = _generate_certs_with_fallback(force_certs=True, certs_dir=certs_dir)
+        self.assertEqual(rc, 0)
+        mock_shell.assert_not_called()
+        script, args, env_vars = mock_ps.call_args.args
+        self.assertTrue(script.endswith("generate-certs-auth-token.ps1"))
+        self.assertEqual(args, ["-ForceCreateCerts"])
+        # PowerShell gets the host path, not the WSL /mnt/c form.
+        self.assertEqual(env_vars, {"WEIGHTSLAB_CERTS_DIR": certs_dir})
+
+    @patch("weightslab.cli._is_windows", return_value=True)
+    @patch("weightslab.cli._run_shell_script", return_value=0)
+    @patch("weightslab.cli._run_powershell_script", return_value=1)
+    def test_windows_falls_back_to_bash_when_powershell_fails(self, mock_ps, mock_shell, _mock_win):
+        rc = _generate_certs_with_fallback(certs_dir=r"C:\Users\testuser\.weightslab-certs")
+        self.assertEqual(rc, 0)
+        mock_ps.assert_called_once()
+        mock_shell.assert_called_once()
+        self.assertEqual(mock_shell.call_args.args[2],
+                         {"WEIGHTSLAB_CERTS_DIR": "/mnt/c/Users/testuser/.weightslab-certs"})
+
+    @patch("weightslab.cli._is_windows", return_value=True)
+    @patch("weightslab.cli._run_shell_script", return_value=0)
+    @patch("weightslab.cli._run_powershell_script", return_value=0)
+    def test_windows_force_ubuntu_uses_bash_only(self, mock_ps, mock_shell, _mock_win):
+        rc = _generate_certs_with_fallback(
+            force_certs=True, certs_dir=r"C:\Users\testuser\.weightslab-certs", force_ubuntu=True)
+        self.assertEqual(rc, 0)
+        mock_ps.assert_not_called()
+        script, args, env_vars = mock_shell.call_args.args
+        self.assertTrue(script.endswith("generate-certs-auth-token.sh"))
+        self.assertEqual(args, ["--force-create-certs"])
+        self.assertEqual(env_vars, {"WEIGHTSLAB_CERTS_DIR": "/mnt/c/Users/testuser/.weightslab-certs"})
+
+    @patch("weightslab.cli._is_windows", return_value=True)
+    @patch("weightslab.cli._run_shell_script", return_value=2)
+    @patch("weightslab.cli._run_powershell_script", return_value=0)
+    def test_windows_force_ubuntu_does_not_fall_back_to_powershell(self, mock_ps, _mock_shell, _mock_win):
+        rc = _generate_certs_with_fallback(force_ubuntu=True)
+        self.assertEqual(rc, 2)
+        mock_ps.assert_not_called()
+
+    @patch("weightslab.cli._is_windows", return_value=False)
+    @patch("weightslab.cli._run_shell_script", return_value=0)
+    @patch("weightslab.cli._run_powershell_script", return_value=0)
+    def test_force_ubuntu_is_noop_off_windows(self, mock_ps, mock_shell, _mock_win):
+        self.assertEqual(_generate_certs_with_fallback(force_ubuntu=True), 0)
+        self.assertEqual(_generate_certs_with_fallback(force_ubuntu=False), 0)
+        mock_ps.assert_not_called()
+        self.assertEqual(mock_shell.call_count, 2)
+
 
 class TestUiSecureEnvironment(unittest.TestCase):
+    def setUp(self):
+        # `se` exports WEIGHTSLAB_CERTS_DIR into os.environ and reads it as its
+        # default dir: sandbox it so tests neither leak it into later tests nor
+        # write a real token into ~/.weightslab-certs.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = patch.dict(os.environ, {"WEIGHTSLAB_CERTS_DIR": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+
     @patch("weightslab.cli.CertAuthManager")
     @patch("weightslab.cli._generate_certs_with_fallback", return_value=0)
     def test_ui_secure_environment_success(self, mock_gen_certs, mock_cert_manager):
@@ -114,7 +193,8 @@ class TestUiSecureEnvironment(unittest.TestCase):
         with self.assertLogs("weightslab.cli", level="INFO") as log_context:
             ui_secure_environment(argparse.Namespace(force_certs=False))
         self.assertTrue(any("Certificates generated successfully" in m for m in log_context.output))
-        mock_gen_certs.assert_called_once_with(force_certs=False, certs_dir=mgr.certs_dir)
+        mock_gen_certs.assert_called_once_with(
+            force_certs=False, certs_dir=mgr.certs_dir, force_ubuntu=False)
         mgr.certs_dir.mkdir.assert_called_once()
         self.assertTrue(any("WEIGHTSLAB_CERTS_DIR exported" in m for m in log_context.output))
 
@@ -123,6 +203,46 @@ class TestUiSecureEnvironment(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=False):
             ui_secure_environment(argparse.Namespace(force_certs=True))
         self.assertTrue(mock_gen_certs.call_args.kwargs["force_certs"])
+
+    @patch("weightslab.cli._generate_certs_with_fallback", return_value=0)
+    def test_ui_secure_environment_force_ubuntu(self, mock_gen_certs):
+        with patch.dict(os.environ, {}, clear=False):
+            ui_secure_environment(argparse.Namespace(force_certs=False, force_ubuntu=True))
+        self.assertTrue(mock_gen_certs.call_args.kwargs["force_ubuntu"])
+
+    @patch("weightslab.cli.CertAuthManager")
+    @patch("weightslab.cli._generate_certs_with_fallback", return_value=0)
+    def test_ui_secure_environment_uses_env_certs_dir(self, _mock_gen_certs, mock_cert_manager):
+        custom = str(Path(tempfile.gettempdir()) / "custom-certs")
+        with patch.dict(os.environ, {"WEIGHTSLAB_CERTS_DIR": custom}):
+            ui_secure_environment(argparse.Namespace(force_certs=False))
+        self.assertEqual(mock_cert_manager.call_args.kwargs["certs_dir"], custom)
+
+    @patch("weightslab.cli.CertAuthManager")
+    @patch("weightslab.cli._generate_certs_with_fallback", return_value=0)
+    def test_ui_secure_environment_ignores_relative_env(self, _mock_gen_certs, mock_cert_manager):
+        """A bogus value (e.g. a leaked mock repr) falls back to the default dir."""
+        bogus = "<MagicMock name='CertAuthManager.from_env_or_default().certs_dir' id='1'>"
+        with patch.dict(os.environ, {"WEIGHTSLAB_CERTS_DIR": bogus}):
+            ui_secure_environment(argparse.Namespace(force_certs=False))
+        self.assertIsNone(mock_cert_manager.call_args.kwargs["certs_dir"])
+
+    @patch("weightslab.cli.CertAuthManager")
+    @patch("weightslab.cli._generate_certs_with_fallback", return_value=0)
+    def test_ui_secure_environment_positional_beats_env(self, _mock_gen_certs, mock_cert_manager):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"WEIGHTSLAB_CERTS_DIR": "/custom/certs"}):
+                ui_secure_environment(argparse.Namespace(force_certs=False, certs_dir=tmp))
+            self.assertEqual(mock_cert_manager.call_args.kwargs["certs_dir"],
+                             str(Path(tmp).resolve()))
+
+    @patch("weightslab.cli.CertAuthManager")
+    @patch("weightslab.cli._generate_certs_with_fallback", return_value=0)
+    def test_ui_secure_environment_default_dir_without_env(self, _mock_gen_certs, mock_cert_manager):
+        env = {k: v for k, v in os.environ.items() if k != "WEIGHTSLAB_CERTS_DIR"}
+        with patch.dict(os.environ, env, clear=True):
+            ui_secure_environment(argparse.Namespace(force_certs=False))
+        self.assertIsNone(mock_cert_manager.call_args.kwargs["certs_dir"])
 
     @patch("weightslab.cli._generate_certs_with_fallback", return_value=1)
     def test_ui_secure_environment_cert_failure(self, _mock_gen_certs):
@@ -145,6 +265,14 @@ class TestUiStartNative(unittest.TestCase):
             k: os.environ.get(k)
             for k in ("WEIGHTSLAB_ROOT_LOG_DIR", "WL_LAST_EXPERIMENT_DIR")
         }
+        # `start` uses TLS whenever certs are found: default every test to "no
+        # certs" so results don't depend on the machine's ~/.weightslab-certs.
+        no_certs = MagicMock()
+        no_certs.has_valid_certs.return_value = False
+        patcher = patch("weightslab.cli.CertAuthManager.from_env_or_default",
+                        return_value=no_certs)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         os.chdir(self._cwd)
@@ -169,7 +297,7 @@ class TestUiStartNative(unittest.TestCase):
         kwargs = mock_serve.call_args.kwargs
         self.assertEqual(kwargs["backend_port"], 50051)
         self.assertFalse(kwargs["open_browser"])
-        self.assertIsNone(kwargs["certs_dir"])  # no --certs -> unsecured
+        self.assertIsNone(kwargs["certs_dir"])  # no certs found -> unsecured
 
     @patch("weightslab.utils.telemetry.ping_ui_launch")
     @patch("weightslab.ui.server.serve_ui")
@@ -183,6 +311,57 @@ class TestUiStartNative(unittest.TestCase):
         with self.assertLogs("weightslab.cli", level="WARNING"):
             ui_start_native(args)
         self.assertIsNone(mock_serve.call_args.kwargs["certs_dir"])
+
+    @staticmethod
+    def _certs_found_manager(mock_mgr):
+        mgr = MagicMock()
+        mgr.has_valid_certs.return_value = True
+        mgr.certs_dir = Path(tempfile.gettempdir()) / "wl-certs"
+        mgr.get_or_create_auth_token.return_value = "tok"
+        mock_mgr.from_env_or_default.return_value = mgr
+        return mgr
+
+    @patch("weightslab.utils.telemetry.ping_ui_launch")
+    @patch("weightslab.ui.server.serve_ui")
+    @patch("weightslab.cli.CertAuthManager")
+    def test_start_uses_certs_automatically_when_found(self, mock_mgr, mock_serve, _mock_ping):
+        """No flag: certs present -> HTTPS + mTLS, like the backend's import check."""
+        mgr = self._certs_found_manager(mock_mgr)
+        env = {k: v for k, v in os.environ.items() if k != "GRPC_TLS_ENABLED"}
+        with patch.dict(os.environ, env, clear=True):
+            ui_start_native(argparse.Namespace(port=9127, host=None, backend_host=None,
+                                               backend_port=None, no_browser=True, certs=False))
+        kwargs = mock_serve.call_args.kwargs
+        self.assertEqual(kwargs["certs_dir"], str(mgr.certs_dir))
+        self.assertEqual(kwargs["grpc_auth_token"], "tok")
+
+    @patch("weightslab.utils.telemetry.ping_ui_launch")
+    @patch("weightslab.ui.server.serve_ui")
+    @patch("weightslab.cli.CertAuthManager")
+    def test_start_no_certs_flag_forces_http(self, mock_mgr, mock_serve, _mock_ping):
+        self._certs_found_manager(mock_mgr)
+        ui_start_native(argparse.Namespace(port=9128, host=None, backend_host=None,
+                                           backend_port=None, no_browser=True,
+                                           certs=False, no_certs=True))
+        self.assertIsNone(mock_serve.call_args.kwargs["certs_dir"])
+        mock_mgr.from_env_or_default.assert_not_called()
+
+    @patch("weightslab.utils.telemetry.ping_ui_launch")
+    @patch("weightslab.ui.server.serve_ui")
+    @patch("weightslab.cli.CertAuthManager")
+    def test_start_tls_disabled_by_env_forces_http(self, mock_mgr, mock_serve, _mock_ping):
+        self._certs_found_manager(mock_mgr)
+        for value in ("0", "false", "OFF"):
+            with self.subTest(value=value), patch.dict(os.environ, {"GRPC_TLS_ENABLED": value}):
+                ui_start_native(argparse.Namespace(port=9129, host=None, backend_host=None,
+                                                   backend_port=None, no_browser=True, certs=False))
+                self.assertIsNone(mock_serve.call_args.kwargs["certs_dir"])
+
+    def test_certs_and_no_certs_are_mutually_exclusive(self):
+        with patch("sys.argv", ["weightslab", "start", "--certs", "--no-certs"]), \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                main()
 
     @patch("weightslab.utils.telemetry.ping_ui_launch")
     @patch("weightslab.ui.server.serve_ui")
@@ -202,6 +381,26 @@ class TestUiStartNative(unittest.TestCase):
                                   backend_port=None, no_browser=True, certs=False)
         ui_start_native(args)
         mock_serve.assert_called_once()
+
+
+class TestResolveUiPort(unittest.TestCase):
+    @patch("weightslab.cli._load_ui_port_from_experiment_config", return_value=None)
+    def test_default_is_8080(self, _mock_cfg):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("WL_LAST_UI_PORT", "WEIGHTSLAB_UI_PORT")}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(_resolve_ui_port(argparse.Namespace(port=None, config=None)),
+                             (8080, "default"))
+
+    @patch("weightslab.cli._load_ui_port_from_experiment_config", return_value=None)
+    def test_env_order(self, _mock_cfg):
+        ns = argparse.Namespace(port=None, config=None)
+        with patch.dict(os.environ, {"WL_LAST_UI_PORT": "9001", "WEIGHTSLAB_UI_PORT": "9002"}):
+            self.assertEqual(_resolve_ui_port(ns), (9001, "WL_LAST_UI_PORT"))
+        env = {k: v for k, v in os.environ.items() if k != "WL_LAST_UI_PORT"}
+        env["WEIGHTSLAB_UI_PORT"] = "9002"
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(_resolve_ui_port(ns), (9002, "WEIGHTSLAB_UI_PORT"))
 
 
 class TestExperimentDir(unittest.TestCase):
@@ -292,6 +491,12 @@ class TestExampleStart(unittest.TestCase):
     def test_example_dir_points_at_bundled_example(self):
         self.assertTrue((_get_example_dir("wl-classification") / "main.py").exists())
 
+    def test_every_example_flag_points_at_a_bundled_main_py(self):
+        for kind, (dir_name, _label, category) in _EXAMPLES.items():
+            with self.subTest(kind=kind):
+                self.assertTrue((_get_example_dir(dir_name, category) / "main.py").exists(),
+                                f"--{kind} -> examples/{category}/{dir_name}/main.py is missing")
+
     @patch("weightslab.cli.subprocess.run")
     def test_example_start_seg_runs_segmentation(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
@@ -328,6 +533,18 @@ class TestMainCLI(unittest.TestCase):
         with patch("sys.argv", ["weightslab", "se"]):
             main()
         mock_se.assert_called_once()
+
+    @patch("weightslab.cli.ui_secure_environment")
+    def test_main_se_force_ubuntu_flag(self, mock_se):
+        with patch("sys.argv", ["weightslab", "se", "--force-ubuntu"]):
+            main()
+        self.assertTrue(mock_se.call_args.args[0].force_ubuntu)
+
+    @patch("weightslab.cli.ui_secure_environment")
+    def test_main_se_defaults_force_ubuntu_off(self, mock_se):
+        with patch("sys.argv", ["weightslab", "se"]):
+            main()
+        self.assertFalse(mock_se.call_args.args[0].force_ubuntu)
 
     @patch("weightslab.cli.ui_start_native")
     def test_main_bare_start_launches_native_ui(self, mock_start):
@@ -373,6 +590,21 @@ class TestBannerAndHelp(unittest.TestCase):
         self.assertIn("se", out)
         self.assertIn("start", out)
         self.assertIn("start example", out)
+
+    def test_help_lists_every_command_and_hides_alias(self):
+        out = self._capture_main(["weightslab", "help"])
+        self.assertNotIn("==SUPPRESS==", out)
+        for cmd in ("se [CERTS_DIR]", "start [DIR]", "start example", "cli", "tunnel",
+                    "export", "agent init"):
+            with self.subTest(cmd=cmd):
+                self.assertIn(cmd, out)
+
+    def test_every_subcommand_has_help(self):
+        for argv in (["se"], ["start"], ["start", "example"], ["example", "start"],
+                     ["cli"], ["tunnel"], ["export"], ["agent"], ["agent", "init"], ["help"]):
+            with self.subTest(argv=argv):
+                out = self._capture_main(["weightslab", *argv, "--help"])
+                self.assertIn("usage: weightslab", out)
 
 
 if __name__ == "__main__":

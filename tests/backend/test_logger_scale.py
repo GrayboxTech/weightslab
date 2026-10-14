@@ -217,9 +217,10 @@ def test_output_is_bounded_by_budget_not_table_size(tmp_path):
 
     (rows_small, out_small), (rows_big, out_big) = sizes
     assert rows_big >= rows_small * 3, "fixture did not actually grow"
-    # 4x the rows must not produce meaningfully more output. Allow a little
-    # slack: special rows (markers/notes/outliers) scale with depth by design.
-    assert out_big <= out_small * 1.6, (
+    # 4x the rows must not produce meaningfully more output. The small slack is
+    # for shallow curves that cannot fill every bucket, not for special rows:
+    # those are bucketed too now, so they no longer scale with depth.
+    assert out_big <= out_small * 1.25, (
         f"output grew with table size: {rows_small:,} rows -> {out_small} points, "
         f"{rows_big:,} rows -> {out_big} points")
 
@@ -234,8 +235,12 @@ def test_every_curve_respects_max_points(big_logger):
         for h, steps in per_hash.items():
             n = sum(len(e) for e in steps.values())
             truth_count = big_logger.truth[(metric, h)]["count"]
-            # Budget + the special rows that are deliberately exempt.
-            assert n <= budget * 3, f"{metric}/{h}: {n} points for budget {budget}"
+            # The budget is a HARD cap, not a target: marker/annotated/outlier
+            # rows are chosen inside the bucket grid (one reserved slot per
+            # bucket) rather than unioned on top of it, so no mix of special
+            # rows can push a curve past it. Only the two endpoint rows, which
+            # are emitted unconditionally to pin the x-extent, sit outside.
+            assert n <= budget + 2, f"{metric}/{h}: {n} points for budget {budget}"
             assert n >= min(3, truth_count), f"{metric}/{h}: only {n} points"
 
 
@@ -330,7 +335,10 @@ def test_special_points_survive_decimation(big_logger):
     """Markers, annotated points and outlier steps are what a user zooms to find.
 
     Uniform decimation would drop them at exactly the rate it drops everything
-    else; they must be exempt.
+    else. They are not exempt from the budget -- that is what used to let an
+    outlier-heavy signal blow past it -- but every bucket reserves one slot for
+    its highest-ranked special row, so they survive at the resolution the budget
+    allows instead of all-or-nothing.
     """
     metric, h = next(iter(big_logger.truth))
     hist = big_logger.get_signal_history_downsampled(
@@ -376,8 +384,9 @@ def test_value_spike_survives_decimation(tmp_path):
         values = [e.get("metric_value") for e in entries]
         assert any(abs((v or 0) - spike_val) < 1e-6 for v in values), \
             "value spike was decimated away"
-        # ~max_points, not the full 10k and not a handful.
-        assert 200 <= len(entries) <= 2200, f"unexpected emitted count {len(entries)}"
+        # ~max_points, not the full 10k and not a handful -- and never over
+        # budget (+2 endpoints), which is the contract this path guarantees.
+        assert 200 <= len(entries) <= 1002, f"unexpected emitted count {len(entries)}"
     finally:
         try:
             lg.stop_background_flush()

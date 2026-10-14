@@ -6,11 +6,11 @@ relabeling-tool format, so a dataset (or a slice of one) can be handed off
 for an outsourced relabeling pass. Three ways to trigger it, all backed by
 the same code path:
 
-- **Weights Studio UI** — an "Export" button next to Save/Grid settings, with
+- **Weights Studio UI**, an "Export" button next to Save/Grid settings, with
   a format picker (CVAT / Label Studio / V7). Triggers a browser download.
-- **CLI** — ``weightslab export`` connects over gRPC to a running experiment,
+- **CLI**, ``weightslab export`` connects over gRPC to a running experiment,
   same as ``weightslab cli``.
-- **Python** — :func:`wl.export_annotations`, called in-process (no gRPC
+- **Python**, :func:`wl.export_annotations`, called in-process (no gRPC
   round-trip needed since it already runs alongside the registered dataframe).
 
 Supported formats
@@ -28,7 +28,7 @@ Supported formats
        ``<box>``/``<polygon>`` children).
      - `CVAT XML format <https://opencv.github.io/cvat/docs/manual/advanced/xml_format/>`_
    * - ``label_studio``
-     - A single JSON file — a list of "tasks", each with a ``result`` list of
+     - A single JSON file, a list of "tasks", each with a ``result`` list of
        ``rectanglelabels``/``polygonlabels`` entries. Coordinates are
        percentages (0-100) of the image's width/height, per Label Studio's
        convention.
@@ -39,7 +39,7 @@ Supported formats
      - `Darwin JSON reference <https://docs.v7labs.com/reference/darwin-json>`_
 
 Bounding boxes are exported for every format. Segmentation masks are
-converted to polygons via OpenCV contour extraction — this needs the
+converted to polygons via OpenCV contour extraction, this needs the
 optional ``export`` extra:
 
 .. code-block:: bash
@@ -83,15 +83,15 @@ The download-arrow icon button sits in the Details panel's header actions,
 between the manual-save and grid-settings buttons. Clicking it opens a small
 floating menu next to the button:
 
-- A **tag filter section** — one checkbox per existing ``tag:<name>`` column
+- A **tag filter section**, one checkbox per existing ``tag:<name>`` column
   (boolean or categorical), only shown if any tags exist. Leave every box
   unchecked to export the whole dataset; check one or more to restrict to
   samples carrying **any** of them.
-- Three **format buttons** — "Export to CVAT (XML)", "Export to Label Studio
+- Three **format buttons**, "Export to CVAT (XML)", "Export to Label Studio
   (JSON)", "Export to V7 / Darwin (zip)".
 
 Clicking a format button fires the ``ExportAnnotations`` gRPC call
-immediately (with the checked tags, or none) — there is no format preview
+immediately (with the checked tags, or none), there is no format preview
 step. A toast shows "Exporting annotations…", then either a success message
 with the image count and a browser download of the file, or an error
 message if the call fails. The UI always exports ground-truth targets; it
@@ -101,7 +101,7 @@ that the Python and CLI paths have.
 .. note::
 
    The export button is disabled in sandbox mode, with a tooltip explaining
-   why — sandbox sessions can't download data out of the demo.
+   why, sandbox sessions can't download data out of the demo.
 
 **In-app chat agent**
 
@@ -131,16 +131,16 @@ Every export path collects annotations from the same registered dataframe
 that backs the rest of WeightsLab (`get_dataframe()`), grouping the
 ``(sample_id, annotation_id)`` multi-index rows by sample:
 
-- **Boxes** — read from the ``target`` (or ``prediction``, with
+- **Boxes**, read from the ``target`` (or ``prediction``, with
   ``use_predictions=True``) column when it holds coordinate-shaped data
   (``(x1, y1, x2, y2[, conf][, cls])``), whether that's a single box per
   sample or several boxes exploded across annotation rows.
-- **Masks -> polygons** — read from the same column when it holds a dense
+- **Masks -> polygons**, read from the same column when it holds a dense
   ``(H, W)`` array (pixel value = class id); one polygon per connected
   region per class id.
 
 Two real gaps in the current data model drive the "best effort" behavior
-below — call these out explicitly if an export looks wrong:
+below, call these out explicitly if an export looks wrong:
 
 - **No dedicated class-id -> name registry.** Labels are resolved, in order:
   an explicit ``class_names`` argument; else a ``class_names`` attribute on
@@ -150,6 +150,6 @@ below — call these out explicitly if an export looks wrong:
   (``image_paths``, ``img_files``, ``images``, ``imgs``, ``files``,
   ``samples``); dimensions come from that file (via Pillow) or, for
   segmentation samples, directly from the mask's own shape. When no path
-  resolves, the exported filename is synthetic (``sample_<id>.jpg``) — **no
+  resolves, the exported filename is synthetic (``sample_<id>.jpg``), **no
   image file is copied or embedded**, so you must ensure the filenames you
   upload to CVAT/Label Studio/V7 match the ones in the export.

@@ -7,15 +7,15 @@ How the console fits
 - **Transport**: local TCP, plain-text commands, JSON responses.
 - **Intended scope**: development / debugging, not a production control plane.
 - **Security model**: binds to localhost by default; plain-text protocol
-  (keep the port private — localhost or a private subnet only).
+  (keep the port private, localhost or a private subnet only).
 - **Independent of the UI**: the console talks to the backend over its own
-  TCP socket, not gRPC/gRPC-Web — you can run it with or without
+  TCP socket, not gRPC/gRPC-Web, you can run it with or without
   :doc:`../weights_studio_ui/index` open, and both can be attached at once.
 
 Start the server
 ------------------
 
-From your training script (recommended) — starts the server; a client REPL
+From your training script (recommended), starts the server; a client REPL
 window opens automatically:
 
 .. code-block:: python
@@ -26,14 +26,14 @@ window opens automatically:
    wl.keep_serving()
 
 To start the server **headless** (no REPL window pops up; attach later on
-demand), pass ``spawn_cli_client=False`` — see the ``serve`` entry in
+demand), pass ``spawn_cli_client=False``, see the ``serve`` entry in
 :doc:`../user_functions`:
 
 .. code-block:: python
 
    wl.serve(serving_cli=True, spawn_cli_client=False)
 
-Low-level equivalents (rarely needed directly — ``wl.serve``/``weightslab
+Low-level equivalents (rarely needed directly, ``wl.serve``/``weightslab
 cli`` cover the normal workflow):
 
 .. code-block:: bash
@@ -63,18 +63,18 @@ when several experiments are running locally at once and auto-discovery would
 be ambiguous.
 
 Once attached, type ``help`` (or ``h`` / ``?``) inside the console at any
-time — it prints the same reference as :doc:`cli_console`, with extra
+time, it prints the same reference as :doc:`cli_console`, with extra
 examples pulled from the running experiment's own registrations.
 
 Ending a session
 -------------------
 
-- ``exit`` / ``quit`` — close the client connection (handled server-side; the
+- ``exit`` / ``quit``, close the client connection (handled server-side; the
   server replies, then closes the socket).
-- ``clear`` / ``cls`` — clear the local terminal screen. Handled entirely by
+- ``clear`` / ``cls``, clear the local terminal screen. Handled entirely by
   the **client**, not sent to the server.
 - ``Ctrl+C`` in the server's own terminal stops training and every service
-  ``wl.serve()`` started, including the CLI server — the console can't be
+  ``wl.serve()`` started, including the CLI server, the console can't be
   attached to after that.
 
 Developer notes
@@ -82,7 +82,7 @@ Developer notes
 
 - Prefer the console for quick diagnosis and manual interventions; use
   Weights Studio for richer visual workflows.
-- Keep the CLI port private (localhost, or a private subnet at most) — the
+- Keep the CLI port private (localhost, or a private subnet at most), the
   protocol is plain text with no authentication.
 - Editing hyperparameters is the only supported mutation path for
   architecture-level state; there is currently no console command to

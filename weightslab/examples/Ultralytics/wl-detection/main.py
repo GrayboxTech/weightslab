@@ -23,7 +23,6 @@ warnings.filterwarnings(
 )
 
 import weightslab as wl
-from weightslab.integrations.ultralytics import WLAwareTrainer
 from ultralytics import YOLO
 
 logging.getLogger("weightslab.watchdog.grpc_watchdog").setLevel(logging.ERROR)
@@ -60,10 +59,10 @@ def main():
 
     # ================
     # Training Loop
-    wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+    # wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     YOLO(model_name).train(
-        trainer=WLAwareTrainer,
+        trainer=wl.WLAwareTrainer,
         data=data_root,
         imgsz=image_size,
         epochs=1000 if max_steps == None else max(1, int(max_steps)),

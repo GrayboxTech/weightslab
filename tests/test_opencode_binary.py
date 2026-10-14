@@ -218,11 +218,17 @@ class ResolverPrecedenceTests(unittest.TestCase):
     """opencode_process.resolve_opencode_argv order:
     managed-present -> PATH -> managed-download -> npx -> None."""
 
+    # resolve_opencode_argv returns str(Path), so the expected value has to be
+    # spelled the same way: str(Path("/mgd/opencode")) is "/mgd/opencode" on
+    # POSIX and "\\mgd\\opencode" on Windows. Hard-coding the POSIX form made
+    # these two fail on Windows only, for no reason in the code under test.
+    MANAGED = str(Path("/mgd/opencode"))
+
     def test_managed_present_wins(self):
         with patch.object(opencode_process.opencode_binary, "find_managed_binary",
                           return_value=Path("/mgd/opencode")), \
                 patch.object(opencode_process.shutil, "which", return_value="/usr/bin/opencode"):
-            self.assertEqual(opencode_process.resolve_opencode_argv(), ["/mgd/opencode"])
+            self.assertEqual(opencode_process.resolve_opencode_argv(), [self.MANAGED])
 
     def test_path_used_before_download(self):
         with patch.object(opencode_process.opencode_binary, "find_managed_binary", return_value=None), \
@@ -237,7 +243,7 @@ class ResolverPrecedenceTests(unittest.TestCase):
                 patch.object(opencode_process.opencode_binary, "ensure_managed_binary",
                              return_value=Path("/mgd/opencode")), \
                 patch.object(opencode_process.shutil, "which", return_value=None):
-            self.assertEqual(opencode_process.resolve_opencode_argv(), ["/mgd/opencode"])
+            self.assertEqual(opencode_process.resolve_opencode_argv(), [self.MANAGED])
 
     def test_npx_last_resort(self):
         def which(name):

@@ -24,7 +24,6 @@ from torch.utils.data import Dataset
 from torchvision import datasets, transforms
 
 import weightslab as wl
-from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
 
 LOSS = "loss_sample"
 OUT = os.environ.get("WL_STRESS_OUT", "/tmp/wl_stress")
@@ -134,7 +133,7 @@ def main():
         with torch.no_grad():
             for tb in test_loader:
                 ti, tid, tl = tb[0].to(dev), tb[1], tb[2].to(dev)
-                with guard_testing_context:
+                with wl.guard_testing_context:
                     tlg = model(ti)
                     crit(tlg, tl, batch_ids=tid, preds=tlg.argmax(1, keepdim=True))
 
@@ -148,7 +147,7 @@ def main():
         for img, ids, lab in loader:
             img, lab = img.to(dev), lab.to(dev)
             sync(); ts = time.perf_counter()
-            with guard_training_context:
+            with wl.guard_training_context:
                 opt.zero_grad()
                 logits = model(img)
                 # only per-step call: the watched loss logs loss_sample and fires

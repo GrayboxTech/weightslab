@@ -91,6 +91,19 @@ class ArrayH5Proxy:
             return array.astype(dtype)
         return array
 
+    def __iter__(self):
+        """Iterate the loaded array.
+
+        Raises TypeError (not ValueError) when the array can't be loaded: pandas'
+        display checks ``is_sequence`` (iter + len) and treats a TypeError as
+        "not a sequence", so a missing/corrupted array prints as the proxy
+        instead of failing the whole DataFrame repr.
+        """
+        array = self.load()
+        if array is None:
+            raise TypeError(f"Array not available for {self.path_ref}")
+        return iter(array)
+
     def __getitem__(self, key):
         """Support indexing on the proxy - loads array first."""
         array = self.load()

@@ -35,10 +35,6 @@ from typing import Any, Dict, List
 from face.data import FaceDataset
 from face.model import FaceEmbeddingModel
 from face.signals import FaceMetrics
-from weightslab.components.global_monitoring import (
-    guard_training_context,
-    guard_testing_context,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +122,7 @@ def train(
         while True:
             step += 1
 
-            with guard_training_context:
+            with wl.guard_training_context:
                 # ---- Fetch next batch (cycle loader) ----
                 try:
                     images, batch_ids, labels, _metadata = next(data_iter)
@@ -165,7 +161,7 @@ def train(
                 )
 
             if should_eval:
-                with guard_testing_context:
+                with wl.guard_testing_context:
                     print(f"\n[eval@test] step {step}")
                     metrics = evaluate(model=model, loader=test_loader, name="test")
                     eval_history.append({"step": step, "metrics": metrics})
@@ -322,7 +318,7 @@ if __name__ == "__main__":
 
     # ================
     # Training Loop
-    wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+    # wl.start_training(timeout=3)3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     train(
         model=model,

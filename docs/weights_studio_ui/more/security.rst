@@ -1,21 +1,33 @@
 Secure mode (HTTPS + mTLS)
 ==========================
 
-The default is plain HTTP (no cert files required, easiest for local dev). Do this before running the Python experiment script to enable HTTPS between the browser and the UI server, and mTLS between the UI server and the backend:
+Without certificates everything runs plain HTTP (easiest for local dev). Once certificates exist, ``weightslab start`` and the training backend both find them and switch on HTTPS between the browser and the UI server, and mTLS between the UI server and the backend. Set it up before running the Python experiment script:
 
 1. Generate TLS certificates once::
 
      weightslab se
 
-   Certificates are placed in ``~/.weightslab-certs``
-   (or ``$WEIGHTSLAB_CERTS_DIR``).
+   Certificates are placed in ``$WEIGHTSLAB_CERTS_DIR``, else
+   ``~/.weightslab-certs``.
    Follow the printed instructions to export ``WEIGHTSLAB_CERTS_DIR`` globally.
 
-2. Start the UI in secure mode::
+   On Windows, ``weightslab se`` runs the PowerShell script with the Windows
+   ``openssl`` and adds the dev CA to your user's trusted root certificates
+   (Windows asks you to confirm). To generate the certificates through WSL
+   (Ubuntu) instead, run::
 
-     weightslab start --certs
+     weightslab se --force-ubuntu
 
-   ``--certs`` reads ``$WEIGHTSLAB_CERTS_DIR`` (single source of truth) and:
+   The WSL path does not install the CA into the Windows trust store.
+
+2. Start the UI::
+
+     weightslab start
+
+   It reads ``$WEIGHTSLAB_CERTS_DIR`` (single source of truth). When the
+   variable is unset, or its directory has no certs, ``~/.weightslab-certs``
+   is used instead. With certs found it (``--certs`` turns missing certs into
+   a warning; ``--no-certs`` or ``GRPC_TLS_ENABLED=0`` force plain HTTP):
 
    - Serves HTTPS using ``ui-server.crt`` / ``ui-server.key``
    - Presents ``ui-client.crt`` / ``ui-client.key`` to the backend (mTLS)

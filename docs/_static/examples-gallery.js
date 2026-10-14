@@ -16,7 +16,7 @@
   var EXAMPLES = [
     {
       badge: 'PyTorch', color: 'pytorch',
-      title: 'Classification — MNIST',
+      title: 'Classification, MNIST',
       desc: 'CNN digit classifier on MNIST. Register hyperparameters, monitor per-sample loss, and use the deny-aware sampler to focus on hard examples.',
       tags: ['classification', 'supervised', 'mnist', 'cnn'],
       url: 'examples/pytorch/classification.html',
@@ -24,7 +24,7 @@
     },
     {
       badge: 'PyTorch', color: 'pytorch',
-      title: 'Segmentation — BDD100k',
+      title: 'Segmentation, BDD100k',
       desc: 'Per-pixel semantic segmentation with a UNet. Track per-sample IoU and visualise mask overlays directly in the studio.',
       tags: ['segmentation', 'semantic', 'bdd100k', 'masks', 'dense prediction'],
       url: 'examples/pytorch/segmentation.html',
@@ -32,7 +32,7 @@
     },
     {
       badge: 'PyTorch', color: 'pytorch',
-      title: 'Detection — Penn-Fudan',
+      title: 'Detection, Penn-Fudan',
       desc: 'Bounding-box detection on Penn-Fudan pedestrians. Per-instance multi-index dataframe with (sample_id, annotation_id) keys.',
       tags: ['detection', 'object detection', 'bounding boxes', 'penn-fudan'],
       url: 'examples/pytorch/detection.html',
@@ -40,7 +40,7 @@
     },
     {
       badge: 'PyTorch', color: 'pytorch',
-      title: 'Clustering — Face Recognition',
+      title: 'Clustering, Face Recognition',
       desc: 'Metric learning with triplet loss on face datasets. Store and explore high-dimensional embeddings per sample in the studio.',
       tags: ['clustering', 'unsupervised', 'embeddings', 'face recognition', 'metric learning'],
       url: 'examples/pytorch/clustering.html',
@@ -56,14 +56,14 @@
     },
     {
       badge: 'Lightning', color: 'lightning',
-      title: 'Classification — MNIST (Lightning)',
-      desc: 'Same MNIST classification wrapped in a LightningModule. WeightsLab hooks replace only the guard functions — the rest is unchanged.',
+      title: 'Classification, MNIST (Lightning)',
+      desc: 'Same MNIST classification wrapped in a LightningModule. WeightsLab hooks replace only the guard functions, the rest is unchanged.',
       tags: ['classification', 'supervised', 'mnist', 'pytorch lightning'],
       url: 'examples/lightning/classification.html'
     },
     {
       badge: 'Ultralytics', color: 'ultralytics',
-      title: 'Detection — YOLO',
+      title: 'Detection, YOLO',
       desc: 'Drop-in WLAwareTrainer for YOLO training. Track mAP, per-image loss, and discard low-quality samples without touching the model.',
       tags: ['detection', 'yolo', 'object detection', 'mAP'],
       url: 'examples/ultralytics/detection.html',
@@ -71,7 +71,7 @@
     },
     {
       badge: 'Usecase', color: 'usecase',
-      title: 'LiDAR Detection — 2D and 3D',
+      title: 'LiDAR Detection, 2D and 3D',
       desc: 'Point-cloud BEV previews, dual 2D/3D bounding box signals, streaming GetPointCloud RPC, and an interactive three.js 3D viewer.',
       tags: ['lidar', 'point cloud', '3d detection', 'bev', 'streaming'],
       url: 'examples/usecases/lidar_detection.html'
@@ -86,7 +86,7 @@
     },
     {
       badge: 'Usecase', color: 'usecase',
-      title: 'Model Signals — Fashion-MNIST',
+      title: 'Model Signals, Fashion-MNIST',
       desc: 'Per-step training dynamics: global and per-layer gradient norms, weight norms and activation statistics, from one argument on the model wrap.',
       tags: ['model signals', 'gradient norm', 'activations', 'per-layer', 'training dynamics'],
       url: 'examples/usecases/model_signals.html'

@@ -36,7 +36,7 @@ LightningModule excerpt
            self.metric_wl = metric_wl
 
        def training_step(self, batch):
-           with guard_training_context:
+           with wl.guard_training_context:
                x, ids, y = batch
                logits = self.model(x)
                preds = torch.argmax(logits, dim=1)
@@ -49,7 +49,7 @@ LightningModule excerpt
                return loss_batch.mean()
 
        def validation_step(self, batch):
-           with guard_testing_context:
+           with wl.guard_testing_context:
                x, ids, y = batch
                logits = self.model(x)
                preds = torch.argmax(logits, dim=1)

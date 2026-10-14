@@ -22,7 +22,7 @@ all array materialisation until it is actually needed:
        array_autoload_arrays=False,
        array_return_proxies=True,
        array_use_cache=True,
-       # Load labels on demand — don't scan every annotation at startup.
+       # Load labels on demand, don't scan every annotation at startup.
        preload_labels=False,
    )
 
@@ -100,8 +100,8 @@ component so callers can request only what they need:
 
 **Why this matters:** without ``get_items``, any WeightsLab utility that
 scans annotations (class-weight computation, distribution analysis, label
-preloading) is forced to run the full ``__getitem__`` pipeline — including
-image decode, resize, and augmentation — even though it only needs the label.
+preloading) is forced to run the full ``__getitem__`` pipeline, including
+image decode, resize, and augmentation, even though it only needs the label.
 On a large dataset this can cost minutes at startup.
 
 .. warning::
@@ -109,11 +109,11 @@ On a large dataset this can cost minutes at startup.
    When ``include_images`` and ``include_labels`` are requested in separate
    ``get_items`` calls (as in the pattern below), any *random* augmentation
    (random crop, flip, etc.) must not be re-sampled independently on each
-   call — otherwise the transform applied to the image and the transform
+   call, otherwise the transform applied to the image and the transform
    applied to its annotations will diverge, silently misaligning boxes/masks
    with the image they describe. Derive the augmentation deterministically
    per sample (e.g. a seed keyed by ``uid``/``idx``), or sample it once and
-   cache it — for instance in ``metadata`` — so every subsequent
+   cache it, for instance in ``metadata``, so every subsequent
    ``get_items`` call for that sample reuses the same transform instead of
    drawing a new random one.
 

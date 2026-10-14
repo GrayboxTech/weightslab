@@ -8,6 +8,7 @@ main dataframe as paths like 'arrays.h5:/sample_id/key_name'.
 """
 
 import os
+import json
 import time
 import logging
 import threading
@@ -19,6 +20,8 @@ from typing import Dict, Optional, Union, Any, Tuple
 from collections import OrderedDict
 import h5py
 import numpy as np
+
+from weightslab.data.h5_recovery import is_file_corruption_error, quarantine_file, unopenable_reason
 
 
 # Config global logger
@@ -127,6 +130,16 @@ class LRUArrayCache:
                 'misses': self._misses,
                 'hit_rate': hit_rate,
             }
+
+
+# What HDF5 reports when a chunk can't be decoded -- typically left by a
+# process stopped in the middle of writing it.
+_CORRUPTION_SIGNATURES = ("filter returned failure", "Can't synchronously read")
+
+
+def _is_corruption_error(exc) -> bool:
+    msg = str(exc)
+    return any(sig in msg for sig in _CORRUPTION_SIGNATURES)
 
 
 class _ReadWriteLock:
@@ -362,6 +375,8 @@ class H5ArrayStore:
         self._path = Path(path)
         self._local_lock = threading.RLock()
         self._rw_lock = _ReadWriteLock() # Read-write lock for concurrent reads
+        # Set when opening the file fails structurally; see _heal_file_if_suspect.
+        self._suspect_corrupt = False
         self._lock_path = self._path.with_suffix(self._path.suffix + ".lock")
         self._lock_timeout = lock_timeout
         self._poll_interval = poll_interval
@@ -470,6 +485,7 @@ class H5ArrayStore:
 
         self._ensure_parent()
 
+        self._heal_file_if_suspect()
         # Acquire the exclusive write side of the read-write lock so that no
         # reader (load_array / load_arrays_batch) can have the file open in
         # 'r' mode while we open it in 'a' mode. HDF5 forbids opening the same
@@ -509,8 +525,63 @@ class H5ArrayStore:
                         return self._build_path_reference(sample_id, key_name)
 
                     except Exception as exc:
+                        if is_file_corruption_error(exc):
+                            self._suspect_corrupt = True     # healed on the next call
                         logger.error(f"[H5ArrayStore] Failed to save array for sample_id={sample_id}, key={key_name}: {exc}")
                         return None
+            finally:
+                self._rw_lock.release_write()
+
+    def _try_inplace_batch(self, prepared):
+        """Overwrite existing datasets in place; None means "cannot, fall back".
+
+        Two passes under the write lock: check every destination exists with a
+        matching shape and dtype, and only then write. A partial in-place write
+        followed by a fallback would corrupt silently, so nothing is written
+        until the whole batch is known to fit.
+        """
+        if not self._path.exists():
+            return None
+        with self._local_lock:
+            self._rw_lock.acquire_write()
+            try:
+                with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout,
+                                           poll_interval=self._poll_interval):
+                    with h5py.File(str(self._path), 'a') as f:
+                        for group_name, key_data in prepared.items():
+                            grp = f.get(group_name)
+                            if grp is None:
+                                return None
+                            for key_name, (array, _meta) in key_data.items():
+                                kg = grp.get(key_name)
+                                if kg is None or 'data' not in kg:
+                                    return None
+                                dset = kg['data']
+                                if dset.shape != array.shape or dset.dtype != array.dtype:
+                                    return None
+                        self._write_inplace_journal(
+                            f"{group_name}/{key_name}"
+                            for group_name, key_data in prepared.items() for key_name in key_data)
+                        for group_name, key_data in prepared.items():
+                            for key_name, (array, metadata) in key_data.items():
+                                kg = f[group_name][key_name]
+                                kg['data'][...] = array
+                                for mk, mv in metadata.items():
+                                    kg.attrs[mk] = mv
+                    # Closed and flushed: the overwritten datasets are whole again.
+                    self._inplace_journal_path().unlink(missing_ok=True)
+                    return {
+                        group_name: {
+                            key_name: self._build_path_reference(group_name, key_name)
+                            for key_name in key_data
+                        }
+                        for group_name, key_data in prepared.items()
+                    }
+            except Exception as exc:
+                if is_file_corruption_error(exc):
+                    self._suspect_corrupt = True
+                logger.debug(f"[H5ArrayStore] in-place batch fell back: {exc}")
+                return None
             finally:
                 self._rw_lock.release_write()
 
@@ -561,6 +632,18 @@ class H5ArrayStore:
 
         if not prepared:
             return {}
+
+        # O(change): if every array already exists with the same shape and dtype,
+        # overwrite the values in place. That is not a structural change, so it
+        # needs neither the temp file nor the full-file backup (9.5GB per flush
+        # at current ledger size). Returns None if anything would need creating
+        # or resizing, and the original two-phase path below runs unchanged.
+        inplace_refs = self._try_inplace_batch(prepared)
+        if inplace_refs is not None:
+            return inplace_refs
+        # The in-place attempt may have found the file unopenable: start a fresh
+        # one before the merge below, so this batch is not lost too.
+        self._heal_file_if_suspect()
 
         tmp_path = self._path.with_suffix(f".h5.writing_{uuid.uuid4().hex[:8]}")
         try:
@@ -672,6 +755,131 @@ class H5ArrayStore:
             )
             if self._restore_backup(backup_path):
                 backup_path.unlink(missing_ok=True)
+        # A file HDF5 can't open at all (e.g. cut short by a crash) is set aside.
+        self._suspect_corrupt = True
+        self._heal_file_if_suspect()
+        self._recover_inplace_journal()
+
+    def _heal_file_if_suspect(self) -> None:
+        """Set arrays.h5 aside when it can't be opened at all, so saves work again.
+
+        An unopenable file fails every later read *and* write, so the store
+        would stay dead. Its contents are predictions/targets that training
+        writes again as samples are processed, so a fresh file fills back in;
+        the old one is kept as ``arrays.h5.corrupt-<time>``. Callers must not
+        hold the read lock (this takes the write side).
+        """
+        if not self._suspect_corrupt:
+            return
+        moved, reason = None, None
+        with self._local_lock:
+            self._rw_lock.acquire_write()
+            try:
+                with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout,
+                                           poll_interval=self._poll_interval):
+                    self._suspect_corrupt = False
+                    reason = unopenable_reason(self._path)
+                    if reason is not None:
+                        moved = quarantine_file(self._path)
+                        if moved is not None:
+                            self._cache.clear()
+                            self._inplace_journal_path().unlink(missing_ok=True)
+            except Exception as exc:
+                logger.error(f"[H5ArrayStore] Could not check whether {self._path} is readable: {exc}")
+            finally:
+                self._rw_lock.release_write()
+        if moved is not None:
+            logger.error(
+                f"[H5ArrayStore] {self._path.name} could not be opened ({reason[:160]}). "
+                f"Moved it to {moved.name} and started a fresh file; predictions and "
+                "targets are written again as samples are processed."
+            )
+
+    def _inplace_journal_path(self) -> Path:
+        return self._path.with_suffix(".h5.inplace")
+
+    def _write_inplace_journal(self, entries) -> None:
+        """Name the datasets an in-place overwrite is about to touch.
+
+        In-place writes skip the temp-file + backup protocol (it would copy the
+        whole store on every flush), so a process stopped mid-write can leave a
+        half-written chunk behind. The journal lets recover() check just those
+        datasets instead of the whole file. Written atomically (tmp + replace).
+        """
+        journal = self._inplace_journal_path()
+        tmp = journal.with_name(journal.name + ".tmp")
+        tmp.write_text(json.dumps(sorted(entries)), encoding="utf-8")
+        os.replace(tmp, journal)
+
+    def _recover_inplace_journal(self) -> None:
+        """Drop unreadable datasets named by a leftover in-place journal."""
+        journal = self._inplace_journal_path()
+        if not journal.exists():
+            return
+        dropped = []
+        with self._local_lock:
+            self._rw_lock.acquire_write()
+            try:
+                with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout,
+                                           poll_interval=self._poll_interval):
+                    try:
+                        entries = json.loads(journal.read_text(encoding="utf-8"))
+                    except Exception:
+                        entries = []
+                    dropped = self._drop_unreadable_locked(entries)
+                    journal.unlink(missing_ok=True)
+            except Exception as exc:
+                logger.error(f"[H5ArrayStore] Could not check arrays from an interrupted write: {exc}")
+            finally:
+                self._rw_lock.release_write()
+        if dropped:
+            logger.warning(
+                f"[H5ArrayStore] Dropped {len(dropped)} array(s) left unreadable by an interrupted "
+                f"write: {dropped[:10]}{' ...' if len(dropped) > 10 else ''}. They are rewritten "
+                "the next time those samples are saved."
+            )
+
+    def _drop_unreadable_locked(self, entries) -> list:
+        """Delete every dataset in *entries* ("<sample_id>/<key>") that can't be
+        read back. Caller holds the write + inter-process locks."""
+        dropped = []
+        if not entries or not self._path.exists():
+            return dropped
+        with h5py.File(str(self._path), 'a') as f:
+            for entry in entries:
+                group_name, _, key_name = str(entry).partition("/")
+                grp = f.get(group_name)
+                if grp is None or key_name not in grp:
+                    continue
+                try:
+                    grp[key_name]['data'][()]        # decode every chunk
+                except Exception:
+                    del grp[key_name]
+                    dropped.append(f"{group_name}/{key_name}")
+        return dropped
+
+    def _drop_unreadable(self, entries) -> list:
+        """Locked wrapper around _drop_unreadable_locked (for the read paths)."""
+        with self._local_lock:
+            self._rw_lock.acquire_write()
+            try:
+                with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout,
+                                           poll_interval=self._poll_interval):
+                    return self._drop_unreadable_locked(entries)
+            except Exception as exc:
+                logger.error(f"[H5ArrayStore] Could not drop unreadable arrays {entries[:5]}: {exc}")
+                return []
+            finally:
+                self._rw_lock.release_write()
+
+    def _report_corrupted(self, entries) -> None:
+        dropped = self._drop_unreadable(entries)
+        logger.error(
+            f"[H5ArrayStore] Unreadable (corrupted) array(s) {entries[:5]}"
+            f"{' ...' if len(entries) > 5 else ''}, usually left by a process stopped "
+            f"mid-write. Dropped {len(dropped)} so the next save of those samples "
+            "rewrites them cleanly."
+        )
 
     def load_array(self, path_ref: str) -> Optional[np.ndarray]:
         """
@@ -691,6 +899,7 @@ class H5ArrayStore:
         if cached is not None:
             return cached
 
+        self._heal_file_if_suspect()
         if not self._path.exists():
             logger.debug(f"[H5ArrayStore] Array file does not exist: {self._path}")
             return None
@@ -701,6 +910,7 @@ class H5ArrayStore:
             logger.warning(f"[H5ArrayStore] Invalid path reference: {e}")
             return None
 
+        corrupted = False
         # Use read lock for concurrent read access (multiple threads can load in parallel)
         self._rw_lock.acquire_read()
         try:
@@ -728,18 +938,21 @@ class H5ArrayStore:
                     return array
 
             except Exception as exc:
-                error_msg = str(exc)
-                if "filter returned failure" in error_msg or "Can't synchronously read" in error_msg:
-                    logger.error(
-                        f"[H5ArrayStore] Corrupted/unreadable data at {path_ref}: {exc}. "
-                        f"This may be due to: (1) interrupted write, (2) invalid array values (NaN/Inf), "
-                        f"or (3) HDF5 filter codec issues. Consider deleting and regenerating this data."
-                    )
+                if _is_corruption_error(exc):
+                    corrupted = True                 # one dataset
+                elif is_file_corruption_error(exc):
+                    self._suspect_corrupt = True     # the whole file
                 else:
                     logger.error(f"[H5ArrayStore] Failed to load array from {path_ref}: {exc}")
-                return None
+                    return None
         finally:
             self._rw_lock.release_read()
+        # Outside the read lock: both repairs need the write side.
+        if self._suspect_corrupt:
+            self._heal_file_if_suspect()
+        elif corrupted:
+            self._report_corrupted([f"{sample_id}/{key_name}"])
+        return None
 
     def load_arrays_batch(self, path_refs: Dict[int, Dict[str, str]]) -> Dict[int, Dict[str, np.ndarray]]:
         """
@@ -756,6 +969,7 @@ class H5ArrayStore:
         if not self._path.exists():
             return arrays
 
+        corrupted = []
         # Use read lock for concurrent batch read access
         self._rw_lock.acquire_read()
         try:
@@ -791,19 +1005,27 @@ class H5ArrayStore:
                                 # Cache the array
                                 self._cache.put(path_ref, array)
                                 sample_arrays[key_name] = array
-                            except Exception:
+                            except Exception as exc:
+                                if _is_corruption_error(exc):
+                                    corrupted.append(f"{sample_group_name}/{key_name}")
                                 continue
 
                             if sample_arrays:
                                 arrays[sample_id] = sample_arrays
 
-                return arrays
-
             except Exception as exc:
-                logger.error(f"[H5ArrayStore] Failed to load arrays in batch: {exc}")
-                return {}
+                if not is_file_corruption_error(exc):
+                    logger.error(f"[H5ArrayStore] Failed to load arrays in batch: {exc}")
+                    return {}
+                self._suspect_corrupt = True
+                arrays = {}
         finally:
             self._rw_lock.release_read()
+        if self._suspect_corrupt:
+            self._heal_file_if_suspect()
+        elif corrupted:
+            self._report_corrupted(corrupted)
+        return arrays
 
     def delete_sample(self, sample_id: int) -> bool:
         """

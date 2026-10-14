@@ -160,7 +160,7 @@ body[data-theme="dark"] .wl-only-dark {
   color: var(--color-foreground-primary);
 }
 
-/* Hide Furo's native theme-toggle buttons everywhere — only the topnav toggle is used */
+/* Hide Furo's native theme-toggle buttons everywhere, only the topnav toggle is used */
 .theme-toggle {
   display: none !important;
 }
@@ -438,14 +438,14 @@ body[data-theme="dark"] .wl-only-dark {
   color: var(--color-foreground-primary);
 }
 
-/* Active state — "All" */
+/* Active state, "All" */
 .wl-eg-filter-btn.wl-eg-filter--active {
   background: var(--color-foreground-primary);
   color: var(--color-background-primary);
   border-color: var(--color-foreground-primary);
 }
 
-/* Active state — per framework color */
+/* Active state, per framework color */
 .wl-eg-filter-btn[data-color="pytorch"].wl-eg-filter--active    { background:#de4e20; border-color:#de4e20; color:#fff; }
 .wl-eg-filter-btn[data-color="lightning"].wl-eg-filter--active   { background:#7b2bdb; border-color:#7b2bdb; color:#fff; }
 .wl-eg-filter-btn[data-color="ultralytics"].wl-eg-filter--active { background:#0a9e4e; border-color:#0a9e4e; color:#fff; }

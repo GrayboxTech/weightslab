@@ -801,12 +801,21 @@ def _handle_command(cmd: str) -> Any:
                     available = bool(agent.is_available())
                 except Exception:
                     available = False
+                # current_model() re-reads OpenCode's shared config, so a model
+                # picked in the studio after this backend started is reported
+                # here instead of the model resolved at start-up.
+                model = getattr(agent, 'opencode_model', None)
+                try:
+                    if hasattr(agent, 'current_model'):
+                        model = agent.current_model() or model
+                except Exception:
+                    pass
                 return {
                     'ok': True,
                     'available': available,
                     'preferred_provider': getattr(agent, 'preferred_provider', None),
                     'opencode_url': getattr(agent, 'opencode_url', None),
-                    'opencode_model': getattr(agent, 'opencode_model', None),
+                    'opencode_model': model,
                     'message': 'Agent available. Ready to help you.' if available else 'Agent not configured. Use agent init.',
                 }
 

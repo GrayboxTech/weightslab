@@ -75,13 +75,12 @@ class TestCertAuthManager:
             assert "GRPC_AUTH_TOKEN" not in env_vars
 
     def test_from_env_or_default(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            os.environ["WEIGHTSLAB_CERTS_DIR"] = tmpdir
-            try:
+        # Isolated from the real ~/.weightslab-certs, which may hold certs.
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as home:
+            with patch("weightslab.security.cert_auth_manager._get_user_profile", return_value=home), \
+                 patch.dict(os.environ, {"WEIGHTSLAB_CERTS_DIR": tmpdir}):
                 manager = CertAuthManager.from_env_or_default()
                 assert manager.certs_dir == Path(tmpdir)
-            finally:
-                del os.environ["WEIGHTSLAB_CERTS_DIR"]
 
     @patch("weightslab.security.cert_auth_manager.subprocess.run")
     def test_generate_certs_success(self, mock_run):
@@ -130,3 +129,62 @@ class TestSecureInitialization:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def _write_cert_set(directory):
+    Path(directory).mkdir(parents=True, exist_ok=True)
+    for name in ("backend-server.crt", "backend-server.key", "ca.crt"):
+        (Path(directory) / name).write_text("x")
+
+
+class TestCertsDirResolution:
+    """$WEIGHTSLAB_CERTS_DIR first, then ~/.weightslab-certs."""
+
+    @pytest.fixture(autouse=True)
+    def _home(self, tmp_path):
+        from weightslab.security import cert_auth_manager as cam
+        cam._WARNED_CERTS_DIRS.clear()
+        home = tmp_path / "home"
+        home.mkdir()
+        self.default_dir = home / ".weightslab-certs"
+        self.env_dir = tmp_path / "custom-certs"
+        with patch.object(cam, "_get_user_profile", return_value=str(home)):
+            env = {k: v for k, v in os.environ.items() if k != "WEIGHTSLAB_CERTS_DIR"}
+            with patch.dict(os.environ, env, clear=True):
+                yield
+
+    def test_unset_uses_default(self):
+        assert CertAuthManager.from_env_or_default().certs_dir == self.default_dir
+
+    def test_empty_uses_default(self):
+        with patch.dict(os.environ, {"WEIGHTSLAB_CERTS_DIR": "  "}):
+            assert CertAuthManager.from_env_or_default().certs_dir == self.default_dir
+
+    def test_env_dir_with_certs_wins(self):
+        _write_cert_set(self.env_dir)
+        _write_cert_set(self.default_dir)
+        with patch.dict(os.environ, {"WEIGHTSLAB_CERTS_DIR": str(self.env_dir)}):
+            assert CertAuthManager.from_env_or_default().certs_dir == self.env_dir
+
+    def test_falls_back_to_default_when_env_dir_has_no_certs(self, caplog):
+        _write_cert_set(self.default_dir)
+        with patch.dict(os.environ, {"WEIGHTSLAB_CERTS_DIR": str(self.env_dir)}):
+            assert CertAuthManager.from_env_or_default().certs_dir == self.default_dir
+        assert "No certs in WEIGHTSLAB_CERTS_DIR" in caplog.text
+
+    def test_keeps_env_dir_when_neither_has_certs(self):
+        with patch.dict(os.environ, {"WEIGHTSLAB_CERTS_DIR": str(self.env_dir)}):
+            assert CertAuthManager.from_env_or_default().certs_dir == self.env_dir
+
+    def test_relative_value_is_ignored(self, caplog):
+        _write_cert_set(self.default_dir)
+        bogus = "<MagicMock name='CertAuthManager.from_env_or_default().certs_dir' id='1'>"
+        with patch.dict(os.environ, {"WEIGHTSLAB_CERTS_DIR": bogus}):
+            assert CertAuthManager.from_env_or_default().certs_dir == self.default_dir
+        assert "not an absolute path" in caplog.text
+
+    def test_warning_logged_once(self, caplog):
+        with patch.dict(os.environ, {"WEIGHTSLAB_CERTS_DIR": "relative/dir"}):
+            CertAuthManager.from_env_or_default()
+            CertAuthManager.from_env_or_default()
+        assert caplog.text.count("not an absolute path") == 1

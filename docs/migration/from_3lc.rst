@@ -6,7 +6,7 @@ From 3LC
 3LC and WeightsLab are after the same thing: use what training tells you about
 your data to make the dataset better. They differ in the shape of the loop.
 3LC's is *collect → revise → retrain*, with the revision recorded as a new
-table version. WeightsLab's has no retrain step — the revision lands on the
+table version. WeightsLab's has no retrain step, the revision lands on the
 run that is already going.
 
 Migration notes
@@ -19,15 +19,15 @@ alongside it:
 
 .. code-block:: python
 
-   # 3LC — ingest into a versioned Table
+   # 3LC, ingest into a versioned Table
    table = tlc.Table.from_torch_dataset(train_dataset, table_name="train")
 
-   # WeightsLab — wrap in place; the dataframe is derived, not a second copy
+   # WeightsLab, wrap in place; the dataframe is derived, not a second copy
    train_loader = wl.watch_or_edit(train_dataset, flag="data",
                                    loader_name="train_loader", is_training=True)
 
 Implement ``get_items`` on your dataset so label and metadata scans don't have
-to run the full ``__getitem__`` pipeline — see :ref:`good-practice-get-items`.
+to run the full ``__getitem__`` pipeline, see :ref:`good-practice-get-items`.
 
 **Metrics collection becomes continuous.** 3LC collects per-sample metrics in a
 dedicated pass you schedule. In WeightsLab the collection *is* the training
@@ -39,8 +39,8 @@ step, because the loss object is watched and reports per sample:
                                 flag="loss", signal_name="train-loss-CE", log=True)
    loss_per_sample = criterion(outputs, targets, batch_ids=ids)
 
-For anything you compute yourself — a custom per-sample metric, processed
-predictions for the overlays — use :func:`save_signals`:
+For anything you compute yourself, a custom per-sample metric, processed
+predictions for the overlays, use :func:`save_signals`:
 
 .. code-block:: python
 
@@ -63,8 +63,8 @@ running experiment immediately.
    wl.discard_samples(...)      # out of the active set on the next step
    wl.write_dataframe()         # snapshot the current data state to disk
 
-That is a real trade. You lose 3LC's lineage — the record of which revision
-trained which model — and you gain a much shorter loop. If lineage matters for
+That is a real trade. You lose 3LC's lineage, the record of which revision
+trained which model, and you gain a much shorter loop. If lineage matters for
 your work, ``wl.write_dataframe()`` plus the experiment directory is what you
 have; it is a snapshot, not a version graph.
 
@@ -98,7 +98,7 @@ Replaced parts
    * - The 3LC Dashboard
      - ``weightslab start <experiment_dir>``
    * - Exporting a revised table
-     - :func:`export_annotations` (CVAT / Label Studio / V7) — see
+     - :func:`export_annotations` (CVAT / Label Studio / V7), see
        :doc:`../export`
    * - Run comparison across revisions
      - Comparison *within* a run: merged plots, and loading weights from an
@@ -107,7 +107,7 @@ Replaced parts
 Updated examples
 ----------------
 
-**Before** — a 3LC collect-and-revise cycle:
+**Before**, a 3LC collect-and-revise cycle:
 
 .. code-block:: python
    :emphasize-lines: 3,5,14,16,17
@@ -130,7 +130,7 @@ Updated examples
    # then: open the dashboard, review, create a revised table,
    #       point training at the revision, and run the whole thing again
 
-**After** — the same intent, without the second run:
+**After**, the same intent, without the second run:
 
 .. code-block:: python
    :emphasize-lines: 5,9,13,14,17,25
@@ -174,7 +174,7 @@ Expanded UI documentation
    * - In the 3LC Dashboard you would…
      - In Weights Studio
    * - Open a table and scan its samples
-     - The :ref:`data board <studio-data-board>` — grid, or a sortable
+     - The :ref:`data board <studio-data-board>`, grid, or a sortable
        :ref:`list view <studio-data-board>` for reading numbers
    * - Sort by a collected metric
      - Click a column header, or use :ref:`quick filters
@@ -183,7 +183,7 @@ Expanded UI documentation
      - The :ref:`detail modal <studio-detail-modal>`, with its metadata panel
        and overlay comparison modes
    * - Chart a metric across the run
-     - The :ref:`plots board <studio-plots>` — including an error band drawn
+     - The :ref:`plots board <studio-plots>`, including an error band drawn
        from each step's real batch extremes
    * - Find where a metric spiked
      - **Highlight step samples** on the curve filters the grid to that exact

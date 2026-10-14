@@ -18,7 +18,7 @@ Hyperparameter wrapper parameters
    * - ``defaults``
      - ``None``
      - Values registered before the YAML is first read. They seed the in-memory
-       config only — the watcher reads the file, it never writes it, so write the
+       config only, the watcher reads the file, it never writes it, so write the
        YAML yourself if you want it editable from the start.
    * - ``poll_interval``
      - ``1.0``
@@ -96,7 +96,7 @@ Standalone config-only integration (UI + CLI ready)
 A complete, runnable script with **nothing but the configuration** registered: no
 model, no data, no signals. Its loop only reads the config each step and prints
 what changed, so you can watch a value propagate from any of the three places it
-can be edited — the YAML file, ``set_hp`` in the CLI, or the studio panel.
+can be edited, the YAML file, ``set_hp`` in the CLI, or the studio panel.
 
 **Bundled example:** ``weightslab/examples/PyTorch/wl-standalone-config/main.py``
 
