@@ -555,6 +555,13 @@ def missing_reason(prefix: str, prefixes: list) -> str:
     if tracker is not None and tracker.signal_prefix == prefix:
         if tracker.disabled_reason:
             return f"{head}: the live projection stopped after {tracker.disabled_reason}."
+        mismatch = getattr(tracker, "last_mismatch", None)
+        if mismatch and not tracker.steps_trained:
+            rows, samples = mismatch
+            return (f"{head}: the hooked layer {tracker.layer_name!r} gives {rows} "
+                    f"feature rows for a batch of {samples} samples, not one per "
+                    f"sample. Point it at a per-sample layer with "
+                    f"projection={{'layer': ...}} in wl.watch_or_edit(model, ...).")
         if tracker._handle is not None:
             return (f"{head} yet: the live UMAP places its first points after its "
                     f"first fit (every {tracker.every_n_steps} training steps).")
