@@ -34,6 +34,49 @@ Create and activate a virtual environment and install WeightsLab.
       # Linux/macOS
       # source .venv/bin/activate
 
+Install with uv
+~~~~~~~~~~~~~~~
+
+With `uv <https://docs.astral.sh/uv/>`_, add WeightsLab to your project, or
+install it into any virtual environment:
+
+.. code-block:: bash
+
+   uv add weightslab           # uv project: recorded in pyproject.toml and uv.lock
+   uv pip install weightslab   # any virtual environment
+
+In a uv project, run the commands through ``uv run`` (``uv run weightslab start``,
+``uv run python train.py``) or activate ``.venv``. ``weightslab start example``
+works in uv environments too: they ship without pip, so the example's
+requirements are installed with uv instead.
+
+.. note:: Choosing the PyTorch build
+
+   ``uv pip install weightslab --torch-backend=auto`` picks the PyTorch build that
+   matches your GPU driver (or force one: ``cpu``, ``cu126``, ...).
+
+   Do **not** add the PyTorch index with ``--extra-index-url``, as you would with
+   pip. uv takes each package from the first index that carries it, and the
+   PyTorch index carries more than torch (an old ``torchmetrics``, among others),
+   so resolution fails: ``only torchmetrics==1.0.3 is available``.
+
+   In a uv project, route only torch and torchvision to the PyTorch index. They
+   must be direct dependencies of your project, since ``[tool.uv.sources]`` is
+   ignored for packages that only come in through weightslab:
+
+   .. code-block:: toml
+
+      [[tool.uv.index]]
+      name = "pytorch-cu126"
+      url = "https://download.pytorch.org/whl/cu126"
+      explicit = true
+
+      [tool.uv.sources]
+      torch = { index = "pytorch-cu126" }
+      torchvision = { index = "pytorch-cu126" }
+
+   then ``uv add weightslab torch torchvision``.
+
 
 Try the bundled example
 ~~~~~~~~~~~~~~~~~~~~~~~

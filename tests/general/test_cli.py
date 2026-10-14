@@ -10,7 +10,7 @@ import json
 import tempfile
 import argparse
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import sys
 import os
@@ -570,6 +570,48 @@ class TestUIStartPortResolution(unittest.TestCase):
         self.assertEqual(source, "default")
 
 
+class TestExampleRequirementsInstaller(unittest.TestCase):
+    """`weightslab start example` installs requirements with pip, or uv where
+    the environment was created by uv without pip."""
+
+    REQ = Path("requirements.txt")
+
+    def test_pip_when_available(self):
+        with patch.object(wl_cli.importlib.util, "find_spec", return_value=object()):
+            cmd = wl_cli._requirements_install_command(self.REQ)
+        self.assertEqual(cmd[:4], [sys.executable, "-m", "pip", "install"])
+        self.assertIn("--no-input", cmd)
+
+    def test_uv_from_env_when_pip_missing(self):
+        with patch.object(wl_cli.importlib.util, "find_spec", return_value=None), \
+                patch.dict(os.environ, {"UV": "/opt/uv/bin/uv"}):
+            cmd = wl_cli._requirements_install_command(self.REQ)
+        self.assertEqual(
+            cmd, ["/opt/uv/bin/uv", "pip", "install", "--python", sys.executable,
+                  "-r", str(self.REQ)])
+
+    def test_uv_from_path_when_pip_missing(self):
+        with patch.object(wl_cli.importlib.util, "find_spec", return_value=None), \
+                patch.dict(os.environ, {"UV": ""}), \
+                patch.object(wl_cli.shutil, "which", return_value="/usr/bin/uv"):
+            cmd = wl_cli._requirements_install_command(self.REQ)
+        self.assertEqual(cmd[:2], ["/usr/bin/uv", "pip"])
+
+    def test_none_without_pip_or_uv(self):
+        with patch.object(wl_cli.importlib.util, "find_spec", return_value=None), \
+                patch.dict(os.environ, {"UV": ""}), \
+                patch.object(wl_cli.shutil, "which", return_value=None):
+            self.assertIsNone(wl_cli._requirements_install_command(self.REQ))
+
+    def test_install_skipped_without_pip_or_uv(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "requirements.txt").write_text("tomli-w\n", encoding="utf-8")
+            with patch.object(wl_cli, "_requirements_install_command", return_value=None), \
+                    patch.object(wl_cli.subprocess, "run") as run:
+                wl_cli._install_example_requirements(Path(tmpdir))
+            run.assert_not_called()
+
+
 def run_tests():
     """Run all CLI tests."""
     # Create test suite
@@ -582,6 +624,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestCLIServer))
     suite.addTests(loader.loadTestsFromTestCase(TestCLIEndpointDiscovery))
     suite.addTests(loader.loadTestsFromTestCase(TestUIStartPortResolution))
+    suite.addTests(loader.loadTestsFromTestCase(TestExampleRequirementsInstaller))
     # suite.addTests(loader.loadTestsFromTestCase(TestCLIIntegration))
 
     # Run tests

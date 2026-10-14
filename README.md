@@ -52,6 +52,9 @@ WeightsLab hooks into your existing PyTorch training loop and exposes a live UI 
 **1. Install & Launch**
 ```bash
 pip install weightslab
+# or, with uv
+uv add weightslab         # in a uv project (uv run weightslab start)
+uv pip install weightslab # in any virtual environment
 ```
 ```bash
 weightslab start  # launch the UI

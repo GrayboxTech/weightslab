@@ -1,5 +1,9 @@
 [build-system]
-requires = ["setuptools>=61", "wheel", "build", "setuptools_scm[toml]>=8"]
+# setuptools>=64 for PEP 660 editable installs (`pip install -e .`, `uv sync`);
+# setuptools_scm>=8.1 for version_scheme = "only-version". `wheel` and `build`
+# are not backend requirements (setuptools asks for wheel itself when needed;
+# build is a frontend), so they are not installed into every isolated build env.
+requires = ["setuptools>=64", "setuptools_scm[toml]>=8.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -146,6 +150,18 @@ utest = [
   "pytest>=9.0.2",
 ]
 
+# Contributor tooling (PEP 735). `uv sync` installs the `dev` group by default;
+# pip >= 25.1 reads it with `pip install --group dev`. Tests also need the
+# `utest` extra: `uv sync --extra utest`.
+[dependency-groups]
+dev = [
+  "pytest>=9.0.2",
+  "pytest-timeout>=2.3",
+  "grpcio-tools>=1.62,<2",
+  "torchinfo>=1.8,<2",
+  "httpx>=0.27,<1",
+]
+
 [project.scripts]
 weightslab = "weightslab.cli:main"
 
@@ -198,11 +214,32 @@ weightslab = [
 [tool.setuptools_scm]
 # Write the generated version into a small module so your package can import it at runtime
 write_to = "weightslab/_version.py"
-# Optional: choose version/local schemes — defaults are usually fine
-version_scheme = "guess-next-dev"
+# A build from a checkout takes the nearest tag as-is (v2.0.3.dev5 -> 2.0.3.dev5),
+# the same value weightslab/VERSION and the runtime `git describe` fallback in
+# __init__._resolve_version report. "guess-next-dev" refused to bump a .devN tag
+# ("The 2.0.3.dev5 can't be bumped"), so every build from a commit after a dev
+# tag failed: `pip install -e .`, `pip install git+...`, and the editable install
+# `uv sync` / `uv run` perform on every call. Published builds never reach this:
+# ci.yml and release.yml pin the version via SETUPTOOLS_SCM_PRETEND_VERSION_FOR_WEIGHTSLAB.
+version_scheme = "only-version"
 local_scheme = "no-local-version"
+
+[tool.uv]
+# The version is dynamic (setuptools_scm), so uv must rebuild the editable
+# install when the commit or tags move, not only when pyproject.toml changes.
+cache-keys = [{ file = "pyproject.toml" }, { git = { commit = true, tags = true } }]
 
 [tool.pytest.ini_options]
 markers = [
     "scale: large-history robustness tests (sweep-scale fixtures; deselect with -m 'not scale')",
+]
+filterwarnings = [
+    # "tag:..." / dotted column names can never be Python identifiers.
+    # h5_dataframe_store silences this at import, but pytest resets warning
+    # filters after every test, so the suite needs its own copy.
+    "ignore::tables.NaturalNameWarning",
+    # Lightning's DataLoader performance hint; the tests use num_workers=0 on purpose.
+    "ignore:.*does not have many workers:UserWarning",
+    # ipykernel's own code (asyncio event-loop policies on Python 3.14+).
+    "ignore::DeprecationWarning:ipykernel",
 ]

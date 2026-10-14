@@ -155,6 +155,53 @@ jobs:
         run: |
           python -c "import weightslab; print(f'weightslab imported successfully')"
 
+  # ── uv install paths (always runs, alongside `install`) ──────────────────
+  # The ways uv users get weightslab, none of which the pip jobs exercise:
+  # the wheel installed into a uv-created env (no pip inside it), `uvx`, and
+  # the editable install of a checkout that `uv sync` performs. uv picks the
+  # CPU torch build with --torch-backend instead of --extra-index-url, which
+  # uv treats differently from pip (first-index strategy).
+  install-uv:
+    needs: gate
+    if: ${{ needs.gate.outputs.run_ci == 'true' }}
+    runs-on: ubuntu-latest
+    name: install with uv (Python 3.11)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags: a checkout's version is its nearest tag
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10
+
+      - name: Resolve dependencies for every platform
+        run: uv lock
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Install the wheel into a uv venv
+        run: |
+          uv venv --python 3.11 /tmp/wl-uv
+          uv pip install --python /tmp/wl-uv/bin/python dist/*.whl --torch-backend cpu
+          /tmp/wl-uv/bin/python -c "import importlib.util, weightslab; assert importlib.util.find_spec('pip') is None; print(f'weightslab {weightslab.__version__} imported in a pip-less uv env')"
+          /tmp/wl-uv/bin/weightslab --help
+
+      - name: Run the CLI with uvx
+        run: uvx --python 3.11 --torch-backend cpu --from "$(ls dist/*.whl)" weightslab --help
+
+      - name: Editable install of the checkout (what uv sync does)
+        run: |
+          uv venv --python 3.11 /tmp/wl-uv-dev
+          uv pip install --python /tmp/wl-uv-dev/bin/python -e . --torch-backend cpu
+          /tmp/wl-uv-dev/bin/python -c "import importlib.metadata as m; v = m.version('weightslab'); assert not v.startswith('0.'), f'no tag found: {v}'; print(f'editable version {v}')"
+
   # ── Full Python version matrix (PR and main only) ─────────────────────────
   # Verifies that `pip install` + basic import work across all supported Python
   # versions. Runs on every PR and every push to main; skipped on dev/other

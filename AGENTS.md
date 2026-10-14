@@ -76,8 +76,11 @@ Browser  →  weightslab start :8080 (grpc-web → grpc proxy)  →  Python gRPC
 ## 2. Install & run (the happy path)
 
 ```bash
-pip install weightslab
+pip install weightslab        # or: uv add weightslab / uv pip install weightslab
 ```
+
+With uv, pick the PyTorch build with `--torch-backend` (`uv pip install
+weightslab --torch-backend=auto`), never `--extra-index-url` (see §5).
 
 In your training script:
 
@@ -280,6 +283,19 @@ affected by any of these. Full page: `weightslab/docs/projection.rst`.
 
 **Large weights/images fail to transfer.** Raise `GRPC_MAX_MESSAGE_BYTES`.
 
+**uv: "No solution found … only torchmetrics==1.0.3 is available".** The
+PyTorch index was passed with `--extra-index-url` (the pip habit). uv takes each
+package from the first index that has it, and that index carries an old
+`torchmetrics` (and numpy, pillow…). Use `--torch-backend=auto|cpu|cu126` with
+`uv pip install` / `uvx`; in a uv project, an `explicit = true` index plus
+`[tool.uv.sources]` for torch/torchvision, which must be direct dependencies
+(sources are ignored for transitive ones). Full recipe: `docs/quickstart.rst`.
+
+**`pip install -e .` / `uv sync` fails: "The 2.0.3.dev5 can't be bumped".** A
+checkout older than the `only-version` setuptools_scm scheme in `pyproject.toml`
+(`guess-next-dev` refused to bump a `.devN` tag). Update the checkout, or set
+`SETUPTOOLS_SCM_PRETEND_VERSION_FOR_WEIGHTSLAB=<version>` for that build.
+
 **The agent bar says it's unconfigured.** The LLM agent needs a provider: a
 local **Ollama** server (`provider: ollama`, available immediately) or **cloud
 OpenRouter** initialized from the UI via `/init` (then `/model` to switch,
@@ -324,6 +340,9 @@ OpenRouter** initialized from the UI via `/init` (then `/model` to switch,
   `experiment_service.proto`; regenerate Python stubs from the repo root; run
   `npm run generate-proto:data` in weights_studio. Editing one side only leaves
   the build broken.
+- **uv:** `uv sync --extra utest` makes an editable env with the `dev` group
+  (pytest, grpcio-tools, …); then `uv run pytest tests/...`. The version comes
+  from the nearest git tag; `uv.lock` is gitignored.
 - **Tests:** backend `python -m pytest weightslab/tests/...`; frontend unit
   `npm run test` (vitest); E2E/user-simulation Playwright lives in
   **weights_studio** (`test:realtime:*`, `test:e2e:*`), not here.

@@ -14,7 +14,9 @@ Docker-free. Commands:
 """
 
 import argparse
+import importlib.util
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -604,26 +606,49 @@ def _get_example_dir(name: str = "wl-classification", category: str = "PyTorch")
     return Path(__file__).parent / 'examples' / category / name
 
 
+def _requirements_install_command(req: Path) -> Optional[list]:
+    """Command installing `req` into the current interpreter's environment.
+
+    pip when this interpreter has it. Otherwise uv: environments uv creates
+    (`uv venv`, `uv sync`, `uv tool install`, `uvx`) ship without pip, and uv
+    exports its own binary path as $UV to the processes it runs. None when
+    neither is available.
+    """
+    if importlib.util.find_spec("pip") is not None:
+        return [sys.executable, "-m", "pip", "install", "-r", str(req),
+                "--no-input", "--disable-pip-version-check"]
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if uv:
+        # uv never prompts, so it needs no --no-input equivalent.
+        return [uv, "pip", "install", "--python", sys.executable, "-r", str(req)]
+    return None
+
+
 def _install_example_requirements(example_dir: Path) -> None:
     """Install an example's requirements non-interactively, if a file is present.
 
     Looks for requirements.txt (then requirements.in) in the example directory and
-    runs `pip install -r` with the current interpreter and `--no-input` so it never
-    prompts. Non-fatal: a failure is logged and the example is still attempted, so a
-    transient install hiccup doesn't block a run where deps are already satisfied.
+    installs it into the current interpreter's environment, with pip or, in an
+    environment uv created without pip, with uv (see
+    `_requirements_install_command`). Never prompts. Non-fatal: a failure is
+    logged and the example is still attempted, so a transient install hiccup
+    doesn't block a run where deps are already satisfied.
     """
     for fname in ("requirements.txt", "requirements.in"):
         req = example_dir / fname
         if not req.exists():
             continue
+        cmd = _requirements_install_command(req)
+        if cmd is None:
+            logger.warning(
+                f"Cannot install {req}: this environment has neither pip nor uv. "
+                "Continuing — the example may still run if deps are already installed."
+            )
+            return
         logger.info(f"Installing example requirements (non-interactive): {req}")
         try:
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-r", str(req),
-                 "--no-input", "--disable-pip-version-check"],
-                check=True,
-            )
-        except subprocess.CalledProcessError as exc:
+            subprocess.run(cmd, check=True)
+        except (subprocess.CalledProcessError, OSError) as exc:  # OSError: stale $UV path
             logger.warning(
                 f"Failed to install requirements ({req}): {exc}. "
                 "Continuing — the example may still run if deps are already installed."

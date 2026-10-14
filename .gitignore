@@ -47,6 +47,10 @@ htmlcov-report
 .env
 
 # Ignore specific files
+# uv's lockfile (written by `uv sync` / `uv lock`): CI and releases install with
+# pip, so a committed lock would only drift. Commit it, and add `uv lock --check`
+# to CI, if contributor environments should be pinned.
+uv.lock
 *.cache
 experiment_service_pb2.py
 experiment_service_pb2_grpc.py
