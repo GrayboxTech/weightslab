@@ -62,8 +62,7 @@ weightslab start ./my_experiment_directory # launch the UI
 ```
 
 > [!TIP]
-> Studio with HTTP Secure Deployment
-> Run before starting this command to set certificates.
+> Studio with HTTP Secure Deployment. Run before starting this command to set certificates.
 > ```bash
 > weightslab se  # set certificates for encryption
 > ```
