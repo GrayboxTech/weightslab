@@ -356,6 +356,11 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     def GetHistogram(self, request, context):
         logger.debug(f"\nExperimentServiceServicer.GetHistogram({request})")
         return self._exp_service.data_service.GetHistogram(request, context)
+
+    def GetProjection(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.GetProjection({request})")
+        return self._exp_service.data_service.GetProjection(request, context)
+
     def GetMetaData(self, request, context):
         logger.debug(f"\nExperimentServiceServicer.GetMetaData({request})")
         return self._exp_service.data_service.GetMetaData(request, context)

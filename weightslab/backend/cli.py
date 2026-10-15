@@ -1147,36 +1147,38 @@ def _handle_command(cmd: str) -> Any:
 
 def _client_handler(conn: socket.socket, addr):
     with conn:
-        conn_file = conn.makefile('rwb')
-        # greet
-        greeting = {'ok': True, 'welcome': 'weightslab-cli', 'time': time.time()}
-        conn_file.write((json.dumps(greeting) + "\n").encode('utf8'))
-        conn_file.flush()
-        while True:
-            try:
-                line = conn_file.readline()
-            except ConnectionResetError:
-                break
-            if not line:
-                break
-            cmd = line.decode('utf8').rstrip('\n')
-            if cmd.lower().strip() in ('quit', 'exit'):
-                resp = {'ok': True, 'bye': True}
-                conn_file.write((json.dumps(resp) + "\n").encode('utf8'))
-                conn_file.flush()
-                break
-            resp = _handle_command(cmd)
-            # sanitize response to ensure JSON serialization succeeds
-            try:
-                safe = _sanitize_for_json(resp)
-                conn_file.write((json.dumps(safe) + "\n").encode('utf8'))
-            except Exception:
-                # fallback: send a stringified representation
-                try:
-                    conn_file.write((json.dumps({'ok': False, 'error': str(resp)}) + "\n").encode('utf8'))
-                except Exception:
-                    conn_file.write((json.dumps({'ok': False, 'error': 'unserializable_response'}) + "\n").encode('utf8'))
+        try:
+            conn_file = conn.makefile('rwb')
+            # greet
+            greeting = {'ok': True, 'welcome': 'weightslab-cli', 'time': time.time()}
+            conn_file.write((json.dumps(greeting) + "\n").encode('utf8'))
             conn_file.flush()
+            while True:
+                line = conn_file.readline()
+                if not line:
+                    break
+                cmd = line.decode('utf8').rstrip('\n')
+                if cmd.lower().strip() in ('quit', 'exit'):
+                    resp = {'ok': True, 'bye': True}
+                    conn_file.write((json.dumps(resp) + "\n").encode('utf8'))
+                    conn_file.flush()
+                    break
+                resp = _handle_command(cmd)
+                # sanitize response to ensure JSON serialization succeeds
+                try:
+                    safe = _sanitize_for_json(resp)
+                    conn_file.write((json.dumps(safe) + "\n").encode('utf8'))
+                except Exception:
+                    # fallback: send a stringified representation
+                    try:
+                        conn_file.write((json.dumps({'ok': False, 'error': str(resp)}) + "\n").encode('utf8'))
+                    except Exception:
+                        conn_file.write((json.dumps({'ok': False, 'error': 'unserializable_response'}) + "\n").encode('utf8'))
+                conn_file.flush()
+        except ConnectionError:
+            # The client went away mid-exchange: reset, aborted (WinError
+            # 10053 on Windows) or a broken pipe. Nothing left to answer.
+            pass
 
 
 def _server_loop_sock(srv: socket.socket):
@@ -1187,7 +1189,15 @@ def _server_loop_sock(srv: socket.socket):
         _server_host = srv.getsockname()[0]
         _server_port = srv.getsockname()[1]
         while True:
-            conn, addr = srv.accept()
+            try:
+                conn, addr = srv.accept()
+            except OSError as exc:
+                # Closing the socket is how the server is stopped (main()'s
+                # Ctrl+C path, tests): accept() then fails with EBADF, or
+                # EINVAL after a shutdown(). That is the end of serving, not a
+                # crash -- it used to escape as an unhandled thread exception.
+                logger.debug("cli_server_socket_closed", extra={"error": str(exc)})
+                break
             t = threading.Thread(target=_client_handler, args=(conn, addr), name='WL-CLI_serving_loop', daemon=True)
             t.start()
     finally:

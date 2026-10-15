@@ -17,6 +17,7 @@ computer vision task with WeightsLab fully wired in.
    :maxdepth: 1
 
    classification
+   fashion_mnist_umap
    segmentation
    detection
    clustering

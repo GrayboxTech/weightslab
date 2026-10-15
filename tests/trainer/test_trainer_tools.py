@@ -95,7 +95,7 @@ class TestTrainerTools(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = os.path.join(tmp, "mask.png")
             arr = np.array([[0, 1], [1, 3]], dtype=np.uint8)
-            Image.fromarray(arr, mode="L").save(p)
+            Image.fromarray(arr).save(p)
 
             labels = _labels_from_mask_path_histogram(p, num_classes=4, ignore_index=255)
             self.assertEqual(labels, [0, 1, 3])

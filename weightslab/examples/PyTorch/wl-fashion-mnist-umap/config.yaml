@@ -1,0 +1,49 @@
+# Fashion-MNIST: the built-in live UMAP, then a PCA of your own to compare it with.
+experiment_name: fashion_mnist_umap_vs_pca
+device: auto
+training_steps_to_do: null   # the stages below set the schedule, not a ceiling
+# root_log_dir:              # defaults to $WEIGHTSLAB_ROOT_LOG_DIR, else a temp dir
+
+optimizer:
+  lr: 0.001
+
+# The built-in projection is ON by default; these keys only tune it. Each one
+# overrides its WEIGHTSLAB_PROJECTION_* environment variable. See docs/projection.rst.
+projection:
+  every_n_steps: 25    # fit the UMAP encoder every 25 training steps (default 50)
+  graph_size: 1024     # samples in the kNN graph (default 512)
+  n_neighbors: 15
+
+# The staged exploration (main.py); `--steps INITIAL RETRAIN` overrides the two step counts.
+exploration:
+  steps_initial: 1000      # train with the live UMAP, then keep a checkpoint
+  discard_fraction: 0.3    # then drop this share of the training samples, lowest loss first
+  steps_retrain: 1000      # train on what is left (0 = stop after the comparison)
+  knn_k: 10                # neighbours counted by the class-purity score
+
+# Experiment cadence
+eval_full_to_train_steps_ratio: 250
+experiment_dump_to_train_steps_ratio: 1000
+skip_checkpoint_load: false
+tqdm_display: true
+start_timeout: 3           # seconds to let the studio attach before the first step
+
+# Global dataframe storage
+ledger_enable_flushing_threads: true
+ledger_enable_h5_persistence: true
+ledger_flush_max_rows: 15000
+ledger_flush_interval: 30.0
+
+serving_grpc: true
+
+# data_root: ./data          # auto-downloaded on first run
+data:
+  train_loader:
+    shuffle: true
+    batch_size: 64
+    max_samples: 20000       # raise (or drop) for the full 60k
+  test_loader:
+    shuffle: false
+    batch_size: 256
+    max_samples: 2000
+    drop_last: false
