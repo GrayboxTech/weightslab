@@ -56,28 +56,25 @@ For a detailed installation guide and advanced configuration: [Documentation](ht
 ```bash
 pip install weightslab
 ```
+
 ```bash
 weightslab start ./my_experiment_directory # launch the UI
 ```
 
-**2. Start**
 > [!TIP]
-> Quick examples to get started
+> Studio with HTTP Secure Deployment. Run before starting this command to set certificates.
 > ```bash
-> weightslab start example            # classification (default)
-> weightslab start example --cls      # classification
-> weightslab start example --seg      # segmentation
-> weightslab start example --det      # detection
-> weightslab start example --clus     # clustering
+> weightslab se  # set certificates for encryption
 > ```
-> Explore our [sandbox](https://sandbox.graybx.com/).
+
+**2. Start**
 
 **In the cloud directly**
 
 [![Start coding with GCollab](https://img.shields.io/badge/Start_coding_with_GCollab-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=white)](https://colab.research.google.com/github/GrayboxTech/weightslab/blob/main/weightslab/examples/Notebooks/Colab/wl-colab-quickstart.ipynb)
 
 
-**OR Wrap your training script locally**
+**Or Wrap your training script locally**
 ```python
 # wrap the objects in your training script
 
@@ -91,6 +88,19 @@ loader = wl.watch_or_edit(dataset, flag='data', loader_name="train")
 wl.serve(serving_grpc=True, serving_cli=False)
 ...
 ```
+
+> [!TIP]
+> Quick examples to get started
+> ```bash
+> weightslab start example            # classification (default)
+> weightslab start example --cls      # classification
+> weightslab start example --seg      # segmentation
+> weightslab start example --det      # detection
+> weightslab start example --clus     # clustering
+> ```
+> Explore our [sandbox](https://sandbox.graybx.com/).
+
+
 
 ## How can you use it ?
 
