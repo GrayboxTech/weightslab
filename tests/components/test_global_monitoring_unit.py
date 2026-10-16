@@ -72,5 +72,44 @@ class TestGlobalMonitoringUnit(unittest.TestCase):
         self.assertTrue(suppressed)
 
 
+class TestPauseControllerCheckpointManager(unittest.TestCase):
+    """resume() dumps through the manager registered NOW, not the first one.
+
+    The controller is a process-wide singleton. It used to keep the manager it
+    first saw, so after ledgers.clear_all() and a new experiment it went on
+    writing the new run's checkpoints into the previous run's manifest, and a
+    reload by the current hash found nothing.
+    """
+
+    def tearDown(self):
+        from weightslab.backend import ledgers
+        ledgers.clear_all()
+
+    def test_resume_follows_the_manager_registered_after_clear_all(self):
+        from unittest.mock import MagicMock
+        from weightslab.backend import ledgers
+        from weightslab.components.global_monitoring import PauseController
+
+        first, second = MagicMock(name="first"), MagicMock(name="second")
+        first.hash_by_module = second.hash_by_module = ["aaaa", "bbbb", "cccc"]
+        controller = PauseController()
+        with patch("weightslab.components.global_monitoring.set_hyperparam"):
+            ledgers.register_checkpoint_manager(first)
+            controller.resume(force=True)
+            first.save_pending_changes.assert_called()
+            first.reset_mock()
+
+            ledgers.clear_all()
+            ledgers.register_checkpoint_manager(second)
+            controller.resume(force=True)
+
+        # Everything after the switch goes to the new run's manager, nothing to
+        # the old one (call counts are not pinned: other code may use it too).
+        second.update_experiment_hash.assert_called_with(first_time=True)
+        second.save_pending_changes.assert_called()
+        first.update_experiment_hash.assert_not_called()
+        first.save_pending_changes.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

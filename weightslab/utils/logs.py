@@ -211,6 +211,32 @@ def _print_log_location():
             pass
 
 
+class _SessionFileHandler(logging.FileHandler):
+    """The session log's handler: logging must never be what fails a program.
+
+    ``FileHandler.emit`` reopens a closed stream *outside* its own try/except,
+    so once the log's directory was gone -- a temporary ``root_log_dir`` the
+    log had been moved into, then deleted -- every later log call anywhere in
+    the process raised ``FileNotFoundError``, failing code that has nothing to
+    do with logging (tornado creating an event loop, in the release tests).
+    The directory is recreated when it can be; any other failure goes through
+    ``handleError``, as a failed write already does.
+    """
+
+    def _open(self):
+        try:
+            return super()._open()
+        except FileNotFoundError:
+            os.makedirs(os.path.dirname(self.baseFilename) or ".", exist_ok=True)
+            return super()._open()
+
+    def emit(self, record):
+        try:
+            super().emit(record)
+        except Exception:
+            self.handleError(record)
+
+
 def _make_file_handler(path: str) -> logging.FileHandler:
     """Open the session log file.
 
@@ -224,7 +250,7 @@ def _make_file_handler(path: str) -> logging.FileHandler:
     equivalent to truncating for a fresh file, and strictly better if two
     processes ever land on the same name.
     """
-    handler = logging.FileHandler(path, mode='a', encoding='utf-8')
+    handler = _SessionFileHandler(path, mode='a', encoding='utf-8')
     handler.setLevel(_FILE_LEVEL)
     handler.setFormatter(logging.Formatter(FORMAT, datefmt=DATE_FORMAT))
     return handler

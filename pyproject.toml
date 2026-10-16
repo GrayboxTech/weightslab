@@ -183,6 +183,9 @@ weightslab = [
   # project config from the directory it is started in, which is that same
   # workspace; this one points `instructions` at AGENTS.md.
   "opencode.json",
+  # Last release tag, kept current by release.yml; the final fallback for
+  # weightslab.__version__ (see _resolve_version in __init__.py).
+  "VERSION",
 ]
 
 [tool.setuptools.exclude-package-data]
@@ -202,4 +205,14 @@ local_scheme = "no-local-version"
 [tool.pytest.ini_options]
 markers = [
     "scale: large-history robustness tests (sweep-scale fixtures; deselect with -m 'not scale')",
+]
+filterwarnings = [
+    # "tag:..." / dotted column names can never be Python identifiers.
+    # h5_dataframe_store silences this at import, but pytest resets warning
+    # filters after every test, so the suite needs its own copy.
+    "ignore::tables.NaturalNameWarning",
+    # Lightning's DataLoader performance hint; the tests use num_workers=0 on purpose.
+    "ignore:.*does not have many workers:UserWarning",
+    # ipykernel's own code (asyncio event-loop policies on Python 3.14+).
+    "ignore::DeprecationWarning:ipykernel",
 ]

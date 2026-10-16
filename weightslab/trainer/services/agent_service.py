@@ -61,9 +61,16 @@ class AgentService:
         Check whether any LLM provider is ready to serve queries.
 
         Returns:
-            AgentHealthResponse { available: bool, message: str }
+            AgentHealthResponse { available: bool, message: str,
+                                  current_model: str }
               - available=True → "Ready to help you."
               - available=False → "Agent not configured. Type /init to set up."
+
+        `current_model` is re-resolved from OpenCode's config rather than read
+        off a snapshot, so a model chosen from the CLI (or by another studio
+        tab) is visible here. Health is polled, which makes this the channel
+        by which the picker learns it is out of date — before, a client could
+        only know the model IT had set, so a CLI switch never reached the UI.
         """
         available = self._is_available()
         message = (
@@ -72,7 +79,9 @@ class AgentService:
             else "Agent not configured. Type /init to set up."
         )
         logger.debug("CheckAgentHealth → available=%s", available)
-        return pb2.AgentHealthResponse(available=available, message=message)
+        return pb2.AgentHealthResponse(
+            available=available, message=message,
+            current_model=self._current_model())
 
     @safe_grpc(lambda msg: pb2.InitializeAgentResponse(success=False, message=msg))
     def InitializeAgent(self, request, context):
@@ -114,6 +123,21 @@ class AgentService:
         success, message = agent.initialize_with_cloud_key(request.api_key, provider_name, request.model)
         return pb2.InitializeAgentResponse(success=success, message=message)
 
+    def _current_model(self) -> str:
+        """The model the next query will use, or "" when it cannot be resolved.
+
+        Never raises: this feeds a health poll, and an agent that is down must
+        report an empty model rather than fail the whole response.
+        """
+        agent = self._agent
+        if agent is None:
+            return ""
+        try:
+            return str(agent.current_model() or "")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[AgentService] current_model unavailable: %s", exc)
+            return ""
+
     @safe_grpc(lambda msg: pb2.ChangeAgentModelResponse(success=False, message=msg))
     def ChangeAgentModel(self, request, context):
         """
@@ -150,7 +174,9 @@ class AgentService:
             )
 
         ok, models, message = agent.get_available_models()
-        return pb2.GetAgentModelsResponse(success=ok, models=models, message=message)
+        return pb2.GetAgentModelsResponse(
+            success=ok, models=models, message=message,
+            current_model=self._current_model())
 
     @safe_grpc(lambda msg: pb2.ResetAgentResponse(success=False, message=msg))
     def ResetAgent(self, request, context):

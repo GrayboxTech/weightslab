@@ -591,7 +591,7 @@ def load_raw_image(dataset, index, slice_idx: int = None, rank: int = 0) -> Imag
         if np_img.ndim == 2:
             # Grayscale 2D
             np_img = to_uint8(np_img)
-            return Image.fromarray(np_img, mode="L")
+            return Image.fromarray(np_img)
         elif np_img.ndim == 3:
             # 3D array - detect channel order
             if _detect_channel_first_3d(np_img.shape):
@@ -602,11 +602,11 @@ def load_raw_image(dataset, index, slice_idx: int = None, rank: int = 0) -> Imag
             # Now must be (H, W, C)
             channels = np_img.shape[-1]
             if channels == 1:
-                return Image.fromarray(np_img[..., 0], mode="L")
+                return Image.fromarray(np_img[..., 0])
             elif channels == 3:
-                return Image.fromarray(np_img, mode="RGB")
+                return Image.fromarray(np_img)
             elif channels == 4:
-                return Image.fromarray(np_img, mode="RGBA")
+                return Image.fromarray(np_img)
             else:
                 raise ValueError(f"Unsupported channel count: {channels}")
         else:
@@ -632,6 +632,15 @@ def load_raw_image_array(dataset, index, rank: int = 0) -> tuple:
         (full_array, is_volumetric, original_shape, middle_slice_image)
     """
     wrapped = getattr(dataset, "wrapped_dataset", dataset)
+
+    # Cheapest path first: a video dataset that can seek a single frame should
+    # never be asked to decode a whole clip for a thumbnail nobody plays. Only
+    # datasets defining get_poster_frame() take this branch.
+    from weightslab.data.video_utils import load_poster_frame_direct
+    poster = load_poster_frame_direct(wrapped, index)
+    if poster is not None:
+        poster_pil = Image.fromarray(poster)
+        return poster, False, tuple(poster.shape), poster_pil
 
     if hasattr(wrapped, '__getitem__'):
         np_img, is_volumetric, original_shape = _get_image_array_and_metadata(wrapped, index, rank=rank)
@@ -695,20 +704,20 @@ def load_raw_image_array(dataset, index, rank: int = 0) -> tuple:
         # Convert middle slice to PIL Image for thumbnail
         if middle_slice.ndim == 2:
             middle_slice_uint8 = to_uint8(middle_slice)
-            middle_pil = Image.fromarray(middle_slice_uint8, mode="L")
+            middle_pil = Image.fromarray(middle_slice_uint8)
         else:
             if middle_slice.ndim == 3 and _detect_channel_first_3d(middle_slice.shape):
                 middle_slice = np.transpose(middle_slice, (1, 2, 0))
             middle_slice_uint8 = to_uint8(middle_slice)
             channels = middle_slice_uint8.shape[-1] if middle_slice_uint8.ndim == 3 else 1
             if channels == 1:
-                middle_pil = Image.fromarray(middle_slice_uint8[..., 0], mode="L")
+                middle_pil = Image.fromarray(middle_slice_uint8[..., 0])
             elif channels == 3:
-                middle_pil = Image.fromarray(middle_slice_uint8, mode="RGB")
+                middle_pil = Image.fromarray(middle_slice_uint8)
             elif channels == 4:
-                middle_pil = Image.fromarray(middle_slice_uint8, mode="RGBA")
+                middle_pil = Image.fromarray(middle_slice_uint8)
             else:
-                middle_pil = Image.fromarray(middle_slice_uint8[..., 0], mode="L") # Fallback
+                middle_pil = Image.fromarray(middle_slice_uint8[..., 0]) # Fallback
 
         return np_img, is_volumetric, original_shape, middle_pil
 

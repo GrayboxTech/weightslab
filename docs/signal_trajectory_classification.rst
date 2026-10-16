@@ -103,7 +103,7 @@ own vocabulary; yours can return anything.
 
 - ``@wl.signal_classifier(signal="loss_sample")``, classify only that one
   signal.
-- ``@wl.signal_classifier`` / ``@wl.signal_classifier()`` (no ``signal=``) —
+- ``@wl.signal_classifier`` / ``@wl.signal_classifier()`` (no ``signal=``),
   become the global default for every signal that doesn't have its own
   per-signal classifier registered.
 
