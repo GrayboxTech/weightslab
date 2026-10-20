@@ -4,7 +4,5 @@
     "AGENTS.md"
   ],
   "shell": "pwsh",
-  "models": {
-    "default": "anthropic/claude-sonnet-latest"
-  }
+  "model": "big-pickle"
 }
