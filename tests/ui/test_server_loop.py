@@ -150,7 +150,14 @@ class TestLoopRegistryUnit(unittest.TestCase):
             self.registry.stop(result["id"])
 
         self.assertGreaterEqual(send_mock.call_count, 2)
-        create_mock.assert_called_once()  # session created once, reused on tick 2
+        # Session created once and reused on tick 2. Counted by path rather
+        # than by total calls on the mock: stop() now also goes through
+        # _opencode_json_request (abort + delete, so a stopped loop doesn't
+        # leave its current check-in running), and that stop is inside the
+        # patch block above.
+        creates = [c for c in create_mock.call_args_list
+                   if c.args[1] == "/session" and c.kwargs.get("method") == "POST"]
+        self.assertEqual(len(creates), 1)
         second_call_text = send_mock.call_args_list[1].args[2]
         self.assertEqual(second_call_text, "watch the loss")  # no preamble wrapper on repeat ticks
 
@@ -260,6 +267,40 @@ class TestLoopRegistryUnit(unittest.TestCase):
             calls_at_stop = send_mock.call_count
             time.sleep(0.1)
             self.assertEqual(send_mock.call_count, calls_at_stop)  # no tick after stop
+
+    def test_stop_aborts_and_deletes_the_session(self):
+        """Cancelling the timer only stops FUTURE ticks. A check-in already
+        inside _opencode_send_and_collect runs on to its own timeout, so
+        closing a loop's tab used to leave the agent working on an answer
+        nobody would ever read -- and leaked the session on top."""
+        with patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}) as req_mock,                 patch.object(ui_server, "_opencode_send_and_collect", return_value=("ok", None)):
+            result = self.registry.start("watch training", 120, "/tmp", None)
+            self._wait_for_first_tick(result["id"])
+
+            req_mock.reset_mock()
+            self.assertTrue(self.registry.stop(result["id"])["ok"])
+
+        paths = [(c.args[1], c.kwargs.get("method")) for c in req_mock.call_args_list]
+        self.assertIn(("/session/ses_abc/abort", "POST"), paths)
+        self.assertIn(("/session/ses_abc", "DELETE"), paths)
+
+    def test_stop_still_succeeds_when_the_abort_call_fails(self):
+        """A wedged OpenCode must not make the stop button hang or error: the
+        job is gone from the registry either way, so its result is dropped and
+        nothing further is scheduled."""
+        with patch.object(ui_server, "_opencode_json_request", return_value={"id": "ses_abc"}),                 patch.object(ui_server, "_opencode_send_and_collect", return_value=("ok", None)) as send_mock:
+            result = self.registry.start("watch training", 120, "/tmp", None)
+            self._wait_for_first_tick(result["id"])
+
+            with patch.object(ui_server, "_opencode_json_request",
+                              side_effect=OSError("connection refused")):
+                stop_result = self.registry.stop(result["id"])
+
+            self.assertTrue(stop_result["ok"])
+            self.assertEqual(self.registry.list(), [])
+            calls_at_stop = send_mock.call_count
+            time.sleep(0.1)
+            self.assertEqual(send_mock.call_count, calls_at_stop)
 
     def test_stopping_an_unknown_job_id_reports_not_found(self):
         result = self.registry.stop("does-not-exist")

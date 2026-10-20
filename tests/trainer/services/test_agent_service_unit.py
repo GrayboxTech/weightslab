@@ -183,3 +183,75 @@ class TestAgentServiceUnit(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestCurrentModelIsReported(unittest.TestCase):
+    """Both surfaces must be able to see a model chosen on the other one.
+
+    Before this, no RPC reported the ACTIVE model: the studio knew only what
+    it had set itself, so a `/model` switch from the CLI never reached the UI.
+    """
+
+    def _make_service(self, agent=None, available=True):
+        data_service = SimpleNamespace(
+            _agent=agent,
+            _is_agent_available=MagicMock(return_value=available),
+        )
+        return AgentService(data_service)
+
+    def test_health_reports_the_live_model(self):
+        agent = MagicMock()
+        agent.current_model.return_value = 'opencode/big-pickle'
+        service = self._make_service(agent=agent)
+
+        response = service.CheckAgentHealth(pb2.Empty(), None)
+
+        self.assertEqual(response.current_model, 'opencode/big-pickle')
+
+    def test_model_list_reports_which_one_is_active(self):
+        agent = MagicMock()
+        agent.current_model.return_value = 'opencode/grok-code'
+        agent.get_available_models.return_value = (
+            True, ['opencode/grok-code', 'opencode/big-pickle'], '')
+        service = self._make_service(agent=agent)
+
+        response = service.GetAgentModels(pb2.GetAgentModelsRequest(), None)
+
+        self.assertEqual(response.current_model, 'opencode/grok-code')
+        self.assertIn(response.current_model, list(response.models))
+
+    def test_a_cli_switch_is_visible_on_the_next_health_poll(self):
+        """The CLI -> UI direction, which had no channel at all."""
+        agent = MagicMock()
+        agent.current_model.return_value = 'opencode/model-a'
+        service = self._make_service(agent=agent)
+        self.assertEqual(
+            service.CheckAgentHealth(pb2.Empty(), None).current_model,
+            'opencode/model-a')
+
+        # Someone types `/model opencode/model-b` in the CLI.
+        agent.current_model.return_value = 'opencode/model-b'
+
+        self.assertEqual(
+            service.CheckAgentHealth(pb2.Empty(), None).current_model,
+            'opencode/model-b')
+
+    def test_no_agent_reports_an_empty_model_rather_than_failing(self):
+        service = self._make_service(agent=None, available=False)
+
+        response = service.CheckAgentHealth(pb2.Empty(), None)
+
+        self.assertEqual(response.current_model, '')
+        self.assertFalse(response.available)
+
+    def test_a_raising_agent_does_not_break_the_health_poll(self):
+        # Health is polled constantly; one unresolvable model must not take
+        # the whole response down with it.
+        agent = MagicMock()
+        agent.current_model.side_effect = RuntimeError('opencode unreachable')
+        service = self._make_service(agent=agent)
+
+        response = service.CheckAgentHealth(pb2.Empty(), None)
+
+        self.assertEqual(response.current_model, '')
+        self.assertTrue(response.available)

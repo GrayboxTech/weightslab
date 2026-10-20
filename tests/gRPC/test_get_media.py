@@ -69,6 +69,7 @@ class _StubService:
     """Minimal stand-in exposing only what GetMedia touches."""
     _MEDIA_CHUNK_BYTES = DataService._MEDIA_CHUNK_BYTES
     _MEDIA_CACHE_ENTRIES = DataService._MEDIA_CACHE_ENTRIES
+    _MEDIA_CACHE_BYTES = DataService._MEDIA_CACHE_BYTES
     GetMedia = DataService.GetMedia
     _stream_media = DataService._stream_media
     _media_cache_get = DataService._media_cache_get
@@ -432,3 +433,45 @@ def test_chunk_sizes_respect_the_configured_bound():
 
     assert all(len(c.data) <= 2048 for c in chunks)
     assert sum(len(c.data) for c in chunks) == chunks[0].total_bytes
+
+
+# ---------------------------------------------------------------------------
+# Cache budget — entries AND bytes
+# ---------------------------------------------------------------------------
+def test_media_cache_evicts_on_byte_budget_before_entry_count():
+    """A few large clips must not pin memory just because the count fits.
+
+    Clip sizes vary by orders of magnitude between datasets, so the entry
+    count alone cannot bound this cache: 32 entries of 40 MB each would be
+    1.2 GB held inside the training process.
+    """
+    stub = _StubService(_FakeVideoDataset())
+    stub._MEDIA_CACHE_ENTRIES = 100          # deliberately not the binding limit
+    stub._MEDIA_CACHE_BYTES = 10 * 1024      # 10 KB
+
+    for i in range(8):
+        stub._media_cache_put(i, {"data": b"x" * 4096})   # 4 KB each
+
+    total = sum(len(v["data"]) for v in stub._media_cache.values())
+    assert total <= stub._MEDIA_CACHE_BYTES, total
+    assert len(stub._media_cache) < 8        # byte budget evicted, count did not
+
+
+def test_media_cache_keeps_the_entry_just_inserted():
+    """Whoever just put a clip in is about to stream it."""
+    stub = _StubService(_FakeVideoDataset())
+    stub._MEDIA_CACHE_ENTRIES = 1
+    stub._MEDIA_CACHE_BYTES = 1              # smaller than any real payload
+
+    stub._media_cache_put("only", {"data": b"x" * 4096})
+
+    assert "only" in stub._media_cache
+
+
+def test_media_cache_holds_the_studio_prefetch_window():
+    """The default must cover the modal's 6-neighbour window.
+
+    A cache smaller than the window evicts clips the studio has just
+    prefetched, so every step through a video dataset re-muxes on the backend.
+    """
+    assert DataService._MEDIA_CACHE_ENTRIES >= 7

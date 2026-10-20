@@ -31,6 +31,13 @@ How it works
   ``root_log_dir``. Reopening the panel, even after restarting the UI,
   as long as it points at the same experiment, reloads the same cells,
   their source, and their last-run outputs.
+- A new experiment's notebook starts with two worked cells: the data and
+  logged signals at a glance, then the model's layers (by index and name, the
+  one the projection reads marked) with how to re-project from another layer.
+  Set ``LAYER`` in that cell to a name or index from the list and run it
+  again: it calls ``wl.project_dataset(..., layer=...)`` on the live prefix,
+  and training carries on from that fit. To keep the layer for the next run,
+  pass ``projection={"layer": "<name>"}`` to ``wl.watch_or_edit``.
 - Every cell runs against the training process's ONE shared kernel: only one
   cell executes at a time. Clicking Run on a second cell while another is
   still running queues it rather than firing a second concurrent execution.
@@ -38,6 +45,9 @@ How it works
   (merged, in order), the value of the last expression, any ``matplotlib``
   figures rendered inline as images, and a full traceback on error.
 - A run can be interrupted mid-flight with the stop button next to the cell.
+- Running a code cell pauses a running training first, and training stays
+  paused until Play: a cell always sees one state of the model (see
+  :ref:`notebook-pauses-training`).
 
 Cell types
 ----------

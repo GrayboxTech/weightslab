@@ -396,9 +396,9 @@ def load_raw_image(dataset, index):
         if hasattr(np_img, 'numpy'):
             np_img = np_img.numpy()
         if np_img.ndim == 2:
-            return Image.fromarray(np_img.astype(np.uint8), mode="L")
+            return Image.fromarray(np_img.astype(np.uint8))
         elif np_img.ndim == 3:
-            return Image.fromarray(np_img.astype(np.uint8), mode="RGB")
+            return Image.fromarray(np_img.astype(np.uint8)).convert("RGB")
         else:
             raise ValueError(f"Unsupported image shape: {np_img.shape}")
 

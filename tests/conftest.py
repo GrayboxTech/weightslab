@@ -68,3 +68,35 @@ def _disable_resource_monitor():
             os.environ.pop("WEIGHTSLAB_DISABLE_RESOURCE_MONITORING", None)
         else:
             os.environ["WEIGHTSLAB_DISABLE_RESOURCE_MONITORING"] = previous
+
+
+# The test modules that spawn (fake) OpenCode servers.
+_OPENCODE_SPAWNING_MODULES = (
+    "test_opencode_process",
+    "test_opencode_shared_server_integration",
+    "test_server_agent",
+)
+
+
+@pytest.fixture(autouse=True)
+def _private_opencode_machine_lock(request, monkeypatch):
+    """Give each OpenCode-spawning test its own machine-wide lock.
+
+    opencode_process publishes every server it spawns in
+    ``~/.weightslab/.wl_opencode.json`` (the machine-wide rendezvous), and the
+    fake servers these tests start are detached on purpose, so they outlive
+    the test. Against the real home directory, the next test found the
+    previous one's fake still healthy and adopted it instead of spawning
+    (``'machine-lockfile' != 'spawned'``), and running the suite overwrote the
+    developer's own lock with a test server's address.
+
+    test_opencode_rendezvous isolates the home directory itself and asserts the
+    real path layout, so it is left alone here.
+    """
+    if request.module.__name__.rsplit(".", 1)[-1] not in _OPENCODE_SPAWNING_MODULES:
+        yield
+        return
+    from weightslab import opencode_process
+    lock = request.getfixturevalue("tmp_path") / ".weightslab" / opencode_process.LOCK_FILENAME
+    monkeypatch.setattr(opencode_process, "machine_lock_path", lambda: lock)
+    yield

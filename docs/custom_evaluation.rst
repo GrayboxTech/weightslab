@@ -5,7 +5,7 @@ When the CLI's ``evaluate`` command (or the UI's evaluate action, or the
 agent) runs an evaluation, something has to actually iterate the loader and
 compute the numbers. By default WeightsLab builds that runner for you out of
 whatever signals you've already registered as ``flag="loss"``/``flag="metric"``
-— but decorating your own function with ``@wl.eval_fn`` replaces that default
+, but decorating your own function with ``@wl.eval_fn`` replaces that default
 with your real evaluation logic.
 
 The built-in default
