@@ -1021,6 +1021,9 @@ jobs:
 
       # Each branch is rewritten from its fresh tip; a push rejected because the
       # branch moved meanwhile is retried on the new tip rather than rebased.
+      # refs/heads/ is spelled out: the repo also has a tag named "main", and a
+      # bare "main" refspec is ambiguous ("dst refspec main matches more than
+      # one" failed the v2.0.3 sync).
       - name: Commit weightslab/VERSION
         env:
           VERSION: ${{ steps.target.outputs.version }}
@@ -1031,7 +1034,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           for BRANCH in ${BRANCHES}; do
             for attempt in 1 2 3; do
-              git fetch --depth=1 origin "${BRANCH}"
+              git fetch --depth=1 origin "refs/heads/${BRANCH}"
               git checkout -q -B "${BRANCH}" FETCH_HEAD
               printf '%s\n' "${VERSION}" > weightslab/VERSION
               git add weightslab/VERSION
@@ -1040,7 +1043,7 @@ jobs:
                 continue 2
               fi
               git commit -q -m "release: weightslab/VERSION -> ${VERSION} [skip ci]"
-              if git push origin "HEAD:${BRANCH}"; then
+              if git push origin "HEAD:refs/heads/${BRANCH}"; then
                 echo "${BRANCH}: weightslab/VERSION -> ${VERSION}"
                 continue 2
               fi
@@ -1050,3 +1053,22 @@ jobs:
             echo "::error::Could not push weightslab/VERSION to ${BRANCH}"
             exit 1
           done
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # WHAT'S NEW — after a main release, regenerate docs/whats_new.rst from the
+  # GitHub releases, commit it to main and dev, and redeploy the docs.
+  # ═══════════════════════════════════════════════════════════════════════════
+  # The tag push already started docs-pages.yml, but that build ran before this
+  # release existed, so the page it published lacks it. whats-new.yml commits
+  # the refreshed page with "[skip ci]" and dispatches docs-pages.yml itself.
+  # After sync-version-file so the two never push to main/dev at the same time;
+  # !cancelled() so a failed VERSION sync does not hold the docs back.
+  update-whats-new:
+    name: Update docs What's New
+    needs: [create-main-release, sync-version-file]
+    if: ${{ !cancelled() && needs.create-main-release.result == 'success' }}
+    permissions:
+      contents: read
+      actions: write
+    uses: ./.github/workflows/whats-new.yml
+    secrets: inherit
