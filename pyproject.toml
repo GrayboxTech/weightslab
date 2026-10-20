@@ -11,12 +11,12 @@ authors = [
   { name = "Alexandru-Andrei Rotaru", email = "alexandru@graybx.com" },
   { name = "Guillaue Pelluet", email = "guillaue@graybx.com" }
 ]
-license = { text = "BSD 2-clause" }
+license = { text = "PolyForm-Noncommercial-1.0.0 OR PolyForm-Small-Business-1.0.0 OR commercial licence from Graybox SAS (see LICENSE)" }
 requires-python = ">=3.10"
 classifiers = [
   "Development Status :: 1 - Planning",
   "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: BSD License",
+  "License :: Other/Proprietary License",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3.10",
 ]

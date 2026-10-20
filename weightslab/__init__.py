@@ -238,7 +238,7 @@ if _IS_MAIN_PROCESS:
 __author__ = 'Alexandru-Andrei ROTARY'
 __maintainer__ = 'Guillaume PELLUET'
 __credits__ = 'GrayBx'
-__license__ = 'BSD 2-clause'
+__license__ = 'PolyForm-Noncommercial-1.0.0 OR PolyForm-Small-Business-1.0.0 OR commercial (see LICENSE)'
 __all__ = [
     "watch_or_edit",
     "serve",
