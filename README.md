@@ -1,8 +1,8 @@
 <div align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/GrayboxTech/.github/blob/main/profile/weightslab-banner-product-screen.png" />
-    <source media="(prefers-color-scheme: light)" srcset="https://github.com/GrayboxTech/.github/blob/main/profile/weightslab-banner-product-screen.png" />
-    <img alt="WeightsLab Banner" src="https://github.com/GrayboxTech/.github/blob/main/profile/weightslab-banner-product-screen.png" width="100%" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/weightslab-banner-product-screen.png" />
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/weightslab-banner-product-screen.png" />
+    <img alt="WeightsLab Banner" src="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/weightslab-banner-product-screen.png" width="100%" />
   </picture>
 <br>
 

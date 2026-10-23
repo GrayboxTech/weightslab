@@ -19,6 +19,74 @@ list lives.
    time? Start at :doc:`quickstart`.
 
 .. card::
+   :link: https://github.com/GrayboxTech/weightslab/releases/tag/v2.0.3
+   :class-card: wl-release-card
+
+   .. rst-class:: wl-release-date
+
+   October 20, 2026
+
+   .. rst-class:: wl-release-version
+
+   v2.0.3
+
+   - `PR #312 <https://github.com/GrayboxTech/weightslab/pull/312>`__
+
+     **Summary**
+
+     This PR adds learned 2D/3D projections during training so model representations
+     can be explored live in the Studio. By default, it uses a parametric UMAP trained
+     alongside the model, allowing the projection to track representation changes as
+     training progresses and to embed new samples without refitting. The projection
+     can be configured per model, turned off when needed, and rendered alongside
+     training progress in the Studio.
+
+     *Full description in the pull request.*
+
+.. card::
+   :link: https://github.com/GrayboxTech/weightslab/releases/tag/v2.0.2
+   :class-card: wl-release-card
+
+   .. rst-class:: wl-release-date
+
+   October 1, 2026
+
+   .. rst-class:: wl-release-version
+
+   v2.0.2
+
+   - `PR #306 <https://github.com/GrayboxTech/weightslab/pull/306>`__
+
+     **Summary**
+
+     - Improve experiment-view synchronization to operate incrementally instead of
+       rebuilding the full dataset.
+     - Reduce H5 update overhead and lock duration for large experiments.
+     - Improve error reporting for failed synchronization and view-building
+       operations.
+     - Prevent training logs and tqdm output from appearing in unrelated notebook
+       cells.
+     - Fix communication issues caused by process-wide stdout/stderr redirection.
+     - Fix the 'weightslab se' command for certificate generation.
+
+     *Full description in the pull request.*
+
+   - `PR #287 <https://github.com/GrayboxTech/weightslab/pull/287>`__
+
+     **Summary**
+
+     - add a versioned, JSON-serializable model graph and per-layer/per-neuron
+       inspection API
+     - add validated dependency-aware helpers for add, prune, freeze, unfreeze, reset,
+       and perturb operations
+     - make freeze/unfreeze idempotent at the public API boundary
+     - document the model graph ontology, dependency types, and editing workflow
+     - add regression coverage for graph serialization, live structural edits, frozen
+       state, and invalid targets
+
+     *Full description in the pull request.*
+
+.. card::
    :link: https://github.com/GrayboxTech/weightslab/releases/tag/v2.0.1
    :class-card: wl-release-card
 
@@ -62,8 +130,8 @@ list lives.
    - **Error bands & outlier highlighting**, curves now display statistical bands and
      visually emphasize anomalous steps.
 
-   - **Relabelling export**, export tagged/annotated data to external tools (CVAT,
-     V7, etc.) for downstream relabelling workflows.
+   - **Relabelling export**, export tagged/annotated data to external tools (CVAT, V7,
+     etc.) for downstream relabelling workflows.
 
    - **Integrated OpenCode Agent**, full agent loop support (code generation,
      training, monitoring, report creation) directly inside WeightsLab.
@@ -187,8 +255,7 @@ list lives.
        hasn't finished indexing a fresh upload yet, or a one-off network blip during
        install/import.
 
-
-   **Test plan - [ ] Cut a ``-dev`` tag and confirm `test-install-fr...**
+     *Full description in the pull request.*
 
 .. card::
    :link: https://github.com/GrayboxTech/weightslab/releases/tag/v1.4.0
@@ -207,12 +274,20 @@ list lives.
      > Re-opened from #265 with the Ultralytics example notebooks excluded (kept on
      ``dev`` only, not ready for this release).
 
-     **WeightsLab v1.4.0**
+     **WeightsLab v1.4.0, Release Notes**
 
-     Release Notes
+     **🚀 Highlights**
 
+     - **Collab compatibility improvements**
+     - PyTorch notebooks support
+     - UL notebooks integrations
+     - Dependency fixes (notably around ``numpy > 2`` and ``protobuf``)
+     - **Docker dependency cleanup**
+     - Removed Docker-related dependencies/repositories
+     - Updated UI Docker bridge (including rename)
+     - Updated README and docs accordingly
 
-   **🚀 Highlights - **Collab compatibility improvements** - PyTorch notebooks support - UL notebooks integrations - Dependency fixes (notably around ``numpy > 2`` and ``protobuf``) - **Docker dependency cleanup** - Removed Docker-related dependencies/repositories - Updated UI Docker bridge (including rename) - Updated README and docs accordingly - **Model...**
+     *Full description in the pull request.*
 
 .. card::
    :link: https://github.com/GrayboxTech/weightslab/releases/tag/v1.3.3
@@ -228,10 +303,20 @@ list lives.
 
    - `PR #250 <https://github.com/GrayboxTech/weightslab/pull/250>`__
 
-     ## v1.3.3 Release
+     **v1.3.3 Release**
 
+     **Features & Improvements**
 
-   **Features & Improvements - **Collab Integration**: Bundled examples with Google Collab support, tunnel serving function, and documentation links - **UI Enhancements**: Fix grid size button, add restart action in dev mode, Firefox input arrows fix - **Sorting**: Default decreasing order (high loss values prioritized), configurable sort - **CLI Upgrades**: Match latest features—hyperparameter modification, experiment status check, data tagging/discard, agent queries - **Agent Actions**...**
+     - **Collab Integration**: Bundled examples with Google Collab support, tunnel
+       serving function, and documentation links
+     - **UI Enhancements**: Fix grid size button, add restart action in dev mode,
+       Firefox input arrows fix
+     - **Sorting**: Default decreasing order (high loss values prioritized),
+       configurable sort
+     - **CLI Upgrades**: Match latest features—hyperparameter modification, experiment
+       status check, data tagging/discard, agent queries
+
+     *Full description in the pull request.*
 
 .. card::
    :link: https://github.com/GrayboxTech/weightslab/releases/tag/v1.3.2
@@ -275,41 +360,12 @@ list lives.
      - New WeightsLab Banner
      - Improve, fix, and add new user weightslab commands (e.g., weightslab cli)
 
-.. card::
-   :link: https://github.com/GrayboxTech/weightslab/releases/tag/v1.3.0
-   :class-card: wl-release-card
-
-   .. rst-class:: wl-release-date
-
-   June 29, 2026
-
-   .. rst-class:: wl-release-version
-
-   v1.3.0
-
-   *(no pull requests found since last release)*
-
-.. card::
-   :link: https://github.com/GrayboxTech/weightslab/releases/tag/v1.2.5
-   :class-card: wl-release-card
-
-   .. rst-class:: wl-release-date
-
-   June 17, 2026
-
-   .. rst-class:: wl-release-version
-
-   v1.2.5
-
-   - `#207 <https://github.com/GrayboxTech/weightslab/pull/207>`__
-
-     v1.2.5, 2026-06-17 Fix EMA Sync. from Ultralytics trainer and evaluate mode
-
 
 ----
 
 `Every release on GitHub → <https://github.com/GrayboxTech/weightslab/releases>`__
 
-.. This page is generated. To refresh it after a release:
+.. This page is generated. CI (.github/workflows/whats-new.yml) refreshes it
+.. after every stable release; to refresh it by hand:
 ..     python docs/_scripts/update_whats_new.py
-.. Last generated: 2026-08-27
+.. Last generated: 2026-10-20
