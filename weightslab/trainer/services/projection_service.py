@@ -1101,7 +1101,8 @@ class ProjectionIndex:
             response.extent_max_z = float(self.hi[2])
 
         sub = _frame_rows(frame, rows, ("origin", "discarded", request.color_column,
-                                        "target", "signals//target"))
+                                        "target", "signals//target",
+                                        *_tag_columns(frame, request.color_column)))
         if not _fill_origins_from_index(response, frame, rows):
             _fill_origins(response, sub)
         _fill_colors(response, sub, request.color_column)
@@ -1510,6 +1511,30 @@ def _text_labels(series: pd.Series):
     return remap[codes], merged
 
 
+def _tag_columns(frame, column: str) -> list:
+    """Boolean ``tag:*`` columns behind colour source "tags" (all) or
+    "tags:a,b" (those); categorical tags such as loss shapes are left out."""
+    column = (column or "").strip()
+    if column != "tags" and not column.startswith("tags:"):
+        return []
+    wanted = {t.strip() for t in column[5:].split(",") if t.strip()}
+    return [c for c in frame.columns if isinstance(c, str) and c.startswith("tag:")
+            and "shape" not in c.lower() and (not wanted or c[4:] in wanted)]
+
+
+def _tag_labels(frame, tags) -> np.ndarray:
+    """Per row, the names of its set tags joined by " + ", else "untagged"."""
+    labels = np.full(len(frame), "", dtype=object)
+    for column in tags:
+        values = frame[column]
+        on = values.astype(str).str.lower().isin(("1", "1.0", "true")).to_numpy() \
+            if values.dtype == object else values.fillna(0).to_numpy(dtype=float) != 0
+        name = column[4:]
+        labels[on] = np.where(labels[on] == "", name, labels[on] + " + " + name)
+    labels[labels == ""] = "untagged"
+    return labels
+
+
 def _fill_colors(response, frame, column: str) -> None:
     """Optional per-point colour source.
 
@@ -1524,6 +1549,11 @@ def _fill_colors(response, frame, column: str) -> None:
     # sample is the same colour here as in the data grid. Filling labels for it
     # would hand the viewer a second, different palette for the same thing.
     if column in ("origin", "split"):
+        return
+
+    tags = _tag_columns(frame, column)
+    if tags or column == "tags":
+        response.color_labels.extend(_tag_labels(frame, tags).tolist())
         return
 
     if not column:
