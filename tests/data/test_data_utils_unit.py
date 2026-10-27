@@ -68,6 +68,32 @@ class TestDataUtilsUnit(unittest.TestCase):
         self.assertEqual(mask.shape, (5, 5))
         self.assertEqual(int(mask[1, 1]), 2)
 
+        batched = du.get_mask(bboxes[None], raw_data=raw_data)
+        self.assertEqual(batched.shape, (5, 5))
+        self.assertEqual(int(batched[1, 1]), 2)
+
+    def test_get_mask_keeps_dense_masks_of_another_size(self):
+        """A dense mask whose size differs from the image is not boxes.
+
+        Regression: any 2-D array with >= 4 columns was rasterized as boxes
+        before each H5 flush, so a 512x512 prediction on 640x640 images became
+        an all-zero 640x640 map.
+        """
+        class _NoRead:
+            def __getitem__(self, idx):
+                raise AssertionError("dense masks must not read the image")
+
+        image = (np.zeros((640, 640, 3), dtype=np.uint8),)
+        dense = [
+            np.random.default_rng(0).integers(0, 3, (512, 512)),  # (H, W)
+            np.ones((3, 64, 64), dtype=np.float32),                # (C, H, W)
+            np.ones((64, 64, 5), dtype=np.float32),                # (H, W, C)
+            np.ones((1, 512, 512), dtype=np.float32),              # (1, H, W)
+        ]
+        for arr in dense:
+            self.assertIs(du.get_mask(arr, raw_data=image), arr)
+            self.assertIs(du.get_mask(arr, dataset=_NoRead(), dataset_index=0), arr)
+
     def test_label_metadata_uid_and_volumetric_helpers(self):
         rows = [(
             np.zeros((4, 4, 3), dtype=np.uint8),

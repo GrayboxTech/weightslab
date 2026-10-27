@@ -246,9 +246,31 @@ def to_numpy_safe(x):
     return None
 
 
+# Widest box row: (x1, y1, x2, y2[, conf][, cls]) plus a few columns for 3-D
+# boxes. Same bound as LedgeredDataFrameManager._is_bbox_array.
+_BBOX_MAX_COLS = 9
+
+
+def _is_bbox_coords(raw) -> bool:
+    """True if ``raw`` holds box rows: ``(N, 4..9)``, or one batch of them
+    ``(1, N, 4..9)``.
+
+    A dense mask also has >= 4 columns, but its last axis is its width (or the
+    channels of an ``(H, W, C)`` map, whose first axis is H > 1), so the column
+    bound is what tells box coordinates apart from a mask.
+    """
+    if not isinstance(raw, np.ndarray) or raw.ndim not in (2, 3):
+        return False
+    if raw.ndim == 3 and raw.shape[0] != 1:
+        return False
+    return 4 <= raw.shape[-1] <= _BBOX_MAX_COLS
+
+
 def get_mask(raw, dataset=None, dataset_index=None, raw_data=None):
-    # Check if prediction_raw is a numpy array (could be bboxes)
-    if isinstance(raw, np.ndarray) and (raw.ndim == 2 or raw.ndim == 3) and raw.shape[-1] >= 4:
+    # Only box coordinates are rasterized. A dense mask is returned unchanged:
+    # read as boxes, its pixel rows would paint an empty image-sized canvas
+    # whenever the mask and the image differ in size.
+    if _is_bbox_coords(raw):
         # raw appears to be bboxes (N, 4+) format
         # Get the item (image) to determine mask dimensions
         raw_data = dataset[dataset_index] if dataset is not None and dataset_index is not None else raw_data

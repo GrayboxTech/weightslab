@@ -419,6 +419,31 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         mgr._normalize_arrays_for_storage(row)
         self.assertEqual(captured.get('sid'), "12")
 
+    def test_normalize_arrays_for_storage_keeps_dense_prediction(self):
+        """A dense prediction smaller than the image survives normalization.
+
+        Regression: a 512x512 predicted mask on 640x640 crops was rasterized
+        as bounding boxes onto a blank 640x640 canvas before each H5 flush, so
+        every stored prediction came back as zeros.
+        """
+        mgr = LedgeredDataFrameManager(enable_flushing_threads=False, enable_h5_persistence=False)
+
+        class _FakeDataset:
+            def get_index_from_sample_id(self, sid):
+                return 0
+
+            def __getitem__(self, idx):
+                return (np.zeros((640, 640, 3), dtype=np.uint8), 0)
+
+        mgr._get_loader_by_origin = lambda origin: type('L', (), {'wrapped_dataset': _FakeDataset()})()
+
+        pred = np.random.default_rng(0).integers(0, 3, (512, 512)).astype(np.int64)
+        row = pd.Series({"origin": "train", SampleStats.Ex.PREDICTION.value: pred})
+        row.name = "3"
+
+        out = mgr._normalize_arrays_for_storage(row)
+        np.testing.assert_array_equal(out[SampleStats.Ex.PREDICTION.value], pred)
+
     def test_enqueue_instance_batch_writes_per_annotation(self):
         """enqueue_instance_batch buffers one signal value per (sample_id, annotation_id);
         the flush writes them to the correct rows."""
