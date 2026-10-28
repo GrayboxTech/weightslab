@@ -779,5 +779,33 @@ class TestDataSampleTrackingWrapperAsRecords(unittest.TestCase):
             self.assertIsInstance(record, dict)
 
 
+class TestDataSampleTrackingWrapperPredictionMask(unittest.TestCase):
+    """get_prediction_mask must pass the stored prediction to get_mask.
+
+    Regression: it called get_mask(sample_id, pred_raw), so it returned the
+    sample id and the GetSamples segmentation preview had no prediction.
+    """
+
+    def _wrapper(self, pred):
+        w = DataSampleTrackingWrapper.__new__(DataSampleTrackingWrapper)
+        w._sid_to_physical_idx = {"7": 0}
+        w.get = lambda sample_id, stat_name: pred
+        w._getitem_raw = lambda index=None, id=None: (np.zeros((5, 5, 3), dtype=np.uint8), "7", None)
+        return w
+
+    def test_dense_prediction_returned(self):
+        pred = np.ones((32, 32), dtype=np.int64)
+        self.assertIs(self._wrapper(pred).get_prediction_mask("7"), pred)
+
+    def test_box_prediction_rasterized(self):
+        pred = np.array([[1, 1, 3, 3, 2]], dtype=np.float32)
+        mask = self._wrapper(pred).get_prediction_mask("7")
+        self.assertEqual(mask.shape, (5, 5))
+        self.assertEqual(int(mask[1, 1]), 2)
+
+    def test_missing_prediction(self):
+        self.assertIsNone(self._wrapper(None).get_prediction_mask("7"))
+
+
 if __name__ == "__main__":
     unittest.main()
