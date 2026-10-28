@@ -4285,6 +4285,27 @@ class DataService:
 
 
 
+    def _view_lacks_samples(self, dfm, dirty, any_held: bool) -> bool:
+        """_fastUpdateInternals' answer when dirty samples are missing from the view.
+
+        A filtered view leaves samples out on purpose: there is nothing to add,
+        and a rebuild only pays off when the batch also touched rows it shows.
+
+        An unfiltered view holds every sample, so a missing one is NEW -- a
+        loader registered after the view was built, from a notebook cell say --
+        and only the full rebuild can add it. That rebuild can bail (the 10 s
+        throttle; _bg_view_refresh runs the differential pass again first, on a
+        queue already drained here), and the ids were never offered again: the
+        new split never reached the studio. So they go back on the queue until
+        a rebuild actually swaps in (clear_view_dirty).
+        """
+        if getattr(self, "_is_filtered", False):
+            return not any_held
+        requeue = getattr(dfm, "requeue_view_dirty", None)
+        if requeue is not None:
+            requeue(dirty)
+        return False
+
     def _fastUpdateInternals(self, max_dirty: int = 250_000) -> bool:
         """O(change) view refresh. True if applied, False -> caller must rebuild.
 
@@ -4415,12 +4436,8 @@ class DataService:
             # index (built once with the cached keys above, then reused).
             _pos = _view_keys.get_indexer(_sub_keys)
             _found = _pos >= 0
-            if not _found.any():
-                return True
-            # A dirty sample the view does not hold is a structural change (a
-            # new sample): only the full rebuild can add it.
             if not _found.all():
-                return False
+                return self._view_lacks_samples(dfm, dirty, any_held=bool(_found.any()))
             _rows = _pos
             _take = np.arange(len(_pos))
         else:
@@ -4436,10 +4453,9 @@ class DataService:
             # source (indexed by sample_id alone) can mean.
             _src = _sub_keys.get_indexer(_view_keys)      # sub row per view row, -1 if none
             _rows = np.flatnonzero(_src >= 0)
-            if _rows.size == 0:
-                return True
-            if len(set(_sub_keys)) != len(set(_view_keys[_rows])):
-                return False
+            _held = len(set(_view_keys[_rows]))
+            if _held != len(set(_sub_keys)):
+                return self._view_lacks_samples(dfm, dirty, any_held=_held > 0)
             _take = _src[_rows]
         for c in sub.columns:
             _ci = view.columns.get_loc(c)

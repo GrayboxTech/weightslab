@@ -66,6 +66,9 @@ class _FakeManager:
         dirty, self._dirty = self._dirty, []
         return dirty
 
+    def requeue_view_dirty(self, sample_ids):
+        self._dirty.extend(sample_ids)
+
     def get_source_rows(self, sample_ids, columns=None):
         wanted = [str(s) for s in sample_ids]
         level = self._df.index.get_level_values(SID).astype(str)
@@ -227,14 +230,32 @@ class TestFastViewSyncAddressing(unittest.TestCase):
         # 99 is new -> structural change -> only the full rebuild can add it.
         self.assertFalse(service._fastUpdateInternals())
 
-    def test_nothing_to_do_when_no_dirty_sample_is_in_the_view(self):
+    def test_a_filtered_view_ignores_the_samples_it_leaves_out(self):
         view = pd.DataFrame(
             {DISCARDED: [False], "last_seen": [1]},
             index=pd.MultiIndex.from_tuples([("train_loader", "7")], names=["origin", SID]),
         )
         service = self._service(self._source(), ["5"], view)
+        service._is_filtered = True
         self.assertTrue(service._fastUpdateInternals())
         self.assertEqual(view["last_seen"].tolist(), [1])
+        self.assertEqual(service._df_manager._dirty, [])
+
+    def test_new_samples_stay_queued_until_a_rebuild(self):
+        """A loader registered after the view was built: none of its samples
+        is in the (unfiltered) view. That used to read as "nothing to do", and
+        the drained ids were never offered again, so the split never showed."""
+        view = pd.DataFrame(
+            {DISCARDED: [False], "last_seen": [1]},
+            index=pd.MultiIndex.from_tuples([("train_loader", "7")], names=["origin", SID]),
+        )
+        service = self._service(self._source(), ["5"], view)
+
+        self.assertFalse(service._fastUpdateInternals())
+        # The rebuild this asks for can bail (throttled), and _bg_view_refresh
+        # runs this pass again before rebuilding: both must still see them.
+        self.assertFalse(service._fastUpdateInternals())
+        self.assertEqual(service._df_manager._dirty, ["5"])
 
 
 class TestDocumentedFlagDefaults(unittest.TestCase):

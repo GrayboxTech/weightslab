@@ -1707,6 +1707,13 @@ class LedgeredDataFrameManager:
         with self._lock:
             self._view_pending.clear()
 
+    def requeue_view_dirty(self, sample_ids):
+        """Put back ids take_view_dirty() handed out that the caller could not
+        apply. Same reason as the "do NOT clear" case there: the caller falls
+        back to a rebuild that can bail, and nothing else would re-mark them."""
+        with self._lock:
+            self._view_pending.update(sample_ids)
+
     def get_source_rows(self, sample_ids, columns=None):
         """Rows for *sample_ids* straight from the source frame. O(len(ids)).
 
