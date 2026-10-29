@@ -100,12 +100,48 @@ checks remain visible. Branch-local age starts at zero; the parent was trained
 for the configured baseline budget. This is learned-head-parameter replay,
 not a full training-state/ledger restore. Only load trusted generated caches.
 
+### Reading the attribution view
+
+The default is a heatmap without the photograph behind it. Orange supports the
+fixed dataset-class logit; blue opposes it. The class being explained is labelled
+separately from each model's prediction. Switch to **Overlay on grayscale photo**
+and adjust opacity to locate contributions on the image; the grayscale treatment
+is display-only and never changes the model input.
+
+The default detail level sums signed attribution inside 16 × 16 pixel regions,
+so opposite contributions within a region can cancel. **Individual pixels**
+shows the original signed, channel-summed values. Both models use the same
+symmetric scale, pooled across all five snapshots for that image. The readable
+scale caps magnitude at the pooled 99th percentile and reports the saturated
+fraction for each displayed map. **Full range** disables clipping. Scales are
+not comparable across different images or detail levels. These are not attention
+maps, and color differences alone do not establish improved predictions.
+
+New attribution exports include unclipped little-endian float32 maps. To update
+an older demo without retraining or rebuilding the feature cache:
+
+```bash
+python "$experiment_dir/attribute_waterbirds.py" --run-dir /path/to/existing-run \
+  --dataset-root /path/to/waterbird_complete95_forest2water2 \
+  --output /path/to/attribution-ui.json
+python "$experiment_dir/build_demo.py" --refresh-demo /path/to/old-demo/index.html \
+  --attribution /path/to/attribution-ui.json --chart-js /path/to/chart-4.5.1.js \
+  --output /path/to/new-demo/index.html
+```
+
+Refreshing reuses embedded images/results and validates protocol, attribution
+seed/target, validation cases, inputs, labels and predictions. Output must be a
+new file; the existing demo is preserved. A legacy export without raw maps shows
+an explicit unavailable message rather than an invented heatmap.
+
 Run targeted CPU checks:
 
 ```bash
 python "$experiment_dir/test_plan.py"
 python "$experiment_dir/test_experiment.py"
+python "$experiment_dir/test_demo.py"
 python -m pytest tests/diagnostics/test_prediction_comparison.py -q
+node --test "$experiment_dir/test_attribution_view.cjs"
 ```
 
 ## Remaining integration work

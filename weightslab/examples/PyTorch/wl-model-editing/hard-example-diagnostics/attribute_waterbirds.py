@@ -48,6 +48,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
+    parser.add_argument("--output", type=Path, help="Optional attribution output; leaves the original export intact")
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name("experiment.json"))
     args = parser.parse_args()
     report = json.loads((args.run_dir / "report.json").read_text())
@@ -117,6 +118,11 @@ def main():
             print(f"Attributed {case['sample_id']} / {name}: steps={steps}, delta={delta:.5f}, passed={converged}", flush=True)
         scale = max(float(np.abs(values).max()) for values in attribution_maps.values())
         for name, values in attribution_maps.items():
+            # Preserve signed, unclipped values for honest browser-side rendering.
+            entries[name]["attribution"] = {
+                "encoding": "float32-le-base64", "shape": list(values.shape),
+                "data": base64.b64encode(values.astype("<f4").tobytes()).decode(),
+            }
             strength = np.abs(values) / max(scale, np.finfo(float).eps)
             color = np.where((values >= 0)[..., None], np.array([240, 84, 44]), np.array([43, 106, 216]))
             overlay = crop_array * (1 - strength[..., None]) + color * strength[..., None]
@@ -124,7 +130,7 @@ def main():
         result["cases"][case["sample_id"]] = {"group": case["group"], "label": case["label"],
                                                "crop": image_uri(Image.fromarray(crop_array)),
                                                "shared_scale": scale, "snapshots": entries}
-        (args.run_dir / "attribution.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
+        (args.output or args.run_dir / "attribution.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
     wl.clear_all()
 
 
