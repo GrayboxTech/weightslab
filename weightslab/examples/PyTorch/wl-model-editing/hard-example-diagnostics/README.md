@@ -102,11 +102,13 @@ not a full training-state/ledger restore. Only load trusted generated caches.
 
 ### Reading the attribution view
 
-The default is a heatmap without the photograph behind it. Orange supports the
-fixed dataset-class logit; blue opposes it. The class being explained is labelled
-separately from each model's prediction. Switch to **Overlay on grayscale photo**
-and adjust opacity to locate contributions on the image; the grayscale treatment
-is display-only and never changes the model input.
+Open the **Image attribution** tab. The default overlays attribution on the
+photograph. Orange supports the fixed dataset-class logit; blue opposes it.
+The class being explained is labelled separately from each model's prediction.
+Hover or tap either overlay to inspect the same location in both models and
+read its signed contribution and change. Adjust opacity to locate contributions;
+the grayscale treatment is display-only and never changes the model input.
+**Heatmap only (advanced)** is optional, not the default.
 
 The default detail level sums signed attribution inside 16 × 16 pixel regions,
 so opposite contributions within a region can cancel. **Individual pixels**
@@ -143,6 +145,78 @@ python "$experiment_dir/test_demo.py"
 python -m pytest tests/diagnostics/test_prediction_comparison.py -q
 node --test "$experiment_dir/test_attribution_view.cjs"
 ```
+
+## Growth-initialization follow-up and live editing lab
+
+This follow-up reuses the original parent checkpoints and feature cache. It
+adds output-preserving growth and fixed-order pruning ablations. The test set
+was already inspected in the original pilot; do not present this as a new
+untouched holdout. See [the report for Alex](../../../../../docs/proposals/blog-packet-2026-10-29.md).
+
+From the repository root, with the dependencies above installed:
+
+```bash
+export WEIGHTSLAB_PROJECTION=0 WEIGHTSLAB_OPENCODE_AUTOINSTALL=0 WL_NO_TELEMETRY=1
+experiment_dir=weightslab/examples/PyTorch/wl-model-editing/hard-example-diagnostics
+python "$experiment_dir/run_growth_followup.py" \
+  --parent-dir /path/to/original-run --cache /path/to/features.pt \
+  --output /path/to/new-growth-run --source-commit "$(git rev-parse HEAD)"
+python "$experiment_dir/verify_growth_followup.py" \
+  --run-dir /path/to/new-growth-run --cache /path/to/features.pt \
+  --output /path/to/new-growth-run/verification.json
+python "$experiment_dir/live_growth_lab.py" \
+  --parent-dir /path/to/original-run --followup-dir /path/to/new-growth-run \
+  --cache /path/to/features.pt --demo-html /path/to/demo/index.html \
+  --output /path/to/live-audit --port 8878
+```
+
+Open `http://localhost:8878/`. The server binds to loopback, checks Host/Origin
+and a per-process request token, and accepts only the fixed experiment controls.
+For a remote host, forward the port with `ssh -L 8878:127.0.0.1:8878 <host>`.
+Do not expose this experimental server directly to the public network.
+
+Every click restores a checkpoint, applies real `add_neurons`/`prune_neurons`
+operations where requested, and reevaluates all validation or test examples.
+Trained-stage requests load the completed 250-step checkpoints; they do not
+train in the HTTP request. The main reference is the equally trained no-growth
+head under the same sampling policy. A separate pruning-impact line compares
+against the selected checkpoint before removal. These are different controls.
+
+The live process edits only the MLP head over cached frozen ViT features.
+Output preservation zeroes the new classifier columns after growth; it is an
+experiment-local policy, not a new option on the public editing API. All
+checkpoints remain immutable. Only load trusted generated PyTorch caches.
+
+For browser QA and actual screenshots, install Playwright in your tooling
+environment and its Chromium browser. With the recorded viewer on port 8877
+and live lab on port 8878:
+
+```bash
+node "$experiment_dir/capture_blog_packet.cjs" /path/to/packet
+python "$experiment_dir/test_growth_followup.py"
+python "$experiment_dir/test_live_growth_lab.py"
+```
+
+`RECORDED_DEMO_URL`, `LIVE_LAB_URL` and `PLAYWRIGHT_CHROMIUM_EXECUTABLE` can
+override the capture defaults. The script writes seven screenshots, captions,
+and the actual live request results after all assertions pass. It does not
+fabricate predictions or modify saved experiment checkpoints.
+
+To assemble the report packet, put the completed `followup.json` and
+`verification.json` in an evidence directory, then run:
+
+```bash
+pip install markdown
+python "$experiment_dir/build_blog_packet.py" \
+  --evidence-dir /path/to/evidence \
+  --report-md docs/proposals/blog-packet-2026-10-29.md \
+  --recorded-demo /path/to/demo/index.html --output /path/to/packet
+```
+
+The output directory must already contain the capture script's screenshots and
+browser evidence. The builder writes a readable HTML report, per-seed JSON,
+checksums and a ZIP next to the packet directory. Keep dataset-bearing artifacts
+outside Git and review image permissions before publishing them.
 
 ## Remaining integration work
 
