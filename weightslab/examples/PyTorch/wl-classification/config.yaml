@@ -6,6 +6,10 @@ root_log_dir: C:\Users\GuillaumePELLUET\Desktop\USECASES_TESTING  # Path to save
 
 checkpoint_manager:
   load_config: false  # Disable loading previous checkpoint configuration to allow for changes in the current config.yaml file
+  # keep_best:          # Keep only the 5 dumps with the best test accuracy (plus the latest, to resume)
+  #   signal: metric-ACC
+  #   k: 5
+  #   mode: max
 
 optimizer:
   lr: 0.001
