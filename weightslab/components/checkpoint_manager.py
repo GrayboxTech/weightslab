@@ -48,6 +48,7 @@ from weightslab.components.global_monitoring import guard_training_context, guar
 from weightslab.components.experiment_hash import ExperimentHashGenerator
 from weightslab.data.h5_recovery import read_snapshot_table
 from weightslab.components.experiment_naming import generate_experiment_name
+from weightslab.components.checkpoint_retention import KeepBestPolicy, steps_to_prune
 from weightslab.backend.ledgers import (
     get_model,
     get_optimizer,
@@ -568,7 +569,8 @@ class CheckpointManager:
         except Exception as e:
             logger.warning(f"Failed to update manifest: {e}")
 
-    def _update_manifest_weight_checkpoint(self, exp_hash: str, checkpoint_filename: str, step: int):
+    def _update_manifest_weight_checkpoint(self, exp_hash: str, checkpoint_filename: str, step: int,
+                                           rotate: bool = False):
         """Update manifest with latest weight checkpoint for given experiment hash."""
         try:
             manifest = self._load_manifest()
@@ -576,6 +578,7 @@ class CheckpointManager:
                 manifest['experiments'][exp_hash]['latest_weight_checkpoint'] = checkpoint_filename
                 manifest['experiments'][exp_hash]['latest_weight_step'] = step
                 manifest['experiments'][exp_hash]['last_used'] = datetime.now().isoformat()
+                self._record_rotating_checkpoint(manifest['experiments'][exp_hash], checkpoint_filename, rotate)
 
                 # Write updated manifest
                 with open(self.manifest_file, 'w') as f:
@@ -583,6 +586,106 @@ class CheckpointManager:
                 logger.debug(f"Updated manifest with weight checkpoint: {checkpoint_filename} (step {step})")
         except Exception as e:
             logger.warning(f"Failed to update manifest weight checkpoint: {e}")
+
+    @staticmethod
+    def _record_rotating_checkpoint(entry: Dict[str, Any], checkpoint_filename: str, rotate: bool) -> None:
+        """Note in a manifest entry whether keep_best may delete this file.
+
+        A save on purpose landing on the file of an earlier automatic dump (same
+        step) takes it off the list: what was saved on purpose is never rotated.
+        """
+        names = [n for n in entry.get('rotating_weight_checkpoints') or [] if n != checkpoint_filename]
+        if rotate:
+            names.append(checkpoint_filename)
+        if names or 'rotating_weight_checkpoints' in entry:
+            entry['rotating_weight_checkpoints'] = names
+
+    def _apply_keep_best(self, exp_hash: str) -> List[Path]:
+        """Delete the automatic dumps of *exp_hash* that fall out of the
+        ``checkpoint_manager.keep_best`` ranking (see checkpoint_retention).
+        Returns the deleted checkpoint files."""
+        warned = self.__dict__.setdefault('_keep_best_warned', set())
+        try:
+            manager_config = self.config.get('checkpoint_manager', {}) if self.config is not None else {}
+            # The ledger's hyperparameters Proxy hands back a live key proxy.
+            if hasattr(manager_config, '_resolve'):
+                manager_config = manager_config._resolve()
+        except Exception:
+            manager_config = {}
+        try:
+            policy = KeepBestPolicy.from_config(manager_config)
+        except ValueError as exc:
+            if str(exc) not in warned:
+                warned.add(str(exc))
+                logger.warning(f"checkpoint_manager.keep_best ignored, every checkpoint is kept: {exc}")
+            return []
+        if policy is None:
+            return []
+
+        manifest = self._load_manifest()
+        entry = manifest.get('experiments', {}).get(exp_hash)
+        if not entry or not entry.get('rotating_weight_checkpoints'):
+            return []
+
+        model_dir = self.models_dir / exp_hash[8:-8]
+        on_disk = {}
+        for path in model_dir.glob(f"{exp_hash}_step_*.pt"):
+            step = self._extract_step_from_checkpoint_name(path.name)
+            if step is not None:
+                on_disk[step] = path
+        rotating = {step: path for step, path in on_disk.items()
+                    if path.name in entry['rotating_weight_checkpoints']}
+        if len(rotating) <= policy.k:
+            return []
+
+        history = self._keep_best_history(policy.signal, exp_hash)
+        if not history:
+            key = (policy.signal, exp_hash)
+            if key not in warned:
+                warned.add(key)
+                logger.warning(
+                    f"checkpoint_manager.keep_best: no value of signal '{policy.signal}' logged for "
+                    f"{exp_hash} yet, so no checkpoint is rotated. Check the name against the Studio plots.")
+            return []
+
+        from weightslab.projection import snapshots as projection_snapshots
+        removed = []
+        for step in steps_to_prune(policy, rotating, max(on_disk), history):
+            path = rotating[step]
+            try:
+                path.unlink()
+            except OSError as exc:
+                logger.warning(f"keep_best could not delete {path.name}: {exc}")
+                continue
+            for sidecar in (self.projection_sidecar_path(path), projection_snapshots.sidecar_path(path)):
+                try:
+                    sidecar.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            removed.append(path)
+            logger.info(f"keep_best: removed {path.name}, not in the {policy.k} best on '{policy.signal}' ({policy.mode})")
+
+        if removed:
+            gone = {p.name for p in removed}
+            entry['rotating_weight_checkpoints'] = [n for n in entry['rotating_weight_checkpoints'] if n not in gone]
+            self._write_manifest(manifest)
+        return removed
+
+    def _keep_best_history(self, signal: str, exp_hash: str) -> List[tuple]:
+        """``[(step, value)]`` of *signal* for *exp_hash*, one value per step."""
+        try:
+            history = ledgers.get_logger().get_signal_history(
+                max_points=None, metric_names=[signal], exp_hashes=[exp_hash])
+        except Exception as exc:
+            logger.debug(f"keep_best could not read the history of '{signal}': {exc}")
+            return []
+        values = []
+        for step, entries in ((history or {}).get(signal, {}).get(exp_hash, {}) or {}).items():
+            logged = [float(e['metric_value']) for e in entries
+                      if e.get('metric_value') is not None and not e.get('is_evaluation_marker')]
+            if logged:
+                values.append((int(step), sum(logged) / len(logged)))
+        return values
 
     def _bootstrap_latest_state(self, load_model: bool = True, load_config: bool = False, load_data: bool = True, force: bool = False):
         """If a current hash is known (or manifest has one), load and apply it.
@@ -1198,7 +1301,8 @@ class CheckpointManager:
                     logger.info("Saving model weights checkpoint with component changes...")
                     self.save_model_checkpoint(
                         save_optimizer=dump_optimizer_state,
-                        save_model_checkpoint=dump_model_state
+                        save_model_checkpoint=dump_model_state,
+                        rotate=True,
                     )
                 else:
                     logger.warning("Could not save weights: no model available")
@@ -1310,7 +1414,8 @@ class CheckpointManager:
         metadata: Optional[Dict[str, Any]] = None,
         force_dump_pending: bool = False,
         update_manifest: bool = True,
-        step: Optional[int] = None
+        step: Optional[int] = None,
+        rotate: bool = False,
     ) -> Optional[Path]:
         """Save model weights checkpoint.
 
@@ -1322,6 +1427,9 @@ class CheckpointManager:
             save_optimizer: Whether to also save optimizer state
             metadata: Additional metadata to save
             force_dump_pending: If True, dump any pending changes before saving checkpoint
+            rotate: True for the trainer's own periodic dumps, which the
+                ``checkpoint_manager.keep_best`` policy may delete later. A save
+                on purpose (the default) is never rotated.
 
         Returns:
             Path: Path to saved checkpoint file, or None if failed
@@ -1408,11 +1516,19 @@ class CheckpointManager:
 
             # Update manifest with latest weight checkpoint for this experiment
             if update_manifest:
-                self._update_manifest_weight_checkpoint(self.current_exp_hash, checkpoint_file.name, self._step_counter)
+                self._update_manifest_weight_checkpoint(self.current_exp_hash, checkpoint_file.name,
+                                                        self._step_counter, rotate=rotate)
 
             # If model architecture doesn't exist in this hash directory, save a reference to where it is
             if self.config.get('checkpoint_manager', {}).get('dump_model_architecture', False):
                 self._save_architecture_reference_if_needed() # TODO (GP): Disable for now because it adds complexity for big models, and we want to ensure architecture is always saved with weights for simplicity
+
+            # Every save is a moment to re-rank: scores for earlier dumps arrive
+            # after them (an evaluation lands after the dump of its step).
+            try:
+                self._apply_keep_best(self.current_exp_hash)
+            except Exception as e:
+                logger.warning(f"keep_best rotation failed, nothing deleted this time: {e}")
             return checkpoint_file
         except Exception as e:
             logger.error(f"Failed to save model checkpoint: {e}")

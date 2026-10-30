@@ -170,6 +170,10 @@ config (see :doc:`configuration`) to control what gets dumped on a change:
    * - ``dump_config_state``
      - ``True``
      - Save the hyperparameters YAML for this hash.
+   * - ``keep_best``
+     - unset
+     - Keep only the ``k`` best weight checkpoints of each run, ranked by one
+       signal, see below. Unset keeps every checkpoint.
 
 .. code-block:: yaml
 
@@ -179,6 +183,37 @@ config (see :doc:`configuration`) to control what gets dumped on a change:
      enable_checkpoints: true
      dump_model_architecture: false
      dump_optimizer_state: true
+
+Keeping only the best checkpoints
+------------------------------------
+
+A long run dumps a weight checkpoint every
+``experiment_dump_to_train_steps_ratio`` steps, and they pile up. ``keep_best``
+keeps the ``k`` best of them on a signal you choose, and deletes the others
+as training goes:
+
+.. code-block:: yaml
+
+   checkpoint_manager:
+     keep_best:
+       signal: val-acc   # the signal's name, as the Studio plots it
+       k: 5              # default 5
+       mode: max         # max or min; default min when the name contains "loss"
+
+- **How a checkpoint is scored.** By the signal's value at the nearest step it
+  was logged. A checkpoint is only ranked once a value at or after its own
+  step exists, because a dump fires right after the optimizer step, before that
+  step's evaluation is written. Evaluate on the same cadence as you dump (or one
+  step later, as most loops do) and each checkpoint gets its own evaluation.
+- **What is never deleted.** The run's most recent checkpoint (where a restart
+  resumes), so up to ``k + 1`` files remain. Any checkpoint saved on purpose:
+  the Studio's save button, the agent, or a direct
+  ``save_model_checkpoint()`` call. Only the trainer's own dumps rotate (pass
+  ``rotate=True`` to ``save_model_checkpoint`` to opt a call of yours in).
+- **Scope.** Each experiment hash (each run or branch) keeps its own ``k``
+  best. Deleting a checkpoint also deletes its projection sidecars.
+- If no value of the signal is logged for the run, nothing is deleted and a
+  warning names the signal, so a typo never costs a checkpoint.
 
 Multi-root experiments
 --------------------------
