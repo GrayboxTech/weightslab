@@ -1256,7 +1256,12 @@ class DataService:
         self._load_existing_tags()
 
     def _resolve_root_log_dir(self) -> Path:
-        """Resolve root log directory from hyperparams/env, fallback to ./logs."""
+        """Resolve root log directory from hyperparams/env, fallback to ./logs.
+        A read-only viewer's own files go to its workspace (see get_viewer_workspace)."""
+        from weightslab.backend.ledgers import get_viewer_workspace
+        workspace = get_viewer_workspace()
+        if workspace:
+            return Path(workspace)
         root = None
         try:
             hp = self._ctx.components.get("hyperparams")
@@ -2413,10 +2418,13 @@ class DataService:
 
                     # Resize middle slice for thumbnail if requested (maintain aspect ratio)
                     if target_width != original_size[0] or target_height != original_size[1]:
-                        # BILINEAR is ~2x faster than LANCZOS and sufficient for small thumbnails;
-                        # use LANCZOS only for full-resolution modal views where quality matters.
-                        _resample = Image.Resampling.LANCZOS if is_full_resolution else Image.Resampling.BILINEAR
-                        middle_pil = middle_pil.resize((target_width, target_height), _resample)
+                        # LANCZOS keeps thumbnails sharp; reducing_gap first shrinks by an
+                        # integer factor with a box filter (cheap), so a 2048 px photo
+                        # going to a ~200 px cell costs about what BILINEAR did.
+                        middle_pil = middle_pil.resize(
+                            (target_width, target_height), Image.Resampling.LANCZOS,
+                            reducing_gap=None if is_full_resolution else 2.0,
+                        )
 
                     # Keep masks in sync with thumbnail size, but only for thumbnail paths.
                     # Full-resolution modal requests keep original mask resolution.
@@ -2498,12 +2506,9 @@ class DataService:
                             try:
                                 resized_view = view_pil
                                 if resized_view.size != (target_width, target_height):
-                                    _view_resample = (
-                                        Image.Resampling.LANCZOS if is_full_resolution
-                                        else Image.Resampling.BILINEAR
-                                    )
                                     resized_view = resized_view.resize(
-                                        (target_width, target_height), _view_resample
+                                        (target_width, target_height), Image.Resampling.LANCZOS,
+                                        reducing_gap=None if is_full_resolution else 2.0,
                                     )
                                 view_bytes, view_shape, _ = encode_image_to_raw_bytes(
                                     np_img=None,

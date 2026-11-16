@@ -217,6 +217,9 @@ class LedgeredDataFrameManager:
         self._lock = threading.RLock()
         self._queue_lock = threading.Lock()
         self._buffer_lock = threading.RLock()
+        # Held from a buffer drain until its records are applied (or put back):
+        # lets import_from_store know no older write is still in flight.
+        self._apply_lock = threading.RLock()
 
         # Columns that should store arrays in separate H5 file
         self._array_columns = [
@@ -913,43 +916,114 @@ class LedgeredDataFrameManager:
             "checkpoint snapshot."
         )
 
-    def import_from_store(self, store: H5DataFrameStore | str | Path, origins: Optional[Iterable[str]] = None) -> int:
-        """Replace this ledger's per-sample stats with the ones persisted in
-        another root's H5 store -- e.g. a sibling experiment restored from a
-        multi-root viewer: last signal values, predictions, nb_seen, tags,
-        discarded. ``store`` is only read.
+    @staticmethod
+    def _read_foreign_array(arrays_path: Path, path_ref: str) -> Optional[np.ndarray]:
+        """One array of another root's arrays.h5, by its dataframe reference
+        (``arrays.h5:/<sample_id>/<key>``). Opened read-only, never repaired or
+        locked: that file belongs to another experiment. None when absent."""
+        try:
+            import h5py
+            from weightslab.data.h5_array_store import denormalize_array
+            _, inner = str(path_ref).strip().strip('"').split(':/', 1)
+            sample_id, key = inner.split('/', 1)
+            with h5py.File(str(arrays_path), 'r', locking=False) as f:
+                group = f[str(sample_id)][key]
+                array = group['data'][:]
+                metadata = dict(group.attrs)
+            return denormalize_array(array, metadata) if metadata.get('normalized', False) else array
+        except Exception as exc:
+            logger.debug(f"[LedgeredDataFrameManager] {path_ref} not readable from {arrays_path}: {exc}")
+            return None
 
-        Only origins already registered here are imported, and only for samples
-        this ledger knows. Signal and tag columns this ledger holds but
-        ``store`` lacks belong to another run, so they are cleared on the
-        imported rows, and dropped once no row holds a value. Array references
-        are skipped: their arrays live in the other root's arrays.h5. Returns
-        the number of rows imported.
+    def import_from_store(self, store: H5DataFrameStore | str | Path, origins: Optional[Iterable[str]] = None,
+                          arrays: Optional[str | Path] = None, keep_own_columns: bool = False) -> int:
+        """Replace this ledger's per-sample stats with the ones persisted by
+        another experiment root -- e.g. a sibling experiment restored from a
+        multi-root viewer: last signal values, predictions, nb_seen, tags,
+        discarded. Nothing of the other root is written to.
+
+        ``store``: the other root's data.h5 (path or H5DataFrameStore), or a
+        dataframe export of it (``*.parquet``, as written by
+        ``weightslab.write_dataframe``).
+
+        Only samples this ledger knows are imported, each into the origin it
+        has here (the other run may have named its splits differently), and
+        only for the origins in ``origins`` (default: every registered one).
+
+        ``arrays``: the other root's arrays.h5. Predictions stored there by
+        reference are read from it. A prediction reference it cannot resolve
+        clears the imported row's prediction rather than leaving the previous
+        run's. Target references are skipped: labels come from this ledger's
+        own dataset.
+
+        Signal and tag columns this ledger holds but the import lacks belong to
+        another run, so they are cleared on the imported rows, and dropped once
+        no row holds a value. With ``keep_own_columns`` (a viewer that shows
+        its own per-sample columns next to the loaded run's), the columns held
+        before the first import are this ledger's own and are never cleared;
+        only columns brought by an earlier import are. Returns the number of
+        rows imported.
         """
-        if not isinstance(store, H5DataFrameStore):
-            store = H5DataFrameStore(Path(store))
-        if not store.exists():
+        path = store.get_path() if isinstance(store, H5DataFrameStore) else Path(store)
+        if not path.exists():
+            return 0
+        is_export = path.suffix.lower() == ".parquet"
+
+        # Writes still queued for the flush thread (save_signals) predate this
+        # import: apply them now, or they would land on top of it afterwards.
+        # The apply lock waits out a batch the flush thread holds in flight.
+        with self._apply_lock:
+            with self._buffer_lock:
+                queued = list(self._buffer.values())
+                self._buffer = {}
+            if queued:
+                self._apply_buffer_records(queued)
+
+        origin_col = SampleStats.Ex.ORIGIN.value
+        run_column_prefixes = ("signals", "SIGNALS", f"{SampleStats.Ex.TAG.value}:", "TAG:")
+        with self._lock:
+            if self._df.empty or origin_col not in self._df.columns:
+                return 0
+            registered = {str(o) for o in self._df[origin_col].dropna().unique()}
+            # Where each known sample lives here: rows are imported into it.
+            local_origin = self._df[origin_col].groupby(level=0).first().astype(str)
+            if keep_own_columns and getattr(self, "_own_columns", None) is None:
+                self._own_columns = {c for c in self._df.columns if str(c).startswith(run_column_prefixes)}
+            own_columns = set(getattr(self, "_own_columns", None) or ()) if keep_own_columns else set()
+        wanted = registered if origins is None else registered & {str(o) for o in origins}
+        if not wanted:
             return 0
 
-        with self._lock:
-            if self._df.empty or SampleStats.Ex.ORIGIN.value not in self._df.columns:
+        frames = []
+        if is_export:
+            try:
+                frames.append(pd.read_parquet(path))
+            except Exception as exc:
+                logger.warning(f"[LedgeredDataFrameManager] Could not read dataframe export {path}: {exc}")
                 return 0
-            registered = {str(o) for o in self._df[SampleStats.Ex.ORIGIN.value].dropna().unique()}
-            known_samples = set(self._df.index.get_level_values(0))
-        wanted = registered if origins is None else registered & {str(o) for o in origins}
-
-        # Bring the full category sets of categorical tags along.
-        registry = store.load_tag_registry()
-        if registry:
+            tag_prefix = f"{SampleStats.Ex.TAG.value}:"
             with self._lock:
-                for name, cats in registry.items():
-                    self._merge_categories(name, cats)
+                for col in frames[0].columns:
+                    if str(col).startswith(tag_prefix) and frames[0][col].dtype == object:
+                        cats = sorted({str(v) for v in frames[0][col].dropna() if not isinstance(v, bool) and str(v)})
+                        if cats:
+                            self._merge_categories(str(col)[len(tag_prefix):], cats)
+        else:
+            if not isinstance(store, H5DataFrameStore):
+                store = H5DataFrameStore(path)
+            # Bring the full category sets of categorical tags along.
+            registry = store.load_tag_registry()
+            if registry:
+                with self._lock:
+                    for name, cats in registry.items():
+                        self._merge_categories(name, cats)
+            for stored_origin in sorted(store.list_origins()):
+                frames.append(store.load(stored_origin))  # read-only, unlike load_all()
 
-        run_column_prefixes = ("signals", "SIGNALS", f"{SampleStats.Ex.TAG.value}:", "TAG:")
+        arrays_path = Path(arrays) if arrays is not None and Path(arrays).is_file() else None
         stale_columns = set()
         imported = 0
-        for origin in sorted(wanted):
-            loaded = store.load(origin)  # read-only, unlike load_all()
+        for loaded in frames:
             if loaded.empty or "sample_id" not in loaded.columns:
                 continue
             if "annotation_id" in loaded.columns:
@@ -961,23 +1035,45 @@ class LedgeredDataFrameManager:
                  loaded.index.get_level_values(1)],
                 names=['sample_id', 'annotation_id'],
             )
-            loaded = loaded[loaded.index.get_level_values(0).isin(known_samples)]
+            loaded = loaded[loaded.index.get_level_values(0).isin(local_origin.index)]
             if loaded.empty:
                 continue
+            # The destination split is this ledger's, whatever the run called it.
+            loaded = loaded.drop(columns=[origin_col], errors="ignore")
 
             for col in [c for c in self._array_columns if c in loaded.columns]:
-                if loaded[col].dtype == object and loaded[col].map(lambda v: isinstance(v, str) and '.h5:/' in v).any():
+                is_ref = loaded[col].map(lambda v: isinstance(v, str) and '.h5:/' in v)
+                # A dataframe export writes an in-memory array as its truncated
+                # text ("[[0 0 ... 0]]"): nothing to show, so no prediction.
+                is_text = loaded[col].map(
+                    lambda v: isinstance(v, str) and '...' in v and v.strip().strip('"').startswith('['))
+                if not (is_ref.any() or is_text.any()):
+                    continue
+                if col == SampleStats.Ex.TARGET.value:
                     loaded = loaded.drop(columns=col)
+                    continue
+                loaded[col] = pd.Series(
+                    [None if text else
+                     ((self._read_foreign_array(arrays_path, v) if arrays_path is not None else None) if ref else v)
+                     for v, ref, text in zip(loaded[col], is_ref, is_text)],
+                    index=loaded.index, dtype=object)
 
-            with self._lock:
-                stale = [c for c in self._df.columns
-                         if c not in loaded.columns and str(c).startswith(run_column_prefixes)]
-                for col in stale:
-                    loaded[col] = False if pd.api.types.is_bool_dtype(self._df[col].dtype) else np.nan
-            stale_columns.update(stale)
+            destination = local_origin.reindex(loaded.index.get_level_values(0)).to_numpy()
+            for origin in sorted(wanted):
+                part = loaded[destination == origin]
+                if part.empty:
+                    continue
+                part = part.copy()
+                with self._lock:
+                    stale = [c for c in self._df.columns
+                             if c not in part.columns and str(c).startswith(run_column_prefixes)
+                             and c not in own_columns]
+                    for col in stale:
+                        part[col] = False if pd.api.types.is_bool_dtype(self._df[col].dtype) else np.nan
+                stale_columns.update(stale)
 
-            self.upsert_df(loaded, origin=origin, force_flush=True)
-            imported += len(loaded)
+                self.upsert_df(part, origin=origin, force_flush=True)
+                imported += len(part)
 
         # Drop the other run's columns that no row holds anymore (a cleared tag holds False)
         with self._lock:
@@ -2598,6 +2694,9 @@ class LedgeredDataFrameManager:
             is_multi = isinstance(data_snapshot.index, pd.MultiIndex)
             arrays_to_store: Dict[str, Dict[str, np.ndarray]] = {}
             rowkey_to_index: Dict[str, Any] = {}
+            # The cell objects being persisted: a cell written again while the
+            # arrays are saved (outside the lock) must keep its newer value.
+            snapshot_cells: Dict[str, Dict[str, Any]] = {}
 
             for idx in self._rows_with_array_cells(data_snapshot):
                 row = data_snapshot.loc[idx]
@@ -2620,6 +2719,7 @@ class LedgeredDataFrameManager:
                 if arrays:
                     arrays_to_store[row_key] = arrays
                     rowkey_to_index[row_key] = idx
+                    snapshot_cells[row_key] = {c: row[c] for c in arrays}
 
             if arrays_to_store:
                 path_refs = self._array_store.save_arrays_batch(arrays_to_store, preserve_original=False)
@@ -2642,6 +2742,11 @@ class LedgeredDataFrameManager:
                                     continue
                                 for col_name, path_ref in col_refs.items():
                                     if path_ref is not None and col_name in self._df.columns:
+                                        # Only where the cell still holds the array just
+                                        # saved: one replaced meanwhile (a newer
+                                        # prediction, a cleared one) stays as it is.
+                                        if self._df.at[idx, col_name] is not snapshot_cells.get(row_key, {}).get(col_name):
+                                            continue
                                         # .at scalar assignment to the precise (sample_id, annotation_id) row.
                                         self._df.at[idx, col_name] = ArrayH5Proxy(path_ref, array_store=self._array_store)
                         except Exception as e:
@@ -3279,14 +3384,15 @@ class LedgeredDataFrameManager:
     def flush_if_needed_nonblocking(self, force: bool = False):
         """Non-blocking flush - if can't acquire lock immediately, defer to next cycle."""
         # Drain buffer quickly, then release lock before any DF/H5 work.
-        with self._buffer_lock:
-            buffered = list(self._buffer.values())
-            self._buffer = {}
+        with self._apply_lock:
+            with self._buffer_lock:
+                buffered = list(self._buffer.values())
+                self._buffer = {}
 
-        if buffered:
-            logger.debug(f"Flushing {len(buffered)} buffered records to DataFrame (non-blocking).")
-            self._apply_buffer_records_nonblocking(buffered)
-            logger.debug(f"Applied {len(buffered)} buffered records to DataFrame (non-blocking).")
+            if buffered:
+                logger.debug(f"Flushing {len(buffered)} buffered records to DataFrame (non-blocking).")
+                self._apply_buffer_records_nonblocking(buffered)
+                logger.debug(f"Applied {len(buffered)} buffered records to DataFrame (non-blocking).")
 
         # Always check H5 flush even when buffer was empty (pending rows must drain too).
         logger.debug(f"Checking if flush to H5 is needed (non-blocking). Pending count: {len(self._pending)}.")
@@ -3299,17 +3405,18 @@ class LedgeredDataFrameManager:
         The buffer lock is released immediately after draining so that the training
         thread can enqueue new records while the (slower) DF and H5 writes proceed.
         """
-        # Step 1: drain buffer atomically — fast, minimal lock hold.
-        with self._buffer_lock:
-            buffered = list(self._buffer.values())
-            self._buffer = {}
-        # _buffer_lock released here; training can enqueue again.
+        with self._apply_lock:
+            # Step 1: drain buffer atomically — fast, minimal lock hold.
+            with self._buffer_lock:
+                buffered = list(self._buffer.values())
+                self._buffer = {}
+            # _buffer_lock released here; training can enqueue again.
 
-        # Step 2: apply to DF (blocking _lock acquisition; outside buffer lock).
-        if buffered:
-            logger.debug(f"Flushing {len(buffered)} buffered records to DataFrame.")
-            self._apply_buffer_records(buffered)
-            logger.debug(f"Applied {len(buffered)} buffered records to DataFrame.")
+            # Step 2: apply to DF (blocking _lock acquisition; outside buffer lock).
+            if buffered:
+                logger.debug(f"Flushing {len(buffered)} buffered records to DataFrame.")
+                self._apply_buffer_records(buffered)
+                logger.debug(f"Applied {len(buffered)} buffered records to DataFrame.")
 
         # Step 3: flush DF → H5 (outside buffer lock).
         logger.debug(f"Checking if flush to H5 is needed. Pending count: {len(self._pending)}.")

@@ -64,6 +64,40 @@ from weightslab.components.global_monitoring import pause_controller as pause_ct
 logger = logging.getLogger(__name__)
 
 
+# Callables run after an experiment's state has been loaded into this process
+# (see CheckpointManager.load_state and weightslab.on_experiment_load). Each is
+# called as fn(exp_hash, root_dir) where root_dir is the experiment root that
+# owns the hash. They let a script attach what WeightsLab itself did not persist
+# for that run (e.g. predictions kept in the script's own files).
+_EXPERIMENT_LOAD_HOOKS: List[Any] = []
+
+
+def register_experiment_load_hook(fn):
+    """Run ``fn(exp_hash, root_dir)`` after every experiment load (returns ``fn``)."""
+    if fn not in _EXPERIMENT_LOAD_HOOKS:
+        _EXPERIMENT_LOAD_HOOKS.append(fn)
+    return fn
+
+
+def _writes(default=None):
+    """Mark a CheckpointManager method that writes into the experiment root.
+
+    In read-only mode (a viewer over existing experiments, see
+    ``CheckpointManager(read_only=True)``) the method returns ``default`` and
+    writes nothing, so browsing runs never changes them."""
+    def decorate(method):
+        def wrapper(self, *args, **kwargs):
+            if getattr(self, "read_only", False):
+                logger.debug(f"read-only checkpoint manager: skipped {method.__name__}")
+                return default() if callable(default) else default
+            return method(self, *args, **kwargs)
+        wrapper.__name__ = method.__name__
+        wrapper.__doc__ = method.__doc__
+        wrapper.__wrapped__ = method
+        return wrapper
+    return decorate
+
+
 class CheckpointManager:
     """Structured checkpoint manager with experiment hash-based organization.
 
@@ -88,7 +122,10 @@ class CheckpointManager:
     # when looking for nested experiment roots (see _discover_nested_root_dirs).
     NESTED_ROOT_DISCOVERY_MAX_DEPTH = 3
 
-    def __init__(self, root_log_dir: str = 'root_experiment', load_model: bool = True, load_config: bool = False, load_data: bool = True):
+    VIEWER_WORKSPACE_DIRNAME = ".weightslab_viewer"
+
+    def __init__(self, root_log_dir: str = 'root_experiment', load_model: bool = True, load_config: bool = False, load_data: bool = True,
+                 read_only: bool = False, workspace: Optional[str] = None):
         """Initialize the checkpoint manager.
 
         Args:
@@ -104,7 +141,23 @@ class CheckpointManager:
                 exactly as the single-root case), and merges signal-history
                 curves from the other discovered roots so logger curves read
                 as one continuous history across all of them.
+            read_only: Viewer over existing experiments. The current
+                experiment is the most recent one found (no new experiment
+                hash is ever generated or recorded), every discovered root's
+                curves are merged into an in-memory logger, every run of every
+                root is listed and can be loaded (its last per-sample state:
+                signals, tags, predictions), and nothing is written into any
+                experiment root: no manifest, HP, data snapshot, weights or
+                logger database. The per-sample state is loaded once data is
+                registered: ``weightslab.load_experiment()`` (``serve()`` does
+                it when nothing was loaded yet).
+            workspace: Read-only mode: the folder the session writes its own
+                files to (data view, logs, audit log, notebook). Default
+                ``<root_log_dir>/.weightslab_viewer`` (dot folders are never
+                taken for experiment roots).
         """
+        self.read_only = bool(read_only)
+        self._view_loaded = False
         # root_log_dir may arrive as a ledger Proxy / ValueProxy — e.g. when a caller
         # passes ``config.get('root_log_dir')`` straight from the watched hyperparameters.
         # Resolve it to a concrete value before building a Path. We detect the proxy with
@@ -118,25 +171,29 @@ class CheckpointManager:
         # when we adopt a nested directory below as the effective root.
         self.given_root_log_dir = given_root_log_dir
         self.root_log_dir, self.discovered_root_dirs = self._resolve_effective_root_dir(given_root_log_dir)
-        self.root_log_dir.mkdir(parents=True, exist_ok=True)
         self.is_multi_root = len(self.discovered_root_dirs) > 1
 
         self.config = ledgers.get_hyperparams() or {}
 
-        # Create main subdirectories
+        # Main subdirectories
         self.checkpoints_dir = self.root_log_dir / "checkpoints"
-        self.checkpoints_dir.mkdir(exist_ok=True)
 
-        # Create checkpoint subdirectories for different components
+        # Checkpoint subdirectories for different components
         self.models_dir = self.checkpoints_dir / "models"
         self.hp_dir = self.checkpoints_dir / "HP"
         self.data_checkpoint_dir = self.checkpoints_dir / "data"
         self.loggers_dir = self.checkpoints_dir / "loggers"
 
-        self.models_dir.mkdir(exist_ok=True)
-        self.hp_dir.mkdir(exist_ok=True)
-        self.data_checkpoint_dir.mkdir(exist_ok=True)
-        self.loggers_dir.mkdir(exist_ok=True)
+        # A viewer only reads the roots it found: it creates nothing in them, and
+        # writes its own files to its workspace.
+        if self.read_only:
+            self.workspace_dir = Path(workspace or (given_root_log_dir / self.VIEWER_WORKSPACE_DIRNAME)).absolute()
+            self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            self.workspace_dir = self.root_log_dir
+            self.root_log_dir.mkdir(parents=True, exist_ok=True)
+            for d in (self.checkpoints_dir, self.models_dir, self.hp_dir, self.data_checkpoint_dir, self.loggers_dir):
+                d.mkdir(exist_ok=True)
 
         # Persist the signal-history logger to an on-disk DuckDB file under
         # loggers/. Handles the ordering where the logger was created before
@@ -177,8 +234,19 @@ class CheckpointManager:
         # If root_log_dir fanned out into several nested experiment roots,
         # stitch signal-history curves from the other ones into this logger
         # too (model/config/data only ever come from the chosen effective root).
-        if self.is_multi_root:
+        # A viewer merges every root, its effective one included (its logger
+        # stays in memory, see _bind_logger_to_disk).
+        if self.is_multi_root or self.read_only:
             self._merge_sibling_logger_histories()
+
+        if self.read_only:
+            # Nothing is registered yet (no data, no model): the experiment's
+            # per-sample state is loaded later, by load_experiment().
+            logger.info(
+                f"CheckpointManager (read-only) over {self.given_root_log_dir}: "
+                f"{len(self.discovered_root_dirs)} experiment root(s); current experiment "
+                f"{self.current_exp_hash} from {self.root_log_dir}")
+            return
 
         # Automatically resume latest state when an existing root_log_dir is provided
         self._bootstrap_latest_state(load_model=load_model, load_config=load_config, load_data=load_data, force=self.first_time)
@@ -318,7 +386,9 @@ class CheckpointManager:
         lg = ledgers.get_logger()
 
         for candidate in self.discovered_root_dirs:
-            if candidate == self.root_log_dir:
+            # A viewer's logger is in memory, so its effective root's curves
+            # are merged like any other root's.
+            if candidate == self.root_log_dir and not self.read_only:
                 continue
 
             sibling_loggers_dir = candidate / "checkpoints" / "loggers"
@@ -391,6 +461,12 @@ class CheckpointManager:
         persistence support."""
         try:
             lg = ledgers.get_logger()
+            if getattr(self, "read_only", False):
+                # Viewer: never open a run's database for writing. Curves are
+                # copied into the in-memory logger instead.
+                if lg is not None and hasattr(lg, "merge_from_disk"):
+                    self._merge_sibling_logger_histories()
+                return
             if lg is not None and hasattr(lg, "set_db_path"):
                 lg.set_db_path(str(self.get_logger_db_path()))
                 # Logger already existed (created before this manager) — merge
@@ -401,6 +477,7 @@ class CheckpointManager:
         except Exception as e:
             logger.warning(f"Could not bind logger to on-disk DuckDB: {e}")
 
+    @_writes()
     def flush_logger_to_disk(self) -> None:
         """Force the logger to checkpoint its DuckDB history to disk (if any)."""
         try:
@@ -494,6 +571,7 @@ class CheckpointManager:
 
         return {}
 
+    @_writes()
     def _create_exp_hash_directories(
             self,
             exp_hash: str,
@@ -520,12 +598,14 @@ class CheckpointManager:
         logger.debug(f"Created checkpoint directories for {exp_hash}: hp_dir={hp_hash_dir}, model_dir={model_hash_dir}, data_dir={data_hash_dir}")
         self._update_manifest(exp_hash)
 
+    @_writes()
     def _write_manifest(self, manifest: Dict[str, Any]) -> None:
         """Persist a manifest dict to disk (shared by the run-metadata setters below)."""
         self.manifest_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self.manifest_file, 'w') as f:
             yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
 
+    @_writes()
     def _update_manifest(self, exp_hash: str):
         """Update manifest file with new or updated hash."""
         try:
@@ -568,6 +648,7 @@ class CheckpointManager:
         except Exception as e:
             logger.warning(f"Failed to update manifest: {e}")
 
+    @_writes()
     def _update_manifest_weight_checkpoint(self, exp_hash: str, checkpoint_filename: str, step: int):
         """Update manifest with latest weight checkpoint for given experiment hash."""
         try:
@@ -644,6 +725,10 @@ class CheckpointManager:
 
     def get_current_experiment_hash(self) -> Optional[str]:
         """Get the current experiment hash. Computes it on-demand if not yet set."""
+        if self.read_only:
+            # Never a hash of the viewer's own state: the loaded experiment, or
+            # the most recent one found.
+            return self.current_exp_hash or self.get_latest_hash()
         if self.current_exp_hash is None:
             # Compute hash on first access to ensure logger has valid hash from step 0
             model_snapshot = self.get_model_snapshot()
@@ -751,12 +836,15 @@ class CheckpointManager:
         return hash_list
 
     def list_runs(self) -> List[Dict[str, Any]]:
-        """List every run recorded in this root_log_dir's manifest.
+        """List every run recorded in this root_log_dir's manifest, and in
+        multi-root mode in every discovered root's manifest.
 
         Each entry carries a stable ``experiment_name`` and ``notes``,
-        backfilling (and persisting) both for legacy manifest entries that
-        predate these fields, plus ``is_current`` for the run this manager
-        currently has loaded. This backs the UI's runs popup.
+        backfilling (and persisting, except in read-only mode or for another
+        root's runs) both for legacy manifest entries that predate these
+        fields, ``root`` (the experiment root owning the run), plus
+        ``is_current`` for the run this manager currently has loaded. This
+        backs the UI's runs popup.
         """
         manifest = self._load_manifest()
         experiments = manifest.get('experiments', {})
@@ -768,7 +856,9 @@ class CheckpointManager:
         dirty = False
         for info in experiments.values():
             if not info.get('experiment_name'):
-                name = generate_experiment_name(is_taken=lambda n: n in existing_names)
+                # A viewer names an unnamed run after its folder (and persists nothing).
+                name = (self.root_log_dir.name if self.read_only
+                        else generate_experiment_name(is_taken=lambda n: n in existing_names))
                 info['experiment_name'] = name
                 existing_names.add(name)
                 dirty = True
@@ -780,9 +870,31 @@ class CheckpointManager:
             self._write_manifest(manifest)
 
         runs = [
-            {'hash': h, **info, 'is_current': h == self.current_exp_hash}
+            {'hash': h, **info, 'root': str(self.root_log_dir), 'is_current': h == self.current_exp_hash}
             for h, info in experiments.items()
         ]
+
+        # Multi-root: the other discovered roots' runs can be restored too
+        # (see _locate_experiment), so list them. Their manifests are only read;
+        # a run without a name is shown under its root's folder name.
+        listed = set(experiments)
+        for root in self.discovered_root_dirs:
+            if root == self.root_log_dir:
+                continue
+            try:
+                with open(root / "checkpoints" / "manifest.yaml", 'r') as f:
+                    sibling = yaml.safe_load(f) or {}
+            except Exception as e:
+                logger.debug(f"Skipping unreadable manifest under sibling root {root}: {e}")
+                continue
+            for h, info in (sibling.get('experiments') or {}).items():
+                if h in listed:
+                    continue
+                listed.add(h)
+                runs.append({'hash': h, **info, 'experiment_name': info.get('experiment_name') or root.name,
+                             'notes': info.get('notes') or '', 'root': str(root),
+                             'is_current': h == self.current_exp_hash})
+
         runs.sort(key=lambda x: x.get('last_used') or x.get('created') or '', reverse=True)
         return runs
 
@@ -930,6 +1042,11 @@ class CheckpointManager:
         Returns:
             tuple: (exp_hash: str, is_new: bool, changed_components: Set[str])
         """
+        # A viewer shows existing experiments: what it registers (its own
+        # hyperparameters, its data view) is never a new experiment.
+        if self.read_only:
+            return self.current_exp_hash, False, set()
+
         # Init first time saving the init state when first resumes
         if first_time and self.first_time and not force:
             logger.info("First time initialization; skipping hash update.")
@@ -1047,6 +1164,7 @@ class CheckpointManager:
     # ================
     # SAVING FUNCTIONS
     # ================
+    @_writes()
     def _save_architecture_reference_if_needed(self):
         """Save architecture reference file if architecture doesn't exist in current hash.
 
@@ -1102,6 +1220,7 @@ class CheckpointManager:
         except Exception as e:
             logger.debug(f"Could not save architecture reference: {e}")
 
+    @_writes()
     def _save_manager_state(self):
         """Save manager state (current hash, step counter, etc.)"""
         state_file = self.root_log_dir / ".checkpoint_manager_state.json"
@@ -1121,6 +1240,7 @@ class CheckpointManager:
         except Exception as e:
             logger.warning(f"Failed to save manager state: {e}")
 
+    @_writes()
     def _save_changes(
         self,
         model: Optional[th.nn.Module],
@@ -1224,6 +1344,7 @@ class CheckpointManager:
         path = _Path(checkpoint_file)
         return path.parent / "projection" / (path.stem + ".pt")
 
+    @_writes()
     def _save_projection_sidecar(self, checkpoint_file) -> None:
         """Write the live projection encoder next to *checkpoint_file*.
 
@@ -1261,6 +1382,7 @@ class CheckpointManager:
             logger.debug(f"Could not load projection sidecar: {exc}")
             return False
 
+    @_writes()
     def _save_custom_projections_sidecar(self, checkpoint_file) -> None:
         """Write the user's own projections (t-SNE, PCA, ...) beside the weights.
 
@@ -1302,6 +1424,7 @@ class CheckpointManager:
         except Exception as exc:
             logger.debug(f"Could not re-attach projection: {exc}")
 
+    @_writes()
     def save_model_checkpoint(
         self,
         model: Optional[th.nn.Module] = None,
@@ -1418,6 +1541,7 @@ class CheckpointManager:
             logger.error(f"Failed to save model checkpoint: {e}")
             return None
 
+    @_writes()
     def save_model_architecture(
         self,
         model: th.nn.Module,
@@ -1483,6 +1607,7 @@ class CheckpointManager:
             logger.debug(f"Full traceback:\n{traceback.format_exc()}")
             return None
 
+    @_writes()
     def save_config(
         self,
         config: Dict[str, Any],
@@ -1513,6 +1638,7 @@ class CheckpointManager:
             logger.error(f"Failed to save config: {e}")
             return None
 
+    @_writes()
     def _write_snapshot_table(self, snapshot_df, data_hash_dir: Path, active_data_hash: str):
         """Write the snapshot sample table to a **Parquet sidecar** next to the
         metadata JSON — fast, compact and dtype-preserving, so 300k+ row states
@@ -1553,6 +1679,7 @@ class CheckpointManager:
         # rebuilds tags/discards from the newest snapshot.
         return read_snapshot_table(snapshot_data, data_dir)
 
+    @_writes()
     def save_data_snapshot(self, force_new_state: bool = False) -> Optional[Path]:
         """Save a snapshot of data state (sample_id, tags, discarded) + RNG state.
 
@@ -1696,6 +1823,7 @@ class CheckpointManager:
             logger.error(f"Failed to save data snapshot: {e}")
         return None
 
+    @_writes(False)
     def save_pending_changes(self, force: bool = False) -> bool:
         """Dump any pending changes to disk.
 
@@ -1837,11 +1965,25 @@ class CheckpointManager:
                 return root / "checkpoints", sibling_manifest
         return None
 
+    @staticmethod
+    def _find_data_store(root: Path) -> Optional[Path]:
+        """The last per-sample state an experiment root holds: its live data store
+        (``checkpoints/data/data.h5``), else the newest dataframe export written
+        by ``weightslab.write_dataframe`` (``<root>/*_dataframe.parquet``) -- e.g.
+        a run copied back from a training machine without its data store."""
+        live = root / "checkpoints" / "data" / "data.h5"
+        if live.is_file():
+            return live
+        exports = sorted(root.glob("*_dataframe.parquet"), key=lambda p: (p.stat().st_mtime, p.name))
+        return exports[-1] if exports else None
+
     def _load_manager_state(self):
         """Load manager state if available"""
         state_file = self.root_log_dir / ".checkpoint_manager_state.json"
 
-        if not state_file.exists():
+        # A viewer's current experiment is the most recent one recorded in the
+        # most recently updated root's manifest.
+        if not state_file.exists() or self.read_only:
             # handled above
             # No explicit state file; try to derive from manifest
             manifest = self._load_manifest()
@@ -2067,8 +2209,11 @@ class CheckpointManager:
                 - 'weights': Checkpoint dict with weights and metadata
                 - 'config': Loaded config (if changed and load_config=True)
                 - 'data_state': Loaded data state (if changed and load_data=True)
-                - 'data_store': Data store (data.h5) of the sibling root owning the
-                  hash, in multi-root mode (if load_data=True)
+                - 'data_store': Per-sample store of the root owning the hash, when
+                  it is not this root's live one (a sibling root in multi-root
+                  mode, or any root in read-only mode): its data.h5, else its
+                  newest ``*_dataframe.parquet`` export (if load_data=True)
+                - 'data_arrays': That root's arrays.h5 (predictions), if any
                 - 'loaded_components': Set of components that were loaded
                 - 'exp_hash': The experiment hash that was loaded
         """
@@ -2078,6 +2223,7 @@ class CheckpointManager:
             'config': None,
             'data_state': None,
             'data_store': None,
+            'data_arrays': None,
             'rng_state': None,
             'loaded_components': set(),
             'exp_hash': exp_hash
@@ -2265,7 +2411,7 @@ class CheckpointManager:
             json_file = data_dir / f"{exp_hash[-8:]}_data_snapshot.json"
 
             # Always try to load RNG state for reproducibility, even if data hash is unchanged
-            load_data_snapshot = (target_data_hash != current_data_hash or force)
+            load_data_snapshot = (target_data_hash != current_data_hash or force or self.read_only)
             load_rng_only = (target_data_hash == current_data_hash and not force)
 
             if json_file.exists():
@@ -2296,14 +2442,23 @@ class CheckpointManager:
                         logger.info(f" [-] Data state unchanged, using current data")
                 except Exception as e:
                     logger.error(f" [ERROR] Failed to load data snapshot: {e}")
+            elif self.read_only or checkpoints_dir != self.checkpoints_dir:
+                logger.info(f" [-] No data snapshot for {exp_hash[-8:]}; the run's per-sample store is used")
             else:
                 logger.warning(f" [WARNING] Data snapshot file not found: {json_file}")
 
             # The snapshot only holds sample ids, tags and discards. The rest of a
             # sibling root's per-sample stats (last signal values, predictions...)
-            # lives in its own data store, which this root never loaded.
-            if checkpoints_dir != self.checkpoints_dir and (data_base / "data.h5").exists():
-                result['data_store'] = data_base / "data.h5"
+            # lives in its own data store, which this root never loaded. A viewer
+            # (read-only) loaded none of them, its effective root's included.
+            if self.read_only or checkpoints_dir != self.checkpoints_dir:
+                store = self._find_data_store(checkpoints_dir.parent)
+                if store is not None:
+                    result['data_store'] = store
+                    arrays = data_base / "arrays.h5"
+                    result['data_arrays'] = arrays if arrays.is_file() else None
+                    result['loaded_components'].add('data_store')
+                    logger.info(f" [OK] Per-sample state of {checkpoints_dir.parent.name}: {store.name}")
 
         logger.info(f"Loaded components: {result['loaded_components']}")
         return result
@@ -2393,6 +2548,10 @@ class CheckpointManager:
         logger.info(f"\n{'='*60}")
         logger.info(f"Loading and applying state: {exp_hash[:16]}...")
         logger.info(f"{'='*60}")
+
+        # A viewer that wraps no model has nothing to put weights into.
+        if self.read_only and not self._has_registered_model():
+            load_model = load_weights = False
 
         # Load checkpoint data
         self._last_loaded_checkpoint_file = None  # set only if weights load below
@@ -2546,7 +2705,9 @@ class CheckpointManager:
             try:
                 dfm = ledgers.get_dataframe()
                 if dfm != None:
-                    rows = dfm.import_from_store(checkpoint_data['data_store'])
+                    rows = dfm.import_from_store(checkpoint_data['data_store'],
+                                                 arrays=checkpoint_data.get('data_arrays'),
+                                                 keep_own_columns=self.read_only)
                     logger.info(f"[OK] Loaded per-sample stats from {checkpoint_data['data_store']} ({rows} rows)")
             except Exception as e:
                 logger.warning(f"[WARNING] Could not load per-sample stats from {checkpoint_data['data_store']}: {e}")
@@ -2574,7 +2735,7 @@ class CheckpointManager:
                 self.error_loading_checkpoint.append('data') if 'data' not in self.error_loading_checkpoint else None # Reset first_time to allow future auto-resume attempts if data application failed
 
         # Restore RNG state if provided and not already restored
-        if checkpoint_data.get('rng_state'):
+        if checkpoint_data.get('rng_state') and not self.read_only:  # a viewer's generators are its own
             try:
                 restore_rng_state(checkpoint_data['rng_state'])
                 logger.debug(f"Restored RNG state from checkpoint")
@@ -2680,9 +2841,61 @@ class CheckpointManager:
             }
             self.hash_generator.restore_hashes(component_hashes, combined_hash=exp_hash)
             self._save_manager_state()
+            if self.read_only:
+                self._view_loaded = True
+                self._show_experiment_name(exp_info.get('experiment_name')
+                                           or (located[0].parent.name if located else None))
+            self._run_experiment_load_hooks(exp_hash, located[0].parent if located else self.root_log_dir)
             logger.info(f"\n[OK] Successfully loaded and applied state: {exp_hash[:16]}")
         else:
             logger.warning(f"\n[WARNING] State loaded with errors: {self.error_loading_checkpoint}")
 
         logger.info(f"{'='*60}\n")
         return success
+
+    # =========================
+    # VIEWER (READ-ONLY) HELPERS
+    # =========================
+    def load_experiment(self, exp_hash: Optional[str] = None) -> bool:
+        """Load an experiment's last state into this process: its per-sample
+        state (signals, tags, discards, predictions) and, when a model is
+        registered, its weights. Default: the current experiment, i.e. in
+        read-only mode the most recent one found. Any run listed by
+        :meth:`list_runs` can be given, from any discovered root. Returns
+        True when the state was applied."""
+        target = exp_hash or self.current_exp_hash or self.get_latest_hash()
+        if not target:
+            logger.warning(f"No experiment found under {self.given_root_log_dir} to load")
+            return False
+        return self.load_state(target, load_logger=False)
+
+    @staticmethod
+    def _has_registered_model() -> bool:
+        try:
+            model = ledgers.get_model()
+        except Exception:
+            return False
+        if model is None:
+            return False
+        if type(model) is ledgers.Proxy:   # type(): a Proxy masquerades as its target for isinstance
+            return model.is_set()
+        return True
+
+    @staticmethod
+    def _show_experiment_name(name: Optional[str]) -> None:
+        """Show the loaded run's name as the viewer's experiment name (UI header)."""
+        if not name:
+            return
+        try:
+            ledgers.set_hyperparam('experiment_name', str(name), name=ledgers.resolve_hp_name())
+        except Exception as e:
+            logger.debug(f"Could not show experiment name {name}: {e}")
+
+    @staticmethod
+    def _run_experiment_load_hooks(exp_hash: str, root_dir: Path) -> None:
+        for fn in list(_EXPERIMENT_LOAD_HOOKS):
+            try:
+                fn(exp_hash, Path(root_dir))
+            except Exception as e:
+                logger.warning(f"Experiment-load hook {getattr(fn, '__name__', fn)} failed for {exp_hash}: {e}",
+                               exc_info=True)

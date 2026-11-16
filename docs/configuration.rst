@@ -443,6 +443,15 @@ Logging
      - *(training script dir)*
      - Root directory where training log snapshots are saved.
        Defaults to a ``root_log_dir/`` folder next to your training script.
+   * - ``WEIGHTSLAB_UPDATE_CHECK``
+     - *(on)*
+     - Once the studio is connected to a backend, the UI server asks the public
+       PyPI index (pypi.org, never TestPyPI) for the latest stable WeightsLab
+       release, and the studio shows a notice at the top right when the
+       backend's version is older (pre-releases and dev builds don't count).
+       At most one request every 6 h per UI server, sending nothing but the
+       package name; offline simply means no notice. Set ``0``, ``false``,
+       ``no`` or ``off`` to turn it off.
    * - ``WEIGHTSLAB_PROJECTION``
      - *(on)*
      - Live 3-D parametric-UMAP projection of the model's representation

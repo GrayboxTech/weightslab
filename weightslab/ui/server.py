@@ -1672,7 +1672,24 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/experiment-report/view/"):
             self._serve_experiment_report(path[len("/experiment-report/view/"):])
             return
+        if path == "/weightslab/latest-version":
+            self._get_latest_version()
+            return
         self._serve_static()
+
+    def _get_latest_version(self) -> None:
+        """Latest stable WeightsLab on PyPI vs the backend version the studio is
+        connected to (``?installed=``), for its "new version" notice. See
+        weightslab.ui.update_check."""
+        from urllib.parse import parse_qs, urlsplit
+        from weightslab.ui import update_check
+        installed = (parse_qs(urlsplit(self.path).query).get("installed") or [""])[0]
+        try:
+            info = update_check.update_info(installed)
+        except Exception as exc:  # never break the studio over an update check
+            logger.debug("Update check failed: %s", exc)
+            info = {"enabled": True, "installed": installed, "latest": None, "update_available": False}
+        self._send_json(HTTPStatus.OK, info)
 
     def do_HEAD(self):  # noqa: N802
         self._serve_static(head_only=True)
