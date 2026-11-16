@@ -607,6 +607,20 @@ class H5DataFrameStore:
 
         return self._normalize_for_read(df, origin)
 
+    def list_origins(self) -> list:
+        """The origins (splits) stored in this file; [] when it is absent or unreadable."""
+        if not self._path.exists():
+            return []
+        prefix = f"/{self._key_prefix}_"
+        with self._local_lock:
+            try:
+                with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout, poll_interval=self._poll_interval):
+                    with pd.HDFStore(str(self._path), mode="r") as store:
+                        return sorted(k[len(prefix):] for k in store.keys() if k.startswith(prefix))
+            except Exception as exc:
+                logger.warning(f"[H5DataFrameStore] Failed to list origins from {self._path}: {exc}")
+                return []
+
     def load_all(self, origins: Iterable[str] = None, columns: Optional[Iterable[str]] = None, non_blocking: bool = False) -> pd.DataFrame:
         """Load all origins in a single H5 transaction.
 

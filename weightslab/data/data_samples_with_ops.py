@@ -687,7 +687,15 @@ class DataSampleTrackingWrapper(Dataset):
         _UID_CNT += n_samples
 
     def _resolve_root_log_dir(self) -> Optional[Path]:
-        """Resolve root log directory from hyperparams if not provided."""
+        """Resolve root log directory from hyperparams if not provided. A read-only
+        viewer's data view is kept in its workspace (see get_viewer_workspace)."""
+        try:
+            from weightslab.backend.ledgers import get_viewer_workspace
+            workspace = get_viewer_workspace()
+            if workspace:
+                return Path(workspace)
+        except Exception:
+            pass
         try:
             hp_name = resolve_hp_name()
             hp = get_hyperparams(hp_name) if hp_name else None
