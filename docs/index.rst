@@ -136,6 +136,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
    resource_monitoring
    experiment_reports
+   prediction_comparison
    checkpointing
    agent
    export

@@ -35,21 +35,15 @@ _LAZY_EXPORTS = {
     "seed_everything": (".utils.tools", "seed_everything"),
     "guard_training_context": (".components.global_monitoring", "guard_training_context"),
     "guard_testing_context": (".components.global_monitoring", "guard_testing_context"),
-    # Ultralytics integration, so a YOLO script needs no deep import:
-    #   YOLO(...).train(trainer=wl.WLAwareTrainer, ...)
-    # Laziness is load-bearing here rather than just a speed-up: `ultralytics` is
-    # an optional extra, so importing this eagerly would break `import weightslab`
-    # for every user who does not have it installed. The module is resolved (and
-    # a missing extra reported, see _MISSING_EXTRA) only if a name is touched.
+    "compare_predictions": (".diagnostics", "compare_predictions"),
+    # Keep YOLO(...).train(trainer=wl.WLAwareTrainer, ...) available without a
+    # deep import. Ultralytics is optional: load it only when a name is used.
     "WLAwareTrainer": (".integrations.ultralytics", "WLAwareTrainer"),
     "WLAwareSegmentationTrainer": (".integrations.ultralytics", "WLAwareSegmentationTrainer"),
     "WLAwareDataset": (".integrations.ultralytics", "WLAwareDataset"),
     "WLAwareSegmentationDataset": (".integrations.ultralytics", "WLAwareSegmentationDataset"),
 }
-
-# Lazy exports whose module needs a third-party package weightslab does not
-# depend on. A bare "No module named 'ultralytics'" gives no hint that an extra
-# exists for it, so name the install command instead.
+# Give users the install command when an optional export's dependency is absent.
 _MISSING_EXTRA = {
     ".integrations.ultralytics": ("ultralytics", "weightslab[ultralytics]"),
 }
@@ -254,6 +248,7 @@ __maintainer__ = 'Guillaume PELLUET'
 __credits__ = 'GrayBx'
 __license__ = 'BSD 2-clause'
 __all__ = [
+    "compare_predictions",
     "watch_or_edit",
     "serve",
     "keep_serving",
