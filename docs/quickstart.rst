@@ -176,10 +176,10 @@ Migrating a real codebase? The full guides are
              step += 1
 
       Three things to notice. The tracked ``train_loader`` yields
-      ``(inputs, uids, labels)`` — those ``uids`` are what tie a loss value back
+      ``(inputs, uids, labels)`` , those ``uids`` are what tie a loss value back
       to the sample that produced it, which is why they are handed to the loss
       as ``batch_ids``. The loop is open-ended: you stop it from the studio, not
-      with a step budget. And it does not start on its own — run
+      with a step budget. And it does not start on its own , run
       ``weightslab start`` in another terminal and press **Play**.
 
    .. tab-item:: WeightsLab From TensorBoard
@@ -414,7 +414,7 @@ Migrating a real codebase? The full guides are
 
 
       One thing has no equivalent, and is not meant to: there are no sweeps.
-      WeightsLab is built around staying inside *one* run and steering it —
+      WeightsLab is built around staying inside *one* run and steering it,
       raise the learning rate when the curve flattens, discard the samples
       poisoning it, keep going. If you need a sweep, keep the tool you sweep
       with.

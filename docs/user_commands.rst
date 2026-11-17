@@ -269,7 +269,7 @@ consequences:
 - ``--listen-port``, ``-p`` *(int)*, local port to expose. Default: **50051**
   (the port ``weightslab start`` proxies to by default, leave it unless you
   pass ``--backend-port`` or set ``GRPC_BACKEND_PORT``).
-- ``--listen-host`` *(str)*, interface to bind. Default: **auto** —
+- ``--listen-host`` *(str)*, interface to bind. Default: **auto**,
   ``127.0.0.1`` on Windows/macOS, ``0.0.0.0`` (all interfaces) on Linux. With
   the UI on the same machine, ``--listen-host 127.0.0.1`` works on Linux too
   and keeps the tunnel private.

@@ -219,6 +219,11 @@ class ExperimentServiceStub(object):
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsRequest.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsResponse.FromString,
                 _registered_method=True)
+        self.GetProjection = channel.unary_unary(
+                '/ExperimentService/GetProjection',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ProjectionRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ProjectionResponse.FromString,
+                _registered_method=True)
 
 
 class ExperimentServiceServicer(object):
@@ -494,6 +499,17 @@ class ExperimentServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetProjection(self, request, context):
+        """The live parametric-UMAP projection of the model's representation, as a
+        3-D point per sample. Level-of-detail is server-side and driven by the
+        client's current view box: narrowing the box as the user zooms in buys
+        finer detail for the SAME point budget, instead of ever shipping the whole
+        dataset. See ProjectionRequest.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ExperimentServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -681,6 +697,11 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     servicer.ExportAnnotations,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsRequest.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsResponse.SerializeToString,
+            ),
+            'GetProjection': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetProjection,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ProjectionRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ProjectionResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1682,6 +1703,33 @@ class ExperimentService(object):
             '/ExperimentService/ExportAnnotations',
             weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsRequest.SerializeToString,
             weightslab_dot_proto_dot_experiment__service__pb2.ExportAnnotationsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetProjection(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetProjection',
+            weightslab_dot_proto_dot_experiment__service__pb2.ProjectionRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ProjectionResponse.FromString,
             options,
             channel_credentials,
             insecure,

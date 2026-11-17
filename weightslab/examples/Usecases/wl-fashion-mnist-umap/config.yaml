@@ -1,0 +1,42 @@
+# Fashion-MNIST classification with the built-in live UMAP projection (beta).
+experiment_name: fashion_mnist_live_umap
+device: auto
+training_steps_to_do: null  # no ceiling: training runs until you stop it (studio, CLI, Ctrl+C)
+# root_log_dir:              # defaults to $WEIGHTSLAB_ROOT_LOG_DIR, else a temp dir
+
+optimizer:
+  lr: 0.001
+
+# The projection is ON by default; these keys only tune it. Each one overrides
+# its WEIGHTSLAB_PROJECTION_* environment variable. See docs/projection.rst.
+projection:
+  every_n_steps: 25    # fit the UMAP encoder every 25 training steps (default 50)
+  graph_size: 1024     # samples in the kNN graph (default 512)
+  n_neighbors: 15
+
+# Experiment cadence
+eval_full_to_train_steps_ratio: 300
+experiment_dump_to_train_steps_ratio: 1000
+skip_checkpoint_load: false
+tqdm_display: true
+is_training: false
+
+# Global dataframe storage
+ledger_enable_flushing_threads: true
+ledger_enable_h5_persistence: true
+ledger_flush_max_rows: 15000
+ledger_flush_interval: 30.0
+
+serving_grpc: true
+
+# data_root: ./data          # auto-downloaded on first run
+data:
+  train_loader:
+    shuffle: true
+    batch_size: 64
+    max_samples: 20000       # raise (or drop) for the full 60k
+  test_loader:
+    shuffle: false
+    batch_size: 256
+    max_samples: 2000
+    drop_last: false

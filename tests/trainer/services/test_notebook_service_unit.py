@@ -442,6 +442,22 @@ class TestEmbeddedKernelStartupOrder(unittest.TestCase):
             source.index("_install_thread_routed_streams("),
             "repair logging before the rest of the startup logs anything")
 
+    def test_exit_hook_is_registered_after_ipykernels_own(self):
+        # app.initialize() registers ipykernel's atexit hooks; app.close closes
+        # every socket and terminates the zmq context. atexit runs the last
+        # registered hook first, so the hook that stops the kernel's loop must
+        # come after initialize(). Registered before it, app.close ran first
+        # under the still-running loop and CI died with a core dump after every
+        # test had passed.
+        import inspect
+        source = self._source()
+        hook = "atexit.register(_shutdown_embedded_kernel)"
+        self.assertIn(hook, source, "the kernel thread registers its own exit hook")
+        self.assertLess(source.index("app.initialize("), source.index(hook))
+        self.assertNotIn(
+            "atexit.register", inspect.getsource(notebook_service.ensure_embedded_kernel),
+            "registered once, from the kernel thread -- not also at thread creation")
+
 
 class TestNotebookPersistence(unittest.TestCase):
     def setUp(self):
@@ -547,6 +563,131 @@ class TestGenerateNotebookCode(unittest.TestCase):
         self.assertFalse(resp.ok)
         self.assertIn("Agent backend is not running", resp.error)
 
+
+class TestGenerateNotebookCodeSurvivesRefresh(unittest.TestCase):
+    """A refresh cancels the grpc-web request, but gRPC never interrupts a
+    running sync handler -- so the work completed and the answer went nowhere.
+    Generations are now keyed by (prompt, context_code) and stay collectable,
+    which is what lets the reloaded page replay the same request and pick the
+    result up instead of paying for a second generation."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _service(self, agent):
+        return NotebookService(_fake_data_service(agent=agent), root_log_dir=str(self.root))
+
+    @staticmethod
+    def _req(prompt="summarize", context="ctx"):
+        return pb2.GenerateNotebookCodeRequest(prompt=prompt, context_code=context)
+
+    def test_identical_request_reuses_the_first_generation(self):
+        agent = MagicMock()
+        agent.generate_code.return_value = ("df.describe()", "Summary stats.")
+        service = self._service(agent)
+
+        first = service.GenerateNotebookCode(self._req(), None)
+        # The "reloaded page" replays the very same request.
+        second = service.GenerateNotebookCode(self._req(), None)
+
+        self.assertTrue(first.ok and second.ok)
+        self.assertEqual(second.code, "df.describe()")
+        self.assertEqual(second.explanation, "Summary stats.")
+        agent.generate_code.assert_called_once()
+
+    def test_a_different_request_is_a_new_generation(self):
+        agent = MagicMock()
+        agent.generate_code.return_value = ("x", "")
+        service = self._service(agent)
+
+        service.GenerateNotebookCode(self._req(prompt="a"), None)
+        service.GenerateNotebookCode(self._req(prompt="b"), None)
+        self.assertEqual(agent.generate_code.call_count, 2)
+
+    def test_context_code_is_part_of_the_key(self):
+        agent = MagicMock()
+        agent.generate_code.return_value = ("x", "")
+        service = self._service(agent)
+
+        service.GenerateNotebookCode(self._req(context="one"), None)
+        service.GenerateNotebookCode(self._req(context="two"), None)
+        self.assertEqual(agent.generate_code.call_count, 2)
+
+    def test_key_is_unambiguous_across_the_prompt_context_boundary(self):
+        """("ab", "c") and ("a", "bc") concatenate identically -- the key is
+        length-prefixed so they stay distinct generations."""
+        agent = MagicMock()
+        agent.generate_code.return_value = ("x", "")
+        service = self._service(agent)
+
+        service.GenerateNotebookCode(self._req(prompt="ab", context="c"), None)
+        service.GenerateNotebookCode(self._req(prompt="a", context="bc"), None)
+        self.assertEqual(agent.generate_code.call_count, 2)
+
+    def test_a_second_caller_joins_a_still_running_generation(self):
+        """The refresh case proper: the original client is gone, the work is
+        mid-flight, and the replayed request must attach rather than start a
+        second one."""
+        release = threading.Event()
+        calls = []
+
+        def slow_generate(prompt, context_code):
+            calls.append(prompt)
+            release.wait(timeout=5)
+            return ("df.head()", "")
+
+        agent = MagicMock()
+        agent.generate_code.side_effect = slow_generate
+        service = self._service(agent)
+
+        results = []
+        threads = [threading.Thread(
+            target=lambda: results.append(service.GenerateNotebookCode(self._req(), None)))
+            for _ in range(3)]
+        for t in threads:
+            t.start()
+        # Let all three reach the shared future before the work completes.
+        time.sleep(0.2)
+        release.set()
+        for t in threads:
+            t.join(timeout=10)
+
+        self.assertEqual(len(calls), 1, "the generation ran more than once")
+        self.assertEqual(len(results), 3)
+        for resp in results:
+            self.assertTrue(resp.ok)
+            self.assertEqual(resp.code, "df.head()")
+
+    def test_a_failure_is_not_replayed_for_the_rest_of_the_ttl(self):
+        agent = MagicMock()
+        agent.generate_code.side_effect = RuntimeError("opencode down")
+        service = self._service(agent)
+
+        first = service.GenerateNotebookCode(self._req(), None)
+        self.assertFalse(first.ok)
+        self.assertIn("opencode down", first.error)
+
+        # A retry must actually retry rather than replay the cached failure.
+        agent.generate_code.side_effect = None
+        agent.generate_code.return_value = ("ok()", "")
+        second = service.GenerateNotebookCode(self._req(), None)
+        self.assertTrue(second.ok)
+        self.assertEqual(second.code, "ok()")
+
+    def test_audit_is_recorded_once_per_generation_not_per_collector(self):
+        agent = MagicMock()
+        agent.generate_code.return_value = ("x", "")
+        service = self._service(agent)
+        service._audit = MagicMock()
+
+        service.GenerateNotebookCode(self._req(), None)
+        service.GenerateNotebookCode(self._req(), None)
+        self.assertEqual(service._audit.call_count, 1)
+
 # @unittest.skipUnless(_IPYKERNEL_AVAILABLE, "ipykernel/jupyter_client not installed")
 @unittest.skip("Skip until we can reliably run embedded kernel tests in CI without random latency failures")
 class TestEmbeddedKernelWait(unittest.TestCase):
@@ -592,6 +733,64 @@ class TestEmbeddedKernelWait(unittest.TestCase):
 
         self.assertIsNone(found)
         self.assertLess(elapsed, 1.0, "a failed embed must not burn the whole timeout")
+
+
+class TestDefaultProjectionLayerCell(unittest.TestCase):
+    """The default notebook's second cell: the model's layers, and how to
+    point the live projection at another one."""
+
+    def _run(self, source, live=None):
+        """Execute *source* as the kernel would, on a small model; returns
+        (stdout, the project_dataset mock)."""
+        import contextlib
+        import torch.nn as nn
+        from unittest import mock
+        import weightslab as wl
+        import weightslab.projection as projection
+        from weightslab.backend import ledgers
+
+        model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
+        project = MagicMock(return_value={"samples": 400, "columns": ["signals//umap_x"]})
+        out = io.StringIO()
+        with mock.patch.object(projection, "get_tracker", return_value=live), \
+                mock.patch.object(wl, "project_dataset", project), \
+                mock.patch.object(ledgers, "list_dataloaders", return_value=["test_loader", "train_loader"]), \
+                mock.patch.object(ledgers, "get_dataloader", side_effect=lambda name: f"<{name}>"), \
+                contextlib.redirect_stdout(out):
+            exec(compile(source, "<cell>", "exec"), {"wl": wl, "model": model})
+        return out.getvalue(), project
+
+    def test_it_is_the_second_cell_and_the_blank_one_stays_last(self):
+        cells = NotebookService._default_notebook()["cells"]
+        self.assertEqual(cells[1]["source"], notebook_service._PROJECTION_LAYER_CELL)
+        self.assertEqual(cells[-1]["source"], "")
+
+    def test_lists_every_layer_and_marks_the_one_the_projection_reads(self):
+        live = SimpleNamespace(layer_name="2", layer_detail="Linear input", signal_prefix="umap")
+        printed, project = self._run(notebook_service._PROJECTION_LAYER_CELL, live)
+        self.assertIn("The projection reads 2 (Linear input) -> 'umap'", printed)
+        rows = [line for line in printed.splitlines() if "params" in line]
+        self.assertEqual([r.split()[1] for r in rows], ["0", "1", "2"])   # names
+        self.assertIn("<- projection", rows[2])
+        self.assertNotIn("<- projection", rows[0])
+        project.assert_not_called()                 # inert until LAYER is set
+
+    def test_setting_layer_by_index_reprojects_the_training_split(self):
+        live = SimpleNamespace(layer_name="2", layer_detail="Linear input", signal_prefix="umap")
+        source = notebook_service._PROJECTION_LAYER_CELL.replace(
+            'LAYER = None            # e.g. "fc1", or 12', "LAYER = 0")
+        printed, project = self._run(source, live)
+        project.assert_called_once()
+        args, kwargs = project.call_args
+        self.assertEqual(args[1], "<train_loader>")
+        self.assertEqual(kwargs["layer"], "0")
+        self.assertEqual(kwargs["prefix"], "umap")  # the live prefix: training adopts it
+        self.assertIn("400 train_loader samples re-projected from 0", printed)
+
+    def test_without_a_live_projection_it_still_lists_the_layers(self):
+        printed, _ = self._run(notebook_service._PROJECTION_LAYER_CELL, live=None)
+        self.assertIn("No live projection in this run", printed)
+        self.assertEqual(sum("params" in line for line in printed.splitlines()), 3)
 
 
 if __name__ == "__main__":

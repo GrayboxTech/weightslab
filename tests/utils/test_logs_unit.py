@@ -378,5 +378,34 @@ class TestFlushLogs(LogsTestBase):
             self.assertIn("flushed-marker", handle.read())
 
 
+class TestSessionLogSurvivesItsDirectory(unittest.TestCase):
+    """A log moved into a temporary root_log_dir that is then deleted must not
+    make every later log call in the process raise FileNotFoundError."""
+
+    def test_a_deleted_log_directory_never_fails_the_caller(self):
+        root = tempfile.mkdtemp(prefix="wl-log-gone-")
+        self.addCleanup(shutil.rmtree, root, True)
+        path = os.path.join(root, "weightslab_logs", "session.log")
+        os.makedirs(os.path.dirname(path))
+        handler = logs._make_file_handler(path)
+        self.addCleanup(handler.close)
+        logger = logging.getLogger("test.log_dir_gone")
+        logger.addHandler(handler)
+        self.addCleanup(logger.removeHandler, handler)
+        logger.propagate = False
+        self.addCleanup(setattr, logger, "propagate", True)
+        logger.setLevel(logging.INFO)
+        handler.setLevel(logging.INFO)
+
+        logger.info("before")
+        handler.close()                       # set_log_directory / dictConfig close it
+        shutil.rmtree(os.path.dirname(path))  # the test's tearDown removes the dir
+
+        logger.info("after")                  # used to raise FileNotFoundError here
+        handler.flush()
+        with open(path, encoding="utf-8") as fh:
+            self.assertIn("after", fh.read())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,8 +16,14 @@ Core registration and serving:
 - ``wl.watch_or_edit``
 - ``wl.guard_training_context`` / ``wl.guard_testing_context``
 - ``wl.start_training``
+- ``wl.pause_training``
 - ``wl.serve``
 - ``wl.keep_serving``
+
+Projection *(beta, see* :doc:`projection` *)*:
+
+- ``wl.project_dataset``  *(offline re-projection; built-in UMAP or your own method)*
+- ``wl.save_projection_coords``  *(plug in coordinates you computed yourself)*
 
 Signals:
 
@@ -210,6 +216,59 @@ your training loop, optionally blocking first.
    wl.start_training()  # make sure we start unpaused
    for step, batch in enumerate(train_loader):
        ...
+
+pause_training
+--------------
+
+**Signature**
+
+.. code-block:: python
+
+   wl.pause_training()
+
+**Purpose**
+
+Pause training from your own code: the Studio's pause button, as a call, and
+the counterpart of ``start_training``. The step in flight is not interrupted;
+the next ``with wl.guard_training_context:`` blocks until training is resumed
+(Play in the Studio header, or ``wl.start_training()``). While paused, the
+Studio, the gRPC server and the notebook keep running against the live model.
+
+**Typical usage**
+
+.. code-block:: python
+
+   for step, batch in enumerate(train_loader):
+       with wl.guard_training_context:
+           ...
+       if converged():
+           wl.pause_training()   # inspect the converged run, then press Play
+
+Running a cell in the Studio notebook pauses training the same way (see
+:ref:`notebook-pauses-training`).
+
+project_dataset / save_projection_coords
+----------------------------------------
+
+**Signatures**
+
+.. code-block:: python
+
+   wl.project_dataset(model, dataloader, layer=None, prefix=None, method="umap", ...)
+   wl.save_projection_coords(coords, batch_ids, prefix)
+
+**Purpose**
+
+Put a 2-D or 3-D projection of your samples on the Projection Board.
+``project_dataset`` collects the model's features from one layer and lays them
+out, with the built-in parametric UMAP or with your own ``method`` (anything
+with ``fit_transform``, or a callable). ``save_projection_coords`` stores
+coordinates you computed entirely yourself. Both write
+``signals//<prefix>_{x,y,z}`` per sample. ``project_dataset`` sweeps the whole
+loader (restarting a tracked loader a training loop is mid-epoch on), does not
+age the model, and returns a dict that includes ``sample_ids``, the samples
+placed in the order of the feature rows your ``method`` received. See
+:doc:`projection`.
 
 serve
 -----
@@ -631,7 +690,7 @@ trajectory_stats
 
 **Purpose**
 
-Scale- and noise-invariant summary statistics of one sample's value trajectory —
+Scale- and noise-invariant summary statistics of one sample's value trajectory,
 the reusable feature layer :func:`classify_loss_shape` is built on. Returns
 ``None`` when *values* has fewer than 2 points. Build a custom
 :func:`signal_classifier` on top instead of re-deriving these features by hand.
@@ -1975,7 +2034,7 @@ export_annotations
 
 **Purpose**
 
-Export bounding-box/segmentation annotations to a relabeling-tool format —
+Export bounding-box/segmentation annotations to a relabeling-tool format,
 the Python-API counterpart to Weights Studio's "Export" button and the
 ``weightslab export`` CLI command. See :doc:`export` for the full format
 reference and known limitations (image-path/class-name resolution).

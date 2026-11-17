@@ -129,6 +129,9 @@ Conventions that matter for correctness:
   and pause/resume or stats will misbehave.**
 - Use `model.get_age()` (steps actually trained; survives checkpoint reloads),
   not the raw loop counter.
+- Pause from code with `wl.pause_training()` (the counterpart of
+  `wl.start_training()`): the next guarded step waits for Play. Running a cell
+  in the Studio notebook pauses training the same way, and it stays paused.
 - `task_type` on the dataset/model selects rendering: `classification`,
   `segmentation`, `detection`, `detection_pointcloud`.
 - **Hyperparameter handle access:** the registered hyperparameters proxy
@@ -143,6 +146,7 @@ Recording values (pick by what the value is *about*, not by convenience):
 | one annotation | `wl.save_instance_signals(...)` | one box's IoU |
 | a group of samples | `wl.save_group_signals(signals={...}, group_ids=[...])` | a pair's contrastive loss |
 | one training **step** | `wl.save_model_signals(signals={...})` | a gradient norm |
+| a sample's place in a 2-D/3-D **projection** | `wl.save_projection_coords(coords, batch_ids=ids, prefix="tsne")` | your own t-SNE / umap-learn layout |
 
 The first three write dataframe rows (sortable/filterable in the grid); the
 fourth only plots a curve. Never fake a step-level value by broadcasting it
@@ -189,6 +193,7 @@ ones when debugging:
 | `GRPC_MAX_MESSAGE_BYTES` | `268435456` (256 MB) | Raise it if large tensors/image batches fail. |
 | `WEIGHTSLAB_DISABLE_WATCHDOGS` | `0` | Set `1` when debugging with breakpoints (see §5). |
 | `GRPC_WATCHDOG_STUCK_SECONDS` | `60` | Lock/RPC stuck threshold + lock-acquire timeout. |
+| `WEIGHTSLAB_PROJECTION` | on | Live 3-D parametric-UMAP projection (beta). `0` removes it; per model: `watch_or_edit(model, flag="model", projection=False)`. Tuning: `_EVERY`, `_DIM`, `_NEIGHBORS`, `_GRAPH` — see `docs/projection.rst`. |
 
 **Frontend (Weights Studio) — runtime-injected `window.*` globals:**
 
@@ -203,6 +208,7 @@ ones when debugging:
 | `ENABLE_HYPERPARAMETERS_OPTIMIZATION` | `1` | `0`/`false` removes the Hyperparameters section, makes HP inputs read-only, and stops the HP poll. |
 | `ENABLE_AGENT` | `1` | `0`/`false` removes the agent chat bar + history panel and stops the agent health poll. |
 | `ENABLE_NOTEBOOK` | `1` | `0`/`false` removes the notebook button (left of the logo) + notebook window. The notebook runs Python in a shared in-process kernel against the live experiment (`df`, model, checkpoints), persisted as `notebook.ipynb` under `root_log_dir`; `>`-prefixed cells ask the agent to propose code. |
+| `ENABLE_TUTORIAL` | `1` | `0`/`false` removes the new-user tour: the "New to WeightsLab?" notice (shown when no `wl_studio_seen` cookie and no saved Studio settings), its video popup ending on the MNIST Colab notebook, and the header **Tour** button. `TUTORIAL_VIDEO_URL` / `TUTORIAL_COLAB_URL` replace the video / notebook. |
 
 > **VITE_ vs WS_/BB_/ENABLE_:** `VITE_*` variables are baked at **build time**
 > (changing them needs a frontend rebuild). `WS_*` / `BB_*` / `ENABLE_*` are
@@ -264,6 +270,14 @@ something else is holding it; check for a long/blocking train or eval step.
 The train step isn't wrapped in `guard_training_context` (or eval in
 `guard_testing_context`). See §3 — these context managers are how the system
 gates and separates phases.
+
+**Projection board stays empty, or stopped updating.** `wl.projection.get_tracker()`
+is `None` when it is off (`WEIGHTSLAB_PROJECTION=0` or `projection=False`).
+Otherwise `.stats()` says why: `fits == 0` means the hooked layer is not on the
+forward path (pass `projection={"layer": "<named_modules() name>"}`);
+`disabled_reason` is set when 5 fits in a row failed and it turned itself off;
+`skipped_nonfinite > 0` means the model's features went NaN. Training is never
+affected by any of these. Full page: `weightslab/docs/projection.rst`.
 
 **Large weights/images fail to transfer.** Raise `GRPC_MAX_MESSAGE_BYTES`.
 

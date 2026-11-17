@@ -1,4 +1,5 @@
 import io
+import os
 import sys
 import io
 import time
@@ -396,9 +397,9 @@ def load_raw_image(dataset, index):
         if hasattr(np_img, 'numpy'):
             np_img = np_img.numpy()
         if np_img.ndim == 2:
-            return Image.fromarray(np_img.astype(np.uint8), mode="L")
+            return Image.fromarray(np_img.astype(np.uint8))
         elif np_img.ndim == 3:
-            return Image.fromarray(np_img.astype(np.uint8), mode="RGB")
+            return Image.fromarray(np_img.astype(np.uint8)).convert("RGB")
         else:
             raise ValueError(f"Unsupported image shape: {np_img.shape}")
 
@@ -553,6 +554,14 @@ def force_kill_all_python_processes():
         logger.error(f"Operating system '{sys.platform}' not supported for forced shutdown.")
 
 
+def _env_quality(name: str, default: int) -> int:
+    """An encoder quality (1-100) from the environment, else `default`."""
+    try:
+        return max(1, min(100, int(os.environ.get(name, default))))
+    except (TypeError, ValueError):
+        return default
+
+
 def encode_image_to_raw_bytes(
     np_img,
     middle_pil,
@@ -609,7 +618,10 @@ def encode_image_to_raw_bytes(
     else:
         # Thumbnail (grid) or non-volumetric: compress with WebP, fall back to JPEG.
         # WebP is ~40-50 % smaller than JPEG at equivalent visual quality.
-        _quality = 80 if is_full_resolution else 65
+        # Grid thumbnails used quality 65: at a few hundred pixels that left
+        # visible blocking and smeared fine structure. 85 costs a few KB per
+        # thumbnail. WL_THUMBNAIL_QUALITY / WL_MODAL_QUALITY override (1-100).
+        _quality = _env_quality("WL_MODAL_QUALITY", 80) if is_full_resolution else _env_quality("WL_THUMBNAIL_QUALITY", 85)
         _webp_method = 4 if is_full_resolution else 2 # 0 = fastest … 6 = smallest
         raw_buf = io.BytesIO()
         t0_enc = time.time()

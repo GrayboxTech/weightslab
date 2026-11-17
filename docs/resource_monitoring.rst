@@ -82,7 +82,7 @@ To turn everything off, either:
 
    export WEIGHTSLAB_DISABLE_RESOURCE_MONITORING=1
 
-or set ``enabled: false`` in ``resource_monitoring.yaml`` (see below) —
+or set ``enabled: false`` in ``resource_monitoring.yaml`` (see below),
 the YAML value wins if both are set.
 
 Enabling only specific categories
@@ -97,7 +97,7 @@ Two ways to restrict which categories are sampled:
 
      export WL_RESOURCE_MONITOR_CATEGORIES=cpu,memory,gpu
 
-- **YAML file** (``resource_monitoring.yaml``), per-category booleans —
+- **YAML file** (``resource_monitoring.yaml``), per-category booleans,
   lets you leave everything on and disable just one or two:
 
   .. code-block:: yaml

@@ -141,6 +141,37 @@ How it works
   (merged, in order), the value of the last expression, any ``matplotlib``
   figures rendered inline as images, and a full traceback on error.
 - A run can be interrupted mid-flight with the stop button next to the cell.
+- Running a code cell **pauses training first** (see below).
+
+.. _notebook-pauses-training:
+
+Running a cell pauses training
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A cell runs in the training process, against the live model and data. If the
+training loop kept stepping while a cell ran, a cell that reads features,
+computes a t-SNE or inspects weights would see a model that changes underneath
+it. So executing a code cell pauses a running training first — the same pause
+as the header's button, so the header shows it paused — and waits for the
+training step in flight to finish (up to 30 s) before the cell starts.
+
+Training then **stays paused**: resuming is your call, with Play. The first
+cell that paused it says so in its output::
+
+   [WeightsLab] Training paused to run this cell -- press Play in the header to resume.
+
+Code sent to the embedded kernel some other way (``jupyter console
+--existing``) pauses training the same way. Generating code with a ``>`` cell
+does not pause anything; running the generated code does.
+
+To pause at a moment of your choosing from the training script instead — once
+the run has converged, say — call ``wl.pause_training()``.
+
+Which notebook opens: the one used last in this session, else the most
+recently written ``.ipynb`` under ``root_log_dir``, else a new
+``notebook.ipynb``. A script can therefore ship a ready-made notebook by writing
+it into ``root_log_dir`` before ``wl.serve()`` (see
+``examples/Usecases/wl-fashion-mnist-custom-projection``).
 
 Cell types
 ~~~~~~~~~~~

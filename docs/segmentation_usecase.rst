@@ -164,7 +164,7 @@ Important:
 ---------------------------------------------------
 
 ``utils/criterions.py`` also registers free-form signals via ``custom_signals()``
-— a static signal computed from the image, and a dynamic signal that reacts to a
+, a static signal computed from the image, and a dynamic signal that reacts to a
 logged metric:
 
 .. code-block:: python

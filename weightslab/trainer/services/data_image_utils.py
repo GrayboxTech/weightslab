@@ -197,7 +197,7 @@ def render_tabular_heatmap(vec: np.ndarray, cell: int = 16, quality: int = 60):
     norm = (grid - mn) / (mx - mn + 1e-8)
     img8 = np.clip(norm * 255.0, 0, 255).astype(np.uint8)
     try:
-        pil = Image.fromarray(img8, mode="L").resize(
+        pil = Image.fromarray(img8).resize(
             (side * cell, side * cell), Image.Resampling.NEAREST)
         buf = io.BytesIO()
         pil.convert("RGB").save(buf, format="WEBP", quality=quality, method=1)

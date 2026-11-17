@@ -351,7 +351,7 @@ def point_cloud_to_bev_image(
 
     pts = filter_valid_points(points)
     if pts.shape[0] == 0:
-        return Image.fromarray(canvas, mode="RGB")
+        return Image.fromarray(canvas)
 
     if pc_range is None:
         pc_range = get_pc_range(None, pts)
@@ -363,7 +363,7 @@ def point_cloud_to_bev_image(
     )
     pts = pts[in_range]
     if pts.shape[0] == 0:
-        return Image.fromarray(canvas, mode="RGB")
+        return Image.fromarray(canvas)
 
     # Pixel coordinates: col follows +x (right), row follows -y (so +y is up).
     cols = ((pts[:, 0] - x_min) / max(x_max - x_min, 1e-6) * (size - 1)).astype(np.int64)
@@ -389,7 +389,7 @@ def point_cloud_to_bev_image(
 
     flat_canvas = canvas.reshape(-1, 3)
     flat_canvas[occupied] = colors
-    return Image.fromarray(canvas, mode="RGB")
+    return Image.fromarray(canvas)
 
 
 def point_cloud_to_range_image(
@@ -422,7 +422,7 @@ def point_cloud_to_range_image(
     pts = filter_valid_points(points)
     if pts.shape[0] == 0:
         canvas = np.full((image_height, image_width, 3), np.array(_BEV_BACKGROUND, dtype=np.uint8), dtype=np.uint8)
-        return Image.fromarray(canvas, mode="RGB")
+        return Image.fromarray(canvas)
 
     # Extract coordinates
     x, y = pts[:, 0], pts[:, 1]
@@ -471,7 +471,7 @@ def point_cloud_to_range_image(
         colors = np.clip(colors * brightness[:, None], 0, 255).astype(np.uint8)
         canvas[v, u] = colors
 
-    return Image.fromarray(canvas, mode="RGB")
+    return Image.fromarray(canvas)
 
 
 def boxes_dimensionality(boxes: np.ndarray) -> int:
@@ -574,9 +574,7 @@ def render_thumbnail_2d_for_dataset(dataset, points: np.ndarray) -> Image.Image:
             if isinstance(img, Image.Image):
                 return img.convert("RGB")
             arr = np.asarray(img)
-            if arr.ndim == 2:
-                return Image.fromarray(arr.astype(np.uint8), mode="L").convert("RGB")
-            return Image.fromarray(arr.astype(np.uint8), mode="RGB")
+            return Image.fromarray(arr.astype(np.uint8)).convert("RGB")
         except Exception as exc:
             logger.warning("Dataset %s hook failed (%s); falling back to default.", THUMBNAIL_2D_HOOK, exc)
 
@@ -588,9 +586,7 @@ def render_thumbnail_2d_for_dataset(dataset, points: np.ndarray) -> Image.Image:
             if isinstance(img, Image.Image):
                 return img.convert("RGB")
             arr = np.asarray(img)
-            if arr.ndim == 2:
-                return Image.fromarray(arr.astype(np.uint8), mode="L").convert("RGB")
-            return Image.fromarray(arr.astype(np.uint8), mode="RGB")
+            return Image.fromarray(arr.astype(np.uint8)).convert("RGB")
         except Exception as exc:
             logger.warning("Dataset %s hook failed (%s); falling back to default.", BEV_IMAGE_HOOK, exc)
 
@@ -601,9 +597,7 @@ def render_thumbnail_2d_for_dataset(dataset, points: np.ndarray) -> Image.Image:
             if isinstance(img, Image.Image):
                 return img.convert("RGB")
             arr = np.asarray(img)
-            if arr.ndim == 2:
-                return Image.fromarray(arr.astype(np.uint8), mode="L").convert("RGB")
-            return Image.fromarray(arr.astype(np.uint8), mode="RGB")
+            return Image.fromarray(arr.astype(np.uint8)).convert("RGB")
         except Exception as exc:
             logger.warning("Registered thumbnail fn failed (%s); falling back to default.", exc)
 

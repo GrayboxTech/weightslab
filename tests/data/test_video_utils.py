@@ -314,3 +314,136 @@ def test_encode_empty_clip_is_safe():
     empty = np.zeros((0, 8, 8, 3), dtype=np.uint8)
     assert vu.encode_video_mp4(empty, fps=8) == b""
     assert vu.encode_video_gif(empty, fps=8) == b""
+
+
+# ---------------------------------------------------------------------------
+# Per-frame annotations (video segmentation / detection)
+# ---------------------------------------------------------------------------
+class TestSelectFrameAnnotation:
+    """A clip's annotation must be reduced to the frame the poster shows.
+
+    The grid and the modal's still view draw exactly one frame. Sending the
+    whole [T, H, W] stack instead does not fail loudly — it gets RLE'd into a
+    stat the renderer reads as 2-D, i.e. a plausible-looking wrong overlay.
+    """
+
+    def test_poster_index_is_the_middle_frame(self):
+        # video_poster_frame() renders arr[T // 2]; anything drawn on it has
+        # to come from the same index or the overlay describes another moment.
+        assert vu.poster_frame_index(8) == 4
+        assert vu.poster_frame_index(16) == 8
+        assert vu.poster_frame_index(1) == 0
+
+    def test_slices_a_per_frame_mask_stack(self):
+        masks = np.arange(8 * 4 * 4).reshape(8, 4, 4)
+        got = vu.select_frame_annotation(masks, 8)
+        assert got.shape == (4, 4)
+        assert (got == masks[4]).all()
+
+    def test_leaves_a_single_2d_mask_alone(self):
+        mask = np.zeros((4, 4))
+        assert vu.select_frame_annotation(mask, 8).shape == (4, 4)
+
+    def test_does_not_slice_a_colour_mask(self):
+        """[H, W, C] is 3-D but NOT per-frame — slicing it would take a row."""
+        colour = np.zeros((4, 4, 3))
+        assert vu.select_frame_annotation(colour, 8).shape == (4, 4, 3)
+
+    def test_slices_per_frame_box_arrays(self):
+        boxes = np.stack([np.full((1, 6), t) for t in range(8)])   # [T, N, 6]
+        got = vu.select_frame_annotation(boxes, 8)
+        assert got.shape == (1, 6)
+        assert int(got[0, 0]) == 4
+
+    def test_slices_a_per_frame_list(self):
+        boxes = [np.full((2, 6), t) for t in range(8)]
+        assert int(vu.select_frame_annotation(boxes, 8)[0, 0]) == 4
+
+    def test_image_datasets_are_untouched(self):
+        """T == 0 is how an image dataset reports itself; nothing may change."""
+        arr = np.arange(8 * 4 * 4).reshape(8, 4, 4)
+        assert vu.select_frame_annotation(arr, 0).shape == arr.shape
+        assert vu.select_frame_annotation(arr, 1).shape == arr.shape
+
+    def test_none_and_mismatched_lengths_pass_through(self):
+        assert vu.select_frame_annotation(None, 8) is None
+        # A list that is not length T is not per-frame.
+        other = [1, 2, 3]
+        assert vu.select_frame_annotation(other, 8) is other
+
+
+class TestHasPlayableMedia:
+    """media_kind must be enough; task_type is not the only way to be video."""
+
+    class _VideoCls:
+        media_kind = "video"
+        task_type = "classification"
+
+    class _Image:
+        task_type = "classification"
+
+    def test_media_kind_makes_a_classifier_playable(self):
+        assert vu.has_playable_media(self._VideoCls(), "classification")
+
+    def test_generation_task_is_playable_without_media_kind(self):
+        assert vu.has_playable_media(self._Image(), "video_generation")
+        assert vu.has_playable_media(self._Image(), "audio_generation")
+
+    def test_plain_image_dataset_is_not_playable(self):
+        assert not vu.has_playable_media(self._Image(), "classification")
+        assert not vu.has_playable_media(self._Image(), "segmentation")
+
+
+class TestPosterFrameHook:
+    """A dataset may supply the grid's still without decoding a clip.
+
+    Measured on a 40 s 720p corpus: 283 ms to decode a 16-frame window vs
+    158 ms for one frame, so roughly half the grid's image time went on
+    frames nobody looks at.
+    """
+
+    class _WithHook:
+        media_kind = "video"
+        num_frames = 8
+
+        def get_poster_frame(self, index):
+            return np.full((4, 6, 3), int(index), dtype=np.uint8)
+
+    class _Declining:
+        media_kind = "video"
+
+        def get_poster_frame(self, index):
+            return None            # cannot cheaply seek — caller falls back
+
+    class _Broken:
+        media_kind = "video"
+
+        def get_poster_frame(self, index):
+            raise RuntimeError("boom")
+
+    class _WrongShape:
+        media_kind = "video"
+
+        def get_poster_frame(self, index):
+            return np.zeros((8, 4, 6, 3), dtype=np.uint8)   # a whole clip
+
+    class _NoHook:
+        media_kind = "video"
+
+    def test_returns_the_frame_the_dataset_supplies(self):
+        got = vu.load_poster_frame_direct(self._WithHook(), 3)
+        assert got is not None and got.shape == (4, 6, 3)
+        assert int(got[0, 0, 0]) == 3
+
+    def test_dataset_without_the_hook_falls_back(self):
+        assert vu.load_poster_frame_direct(self._NoHook(), 0) is None
+
+    def test_declining_falls_back(self):
+        assert vu.load_poster_frame_direct(self._Declining(), 0) is None
+
+    def test_a_raising_hook_falls_back_instead_of_propagating(self):
+        assert vu.load_poster_frame_direct(self._Broken(), 0) is None
+
+    def test_a_wrong_shaped_poster_is_refused(self):
+        # Drawn, not raised, if accepted — so refuse rather than guess.
+        assert vu.load_poster_frame_direct(self._WrongShape(), 0) is None
