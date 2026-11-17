@@ -281,6 +281,47 @@ def _video_frame_count(dataset, task_type=None) -> int:
         return 0
 
 
+def is_set_flag(value) -> bool:
+    """True only for a boolean column value that is really SET and true.
+
+    Two traps, both hit in production, both of them "a missing value read as
+    set":
+
+    * ``bool(float("nan")) is True`` in Python, and a nullable flag column is
+      full of NaN -- ``discarded`` for a sample nothing has written yet, or a
+      ``tag:*`` column for every sample that does not carry the tag. Reading it
+      with ``bool()`` / ``astype(bool)`` reported all of them as set: samples
+      greyed out as discarded while the dataframe said False, and every sample
+      wearing every tag.
+    * ``bool("False") is True`` as well, and a boolean column that has been
+      through the H5 store (where these columns become categorical) can come
+      back holding the STRINGS "True"/"False".
+
+    So: missing is false, a string is read as a word, everything else falls
+    back to ``bool()``.
+    """
+    try:
+        if value is None or pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        # pd.isna raises for some array-likes; those are not missing.
+        pass
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y", "t")
+    try:
+        return bool(value)
+    except Exception:  # noqa: BLE001 -- an exotic value is not a set flag
+        return False
+
+
+def set_flag_mask(series) -> "np.ndarray":
+    """``is_set_flag`` over a whole column, as a numpy bool array."""
+    if series is None:
+        return np.zeros(0, dtype=bool)
+    return np.fromiter((is_set_flag(v) for v in series.tolist()),
+                       dtype=bool, count=len(series))
+
+
 def _is_non_mask_task(task_type) -> bool:
     """True when labels/predictions for this task must not be read as masks."""
     return task_type in _NON_MASK_TASKS or is_generation_task(task_type)
@@ -1215,7 +1256,12 @@ class DataService:
         self._load_existing_tags()
 
     def _resolve_root_log_dir(self) -> Path:
-        """Resolve root log directory from hyperparams/env, fallback to ./logs."""
+        """Resolve root log directory from hyperparams/env, fallback to ./logs.
+        A read-only viewer's own files go to its workspace (see get_viewer_workspace)."""
+        from weightslab.backend.ledgers import get_viewer_workspace
+        workspace = get_viewer_workspace()
+        if workspace:
+            return Path(workspace)
         root = None
         try:
             hp = self._ctx.components.get("hyperparams")
@@ -2372,10 +2418,13 @@ class DataService:
 
                     # Resize middle slice for thumbnail if requested (maintain aspect ratio)
                     if target_width != original_size[0] or target_height != original_size[1]:
-                        # BILINEAR is ~2x faster than LANCZOS and sufficient for small thumbnails;
-                        # use LANCZOS only for full-resolution modal views where quality matters.
-                        _resample = Image.Resampling.LANCZOS if is_full_resolution else Image.Resampling.BILINEAR
-                        middle_pil = middle_pil.resize((target_width, target_height), _resample)
+                        # LANCZOS keeps thumbnails sharp; reducing_gap first shrinks by an
+                        # integer factor with a box filter (cheap), so a 2048 px photo
+                        # going to a ~200 px cell costs about what BILINEAR did.
+                        middle_pil = middle_pil.resize(
+                            (target_width, target_height), Image.Resampling.LANCZOS,
+                            reducing_gap=None if is_full_resolution else 2.0,
+                        )
 
                     # Keep masks in sync with thumbnail size, but only for thumbnail paths.
                     # Full-resolution modal requests keep original mask resolution.
@@ -2457,12 +2506,9 @@ class DataService:
                             try:
                                 resized_view = view_pil
                                 if resized_view.size != (target_width, target_height):
-                                    _view_resample = (
-                                        Image.Resampling.LANCZOS if is_full_resolution
-                                        else Image.Resampling.BILINEAR
-                                    )
                                     resized_view = resized_view.resize(
-                                        (target_width, target_height), _view_resample
+                                        (target_width, target_height), Image.Resampling.LANCZOS,
+                                        reducing_gap=None if is_full_resolution else 2.0,
                                     )
                                 view_bytes, view_shape, _ = encode_image_to_raw_bytes(
                                     np_img=None,

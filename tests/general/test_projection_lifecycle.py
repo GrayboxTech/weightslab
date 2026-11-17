@@ -926,6 +926,16 @@ class TestNoProjectionReason(_StubbedFrame):
         tracker.disabled_reason = "5 consecutive failed fits"
         self.assertIn("stopped after 5 consecutive", ps.missing_reason("umap", []))
 
+    def test_the_hooked_layer_does_not_see_one_row_per_sample(self):
+        """It will never fit, so "after its first fit" would send the user
+        waiting for something that cannot happen."""
+        tracker = attach_projection(TinyNet())
+        tracker.last_mismatch = (12000, 4)
+        reason = ps.missing_reason("umap", [])
+        self.assertIn("12000 feature rows for a batch of 4 samples", reason)
+        self.assertIn("projection={'layer'", reason)
+        self.assertNotIn("first fit", reason)
+
     def test_the_built_in_is_off(self):
         reason = ps.missing_reason("umap", [])
         self.assertIn("off for this run", reason)

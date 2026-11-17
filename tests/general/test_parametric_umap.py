@@ -171,6 +171,27 @@ class TestTracker(unittest.TestCase):
         finally:
             tracker.detach()
 
+    def test_a_layer_that_never_sees_one_row_per_sample_says_so(self):
+        """A per-point layer mismatches on EVERY batch; dropping each one
+        without a word left the board empty with no explanation."""
+        model = TinyNet()
+        tracker = ProjectionTracker(every_n_steps=1)
+        tracker.attach(model.classifier)
+        tracker.layer_name = "classifier"
+        try:
+            with self.assertLogs("weightslab.projection.parametric_umap", level="WARNING") as logs:
+                for step in range(1, 4):
+                    model(th.randn(8, 16))
+                    self.assertFalse(tracker.observe_batch(["a", "b"], step=step))
+        finally:
+            tracker.detach()
+        self.assertEqual(tracker.mismatched_batches, 3)
+        self.assertEqual(tracker.last_mismatch, (8, 2))
+        self.assertEqual(tracker.stats()["mismatched_batches"], 3)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("8 feature rows for a batch of 2 samples", logs.output[0])
+        self.assertIn("'classifier'", logs.output[0])
+
 
 class TestSaveSignalsCoercion(unittest.TestCase):
     """save_signals must never create a column it then writes nothing into."""
@@ -289,6 +310,32 @@ class TestAnyTorchModel(unittest.TestCase):
                 return self.head(self.encoder(x))
 
         self._assert_projects(Seq(), th.randn(5, 9, 32), 32)
+
+    def test_point_cloud_detector_hooks_its_head_not_the_per_point_net(self):
+        """PointPillars (the 2-D / 3-D LiDAR examples): the only Linear is the
+        per-point feature net, registered FIRST and run on every point of the
+        batch at once -- one row per point. The head is a conv on the stacked
+        BEV canvases, one per sample, and that is what has to be hooked: the
+        Linear's rows never matched the batch, so every batch was dropped."""
+        class Pillars(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.pfn = nn.Sequential(nn.Linear(4, 8), nn.ReLU())
+                self.backbone = nn.Sequential(nn.Conv2d(8, 16, 3, padding=1), nn.ReLU())
+                self.head = nn.Conv2d(16, 5, 1)
+
+            def forward(self, points):                       # (B, N, 4)
+                b, n, _ = points.shape
+                per_point = self.pfn(points.reshape(b * n, 4))
+                canvas = per_point.reshape(b, n, 8).mean(1)[:, :, None, None]
+                return self.head(self.backbone(canvas.expand(b, 8, 4, 4).contiguous()))
+
+        model = Pillars()
+        layer, use_input, feature_last = pick_embedding_layer(model)
+        self.assertIs(layer, model.head)
+        self.assertTrue(use_input)
+        self.assertFalse(feature_last)
+        self._assert_projects(model, th.randn(3, 50, 4), 16)
 
     def test_fully_convolutional_segmentation_head(self):
         """No Linear anywhere: the last CONV is the head, and its INPUT is the

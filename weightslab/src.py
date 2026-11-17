@@ -1360,8 +1360,12 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 if hp_name:
                     hp_dict = get_hyperparams(hp_name)
 
-                    # Use root_log_dir from hyperparameters if available
-                    if isinstance(hp_dict, dict) and 'root_log_dir' in hp_dict:
+                    # Use root_log_dir from hyperparameters if available (a
+                    # read-only viewer keeps its data view in its workspace)
+                    from weightslab.backend.ledgers import get_viewer_workspace
+                    if get_viewer_workspace():
+                        kwargs['root_log_dir'] = get_viewer_workspace()
+                    elif isinstance(hp_dict, dict) and 'root_log_dir' in hp_dict:
                         kwargs['root_log_dir'] = hp_dict['root_log_dir']
 
                     # Update kwargs with relevant hyperparameters
@@ -1546,18 +1550,28 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 # _resolve_configured_root_log_dir for the resolution order).
                 _hp_cfg['root_log_dir'] = _resolve_configured_root_log_dir(
                     _hp_cfg.get('root_log_dir'))
+                # checkpoint_manager.read_only: a viewer over the experiments found
+                # under root_log_dir (see CheckpointManager). It writes its own
+                # files to its workspace, never into root_log_dir.
+                _cm_cfg = _hp_cfg.get('checkpoint_manager') if hasattr(_hp_cfg, 'get') else None
+                _read_only = bool(_cm_cfg.get('read_only', False)) if hasattr(_cm_cfg, 'get') else False
+                _workspace = _cm_cfg.get('workspace') if hasattr(_cm_cfg, 'get') else None
+                if _read_only:
+                    _workspace = os.path.abspath(str(_workspace or os.path.join(
+                        str(_hp_cfg['root_log_dir']), CheckpointManager.VIEWER_WORKSPACE_DIRNAME)))
+                _writes_to = _workspace if _read_only else _hp_cfg['root_log_dir']
                 # The experiment directory is now settled, so move the session
                 # log into it. Done here rather than in the branches below so it
                 # happens for every route (dict, YAML path, hyperparameters
                 # restored from a checkpoint), not only when the caller passed
                 # root_log_dir through `defaults`/kwargs.
-                _update_log_directory(_hp_cfg['root_log_dir'])
+                _update_log_directory(_writes_to)
                 # Publish where training ACTUALLY writes, so the UI lists this
                 # run's reports/notebooks even when the two resolved their
                 # directory by different routes.
                 try:
                     from weightslab.utils.active_experiment import record_backend_experiment
-                    record_backend_experiment(_hp_cfg['root_log_dir'])
+                    record_backend_experiment(_writes_to)
                 except Exception as _exc:  # noqa: BLE001 -- advisory only
                     logger.debug("Could not record the backend experiment dir: %s", _exc)
                 try:
@@ -1571,7 +1585,8 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                             raise KeyError("No manager in ledger")
                     except (KeyError, AttributeError):
                         # Create new manager and register it
-                        _checkpoint_manager = CheckpointManager(root_log_dir=_hp_cfg['root_log_dir'])
+                        _checkpoint_manager = CheckpointManager(root_log_dir=_hp_cfg['root_log_dir'],
+                                                                read_only=_read_only, workspace=_workspace)
                         try:
                             ledgers.register_checkpoint_manager(_checkpoint_manager)
                             logger.info("Registered new checkpoint manager in ledger")
@@ -1584,7 +1599,10 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 checkpoint_hp_loaded = False
                 try:
                     chkpt_manager = get_checkpoint_manager()
-                    if chkpt_manager != None and isinstance(chkpt_manager, ledgers.Proxy):
+                    # A read-only viewer keeps its own hyperparameters (a run's
+                    # saved config names that run's paths, not the viewer's).
+                    if (chkpt_manager != None and isinstance(chkpt_manager, ledgers.Proxy)
+                            and getattr(chkpt_manager, 'read_only', False) is not True):
                         # Try to get latest hash and load hyperparameters from checkpoint
                         latest_hash = None
                         if hasattr(chkpt_manager, 'current_exp_hash') and chkpt_manager.current_exp_hash:
@@ -1831,6 +1849,16 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
     # Before anything that can block: whatever happens next, this process
     # should not outlive the workspace that owns it.
     _register_pid_with_ui_server()
+
+    # A read-only viewer over existing experiments shows the current (most
+    # recent) one's last state from the first page load on.
+    try:
+        _cm = get_checkpoint_manager()
+        if (_cm is not None and getattr(_cm, 'read_only', False) is True
+                and not getattr(_cm, '_view_loaded', False)):
+            load_experiment()
+    except Exception as e:  # noqa: BLE001 -- never block serving on it
+        logger.warning(f"Could not load the current experiment before serving: {e}")
 
     # Mirror tqdm progress bars into the session log. A bar paints itself onto
     # the terminal and never touches `logging`, so a log file read after the run
@@ -3738,6 +3766,58 @@ def _make_default_eval_fn(model):
             pass
 
     return _default_eval
+
+
+def load_experiment(exp_hash: str = None) -> bool:
+    """Load an experiment's last state into this process.
+
+    Its per-sample state replaces the data grid's -- last signal values, tags,
+    discards and predictions, from its data store (``checkpoints/data/data.h5``
+    and ``arrays.h5``) or, when only that remains, its newest
+    ``*_dataframe.parquet`` export -- and its weights are loaded when a model is
+    registered. The UI's run restore does the same.
+
+    Made for a viewer over finished runs: wrap hyperparameters with
+    ``root_log_dir`` set to the folder holding the runs (each in its own
+    subfolder, at any depth up to 3) and ``checkpoint_manager: {read_only:
+    True}``. The current experiment is then the most recent run found, no new
+    experiment is created, nothing is written into the runs, and every run is
+    listed in the UI's runs popup, ready to load. ``serve()`` loads the current
+    one when nothing was loaded yet.
+
+    Args:
+        exp_hash: The run to load (any hash listed in the runs popup, from any
+            discovered folder). Default: the current experiment.
+
+    Returns:
+        True when the state was applied.
+    """
+    cm = get_checkpoint_manager()
+    if cm is None or not hasattr(cm, 'load_experiment'):
+        logger.warning("load_experiment: no checkpoint manager (wrap hyperparameters with root_log_dir first)")
+        return False
+    ok = bool(cm.load_experiment(exp_hash))
+    if not ok:
+        logger.warning(f"load_experiment: could not load {exp_hash or 'the current experiment'}")
+    return ok
+
+
+def on_experiment_load(func):
+    """Decorator: run ``func(exp_hash, root_dir)`` after each experiment load
+    (``load_experiment``, the UI's run restore, auto-resume).
+
+    ``root_dir`` is the experiment folder owning ``exp_hash``. Use it to attach
+    what WeightsLab did not persist for that run, e.g. predictions the training
+    script kept in its own files::
+
+        @wl.on_experiment_load
+        def show_predictions(exp_hash, root_dir):
+            z = np.load(root_dir / "preds.npz")
+            wl.save_signals(signals={"pred_pixels": z["masks"].sum((1, 2))},
+                            batch_ids=z["ids"], preds=z["masks"], log=False)
+    """
+    from weightslab.components.checkpoint_manager import register_experiment_load_hook
+    return register_experiment_load_hook(func)
 
 
 def eval_fn(func):

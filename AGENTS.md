@@ -211,6 +211,7 @@ ones when debugging:
 | `ENABLE_HYPERPARAMETERS_OPTIMIZATION` | `1` | `0`/`false` removes the Hyperparameters section, makes HP inputs read-only, and stops the HP poll. |
 | `ENABLE_AGENT` | `1` | `0`/`false` removes the agent chat bar + history panel and stops the agent health poll. |
 | `ENABLE_NOTEBOOK` | `1` | `0`/`false` removes the notebook button (left of the logo) + notebook window. The notebook runs Python in a shared in-process kernel against the live experiment (`df`, model, checkpoints), persisted as `notebook.ipynb` under `root_log_dir`; `>`-prefixed cells ask the agent to propose code. |
+| `ENABLE_TUTORIAL` | `1` | `0`/`false` removes the new-user tour: the "New to WeightsLab?" notice (shown when no `wl_studio_seen` cookie and no saved Studio settings), its video popup ending on the MNIST Colab notebook, and the header **Tour** button. `TUTORIAL_VIDEO_URL` / `TUTORIAL_COLAB_URL` replace the video / notebook. |
 
 > **VITE_ vs WS_/BB_/ENABLE_:** `VITE_*` variables are baked at **build time**
 > (changing them needs a frontend rebuild). `WS_*` / `BB_*` / `ENABLE_*` are

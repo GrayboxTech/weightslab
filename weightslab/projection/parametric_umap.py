@@ -405,6 +405,10 @@ class ProjectionTracker:
         self._consecutive_failures = 0
         self.disabled_reason: str | None = None
         self.skipped_nonfinite = 0
+        # Batches whose hooked features did not have one row per sample, and the
+        # last such (rows, samples) -- see observe_batch.
+        self.mismatched_batches = 0
+        self.last_mismatch: tuple[int, int] | None = None
 
     # ------------------------------------------------------------------ hook
     def attach(self, module: nn.Module, use_input: bool = True,
@@ -713,7 +717,21 @@ class ProjectionTracker:
                 return False
             if len(ids) != feats.shape[0]:
                 # Mismatched pairing: writing it would attach one sample's
-                # features to another's id.
+                # features to another's id. A layer that never sees one row per
+                # sample (a per-point or per-token layer) does this on EVERY
+                # batch, and the board stayed empty without a word: say it once.
+                self.mismatched_batches += 1
+                self.last_mismatch = (int(feats.shape[0]), len(ids))
+                if self.mismatched_batches == _MISS_WARN_AFTER:
+                    logger.warning(
+                        f"[projection] the hooked layer {self.layer_name!r} gives "
+                        f"{feats.shape[0]} feature rows for a batch of {len(ids)} "
+                        f"samples -- not one row per sample (a per-point or "
+                        f"per-token layer?), so nothing can be placed. Point it at "
+                        f"a per-sample layer with wl.watch_or_edit(model, "
+                        f"flag='model', projection={{'layer': '<named_modules() "
+                        f"name>'}})."
+                    )
                 return False
 
             fit_now = False
@@ -855,6 +873,7 @@ class ProjectionTracker:
             "layer_detail": self.layer_detail,
             "failures": self.failures,
             "skipped_nonfinite": self.skipped_nonfinite,
+            "mismatched_batches": self.mismatched_batches,
             "disabled_reason": self.disabled_reason,
             "columns": [f"signals//{self.signal_prefix}_{a}"
                         for a in ["x", "y", "z"][:self.out_dim]],
@@ -893,15 +912,22 @@ def pick_embedding_layer(model: nn.Module):
     tensor that UMAP will happily lay out; you would just be looking at a map
     of class scores and believing it was the model's representation.
 
-    Order of preference:
+    The last parameterised layer is the last ``nn.Linear`` or conv in
+    registration order, whichever comes later:
 
-    1. last ``nn.Linear`` -> its input; features are on the LAST axis (Linear
-       acts on that axis), so ``(B, T, C)`` keeps ``C``;
-    2. last conv (``Conv1d/2d/3d``, the head of a fully-convolutional model like
-       FCN/DeepLab/U-Net) -> its input; channels-first, so ``(B, C, H, W)``
-       keeps ``C``;
-    3. otherwise the last leaf module's output, channels-first -- a genuine
-       last resort for a model with no parameterised layer to anchor on.
+    * an ``nn.Linear`` -> its input; features are on the LAST axis (Linear acts
+      on that axis), so ``(B, T, C)`` keeps ``C``;
+    * a conv (``Conv1d/2d/3d``, the head of a fully-convolutional model like
+      FCN/DeepLab/U-Net or a detector) -> its input; channels-first, so
+      ``(B, C, H, W)`` keeps ``C``;
+    * no parameterised layer at all -> the last leaf module's output,
+      channels-first, as a genuine last resort.
+
+    "Whichever comes later", not "a Linear if there is one": a point-cloud
+    detector (PointPillars) has exactly one ``nn.Linear``, its per-point
+    feature net, registered FIRST, and a conv head. Preferring any Linear
+    hooked the per-point features -- one row per point, not per sample -- so
+    every batch was dropped and the board never got a point.
 
     AUXILIARY heads are skipped. torchvision's FCN and DeepLab register
     ``aux_classifier`` AFTER ``classifier``, so "the last conv" picked the
@@ -924,26 +950,19 @@ def pick_embedding_layer(model: nn.Module):
     # main = anything not under an auxiliary head; aux = the fallback, used
     # only if a model turns out to be nothing BUT an auxiliary head; fixed =
     # frozen parameterised layers, the last resort before a bare leaf.
-    last_linear = {"main": None, "aux": None, "fixed": None}
-    last_conv = {"main": None, "aux": None, "fixed": None}
+    last_param = {"main": None, "aux": None, "fixed": None}
     last_leaf = {"main": None, "aux": None}
     for name, module in model.named_modules():
         bucket = "aux" if _AUXILIARY_NAME.search(name) else "main"
         param_bucket = "fixed" if _is_frozen(module) else bucket
-        if isinstance(module, nn.Linear):
-            last_linear[param_bucket] = module
-        elif isinstance(module, nn.modules.conv._ConvNd):
-            last_conv[param_bucket] = module
+        if isinstance(module, (nn.Linear, nn.modules.conv._ConvNd)):
+            last_param[param_bucket] = module
         if len(list(module.children())) == 0:
             last_leaf[bucket] = module
 
-    for buckets in (("main", "aux"), ("fixed",)):
-        linear = next((last_linear[b] for b in buckets if last_linear[b] is not None), None)
-        if linear is not None:
-            return linear, True, True
-        conv = next((last_conv[b] for b in buckets if last_conv[b] is not None), None)
-        if conv is not None:
-            return conv, True, False
+    for bucket in ("main", "aux", "fixed"):
+        if last_param[bucket] is not None:
+            return _describe_layer(last_param[bucket])
     leaf = last_leaf["main"] or last_leaf["aux"]
     return leaf, False, False
 
