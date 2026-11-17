@@ -408,6 +408,7 @@ Authoritative reference: `weightslab/docs/configuration.rst`. High-signal ones:
 | `ENABLE_HYPERPARAMETERS_OPTIMIZATION` | `1` | `0` makes HP inputs read-only, stops HP poll. |
 | `ENABLE_AGENT` | `1` | `0` removes agent chat bar. |
 | `ENABLE_NOTEBOOK` | `1` | `0` removes the notebook (shared in-process kernel against the live experiment; persisted as `notebook.ipynb`; `>`-prefixed cells ask the agent for code). |
+| `ENABLE_TUTORIAL` | `1` | `0` removes the new-user tour (notice → YouTube popup → MNIST Colab; header Tour button). `TUTORIAL_VIDEO_URL` / `TUTORIAL_COLAB_URL` override the video / notebook. |
 
 `VITE_*` vars are build-time (need a frontend rebuild); `WS_*`/`BB_*`/`ENABLE_*`
 are runtime (need only restart + reload). `ENABLE_*` default on; `0`/`false`/`no`/`off` disables.

@@ -1316,6 +1316,18 @@ case) to disable.
        notebook document is persisted as ``notebook.ipynb`` under the experiment
        ``root_log_dir``. Dev-server fallback: ``VITE_ENABLE_NOTEBOOK``. See
        :ref:`embedded-notebook` for how it works, with examples.
+   * - ``ENABLE_TUTORIAL``
+     - ``1``
+     - The new-user tour. A browser that never opened Weights Studio (no
+       ``wl_studio_seen`` cookie and no saved Studio settings) gets a
+       "New to WeightsLab?" notice at the top right; it opens a popup that plays
+       the tour video, then points to the MNIST tutorial notebook in Google
+       Colab. A **Tour** button in the header replays it. When disabled, none of
+       this is shown and nothing is stored. ``TUTORIAL_VIDEO_URL`` (any YouTube
+       link, or the video id) and ``TUTORIAL_COLAB_URL`` (an ``https`` URL)
+       replace the default video and notebook. Dev-server fallbacks:
+       ``VITE_ENABLE_TUTORIAL``, ``VITE_TUTORIAL_VIDEO_URL``,
+       ``VITE_TUTORIAL_COLAB_URL``.
 
 .. note::
 

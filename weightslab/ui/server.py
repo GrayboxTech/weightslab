@@ -2494,6 +2494,13 @@ _UI_ENV_GLOBALS = [
      ("ENABLE_HYPERPARAMETERS_OPTIMIZATION", "WS_ENABLE_HYPERPARAMETERS_OPTIMIZATION",
       "VITE_ENABLE_HYPERPARAMETERS_OPTIMIZATION")),
     ("WS_ENABLE_AGENT", ("ENABLE_AGENT", "WS_ENABLE_AGENT", "VITE_ENABLE_AGENT")),
+    # New-user tour (weights_studio src/ui/tutorial.ts): on/off, and the
+    # YouTube video / Colab notebook it shows instead of its defaults.
+    ("WS_ENABLE_TUTORIAL", ("ENABLE_TUTORIAL", "WS_ENABLE_TUTORIAL", "VITE_ENABLE_TUTORIAL")),
+    ("WS_TUTORIAL_VIDEO_URL",
+     ("TUTORIAL_VIDEO_URL", "WS_TUTORIAL_VIDEO_URL", "VITE_TUTORIAL_VIDEO_URL")),
+    ("WS_TUTORIAL_COLAB_URL",
+     ("TUTORIAL_COLAB_URL", "WS_TUTORIAL_COLAB_URL", "VITE_TUTORIAL_COLAB_URL")),
     # Shared with the SDK agent's own OPENCODE_URL config (agent.py's
     # _load_config) -- setting OPENCODE_URL once configures both sides, and
     # is also what _OpencodeSession.ensure() prefers over spawning its own
