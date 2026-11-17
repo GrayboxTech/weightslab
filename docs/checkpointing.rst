@@ -210,6 +210,8 @@ as training goes:
   the Studio's save button, the agent, or a direct
   ``save_model_checkpoint()`` call. Only the trainer's own dumps rotate (pass
   ``rotate=True`` to ``save_model_checkpoint`` to opt a call of yours in).
+  A read-only viewer (``checkpoint_manager.read_only``, see
+  `Multi-root experiments`_) deletes nothing, whatever its ``keep_best``.
 - **Scope.** Each experiment hash (each run or branch) keeps its own ``k``
   best. Deleting a checkpoint also deletes its projection sidecars.
 - If no value of the signal is logged for the run, nothing is deleted and a

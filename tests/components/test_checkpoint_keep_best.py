@@ -161,6 +161,76 @@ class TestManagerRotation(unittest.TestCase):
         self.assertNotIn(100, self._steps_on_disk())
         self.assertFalse(Path(sidecar).exists())
 
+    def test_a_plain_save_is_a_save_on_purpose(self):
+        # rotate defaults to False: only the trainer's own dumps opt in.
+        path = self.cm.save_model_checkpoint(model=self.model, save_optimizer=False, step=100)
+        entry = self.cm._load_manifest()["experiments"][EXP]
+        self.assertNotIn(path.name, entry.get("rotating_weight_checkpoints") or [])
+
+    def test_each_run_keeps_its_own_k_best(self):
+        # Same model part of the hash, so both runs dump into the same folder.
+        other = "ffffffff" + EXP[8:]
+        manifest = self.cm._load_manifest()
+        manifest["experiments"][other] = {}
+        self.cm._write_manifest(manifest)
+        for step, accuracy in [(100, 0.5), (200, 0.9), (300, 0.6)]:
+            self._dump(step)
+            self._evaluate(step, accuracy)
+
+        self.cm.current_exp_hash = other
+        for step, accuracy in [(400, 0.1), (500, 0.2), (600, 0.3), (700, 0.4)]:
+            self.cm.save_model_checkpoint(model=self.model, save_optimizer=False, step=step, rotate=True)
+            self.history._append_history_entry("val-acc", other, step, accuracy)
+
+        # The other run's rotation never touches this one's checkpoints (300 was
+        # not scored yet when this run last dumped, so nothing went)...
+        self.assertEqual(self._steps_on_disk(), [100, 200, 300])
+        # ...and ranks only its own: 600 and 500 are its 2 best scored, 700 its resume point.
+        model_dir = self.cm.models_dir / other[8:-8]
+        self.assertEqual(sorted(int(p.stem.rsplit("_", 1)[1]) for p in model_dir.glob(f"{other}_step_*.pt")),
+                         [500, 600, 700])
+
+    def test_a_read_only_viewer_deletes_nothing(self):
+        for step, accuracy in [(100, 0.5), (200, 0.9), (300, 0.6), (400, 0.7)]:
+            self.cm.save_model_checkpoint(model=self.model, save_optimizer=False, step=step,
+                                          rotate=True, update_manifest=True)
+        # Scores arrive while a viewer has the run open (read_only skips every write).
+        self.cm.config = {"checkpoint_manager": {"keep_best": {"signal": "val-acc", "k": 1}}}
+        for step, accuracy in [(100, 0.5), (200, 0.9), (300, 0.6), (400, 0.7)]:
+            self._evaluate(step, accuracy)
+        before = self._steps_on_disk()
+
+        self.cm.read_only = True
+        self.assertEqual(self.cm._apply_keep_best(EXP), [])
+        self.assertEqual(self._steps_on_disk(), before)
+
+        # The same call on the training manager does rotate: 200 is the best, 400 the resume point.
+        self.cm.read_only = False
+        self.cm._apply_keep_best(EXP)
+        self.assertEqual(self._steps_on_disk(), [200, 400])
+
+
+class TestAutomaticDumpsRotate(unittest.TestCase):
+    """The trainer's periodic dump is the one save that opts into keep_best."""
+
+    def test_the_periodic_dump_passes_rotate(self):
+        from unittest.mock import MagicMock
+        from weightslab.backend.model_interface import ModelInterface
+
+        model = MagicMock()
+        model._sync_dynamic_hyperparams.return_value = False
+        model.is_training.return_value = True
+        model._checkpoint_auto_every_steps = 10
+        model.get_age.return_value = 20
+        manager = MagicMock()
+        manager.update_experiment_hash.return_value = (None, None, set())
+        with patch("weightslab.backend.model_interface.ledgers") as ledgers:
+            ledgers.get_checkpoint_manager.return_value = manager
+            ModelInterface._maybe_auto_dump(model)
+
+        manager.save_model_checkpoint.assert_called_once()
+        self.assertIs(manager.save_model_checkpoint.call_args.kwargs.get("rotate"), True)
+
 
 if __name__ == "__main__":
     unittest.main()

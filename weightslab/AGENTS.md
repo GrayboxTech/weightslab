@@ -170,6 +170,8 @@ CONFIG = {
     "training_steps_to_do": 1_000_000,          # WL counts training STEPS (model.get_age()), never "epochs"/an epoch loop
     "eval_full_to_train_steps_ratio": 100,      # -> agent's "eval ratio" tuning; NOT "eval_every_epochs"/"eval_every_n"
     "experiment_dump_to_train_steps_ratio": 100,# -> agent's "dump ratio" tuning; NOT "dump_every_epochs"/"checkpoint_every"
+    # Optional: keep only the k best of those dumps on one logged signal (docs/checkpointing.rst):
+    # "checkpoint_manager": {"keep_best": {"signal": "val-acc", "k": 5, "mode": "max"}},
     "optimizer": {"lr": 1e-3},                  # nested under "optimizer" -> agent's "learning rate" tuning
     "data": {
         "train_loader": {"batch_size": 64},     # nested under "data.<loader_name>" -> agent's "batch size" tuning
