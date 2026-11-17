@@ -80,7 +80,10 @@ pip install weightslab        # or: uv add weightslab / uv pip install weightsla
 ```
 
 With uv, pick the PyTorch build with `--torch-backend` (`uv pip install
-weightslab --torch-backend=auto`), never `--extra-index-url` (see §5).
+weightslab --torch-backend=auto`), never `--extra-index-url` (see §5). For the
+CLI alone (e.g. only the Studio UI): `uvx --torch-backend=auto weightslab start`
+or `uv tool install weightslab --torch-backend=auto`; a training script still
+needs weightslab in its own environment.
 
 In your training script:
 

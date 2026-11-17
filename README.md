@@ -57,8 +57,11 @@ For a detailed installation guide and advanced configuration: [Documentation](ht
 pip install weightslab
 # or, with uv
 uv add weightslab         # in a uv project (uv run weightslab start)
-uv pip install weightslab # in any virtual environment
+uv pip install weightslab --torch-backend=auto  # in any virtual environment
+uvx --torch-backend=auto weightslab start       # just the CLI / Studio UI
 ```
+
+With uv, choose the PyTorch build with `--torch-backend` (`auto`, `cpu`, `cu126`, ...), not `--extra-index-url`: see the [uv install notes](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
 
 ```bash
 weightslab start ./my_experiment_directory # launch the UI

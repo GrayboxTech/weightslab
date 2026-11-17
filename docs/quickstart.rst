@@ -77,6 +77,19 @@ requirements are installed with uv instead.
 
    then ``uv add weightslab torch torchvision``.
 
+To use only the ``weightslab`` command (for example the Studio UI,
+``weightslab start``) without adding WeightsLab to a project, run it with
+``uvx`` or install it as a uv tool:
+
+.. code-block:: bash
+
+   uvx --torch-backend=auto weightslab start                # one-off, cached environment
+   uv tool install weightslab --torch-backend=auto          # `weightslab` on your PATH
+   uv tool upgrade weightslab                               # later, to update it
+
+A training script still imports ``weightslab`` from its own environment, so
+install it there too (``uv add weightslab`` or ``uv pip install weightslab``).
+
 
 Try the bundled example
 ~~~~~~~~~~~~~~~~~~~~~~~

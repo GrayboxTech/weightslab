@@ -611,6 +611,32 @@ class TestExampleRequirementsInstaller(unittest.TestCase):
                 wl_cli._install_example_requirements(Path(tmpdir))
             run.assert_not_called()
 
+    def test_pip_preferred_over_uv(self):
+        # An env that has pip installs with pip, even when uv is around.
+        with patch.object(wl_cli.importlib.util, "find_spec", return_value=object()), \
+                patch.dict(os.environ, {"UV": "/opt/uv/bin/uv"}):
+            cmd = wl_cli._requirements_install_command(self.REQ)
+        self.assertEqual(cmd[1:3], ["-m", "pip"])
+
+    def test_install_runs_the_uv_command(self):
+        uv_cmd = ["/opt/uv/bin/uv", "pip", "install", "--python", sys.executable, "-r", "x"]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "requirements.txt").write_text("tomli-w\n", encoding="utf-8")
+            with patch.object(wl_cli, "_requirements_install_command", return_value=uv_cmd), \
+                    patch.object(wl_cli.subprocess, "run") as run:
+                wl_cli._install_example_requirements(Path(tmpdir))
+            run.assert_called_once_with(uv_cmd, check=True)
+
+    def test_stale_uv_path_does_not_stop_the_example(self):
+        # $UV pointing at a binary that no longer exists raises OSError, which
+        # is logged like a failed install instead of aborting the example.
+        uv_cmd = ["/gone/uv", "pip", "install", "--python", sys.executable, "-r", "x"]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "requirements.txt").write_text("tomli-w\n", encoding="utf-8")
+            with patch.object(wl_cli, "_requirements_install_command", return_value=uv_cmd), \
+                    patch.object(wl_cli.subprocess, "run", side_effect=FileNotFoundError("/gone/uv")):
+                wl_cli._install_example_requirements(Path(tmpdir))  # must not raise
+
 
 def run_tests():
     """Run all CLI tests."""
