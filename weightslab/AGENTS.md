@@ -56,7 +56,15 @@ Browser  →  weightslab start :8080 (grpc-web → grpc proxy)  →  Python gRPC
 
 ```bash
 pip install weightslab
+# or with uv: uv add weightslab | uv pip install weightslab --torch-backend=auto
+# CLI only:   uvx --torch-backend=auto weightslab start | uv tool install weightslab
 ```
+
+With uv, choose the PyTorch build with `--torch-backend` (`auto`, `cpu`,
+`cu126`, ...), never with `--extra-index-url`: uv takes each package from the
+first index that has it, and the PyTorch index holds an old `torchmetrics`
+(resolution fails with "only torchmetrics==1.0.3 is available"). Full recipe,
+including a uv project that pins torch to a CUDA index: `docs/quickstart.rst`.
 
 ```python
 import weightslab as wl
@@ -170,6 +178,8 @@ CONFIG = {
     "training_steps_to_do": 1_000_000,          # WL counts training STEPS (model.get_age()), never "epochs"/an epoch loop
     "eval_full_to_train_steps_ratio": 100,      # -> agent's "eval ratio" tuning; NOT "eval_every_epochs"/"eval_every_n"
     "experiment_dump_to_train_steps_ratio": 100,# -> agent's "dump ratio" tuning; NOT "dump_every_epochs"/"checkpoint_every"
+    # Optional: keep only the k best of those dumps on one logged signal (docs/checkpointing.rst):
+    # "checkpoint_manager": {"keep_best": {"signal": "val-acc", "k": 5, "mode": "max"}},
     "optimizer": {"lr": 1e-3},                  # nested under "optimizer" -> agent's "learning rate" tuning
     "data": {
         "train_loader": {"batch_size": 64},     # nested under "data.<loader_name>" -> agent's "batch size" tuning
