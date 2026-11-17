@@ -15,7 +15,7 @@
 <br>
 </div>
 <div align="center">
-  <a href="https://github.com/GrayboxTech/weightslab/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License" /></a>
+  <a href="https://github.com/GrayboxTech/weightslab/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-PolyForm%20Noncommercial-blue.svg" alt="License" /></a>
   <a href="https://github.com/GrayboxTech/weightslab/stargazers"><img src="https://img.shields.io/github/stars/GrayboxTech/weightslab?style=flat&color=5865F2" alt="Stars" /></a>
   <a href="https://pypi.org/project/weightslab/"><img src="https://img.shields.io/pypi/v/weightslab?style=flat&color=5865F2&logo=pypi&logoColor=white" alt="Version" /></a>
   <a href="https://pepy.tech/project/weightslab"><img src="https://img.shields.io/pepy/dt/weightslab?style=flat&color=5865F2&logo=pypi&logoColor=white" alt="PyPI - Downloads" /></a>
@@ -278,3 +278,14 @@ If WeightsLab is part of your development process / project / publication, pleas
 }
 ```
 </details>
+
+## License
+
+WeightsLab is free for noncommercial use. Commercial use needs a paid licence.
+
+- **Noncommercial use is free**, under the [PolyForm Noncommercial License 1.0.0](LICENSE-PolyForm-Noncommercial-1.0.0.md). It covers:
+  - personal use for research, experiment, testing, study and hobby projects;
+  - use by charities, educational institutions, public research organisations and government.
+- **Commercial use needs a commercial licence.** This includes any use by or for a company, whatever its size. The licence is sold per seat. A seat is one user, and includes support, updates and the custom features your team needs. Write to [hello@graybx.com](mailto:hello@graybx.com).
+
+Versions released before this licence took effect remain available under the licence they were released with (Apache License 2.0). See [LICENSE](LICENSE).

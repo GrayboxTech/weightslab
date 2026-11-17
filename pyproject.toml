@@ -1,9 +1,5 @@
 [build-system]
-# setuptools>=64 for PEP 660 editable installs (`pip install -e .`, `uv sync`);
-# setuptools_scm>=8.1 for version_scheme = "only-version". `wheel` and `build`
-# are not backend requirements (setuptools asks for wheel itself when needed;
-# build is a frontend), so they are not installed into every isolated build env.
-requires = ["setuptools>=64", "setuptools_scm[toml]>=8.1"]
+requires = ["setuptools>=77", "wheel", "build", "setuptools_scm[toml]>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -15,12 +11,12 @@ authors = [
   { name = "Alexandru-Andrei Rotaru", email = "alexandru@graybx.com" },
   { name = "Guillaue Pelluet", email = "guillaue@graybx.com" }
 ]
-license = { text = "BSD 2-clause" }
+license = "PolyForm-Noncommercial-1.0.0"  # commercial use: paid licence from Graybox SAS, see LICENSE
+license-files = ["LICENSE", "LICENSE-PolyForm-Noncommercial-1.0.0.md"]
 requires-python = ">=3.10"
 classifiers = [
   "Development Status :: 1 - Planning",
   "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: BSD License",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3.10",
 ]
