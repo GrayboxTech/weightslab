@@ -1,23 +1,18 @@
-WeightsLab is free for individuals and small teams. Companies pay per seat.
+WeightsLab is free for noncommercial use. Commercial use needs a paid licence.
 
 Required Notice: Copyright Graybox SAS (https://graybx.com)
 
-You may use WeightsLab under either of these licences, at your option:
+Noncommercial use: PolyForm Noncommercial License 1.0.0
+(LICENSE-PolyForm-Noncommercial-1.0.0.md). It covers personal use for research,
+experiment, testing, study and hobby projects, and use by charities,
+educational institutions, public research organisations and government.
 
-1. PolyForm Noncommercial License 1.0.0 (LICENSE-PolyForm-Noncommercial-1.0.0.md)
-   Personal use, research, education, hobby projects, and use by charities,
-   educational institutions, public research organisations and government.
-
-2. PolyForm Small Business License 1.0.0 (LICENSE-PolyForm-Small-Business-1.0.0.md)
-   Use for the benefit of a company with fewer than 100 people (employees and
-   independent contractors) and less than USD 1,000,000 (2019) in revenue in the
-   prior tax year, adjusted for inflation as the licence describes.
-
-Any other use, including use by larger companies, needs a commercial licence.
-A commercial licence is sold per seat. A seat is one user, and includes support,
+Commercial use: any use for a commercial purpose, including any use by or for
+a company whatever its size, needs a commercial licence from Graybox SAS. A
+commercial licence is sold per seat. A seat is one user, and includes support,
 updates and the custom features the team needs. To get one, write to
 hello@graybx.com.
 
 This notice applies from the commit that introduced it onward. Versions of
 WeightsLab released before it remain available under the licence they were
-released with.
+released with (Apache License 2.0).

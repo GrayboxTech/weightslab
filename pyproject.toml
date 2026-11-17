@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61", "wheel", "build", "setuptools_scm[toml]>=8"]
+requires = ["setuptools>=77", "wheel", "build", "setuptools_scm[toml]>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -11,12 +11,12 @@ authors = [
   { name = "Alexandru-Andrei Rotaru", email = "alexandru@graybx.com" },
   { name = "Guillaue Pelluet", email = "guillaue@graybx.com" }
 ]
-license = { text = "PolyForm-Noncommercial-1.0.0 OR PolyForm-Small-Business-1.0.0 OR commercial licence from Graybox SAS (see LICENSE)" }
+license = "PolyForm-Noncommercial-1.0.0"  # commercial use: paid licence from Graybox SAS, see LICENSE
+license-files = ["LICENSE", "LICENSE-PolyForm-Noncommercial-1.0.0.md"]
 requires-python = ">=3.10"
 classifiers = [
   "Development Status :: 1 - Planning",
   "Intended Audience :: Science/Research",
-  "License :: Other/Proprietary License",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3.10",
 ]
