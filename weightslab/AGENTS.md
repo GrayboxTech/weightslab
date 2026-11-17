@@ -56,7 +56,15 @@ Browser  →  weightslab start :8080 (grpc-web → grpc proxy)  →  Python gRPC
 
 ```bash
 pip install weightslab
+# or with uv: uv add weightslab | uv pip install weightslab --torch-backend=auto
+# CLI only:   uvx --torch-backend=auto weightslab start | uv tool install weightslab
 ```
+
+With uv, choose the PyTorch build with `--torch-backend` (`auto`, `cpu`,
+`cu126`, ...), never with `--extra-index-url`: uv takes each package from the
+first index that has it, and the PyTorch index holds an old `torchmetrics`
+(resolution fails with "only torchmetrics==1.0.3 is available"). Full recipe,
+including a uv project that pins torch to a CUDA index: `docs/quickstart.rst`.
 
 ```python
 import weightslab as wl

@@ -91,7 +91,7 @@ def __getattr__(name):  # PEP 562 module-level lazy attribute access
         package, install = extra
         raise ImportError(
             f"weightslab.{name} needs the optional {package!r} package: "
-            f"pip install '{install}'"
+            f"pip install '{install}' (in a uv project: uv add '{install}')"
         ) from error
     value = getattr(module, attr)
     globals()[name] = value  # cache so __getattr__ isn't hit again
