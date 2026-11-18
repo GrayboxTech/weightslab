@@ -9,6 +9,12 @@ which is the worst time to discover it. Regenerating is a deliberate step::
 
     python docs/_scripts/update_whats_new.py
 
+After every stable release the ``whats-new.yml`` workflow runs it, commits
+the page to ``main`` and ``dev`` and redeploys the docs; it can also be run
+from the Actions tab after a release's notes are edited. ``GITHUB_TOKEN`` (or
+``GH_TOKEN``), when set, authenticates the API calls. The page is only
+rewritten when a release's content changed, not just the generation date.
+
 Only **stable** releases are listed. Every tag push also publishes a
 ``vX.Y.Z.devN`` pre-release to TestPyPI for verification (see ci.yml's
 ``build-and-publish-dev-release``), and those outnumber the real releases
@@ -24,11 +30,16 @@ the human description. Two transformations make that readable:
   structure it had as markdown survives only as inline ``" - "`` separators and
   stray ``"## Heading"`` markers -- ``_description_lines`` recovers it as real
   nested bullets. Without that step the page is ten paragraphs of run-on text.
+
+The template also cuts each PR description at a fixed length, mid-word, with a
+trailing ``...``. ``_drop_truncated_tail`` drops that unfinished fragment (and
+a heading left with nothing under it) so the card never ends on half a word.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import urllib.request
 from datetime import datetime, timezone
@@ -42,17 +53,34 @@ LEAD_IN = re.compile(
     r"^Welcome to the \*\*[^*]+\*\* release of WeightsLab\.[^\n]*\n+", re.M)
 TAIL = re.compile(r"\n*One platform\. Unmatched flexibility\..*\Z", re.S)
 
-SECTION_MARKER = re.compile(r"\s*#{2,4}\s+([A-Z][^#\n]{0,40}?)\s+(?=[-*`\[A-Z])")
+# A flattened "## Heading" has no end marker, so where it stops is a guess,
+# tried in order: right before the next "##" marker ("## v1.3.3 Release ###
+# Features"), right before the first " - " item ("## What's included - Learned
+# ..."), else at the first capitalised word ("## Summary This PR adds ...").
+# It may open with an emoji ("### 🚀 Highlights") or a version ("## v1.3.3").
+_HEADING_TEXT = r"(?:[^\w\s#]+\s+)?(?:[A-Z]|v\d)[^#\n]{0,40}?"
+SECTION_MARKER = re.compile(
+    rf"\s*#{{2,4}}\s+(?:({_HEADING_TEXT})\s*(?=#{{2,4}}\s)"
+    rf"|({_HEADING_TEXT})\s+(?=-\s)"
+    rf"|({_HEADING_TEXT})\s+(?=[-*`\[A-Z]))")
 TOPLEVEL_HEADING = re.compile(r"#{2,6}\s+([^\n#]+?)\s*$", re.M)
 ITEM_SPLIT = re.compile(r"\s+-\s+(?=[\[`*\w])")
 PR_BULLET = re.compile(r"^\[([^\]]+)\]\(([^)]+)\)\s*:?\s*(.*)$", re.S)
+PR_LINE = re.compile(r"^\s*-\s+\[[^\]]+\]\([^)]+\)")
+TRUNCATED = re.compile(r"\s*(?:\.\.\.|…)\s*$")
+SENTENCE_END = re.compile(r"(?<=[.!?])\s")
+GENERATED_LINE = re.compile(r"^\.\. Last generated: .*$", re.M)
 
 
 def fetch_releases() -> list:
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     releases, page = [], 1
     while True:
         url = f"https://api.github.com/repos/{REPO}/releases?per_page=100&page={page}"
-        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=30) as resp:
             batch = json.load(resp)
         releases += batch
@@ -86,6 +114,10 @@ def md_inline_to_rst(text: str) -> str:
     text = re.sub(r"`([^`]+)`", r"``\1``", text)
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"`\1 <\2>`__", text)
     text = re.sub(r"_\(([^)]+)\)_", r"*(\1)*", text)
+    # The page uses no dashes as punctuation: "**Feature** — what it does"
+    # reads "**Feature**, what it does", and a dash closing a heading goes.
+    text = re.sub(r"\s+[—–]\s+", ", ", text)
+    text = re.sub(r"\s*[—–]\s*$", "", text)
     text = re.sub(r"\s{2,}", " ", text)
     return text.strip()
 
@@ -124,13 +156,34 @@ def _wrap(text: str, width: int, first: str, rest: str) -> list:
     return out
 
 
+def _drop_truncated_tail(description: str) -> tuple:
+    """Cut a description the release template truncated back to its last
+    complete piece. Returns ``(text, was_truncated)``.
+
+    The unfinished fragment starts after whichever comes last: an item
+    separator, a section marker, or a sentence end. A heading left at the very
+    end with nothing under it is dropped too.
+    """
+    if not TRUNCATED.search(description):
+        return description, False
+    body = TRUNCATED.sub("", description)
+    cuts = [m.start() for m in ITEM_SPLIT.finditer(body)]
+    cuts += [m.start() for m in re.finditer(r"\s*#{2,4}\s", body)]
+    cuts += [m.start() for m in SENTENCE_END.finditer(body)]
+    body = body[:max(cuts)] if cuts else ""
+    body = re.sub(r"\s*#{2,4}\s+[A-Z][^#\n.!?]{0,40}$", "", body.rstrip())
+    return body.strip(), True
+
+
 def _description_lines(description: str, indent: str) -> list:
     """Render one PR's flattened description as nested RST beneath its bullet."""
+    description, truncated = _drop_truncated_tail(description)
+    more = ["", indent + "*Full description in the pull request.*"] if truncated else []
     if not description.strip():
-        return []
+        return more
 
     marked = SECTION_MARKER.sub(
-        lambda m: "\n@@" + m.group(1).rstrip(":") + "@@\n", description)
+        lambda m: "\n@@" + next(g for g in m.groups() if g).rstrip(":") + "@@\n", description)
 
     lines = []
     for block in marked.split("\n"):
@@ -151,7 +204,7 @@ def _description_lines(description: str, indent: str) -> list:
         else:
             lines.extend(_wrap(_sanitize(md_inline_to_rst(items[0])), 86,
                                first=indent, rest=indent))
-    return lines
+    return lines + more
 
 
 def summary_to_rst(body: str) -> list:
@@ -165,9 +218,13 @@ def summary_to_rst(body: str) -> list:
     # the tail of the preceding sentence on the same line. In both cases the
     # heading is the remainder of its raw line, so marking off everything
     # from the hashes to end-of-line (multiline mode) catches both without
-    # needing them on their own line first.
-    marked = TOPLEVEL_HEADING.sub(
-        lambda m: "\n\n@@" + m.group(1).strip().strip("*").strip() + "@@\n\n", text)
+    # needing them on their own line first. A PR bullet line is left alone:
+    # the "## Summary" inside its flattened description is a section of that
+    # PR, which ``_description_lines`` splits out, not a page heading.
+    marked = "\n".join(
+        raw if PR_LINE.match(raw) else TOPLEVEL_HEADING.sub(
+            lambda m: "\n\n@@" + m.group(1).strip().strip("*").strip() + "@@\n\n", raw)
+        for raw in text.splitlines())
 
     lines, entries, current = [], [], None
 
@@ -245,7 +302,8 @@ FOOTER = """
 
 `Every release on GitHub → <https://github.com/{repo}/releases>`__
 
-.. This page is generated. To refresh it after a release:
+.. This page is generated. CI (.github/workflows/whats-new.yml) refreshes it
+.. after every stable release; to refresh it by hand:
 ..     python docs/_scripts/update_whats_new.py
 .. Last generated: {generated}
 """
@@ -274,9 +332,16 @@ def build_rst(releases: list) -> str:
 
 def main() -> None:
     releases = stable_releases(fetch_releases())
-    OUTPUT.write_text(build_rst(releases), encoding="utf-8")
-    print(f"wrote {OUTPUT}, {len(releases)} releases, "
-          f"{releases[-1]['tag_name']} … {releases[0]['tag_name']}")
+    rst = build_rst(releases)
+    span = f"{len(releases)} releases, {releases[-1]['tag_name']} to {releases[0]['tag_name']}"
+    # Leave the file alone when only the generation date would change, so a
+    # run with nothing new (e.g. after a pre-release) commits nothing.
+    old = OUTPUT.read_text(encoding="utf-8") if OUTPUT.exists() else ""
+    if GENERATED_LINE.sub("", old) == GENERATED_LINE.sub("", rst):
+        print(f"{OUTPUT} is up to date ({span})")
+        return
+    OUTPUT.write_text(rst, encoding="utf-8")
+    print(f"wrote {OUTPUT}, {span}")
 
 
 if __name__ == "__main__":
