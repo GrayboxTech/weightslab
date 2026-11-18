@@ -37,8 +37,9 @@ Standalone examples, one per level
 ----------------------------------
 
 Each level ships as a self-contained, runnable MNIST script that registers *only*
-that level. Run any of them with no arguments, then attach the CLI
-(``weightslab cli``) or open the studio (``weightslab start``) from another shell.
+that level. Run any of them with no arguments: the studio opens in your browser
+on its own (``wl.serve()`` serves it), and you can attach the CLI
+(``weightslab cli``) from another shell.
 
 .. list-table::
    :header-rows: 1

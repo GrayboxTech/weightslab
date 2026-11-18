@@ -3,8 +3,9 @@ Weights Studio UI
 
 Weights Studio is the visual frontend for WeightsLab experiments.
 It ships **inside the Python package**.
-Running ``weightslab start`` serves the bundled SPA and proxies gRPC-Web to
-your training backend, all from one Python process.
+``wl.serve()`` serves the bundled SPA from your training process and proxies
+gRPC-Web to its backend; ``weightslab start`` runs the same server as a
+standalone Python process.
 
 Architecture
 ------------
@@ -15,8 +16,9 @@ Architecture
 
 Runtime path:
 
-1. Browser (served from ``weightslab start``)
-2. ``weightslab start``, pure-Python HTTP server that:
+1. Browser (served from ``wl.serve()`` or ``weightslab start``)
+2. The UI server (a background thread of ``wl.serve()``, or ``weightslab start``),
+   pure-Python HTTP server that:
 
    - Serves the pre-built Weights Studio SPA (vendored in ``weightslab/ui/static/``)
    - Translates gRPC-Web (browser) to raw gRPC (backend) via an embedded proxy
@@ -30,20 +32,23 @@ Quick start
 
      pip install weightslab
 
-2. In your training script, start the backend::
+2. In your training script, start the backend (and the UI)::
 
      import weightslab as wl
      wl.serve(serving_grpc=True)
      # ... training loop ...
      wl.keep_serving()
 
-3. In another terminal, start the UI::
+3. Run the script: Weights Studio opens in your browser (the URL is printed
+   too; ``http://localhost:8080`` by default, a free port when that one is
+   busy). It stops when the training process exits.
 
-     weightslab start
+To keep a UI up across training runs, start it yourself before the script
+(``wl.serve()`` then uses it rather than starting its own)::
 
-4. Open the URL printed by ``weightslab start`` in your browser.
+    weightslab start
 
-The UI auto-discovers the backend on ``localhost:50051`` (default).
+``weightslab start`` auto-discovers the backend on ``localhost:50051`` (default).
 Pass ``--backend-port`` to override::
 
     weightslab start --backend-port 50052
@@ -51,6 +56,7 @@ Pass ``--backend-port`` to override::
 To suppress auto-opening the browser::
 
     weightslab start --no-browser
+    # or, for the UI wl.serve() serves: wl.serve(ui_open_browser=False)
 
 .. _studio-features:
 

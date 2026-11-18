@@ -62,13 +62,9 @@ Use a bundled example so there is something live to talk to:
 
    weightslab start example --cls
 
-Then, in another terminal, start Weights Studio:
-
-.. code-block:: bash
-
-   weightslab start
-
-Open the printed URL. WeightsLab starts (or reuses) a local ``opencode serve``
+The example serves Weights Studio and opens it in your browser (the URL is
+printed too; an already running ``weightslab start`` is used instead).
+WeightsLab starts (or reuses) a local ``opencode serve``
 process for you the first time the agent is used, nothing to run by hand.
 
 Step 3, initialize the agent

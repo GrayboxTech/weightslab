@@ -157,10 +157,8 @@ Run it
 
 .. code-block:: bash
 
-   weightslab start                          # terminal 1: the studio, http://localhost:8080
-
    cd weightslab/examples/PyTorch/wl-fashion-mnist-umap
-   python main.py --wait --keep-serving      # terminal 2
+   python main.py --wait --keep-serving      # opens the studio, http://localhost:8080
    python main.py --steps 200 100            # a quick pass: 200 initial + 100 retrain steps
 
 ``--wait`` stops for Enter after the comparison, so you can look at the board

@@ -1736,6 +1736,13 @@ def _register_pid_with_ui_server() -> None:
     origin = os.environ.get("WEIGHTSLAB_UI_ORIGIN")
     if not origin:
         return
+    # A UI this process serves ITSELF (wl.serve()'s automatic Weights Studio)
+    # also publishes WEIGHTSLAB_UI_ORIGIN. Registering with it would make that
+    # server kill this very process when it shuts down at exit. (Not loaded
+    # means not running: no need to import the UI server just to ask.)
+    _embedded_ui = sys.modules.get("weightslab.ui.embedded")
+    if _embedded_ui is not None and _embedded_ui.is_running():
+        return
 
     def _post() -> None:
         try:
@@ -1766,11 +1773,17 @@ def _register_pid_with_ui_server() -> None:
 
 def serve(serving_cli: bool = True, serving_grpc: bool = True,
           spawn_cli_client: bool = False, serving_bore: bool = False,
-          bore_port: int = None, allow_unconfigured: bool = True, **kwargs):
+          bore_port: int = None, allow_unconfigured: bool = True,
+          serving_ui: bool = True, ui_port: int = None,
+          ui_open_browser: bool = True, **kwargs):
     """Start WeightsLab services.
 
+    With the defaults, ``wl.serve()`` starts the gRPC backend, Weights Studio
+    (the web UI, opened in your browser) and a headless CLI server.
+
     Args:
-        serving_cli: Start the interactive CLI server.
+        serving_cli: Start the interactive CLI server (headless unless
+            ``spawn_cli_client`` is set; attach with ``weightslab cli``).
         serving_grpc: Start the gRPC server. In a notebook/Colab, if this is on
             but ``serving_bore`` is off, a warning suggests ``serving_bore=True``
             (the UI runs on your own machine and needs a tunnel to reach here).
@@ -1782,10 +1795,10 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
             ``WEIGHTSLAB_DISABLE_EMBEDDED_KERNEL=1`` is set. Only one kernel is
             ever embedded per process — a second ``serve()`` call reuses it.
         spawn_cli_client: When ``serving_cli`` is True, also open the interactive
-            REPL in a new console window (the default, backward-compatible
-            behavior). Set to ``False`` to start the CLI server *headless* — it
-            still advertises its port, so you can attach on demand from any
-            terminal with ``weightslab cli`` (or ``weightslab cli --port <port>``).
+            REPL in a new console window. Defaults to ``False``: the CLI server
+            starts *headless* — it still advertises its port, so you can attach
+            on demand from any terminal with ``weightslab cli`` (or
+            ``weightslab cli --port <port>``).
         serving_bore: Expose the gRPC backend to the internet via a zero-signup
             `bore <https://github.com/ekzhang/bore>`_ raw-TCP relay, so a Weights
             Studio running on another machine can reach it (e.g. training in
@@ -1797,26 +1810,41 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
         bore_port: Port to expose when ``serving_bore`` is set. Defaults to the
             gRPC port (``grpc_port`` kwarg, else ``$GRPC_BACKEND_PORT``, else
             50051).
-        allow_unconfigured: Escape hatch for the serving-config guard. ``serve``
-            reads hyperparameters once, here, for TLS, ports and
-            ``root_log_dir``; if none were wrapped
-            (``wl.watch_or_edit(params, flag="hyperparameters")``) those settings
-            silently fall back to env vars / defaults. Serving over the network
-            (``serving_grpc`` / ``serving_bore``) without config therefore
-            raises, because the backend may come up without TLS/auth. Pass
-            ``True`` (or set ``WL_ALLOW_UNCONFIGURED_SERVE=1``) to downgrade the
-            error to a warning and serve anyway. CLI-only serving always warns
-            (never raises), regardless of this flag.
+        allow_unconfigured: The serving-config guard. ``serve`` reads
+            hyperparameters once, here, for TLS, ports and ``root_log_dir``; if
+            none were wrapped (``wl.watch_or_edit(params, flag="hyperparameters")``)
+            those settings fall back to env vars / defaults, and the backend may
+            come up without TLS/auth. Defaults to ``True``: serving without
+            config only logs a warning. Pass ``False`` to make network serving
+            (``serving_grpc`` / ``serving_bore``) without config raise instead;
+            ``WL_ALLOW_UNCONFIGURED_SERVE=1`` then downgrades it back to the
+            warning. CLI-only serving always warns (never raises).
+        serving_ui: Serve Weights Studio from this process, proxying to the
+            gRPC backend, so no separate ``weightslab start`` is needed. The UI
+            comes up with the backend and stops when this process exits.
+            Skipped when ``serving_grpc`` is off, in Google Colab (the browser
+            is on another machine: use ``serving_bore=True`` and
+            ``weightslab start`` + ``weightslab tunnel`` locally), when a
+            ``weightslab start`` already serves this backend, when this process
+            was launched from Weights Studio, or when the environment sets
+            ``WEIGHTSLAB_SERVE_UI=0``. TLS follows the backend's.
+        ui_port: Preferred port for Weights Studio. Defaults to ``ui_port`` in
+            the config, else ``$WEIGHTSLAB_UI_PORT``, else 8080; a busy port
+            falls back to a free one. The interface is ``$WEIGHTSLAB_UI_HOST``
+            (default ``0.0.0.0``), as for ``weightslab start``.
+        ui_open_browser: Open Weights Studio in the default browser once it is
+            up (the URL is printed either way).
         **kwargs: Extra server options passed to underlying backends
-            (e.g. ``cli_host``, ``cli_port``, ``grpc_port``).
+            (e.g. ``cli_host``, ``cli_port``, ``grpc_host``, ``grpc_port``).
 
     Returns:
         The public ``host:port`` bore endpoint string when ``serving_bore`` is
         set and the tunnel came up, otherwise ``None``.
 
     Raises:
-        RuntimeError: If ``serving_grpc`` or ``serving_bore`` is requested before
-            any serving config was wrapped and the escape hatch is not set.
+        RuntimeError: If ``allow_unconfigured=False`` and ``serving_grpc`` or
+            ``serving_bore`` is requested before any serving config was wrapped
+            (unless ``WL_ALLOW_UNCONFIGURED_SERVE=1``).
     """
 
     # ------------------------------------------------------------------
@@ -1926,6 +1954,37 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
             "backend directly. Pass serving_bore=True to open a tunnel and sync "
             "with the UI: wl.serve(serving_grpc=True, serving_bore=True)."
         )
+
+    # Weights Studio itself, from this process (weightslab/ui/embedded.py), so
+    # the UI no longer needs its own `weightslab start`. Not in Colab: the
+    # browser is on another machine there (tunnel above). Never fatal.
+    if serving_ui and serving_grpc and not _running_in_colab():
+        try:
+            from weightslab.ui import embedded as _embedded_ui
+            _backend_port = int(kwargs.get("grpc_port")
+                                or os.getenv("GRPC_BACKEND_PORT", 50051))
+            _backend_host = str(kwargs.get("grpc_host")
+                                or os.getenv("GRPC_BACKEND_HOST", "0.0.0.0"))
+            if _backend_host in ("0.0.0.0", "::", "[::]", ""):
+                _backend_host = "localhost"
+            _ui_dir = None
+            try:
+                _hp = ledgers.get_hyperparams()
+                _ui_dir = _hp["root_log_dir"] if _hp is not None else None
+            except Exception:  # noqa: BLE001 -- no hyperparameters registered
+                _ui_dir = None
+            _embedded_ui.start(
+                _backend_port,
+                backend_host=_backend_host,
+                experiment_dir=str(_ui_dir) if _ui_dir else None,
+                ui_port=ui_port,
+                open_browser=ui_open_browser,
+            )
+        except Exception as exc:  # noqa: BLE001 -- never break serving on the UI
+            logger.warning(f"Could not start Weights Studio ({exc}); run `weightslab start`.")
+    elif serving_ui and serving_grpc:
+        logger.info("Weights Studio is not started in Colab: run `weightslab start` "
+                    "on your own machine (see serving_bore).")
 
     bore_endpoint = None
     if serving_bore:

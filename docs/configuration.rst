@@ -356,8 +356,10 @@ All variables are optional; the built-in default is used when unset.
 Deploying the Studio
 ~~~~~~~~~~~~~~~~~~~~~
 
-All Weights Studio configuration variables are passed to the UI at launch time
-via ``weightslab start``.  There are two ways to supply them.
+All Weights Studio configuration variables are passed to the UI at launch time:
+by ``weightslab start``, or by ``wl.serve()`` for the UI it serves from the
+training process (set them before running the training script).  There are
+two ways to supply them.
 
 **Option 1, shell exports (quick, per-session)**
 
@@ -1074,11 +1076,20 @@ Backend Connection
      - Port of the WeightsLab gRPC backend to proxy to.
    * - ``WEIGHTSLAB_UI_HOST``
      - ``0.0.0.0``
-     - Interface the ``weightslab start`` HTTP server binds to.
+     - Interface the Weights Studio HTTP server binds to, for ``weightslab start``
+       and for the UI ``wl.serve()`` serves.
    * - ``WEIGHTSLAB_UI_PORT``
-     - ``50051``
-     - Preferred port for the ``weightslab start`` HTTP server. If that port is
-       already in use, WeightsLab picks a random available port.
+     - ``8080``
+     - Preferred port for the Weights Studio HTTP server (``weightslab start``,
+       and the UI ``wl.serve()`` serves, where the ``ui_port`` argument or the
+       ``ui_port`` config key take precedence). If that port is already in use,
+       WeightsLab picks a random available port.
+   * - ``WEIGHTSLAB_SERVE_UI``
+     - ``1``
+     - Set to ``0`` (``false`` / ``no`` / ``off``) to stop ``wl.serve()`` from
+       serving Weights Studio itself and opening it in the browser, without a
+       code change (e.g. CI or sweeps). Same as ``wl.serve(serving_ui=False)``;
+       ``weightslab start`` is unaffected.
 
 
 Vite Dev Server

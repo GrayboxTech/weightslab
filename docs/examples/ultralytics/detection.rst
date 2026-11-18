@@ -184,8 +184,8 @@ then:
 
 .. code-block:: bash
 
-   weightslab start        # 1. deploy the studio
-   python weightslab/examples/Ultralytics/wl-detection/main.py   # 2. run it
+   weightslab start        # 1. optional: a studio that outlives the run
+   python weightslab/examples/Ultralytics/wl-detection/main.py   # 2. run it (opens the studio)
 
 .. note::
 

@@ -131,7 +131,7 @@ def main() -> int:
                                 signal_name="metric-AveragePrecision", log=True),
     }
 
-    wl.serve(serving_grpc=True, grpc_port=grpc_port)
+    wl.serve(serving_grpc=True, grpc_port=grpc_port, serving_ui=False)  # headless check: no Studio
     wl.start_training()
 
     # ---- drive a few real training steps ----

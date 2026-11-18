@@ -685,8 +685,8 @@ def example_start(args):
     _prewarm_opencode()
     if not agent_is_configured():
         _log_agent_config_hint()
-    logger.info("In another terminal, launch the UI with: weightslab start")
-    logger.info("Then open the URL printed by `weightslab start` — stop the example with Ctrl+C.")
+    logger.info("Weights Studio opens in your browser once the example serves (wl.serve) — "
+                "or the example uses your running `weightslab start`. Stop it with Ctrl+C.")
     if not _CERTS_DIR_IN_ORIGINAL_ENV:
         manager = CertAuthManager.from_env_or_default()
         if manager.has_valid_certs():
@@ -719,8 +719,8 @@ def example_start(args):
                 logger.warning(
                     " No experiment directory found (no WEIGHTSLAB_ROOT_LOG_DIR here and no "
                     "`weightslab start` on record) — this example will write to a temporary "
-                    "directory, and the UI will not find its reports or notebook. Start the UI "
-                    "first with `weightslab start`, or set WEIGHTSLAB_ROOT_LOG_DIR."
+                    "directory. To keep the run, set WEIGHTSLAB_ROOT_LOG_DIR, or start the UI "
+                    "first with `weightslab start DIR`."
                 )
         else:
             logger.info(f" Using WEIGHTSLAB_ROOT_LOG_DIR from this shell: {env['WEIGHTSLAB_ROOT_LOG_DIR']}")

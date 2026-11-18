@@ -24,7 +24,7 @@ between them (Weights Studio -> Data Exploration -> Projection):
 
 Run::
 
-    python main.py                       # then open the studio (weightslab start)
+    python main.py                       # the studio opens in your browser (wl.serve)
     python main.py --steps 200 100       # a quick pass: 200 initial + 100 retrain
     python main.py --wait                # stop for Enter before retraining, to look
 """
@@ -447,7 +447,7 @@ def run(parameters, steps=None, wait=False, keep_serving=False):
     print(" FASHION-MNIST: LIVE UMAP vs YOUR OWN PCA")
     print(f" train={len(train_dataset)}  test={len(test_dataset)}  device={device}")
     print(f" logs -> {log_dir}")
-    print(" Studio: weightslab start, then Data Exploration -> Projection.")
+    print(" Studio: opens in your browser (wl.serve); Data Exploration -> Projection.")
     print("=" * 72)
 
     # 1 -- train with the live UMAP ---------------------------------------------
