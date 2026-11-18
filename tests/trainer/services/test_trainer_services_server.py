@@ -1,9 +1,14 @@
+import faulthandler
 import sys
 import unittest
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from unittest.mock import MagicMock, patch
 
 import weightslab.trainer.trainer_services as trainer_services
+# grpc_serve imports these lazily; importing them here keeps a first-time
+# module import (and whatever it logs) out of the timed test body.
+import weightslab.trainer.trainer_tools  # noqa: F401
+import weightslab.monitoring.resource_monitor  # noqa: F401
 
 # Default per-test timeout in seconds. Override with WL_TEST_TIMEOUT env var.
 import os
@@ -18,6 +23,24 @@ import os
 _TEST_TIMEOUT = int(os.getenv("WL_TEST_TIMEOUT", "60"))
 
 
+def _local_time(sleep):
+    """A stand-in for trainer_services' OWN ``time`` name: real clock, scripted sleep.
+
+    Do not patch ``weightslab.trainer.trainer_services.time.sleep``: that
+    resolves to the global ``time`` module and replaces ``sleep`` for EVERY
+    thread in the process while the test runs. In a full-suite run the process
+    carries background threads earlier tests never stopped (dataframe flush
+    loops, the LoggerQueue, the resource monitor, the embedded kernel's loop),
+    and with sleep() suddenly returning at once they spin flat out and flood
+    the logging lock -- a pure-mock test that takes milliseconds alone then
+    took 8 s, and on a loaded 2-core CI runner more than the 60 s cap.
+    """
+    import time as _real_time
+    fake = MagicMock(wraps=_real_time)
+    fake.sleep = MagicMock(side_effect=sleep)
+    return fake
+
+
 class _TimeoutMixin:
     """Mixin that wraps every test with a hard timeout so stuck gRPC
     threads / infinite loops cannot block the whole CI run."""
@@ -28,6 +51,10 @@ class _TimeoutMixin:
         try:
             fut.result(timeout=_TEST_TIMEOUT)
         except FuturesTimeoutError:
+            # Where every thread is right now -- the stuck test body included.
+            # Without it a timeout only says THAT something hung, never where.
+            sys.stderr.write(f"\n[_TimeoutMixin] {self.id()} timed out; all thread stacks:\n")
+            faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
             if result is not None:
                 result.addError(self, self._timeout_exc_info())
         finally:
@@ -264,7 +291,7 @@ class TestGrpcServe(_TimeoutMixin, unittest.TestCase):
             patch("weightslab.trainer.trainer_services.pb2_grpc.add_ExperimentServiceServicer_to_server") as add_servicer, \
             patch("weightslab.trainer.trainer_services.Thread", _InstantThread), \
             patch("weightslab.trainer.trainer_services.WeighlabsWatchdog", return_value=fake_watchdog), \
-            patch("weightslab.trainer.trainer_services.time.sleep", side_effect=_sleep_stop), \
+            patch.object(trainer_services, "time", _local_time(_sleep_stop)), \
             patch("weightslab.trainer.trainer_services.ExperimentServiceServicer") as servicer_cls, \
             patch("weightslab.trainer.trainer_services.get_hyperparams", return_value={}):
             trainer_services.grpc_serve(n_workers_grpc=2, grpc_host="127.0.0.1", grpc_port=50099, force_parameters=True)
@@ -315,7 +342,7 @@ class TestGrpcServe(_TimeoutMixin, unittest.TestCase):
              patch("weightslab.trainer.trainer_services.Thread", _InstantThread), \
              patch("weightslab.trainer.trainer_services.GrpcServerManager", return_value=fake_server_manager), \
              patch("weightslab.trainer.trainer_services.WeighlabsWatchdog") as watchdog_cls, \
-             patch("weightslab.trainer.trainer_services.time.sleep", side_effect=_sleep_stop), \
+             patch.object(trainer_services, "time", _local_time(_sleep_stop)), \
              patch("weightslab.trainer.trainer_services.ExperimentServiceServicer") as servicer_cls, \
              patch("weightslab.trainer.trainer_services.get_hyperparams", return_value={}):
             trainer_services.grpc_serve(n_workers_grpc=2, grpc_host="127.0.0.1", grpc_port=50099, force_parameters=True)
@@ -401,10 +428,16 @@ class TestGrpcServe(_TimeoutMixin, unittest.TestCase):
              patch("weightslab.trainer.trainer_services.Thread", _InstantThread), \
              patch("weightslab.trainer.trainer_services.GrpcServerManager", return_value=fake_server_manager), \
              patch("weightslab.trainer.trainer_services.WeighlabsWatchdog", return_value=fake_watchdog), \
-             patch("weightslab.trainer.trainer_services.time.sleep", side_effect=_sleep_stop), \
+             patch.object(trainer_services, "time", _local_time(_sleep_stop)), \
              patch("weightslab.trainer.trainer_services.ExperimentServiceServicer"), \
              patch("weightslab.trainer.trainer_services.get_hyperparams", return_value={}), \
+             patch("weightslab.backend.ledgers.get_checkpoint_manager", return_value=None), \
+             patch("weightslab.backend.ledgers.get_viewer_workspace", return_value=None), \
+             patch("weightslab.monitoring.resource_monitor.start_resource_monitor_from_config"), \
              patch("weightslab.trainer.trainer_services.logger"):
+            # The two ledger getters take the global ledger lock and the monitor
+            # logs through its own logger: shared state the leaked threads also
+            # use, and nothing these tests assert on.
             trainer_services.grpc_serve(**serve_kwargs)
 
         return fake_server
