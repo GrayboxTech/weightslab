@@ -439,6 +439,86 @@ class TestMergeRuns(_RunsFixture):
         self.assertEqual(sorted(self.listed()), sorted([A, K]))
 
 
+class TestMergeManyRuns(_RunsFixture):
+    """More than two runs at once: allowed only if no two of them overlap."""
+
+    def test_three_runs_become_one_under_the_latest_hash(self):
+        self.runs(**{A: "first", K: "second", C: "third"})
+        log_run(self.lg, A, range(0, 5))
+        log_run(self.lg, K, range(5, 10))
+        log_run(self.lg, C, range(20, 25))
+        rows = all_rows(self.lg)
+
+        result = self.cm.merge_runs(K, C, A)
+
+        self.assertTrue(result["success"], result["message"])
+        self.assertEqual(result["merged_hash"], C)
+        self.assertEqual(result["absorbed_hashes"], [A, K])
+        self.assertEqual(result["gaps"], [(9, 20)])
+        self.assertEqual(self.listed(), [C])
+        self.assertEqual(self.lg.run_segments(C), [(A, 0, 4), (K, 5, 9), (C, 20, 24)])
+        self.assertEqual(self.cm.run_merge_segments(C), [(A, 0, 4), (K, 5, 9), (C, 20, -1)])
+        # Each absorbed run's note names the run that picks up after it.
+        self.assertEqual(result["notes"][A],
+                         f"Merged: run 'first' ({A}) continues as 'second' ({K}) at step 5.")
+        self.assertEqual(result["notes"][K],
+                         f"Merged: run 'second' ({K}) continues as 'third' ({C}) at step 20, "
+                         f"after a gap of 10 steps.")
+        self.assertEqual(sorted((m, s) for m, s, _ in notes_of(self.lg, C)),
+                         [("train/loss", 4), ("train/loss", 9), ("val/acc", 4), ("val/acc", 9)])
+
+        # One split gives all three back, exactly.
+        self.assertEqual(sorted(self.cm.split_run(C)["restored_hashes"]), sorted([A, K]))
+        self.assertEqual(all_rows(self.lg), rows)
+        self.assertEqual(sorted(self.listed()), sorted([A, K, C]))
+
+    def test_a_list_works_as_well(self):
+        self.runs(**{A: "first", K: "second", C: "third"})
+        log_run(self.lg, A, range(0, 5))
+        log_run(self.lg, K, range(5, 10))
+        log_run(self.lg, C, range(10, 15))
+
+        self.assertEqual(self.cm.merge_runs([A, K, C])["merged_hash"], C)
+
+    def test_one_overlapping_pair_refuses_the_whole_merge(self):
+        self.runs(**{A: "first", K: "second", C: "third"})
+        log_run(self.lg, A, range(0, 10))
+        log_run(self.lg, K, range(20, 30))
+        log_run(self.lg, C, range(25, 35))           # overlaps K, not A
+        rows, manifest = all_rows(self.lg), self.cm._load_manifest()
+
+        result = self.cm.merge_runs(A, K, C)
+
+        self.assertFalse(result["success"])
+        self.assertIn(f"'second' ({K}) and 'third' ({C}) overlap", result["message"])
+        self.assertIn("at steps 25 to 29", result["message"])
+        self.assertEqual(all_rows(self.lg), rows)
+        self.assertEqual(self.cm._load_manifest(), manifest)
+
+    def test_a_merged_run_merges_with_more_runs(self):
+        self.runs(**{A: "first", K: "second", C: "third", L: "fourth"})
+        log_run(self.lg, A, range(0, 5))
+        log_run(self.lg, K, range(5, 10))
+        log_run(self.lg, C, range(10, 15))
+        log_run(self.lg, L, range(15, 20))
+        self.assertTrue(self.cm.merge_runs(A, K)["success"])
+
+        result = self.cm.merge_runs(K, C, L)
+
+        self.assertTrue(result["success"], result["message"])
+        self.assertEqual([m["hash"] for m in self.manifest_runs()[L]["merged_from"]], [A, K, C])
+        self.assertEqual(sorted(self.cm.split_run(L)["restored_hashes"]), sorted([A, K, C]))
+
+    def test_refusals(self):
+        self.runs(**{A: "first", K: "second"})
+        log_run(self.lg, A, range(0, 5))
+        log_run(self.lg, K, range(5, 10))
+
+        self.assertIn("at least two", self.cm.merge_runs(A)["message"])
+        self.assertIn("at least two", self.cm.merge_runs([])["message"])
+        self.assertIn("itself", self.cm.merge_runs(A, K, A)["message"])
+
+
 class TestSplitRun(_RunsFixture):
     def test_split_gives_back_both_runs_as_they_were(self):
         self.runs(**{A: "first", K: "second"})
@@ -566,11 +646,23 @@ class TestRunMergeRpcs(_RunsFixture):
         self.assertEqual(sorted(r.experiment_hash for r in runs), sorted([A, K]))
         self.assertTrue(all(len(r.merged_segments) == 0 for r in runs))
 
-    def test_merge_needs_exactly_two_runs(self):
+    def test_merge_needs_at_least_two_runs(self):
         response = self.service.MergeExperimentRuns(
             pb2.MergeExperimentRunsRequest(experiment_hashes=[A]), None)
         self.assertFalse(response.success)
-        self.assertIn("exactly two", response.message)
+        self.assertIn("at least two", response.message)
+
+    def test_merge_three_runs_in_one_call(self):
+        self.runs(**{A: "first", K: "second", C: "third"})
+        log_run(self.lg, C, range(40, 45))
+
+        response = self.service.MergeExperimentRuns(
+            pb2.MergeExperimentRunsRequest(experiment_hashes=[K, C, A]), None)
+
+        self.assertTrue(response.success, response.message)
+        self.assertEqual(response.merged_hash, C)
+        self.assertEqual(list(response.absorbed_hashes), [A, K])
+        self.assertEqual([(g.after_step, g.before_step) for g in response.gaps], [(4, 20), (24, 40)])
 
     def test_a_refusal_comes_back_as_a_message(self):
         log_run(self.lg, A, range(20, 22))   # A now overlaps K

@@ -481,9 +481,9 @@ class ExperimentServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def MergeExperimentRuns(self, request, context):
-        """Merge two runs that share no training step into one (the run reaching the
-        later steps keeps its hash), and undo it. Lossless: a split gives back
-        exactly the runs that were merged.
+        """Merge two or more runs, no two of which share a training step, into one
+        (the run reaching the latest step keeps its hash), and undo it. Lossless:
+        a split gives back exactly the runs that were merged.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')

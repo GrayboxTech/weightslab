@@ -1181,31 +1181,37 @@ class CheckpointManager:
             return None
         return signal_logger
 
-    def merge_runs(self, hash_a: str, hash_b: str) -> Dict[str, Any]:
-        """Merge two runs that share no training step into one run.
+    def merge_runs(self, *hashes) -> Dict[str, Any]:
+        """Merge two or more runs, no two of which trained the same steps.
 
-        The run reaching the later steps keeps its hash; the other is absorbed:
-        its curves, per-sample/per-instance history and evaluation markers move
-        under the kept hash, and it leaves the runs list. Its last point on
-        every curve gets a note saying where the run continues (and over how
-        big a gap). Refused when the runs overlap, when one has no logged step,
-        when one was already merged away, when the run to absorb is the one
-        currently loaded (it would keep logging under its own hash), or in a
-        read-only viewer.
+        ``merge_runs(a, b)``, ``merge_runs(a, b, c)`` or ``merge_runs([a, b, c])``.
+        Every pair must pass the overlap check (see _first_overlap), or nothing
+        is merged. The run reaching the latest step keeps its hash; the others
+        are absorbed: their curves, per-sample/per-instance history and
+        evaluation markers move under the kept hash, and they leave the runs
+        list. Each absorbed run's last point on every training curve gets a note
+        naming the run that continues it (and over how big a gap). Also refused
+        when a run has no logged step, was already merged away, is the one
+        currently loaded while it would be absorbed (it would keep logging under
+        its own hash), or in a read-only viewer.
 
         Returns ``{"success", "message"}`` plus, on success, ``merged_hash``,
-        ``absorbed_hashes``, ``gaps`` and ``note``.
+        ``absorbed_hashes``, ``gaps``, ``notes`` ({absorbed: note}) and ``note``
+        (the earliest absorbed run's).
         """
         def refuse(message: str) -> Dict[str, Any]:
             logger.warning(f"Run merge refused: {message}")
             return {'success': False, 'message': message}
 
+        if len(hashes) == 1 and isinstance(hashes[0], (list, tuple, set)):
+            hashes = tuple(hashes[0])
+        wanted = [str(h or '').strip() for h in hashes]
+
         if self.read_only:
             return refuse("This is a read-only viewer: runs can't be merged here.")
-        hash_a, hash_b = str(hash_a or '').strip(), str(hash_b or '').strip()
-        if not hash_a or not hash_b:
-            return refuse("Pick two runs to merge.")
-        if hash_a == hash_b:
+        if len(wanted) < 2 or any(not h for h in wanted):
+            return refuse("Pick at least two runs to merge.")
+        if len(set(wanted)) != len(wanted):
             return refuse("A run can't be merged with itself.")
 
         manifest = self._load_manifest()
@@ -1217,7 +1223,7 @@ class CheckpointManager:
             # which runs differing in model or data share.
             return f"'{name}' ({h})" if name else h
 
-        for h in (hash_a, hash_b):
+        for h in wanted:
             if h not in experiments:
                 return refuse(f"Run {h} is not recorded under this experiment root.")
             if experiments[h].get('merged_into'):
@@ -1227,64 +1233,79 @@ class CheckpointManager:
         if signal_logger is None:
             return refuse("No signal history is loaded, so there is nothing to merge.")
 
-        segments = {h: signal_logger.run_segments(h) for h in (hash_a, hash_b)}
-        for h, segs in segments.items():
-            if not segs:
+        segments = {h: signal_logger.run_segments(h) for h in wanted}
+        for h in wanted:
+            if not segments[h]:
                 return refuse(f"Run {label(h)} has no logged step to place on a curve.")
-        overlap = self._first_overlap(signal_logger.run_signal_segments(hash_a),
-                                      signal_logger.run_signal_segments(hash_b))
-        if overlap:
-            signal, lo, hi = overlap
-            where = f"step {lo}" if lo == hi else f"steps {lo} to {hi}"
-            return refuse(f"Runs {label(hash_a)} and {label(hash_b)} overlap (both logged '{signal}' "
-                          f"at {where}); only runs that share no training step can be merged.")
+        signal_segments = {h: signal_logger.run_signal_segments(h) for h in wanted}
+        for i, a in enumerate(wanted):
+            for b in wanted[i + 1:]:
+                overlap = self._first_overlap(signal_segments[a], signal_segments[b])
+                if overlap:
+                    signal, lo, hi = overlap
+                    where = f"step {lo}" if lo == hi else f"steps {lo} to {hi}"
+                    return refuse(f"Runs {label(a)} and {label(b)} overlap (both logged '{signal}' "
+                                  f"at {where}); only runs that share no training step can be merged.")
 
         def last_step(h: str) -> int:
             return max(hi for _, _, hi in segments[h])
 
-        keeper, absorbed = (hash_a, hash_b) if last_step(hash_a) > last_step(hash_b) else (hash_b, hash_a)
-        if absorbed == self.current_exp_hash:
-            return refuse(f"Run {label(absorbed)} is the loaded run and would keep logging under its own "
-                          f"hash. Load {label(keeper)} first, then merge.")
+        keeper = max(wanted, key=last_step)
+        absorbed = sorted((h for h in wanted if h != keeper), key=last_step)
+        if self.current_exp_hash in absorbed:
+            return refuse(f"Run {label(self.current_exp_hash)} is the loaded run and would keep logging under "
+                          f"its own hash. Load {label(keeper)} first, then merge.")
 
-        absorbed_end = last_step(absorbed)
-        # The kept run's piece that continues the absorbed one. At a boundary
-        # the two can share a step through different signals (see
-        # _first_overlap), so it may start ON absorbed_end, not after it.
-        next_start = min(lo for _, lo, hi in segments[keeper] if hi > absorbed_end)
-        gap = max(0, next_start - absorbed_end - 1)
-        note = (f"Merged: run {label(absorbed)} continues as {label(keeper)} at step {next_start}"
-                + (f", after a gap of {gap} step{'' if gap == 1 else 's'}" if gap > 0 else "") + ".")
+        notes = {}
+        for a in absorbed:
+            end = last_step(a)
+            # The run picking up where this one stops: the earliest piece of any
+            # other merged run that goes on past its end. At a boundary the two
+            # can share a step through different signals (see _first_overlap),
+            # so it may start ON `end`, not after it.
+            nxt, start = min(((h, lo) for h in wanted if h != a for _, lo, hi in segments[h] if hi > end),
+                             key=lambda item: item[1])
+            gap = max(0, start - end - 1)
+            notes[a] = (f"Merged: run {label(a)} continues as {label(nxt)} at step {start}"
+                        + (f", after a gap of {gap} step{'' if gap == 1 else 's'}" if gap > 0 else "") + ".")
 
         def own_range(h: str) -> tuple:
             own = [(lo, hi) for seg, lo, hi in segments[h] if seg == h]
             pool = own or [(lo, hi) for _, lo, hi in segments[h]]
             return min(lo for lo, _ in pool), max(hi for _, hi in pool)
 
+        def take_notes_off():
+            for a, note in notes.items():
+                signal_logger.remove_point_note_text(a, note)
+
         # On every training curve; the machine's resource plots are left alone.
-        signal_logger.add_run_end_note(absorbed, note, skip_prefixes=self.SYSTEM_SIGNAL_PREFIXES)
+        for a in absorbed:
+            signal_logger.add_run_end_note(a, notes[a], skip_prefixes=self.SYSTEM_SIGNAL_PREFIXES)
         try:
-            moved = signal_logger.merge_run_histories(keeper, [absorbed])
+            moved = signal_logger.merge_run_histories(keeper, absorbed)
         except Exception as e:
-            signal_logger.remove_point_note_text(absorbed, note)
+            take_notes_off()
             logger.error(f"Run merge failed while moving history: {e}")
             return {'success': False, 'message': f"Merge failed: {e}"}
 
         now = datetime.now().isoformat()
-        absorbed_info, keeper_info = experiments[absorbed], experiments[keeper]
-        # An absorbed run that was itself a merge hands its members over, so a
-        # split always gives back the original runs.
-        inherited = list(absorbed_info.pop('merged_from', None) or [])
-        absorbed_info.pop('merge_own_first_step', None)
-        first, last = own_range(absorbed)
-        members = list(keeper_info.get('merged_from') or []) + inherited + [{
-            'hash': absorbed,
-            'experiment_name': absorbed_info.get('experiment_name') or '',
-            'first_step': int(first),
-            'last_step': int(last),
-            'merge_note': note,
-            'merged_at': now,
-        }]
+        keeper_info = experiments[keeper]
+        members = list(keeper_info.get('merged_from') or [])
+        for a in absorbed:
+            absorbed_info = experiments[a]
+            # An absorbed run that was itself a merge hands its members over, so
+            # a split always gives back the original runs.
+            members += list(absorbed_info.pop('merged_from', None) or [])
+            absorbed_info.pop('merge_own_first_step', None)
+            first, last = own_range(a)
+            members.append({
+                'hash': a,
+                'experiment_name': absorbed_info.get('experiment_name') or '',
+                'first_step': int(first),
+                'last_step': int(last),
+                'merge_note': notes[a],
+                'merged_at': now,
+            })
         members.sort(key=lambda m: m.get('first_step', 0))
         keeper_info['merged_from'] = members
         keeper_info.setdefault('merge_own_first_step', int(own_range(keeper)[0]))
@@ -1299,20 +1320,21 @@ class CheckpointManager:
             self._write_manifest(manifest)
         except Exception as e:
             # Put the history back so the manifest and the curves agree.
-            signal_logger.split_run_histories(keeper, [absorbed])
-            signal_logger.remove_point_note_text(absorbed, note)
+            signal_logger.split_run_histories(keeper, absorbed)
+            take_notes_off()
             logger.error(f"Run merge failed while saving the manifest: {e}")
             return {'success': False, 'message': f"Merge failed: {e}"}
 
         gaps = self.merge_gaps(self.run_merge_segments(keeper, keeper_info))
-        logger.info(f"Merged run {absorbed} into {keeper} ({moved.get('rows', 0)} history rows)")
+        logger.info(f"Merged runs {absorbed} into {keeper} ({moved.get('rows', 0)} history rows)")
         return {
             'success': True,
-            'message': f"Merged {label(absorbed)} into {label(keeper)}.",
+            'message': f"Merged {', '.join(label(a) for a in absorbed)} into {label(keeper)}.",
             'merged_hash': keeper,
-            'absorbed_hashes': [absorbed],
+            'absorbed_hashes': absorbed,
             'gaps': gaps,
-            'note': note,
+            'notes': notes,
+            'note': notes[absorbed[0]],
         }
 
     def split_run(self, exp_hash: str) -> Dict[str, Any]:

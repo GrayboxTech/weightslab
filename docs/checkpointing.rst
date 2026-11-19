@@ -109,21 +109,23 @@ Merging and splitting runs
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Every hyperparameter change starts a new hash, so one long training session
-can show up as several runs, each with its own curve. When two runs never
-trained the same step, they can be merged into one run with one curve per
-signal. In Weights Studio, open the runs table (click the hash in the left
-panel), tick the two runs and click **Merge selected**. A merged run shows a
+can show up as several runs, each with its own curve. When two or more runs
+never trained the same step, they can be merged into one run with one curve
+per signal. In Weights Studio, open the runs table (click the hash in the left
+panel), tick the runs and click **Merge selected**. A merged run shows a
 **merged ×N** chip and a **Split** button. From Python:
 
 .. code-block:: python
 
-   result = manager.merge_runs(hash_a, hash_b)
+   result = manager.merge_runs(hash_a, hash_b, hash_c)   # or merge_runs([...])
    result["merged_hash"]       # the run that kept its hash
    result["gaps"]              # [(last_step_before, first_step_after)], untrained steps
-   manager.split_run(result["merged_hash"])   # both runs back, exactly as before
+   manager.split_run(result["merged_hash"])   # every run back, exactly as before
 
-- **Which hash survives.** The run reaching the later steps keeps its hash,
-  since it is the one training continues. The other run leaves the runs list.
+- **Which hash survives.** The run reaching the latest step keeps its hash,
+  since it is the one training continues. The others leave the runs list.
+- **Every pair must pass.** With more than two runs, one overlapping pair
+  refuses the whole merge, and the message names that pair.
 - **Refused when the runs overlap**, i.e. both logged the same signal at the
   same steps. The message names the signal and the steps. The check is done
   signal by signal, and two curves may share the one step where the first

@@ -87,9 +87,9 @@ service ExperimentService {
   rpc ListExperimentRuns (ListExperimentRunsRequest) returns (ListExperimentRunsResponse);
   rpc RenameExperimentRun (RenameExperimentRunRequest) returns (RenameExperimentRunResponse);
   rpc SetExperimentRunNotes (SetExperimentRunNotesRequest) returns (SetExperimentRunNotesResponse);
-  // Merge two runs that share no training step into one (the run reaching the
-  // later steps keeps its hash), and undo it. Lossless: a split gives back
-  // exactly the runs that were merged.
+  // Merge two or more runs, no two of which share a training step, into one
+  // (the run reaching the latest step keeps its hash), and undo it. Lossless:
+  // a split gives back exactly the runs that were merged.
   rpc MergeExperimentRuns (MergeExperimentRunsRequest) returns (MergeExperimentRunsResponse);
   rpc SplitExperimentRun (SplitExperimentRunRequest) returns (SplitExperimentRunResponse);
 
@@ -881,7 +881,7 @@ message RunStepGap {
 }
 
 message MergeExperimentRunsRequest {
-  repeated string experiment_hashes = 1;   // exactly two
+  repeated string experiment_hashes = 1;   // two or more
 }
 
 message MergeExperimentRunsResponse {

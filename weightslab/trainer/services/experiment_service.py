@@ -767,18 +767,18 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         ]
 
     def MergeExperimentRuns(self, request, context):
-        """Merge two runs that share no step into one; the later run keeps its hash."""
+        """Merge two or more runs that share no step into one; the latest run keeps its hash."""
         hashes = [h for h in request.experiment_hashes if h]
         try:
             checkpoint_manager = self._get_checkpoint_manager()
             if checkpoint_manager is None:
                 return pb2.MergeExperimentRunsResponse(
                     success=False, message="Checkpoint manager not initialized")
-            if len(hashes) != 2:
+            if len(hashes) < 2:
                 return pb2.MergeExperimentRunsResponse(
-                    success=False, message=f"Pick exactly two runs to merge (got {len(hashes)}).")
+                    success=False, message=f"Pick at least two runs to merge (got {len(hashes)}).")
 
-            result = checkpoint_manager.merge_runs(hashes[0], hashes[1])
+            result = checkpoint_manager.merge_runs(hashes)
             self._log_audit(
                 "experiment_merge",
                 "success" if result.get('success') else "failed",
