@@ -527,6 +527,14 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         logger.debug(f"\nExperimentServiceServicer.SetExperimentRunNotes({request})")
         return self._exp_service.SetExperimentRunNotes(request, context)
 
+    def MergeExperimentRuns(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.MergeExperimentRuns({request})")
+        return self._exp_service.MergeExperimentRuns(request, context)
+
+    def SplitExperimentRun(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.SplitExperimentRun({request})")
+        return self._exp_service.SplitExperimentRun(request, context)
+
     # -------------------------------------------------------------------------
     # Evaluation mode
     # -------------------------------------------------------------------------
