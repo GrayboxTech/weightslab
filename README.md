@@ -64,7 +64,7 @@ uvx --torch-backend=auto weightslab start       # just the CLI / Studio UI
 With uv, choose the PyTorch build with `--torch-backend` (`auto`, `cpu`, `cu126`, ...), not `--extra-index-url`: see the [uv install notes](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
 
 ```bash
-weightslab start ./my_experiment_directory # launch the UI
+weightslab start ./my_experiment_directory # optional: open the UI on an experiment directory
 ```
 
 > [!TIP]
@@ -91,7 +91,7 @@ optim  = wl.watch_or_edit(optim, flag='opt')
 loss   = wl.watch_or_edit(loss, flag='signal', name="loss", per_sample=True, log=True)
 loader = wl.watch_or_edit(dataset, flag='data', loader_name="train")
 ...
-wl.serve(serving_grpc=True, serving_cli=False)
+wl.serve(serving_grpc=True, serving_cli=False)  # also serves Weights Studio and opens it in your browser
 ...
 ```
 
@@ -139,13 +139,15 @@ wl.serve(serving_grpc=True, serving_cli=False)
 
 ```
 
-3. **Run your script, then launch the UI in a separate terminal:**
+3. **Serve from your script, then run it:**
+```python
+   wl.serve()  # ← starts the backend and Weights Studio (the UI), and opens it in your browser
+```
 ```bash
    python train.py
-   weightslab start
 ```
 
-4. **Open your browser** at the URL printed by `weightslab start` and inspect your training in real time.
+4. **Inspect your training in real time** in the browser tab that opens (the URL is also printed; `http://localhost:8080` by default). No separate terminal is needed (if `weightslab start` is already running for this backend, that UI is used instead).
 
 </details>
 

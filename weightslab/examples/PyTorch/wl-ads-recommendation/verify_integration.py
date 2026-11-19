@@ -92,7 +92,7 @@ def main() -> int:
     metric = wl.watch_or_edit(Accuracy(task="multiclass", num_classes=2),
                               flag="metric", signal_name="metric-ACC", log=True)
 
-    wl.serve(serving_grpc=True, grpc_port=grpc_port)
+    wl.serve(serving_grpc=True, grpc_port=grpc_port, serving_ui=False)  # headless check: no Studio
     wl.start_training()
 
     for _ in range(120):

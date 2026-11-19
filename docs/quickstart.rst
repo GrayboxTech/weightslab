@@ -102,11 +102,9 @@ It run a small bundled experiment:
 
    weightslab start example --cls
 
-Then, in another terminal, launch the UI and open the URL printed by the command:
-
-.. code-block:: bash
-
-   weightslab start
+The example serves Weights Studio itself and opens it in your browser (the URL
+is printed too). If ``weightslab start`` is already running, the example uses
+that UI instead.
 
 
 Local integration in your own Python script (MNIST)
@@ -235,8 +233,8 @@ Migrating a real codebase? The full guides are
       ``(inputs, uids, labels)`` , those ``uids`` are what tie a loss value back
       to the sample that produced it, which is why they are handed to the loss
       as ``batch_ids``. The loop is open-ended: you stop it from the studio, not
-      with a step budget. And it does not start on its own , run
-      ``weightslab start`` in another terminal and press **Play**.
+      with a step budget. And it does not start on its own , ``wl.serve()``
+      opens Weights Studio in your browser: press **Play** there.
 
    .. tab-item:: WeightsLab From TensorBoard
 
@@ -487,13 +485,20 @@ Start by opening this notebook:
 Use Weightslab Studio (UI)
 --------------------------
 
-For a full visual experiment monitoring workflow (agent, samples, tags, discard/restore, plots), deploy the
-Weights Studio web app with the bundled CLI.
+For a full visual experiment monitoring workflow (agent, samples, tags, discard/restore, plots), use the
+Weights Studio web app. ``wl.serve()`` serves it from your training process and opens it in your
+browser (``http://localhost:8080`` by default; a busy port falls back to a free one). Turn that off
+with ``wl.serve(serving_ui=False)`` or ``WEIGHTSLAB_SERVE_UI=0``.
+
+Run it with the bundled CLI instead when you want a UI that outlives the training run, or to open
+an experiment directory up front (``weightslab start DIR``). When ``weightslab start`` is already
+running for the backend's port, ``wl.serve()`` uses it rather than starting a second UI.
 
 **Without certificates the UI runs unsecured (HTTP, no gRPC auth).** Once you have
 generated them with ``weightslab se``, ``weightslab start`` finds them in
 ``$WEIGHTSLAB_CERTS_DIR`` (else ``~/.weightslab-certs``) and serves HTTPS + gRPC auth
-automatically, the same rule the training backend applies, so both sides agree:
+automatically, the same rule the training backend applies, so both sides agree (the UI
+``wl.serve()`` serves follows the backend's TLS setting):
 
 .. code-block:: bash
 
@@ -509,7 +514,8 @@ automatically, the same rule the training backend applies, so both sides agree:
 Run ``weightslab``, ``weightslab help``, or ``weightslab -h`` to see the banner and the full
 command reference (``se``, ``start``, ``start example ...``).
 
-To stop the UI, press ``Ctrl+C`` in the terminal running ``weightslab start``.
+To stop the UI, press ``Ctrl+C`` in the terminal running ``weightslab start``. The UI
+``wl.serve()`` serves stops when the training process exits.
 
 Prefer a terminal over a browser? ``weightslab cli`` opens an interactive
 console connected to the running experiment (pause/resume, status, evaluate,

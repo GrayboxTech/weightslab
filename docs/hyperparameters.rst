@@ -104,7 +104,7 @@ can be edited, the YAML file, ``set_hp`` in the CLI, or the studio panel.
 
    weightslab start example --config    # writes config.yaml on first run
    weightslab cli                       # attach a terminal, in another shell
-   weightslab start                     # open Weights Studio, in a third shell
+   # Weights Studio opens in your browser on its own (wl.serve() serves it)
 
 .. literalinclude:: ../weightslab/examples/PyTorch/wl-standalone-config/main.py
    :language: python

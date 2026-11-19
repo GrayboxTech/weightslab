@@ -2673,7 +2673,9 @@ def serve_ui(
         "  WeightsLab UI is running:\n"
         f"      {url}\n"
         f"    proxying gRPC-Web  ->  {backend_host}:{backend_port}\n"
-        "    Press Ctrl+C to stop.\n\n"
+        # Non-blocking: hosted by another program (wl.serve()'s automatic UI),
+        # so it ends with that program, not with a Ctrl+C of its own.
+        + ("    Press Ctrl+C to stop.\n\n" if block else "    Stops when this process exits.\n\n")
     )
     sys.stdout.flush()
 

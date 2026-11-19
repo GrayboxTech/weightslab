@@ -157,8 +157,8 @@ debug values, custom distances, etc.
 
    .. code-block:: bash
 
-      weightslab start               # 1. deploy the studio
-      weightslab start example --cls # 2. start the classification demo
+      weightslab start               # 1. optional: a studio that outlives the demo
+      weightslab start example --cls # 2. start the classification demo (opens the studio)
 
 
 .. raw:: html

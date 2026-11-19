@@ -92,6 +92,13 @@ variable points at a directory without certs), the same rule the backend
 applies at startup, so both ends agree. Without certificates, or with
 ``GRPC_TLS_ENABLED=0``, it serves plain HTTP.
 
+``wl.serve()`` already runs this same server inside the training process and
+opens it in your browser, so a local run does not need ``weightslab start``.
+Use it for a UI that outlives training runs, to pick the experiment directory
+up front (``DIR``), for remote or tunnel setups, or to open an experiment that
+is not training. When ``weightslab start`` already serves the backend's port,
+``wl.serve()`` uses it instead of starting its own.
+
 **Arguments**
 
 - ``DIR`` *(positional, optional)*, establishes the experiment directory (its
@@ -199,9 +206,11 @@ One-level-at-a-time MNIST demos (four-way SDK approach, see
    weightslab start example --3d_det       # 3D LiDAR detection
    weightslab example start --det          # tolerant alias, same as `start example --det`
 
-Then, in another terminal, run ``weightslab start`` and open the URL it
-prints (``http://localhost:8080`` by default). See :doc:`examples/index` for
-what each example demonstrates.
+The example serves Weights Studio itself and opens it in your browser
+(``http://localhost:8080`` by default; the URL is printed). If
+``weightslab start`` is already running, the example uses that UI and its
+experiment directory instead. See :doc:`examples/index` for what each example
+demonstrates.
 
 weightslab cli
 ~~~~~~~~~~~~~~

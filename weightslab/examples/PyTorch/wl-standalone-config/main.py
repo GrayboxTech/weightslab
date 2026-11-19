@@ -29,7 +29,8 @@ Drive it
       set_hp data.train_loader.batch_size 64
       status                              current registrations
 
-    weightslab start                      # open Weights Studio (another terminal)
+    Weights Studio opens in your browser on its own: wl.serve() serves it
+    (an already running `weightslab start` is used instead).
 
     ...or just edit config.yaml in your editor and save.
 """
@@ -106,8 +107,9 @@ def parse_args(argv=None):
     p.add_argument("--no-cli", action="store_true", help="Do not start the CLI server.")
     p.add_argument("--no-grpc", action="store_true", help="Do not start the gRPC backend.")
     p.add_argument("--grpc-port", type=int, default=50051,
-                   help="gRPC port for Weights Studio (must match `weightslab start "
-                        "--backend-port`).")
+                   help="gRPC port for Weights Studio (the UI wl.serve() opens follows "
+                        "it; a separate `weightslab start` needs the same "
+                        "--backend-port).")
     p.add_argument("--serve-timeout", type=int, default=None,
                    help="Seconds to keep serving after the loop (default: forever).")
     return p.parse_args(argv)
@@ -141,7 +143,7 @@ def main(argv=None) -> int:
     wl.serve(serving_grpc=not args.no_grpc, serving_cli=not args.no_cli,
              grpc_port=args.grpc_port)
     print("=" * 70)
-    print(" CONFIG-ONLY standalone — attach with `weightslab cli`, UI with `weightslab start`")
+    print(" CONFIG-ONLY standalone — attach with `weightslab cli`; Weights Studio opens in your browser")
     print(f" config={config_path}")
     # Each reload makes the FILE authoritative, so a root_log_dir that was only
     # injected at registration does not survive it; ask for the directory in use.
