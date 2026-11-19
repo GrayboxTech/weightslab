@@ -1,1 +1,2 @@
-# Changelog - 2026-10-09 v2.0.3.dev2
+# Changelog - 2026-11-19 v2.0.4
+
