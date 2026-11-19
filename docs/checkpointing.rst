@@ -103,6 +103,54 @@ alongside (not replacing) the branch point:
    # ... continue training; the next change creates a new hash that
    # descends from older_hash, leaving the original branch on disk intact.
 
+.. _merging-runs:
+
+Merging and splitting runs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Every hyperparameter change starts a new hash, so one long training session
+can show up as several runs, each with its own curve. When two runs never
+trained the same step, they can be merged into one run with one curve per
+signal. In Weights Studio, open the runs table (click the hash in the left
+panel), tick the two runs and click **Merge selected**. A merged run shows a
+**merged ×N** chip and a **Split** button. From Python:
+
+.. code-block:: python
+
+   result = manager.merge_runs(hash_a, hash_b)
+   result["merged_hash"]       # the run that kept its hash
+   result["gaps"]              # [(last_step_before, first_step_after)], untrained steps
+   manager.split_run(result["merged_hash"])   # both runs back, exactly as before
+
+- **Which hash survives.** The run reaching the later steps keeps its hash,
+  since it is the one training continues. The other run leaves the runs list.
+- **Refused when the runs overlap**, i.e. both logged the same signal at the
+  same steps. The message names the signal and the steps. The check is done
+  signal by signal, and two curves may share the one step where the first
+  run ends and the second begins. A plain continuation does that: the step
+  training paused on is often evaluated on both sides of the switch. A run
+  branched from an earlier checkpoint retrains several steps and is refused.
+  The resource monitor's ``resource/*`` signals are not compared: they sample
+  the machine, not the training.
+- **Also refused** when a run has logged nothing, when the run to absorb is the
+  loaded one (load the other run first), or in a read-only viewer.
+- **What moves.** All signal history: curves, per-sample and per-instance
+  values, and evaluation markers (renumbered after the kept run's own). The
+  absorbed run's last point on every training curve (not the ``resource/*``
+  plots) gets a note saying where the run continues, and over how many
+  untrained steps if there is a gap.
+- **Gaps.** If the second run does not start right after the first one ends,
+  the line across the untrained steps is drawn dashed.
+- **Nothing is lost.** Each moved row keeps the hash it was logged under, the
+  absorbed run keeps its manifest entry (``merged_into``) and its checkpoints,
+  and the kept run lists its members in ``merged_from``. A split uses these to
+  undo the merge, removes the merge notes, and leaves any note you wrote
+  yourself. Splitting a run built from several merges gives back every
+  original run.
+- **Loading weights at a step** of a merged run loads them from the run that
+  trained that step: ``load_state(merged_hash, target_step=s)`` resolves the
+  owner with ``resolve_run_for_step``.
+
 Step-aware checkpoint selection
 ---------------------------------
 
