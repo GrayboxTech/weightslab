@@ -20,7 +20,8 @@ A running studio session uses three local ports:
      - ``8080``
      - Serves the SPA and proxies gRPC-Web to the backend. This is the URL you
        open in a browser.
-     - ``--port PORT`` or ``$WEIGHTSLAB_UI_PORT``
+     - ``--port PORT`` (``wl.serve(ui_port=PORT)`` for the UI it serves) or
+       ``$WEIGHTSLAB_UI_PORT``
    * - **Backend gRPC**
      - ``50051``
      - Your training process's gRPC service, started by ``wl.serve()``. The UI

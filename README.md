@@ -15,7 +15,7 @@
 <br>
 </div>
 <div align="center">
-  <a href="https://github.com/GrayboxTech/weightslab/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License" /></a>
+  <a href="https://github.com/GrayboxTech/weightslab/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-PolyForm%20Noncommercial-blue.svg" alt="License" /></a>
   <a href="https://github.com/GrayboxTech/weightslab/stargazers"><img src="https://img.shields.io/github/stars/GrayboxTech/weightslab?style=flat&color=5865F2" alt="Stars" /></a>
   <a href="https://pypi.org/project/weightslab/"><img src="https://img.shields.io/pypi/v/weightslab?style=flat&color=5865F2&logo=pypi&logoColor=white" alt="Version" /></a>
   <a href="https://pepy.tech/project/weightslab"><img src="https://img.shields.io/pepy/dt/weightslab?style=flat&color=5865F2&logo=pypi&logoColor=white" alt="PyPI - Downloads" /></a>
@@ -55,10 +55,16 @@ For a detailed installation guide and advanced configuration: [Documentation](ht
 **1. Install & Launch**
 ```bash
 pip install weightslab
+# or, with uv
+uv add weightslab         # in a uv project (uv run weightslab start)
+uv pip install weightslab --torch-backend=auto  # in any virtual environment
+uvx --torch-backend=auto weightslab start       # just the CLI / Studio UI
 ```
 
+With uv, choose the PyTorch build with `--torch-backend` (`auto`, `cpu`, `cu126`, ...), not `--extra-index-url`: see the [uv install notes](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
+
 ```bash
-weightslab start ./my_experiment_directory # launch the UI
+weightslab start ./my_experiment_directory # optional: open the UI on an experiment directory
 ```
 
 > [!TIP]
@@ -85,7 +91,7 @@ optim  = wl.watch_or_edit(optim, flag='opt')
 loss   = wl.watch_or_edit(loss, flag='signal', name="loss", per_sample=True, log=True)
 loader = wl.watch_or_edit(dataset, flag='data', loader_name="train")
 ...
-wl.serve(serving_grpc=True, serving_cli=False)
+wl.serve(serving_grpc=True, serving_cli=False)  # also serves Weights Studio and opens it in your browser
 ...
 ```
 
@@ -133,13 +139,15 @@ wl.serve(serving_grpc=True, serving_cli=False)
 
 ```
 
-3. **Run your script, then launch the UI in a separate terminal:**
+3. **Serve from your script, then run it:**
+```python
+   wl.serve()  # ← starts the backend and Weights Studio (the UI), and opens it in your browser
+```
 ```bash
    python train.py
-   weightslab start
 ```
 
-4. **Open your browser** at the URL printed by `weightslab start` and inspect your training in real time.
+4. **Inspect your training in real time** in the browser tab that opens (the URL is also printed; `http://localhost:8080` by default). No separate terminal is needed (if `weightslab start` is already running for this backend, that UI is used instead).
 
 </details>
 
@@ -272,3 +280,14 @@ If WeightsLab is part of your development process / project / publication, pleas
 }
 ```
 </details>
+
+## License
+
+WeightsLab is free for noncommercial use. Commercial use needs a paid licence.
+
+- **Noncommercial use is free**, under the [PolyForm Noncommercial License 1.0.0](LICENSE-PolyForm-Noncommercial-1.0.0.md). It covers:
+  - personal use for research, experiment, testing, study and hobby projects;
+  - use by charities, educational institutions, public research organisations and government.
+- **Commercial use needs a commercial licence.** This includes any use by or for a company, whatever its size. The licence is sold per seat. A seat is one user, and includes support, updates and the custom features your team needs. Write to [hello@graybx.com](mailto:hello@graybx.com).
+
+Versions released before this licence took effect remain available under the licence they were released with (Apache License 2.0). See [LICENSE](LICENSE).

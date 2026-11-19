@@ -277,11 +277,14 @@ serve
 
 .. code-block:: python
 
-   wl.serve(serving_cli=True, serving_grpc=True, spawn_cli_client=False, **kwargs)
+   wl.serve(serving_cli=True, serving_grpc=True, spawn_cli_client=False,
+            serving_bore=False, bore_port=None, allow_unconfigured=True,
+            serving_ui=True, ui_port=None, ui_open_browser=True, **kwargs)
 
 **Purpose**
 
-Start Weightslab backend services.
+Start Weightslab backend services. With the defaults: the gRPC backend,
+Weights Studio (the web UI, opened in your browser) and a headless CLI server.
 
 **Arguments**
 
@@ -294,14 +297,38 @@ Start Weightslab backend services.
   Leave ``False`` to start the CLI server **headless**: it still advertises
   its port, so any terminal can attach later with ``weightslab cli`` (see
   :doc:`user_commands`).
+- ``serving_bore`` *(bool, default ``False``)*, expose the gRPC backend through
+  a zero-signup `bore <https://github.com/ekzhang/bore>`_ tunnel, so a Weights
+  Studio on another machine can reach it (e.g. training in Colab). Returns the
+  public ``host:port`` endpoint to pass to ``weightslab tunnel``.
+- ``bore_port`` *(int, optional)*, port to expose with ``serving_bore``;
+  defaults to the gRPC port.
+- ``allow_unconfigured`` *(bool, default ``True``)*, serving before any
+  hyperparameters were wrapped (``flag="hyperparameters"``) only logs a
+  warning, since TLS, ports and ``root_log_dir`` then fall back to env vars /
+  defaults. Pass ``False`` to make network serving raise instead.
+- ``serving_ui`` *(bool, default ``True``)*, serve Weights Studio from this
+  process, so no separate ``weightslab start`` is needed. The UI comes up with
+  the backend and stops when the process exits; TLS follows the backend's.
+  Skipped when ``serving_grpc`` is off, in Google Colab (use ``serving_bore``
+  and ``weightslab start`` + ``weightslab tunnel`` on your machine), when a
+  ``weightslab start`` already serves this backend's port (that UI is used),
+  when the process was launched from Weights Studio, or when
+  ``WEIGHTSLAB_SERVE_UI=0`` is set.
+- ``ui_port`` *(int, optional)*, preferred Weights Studio port: this argument,
+  else ``ui_port`` in the config, else ``$WEIGHTSLAB_UI_PORT``, else ``8080``;
+  a busy port falls back to a free one. The bind interface is
+  ``$WEIGHTSLAB_UI_HOST`` (default ``0.0.0.0``), as for ``weightslab start``.
+- ``ui_open_browser`` *(bool, default ``True``)*, open Weights Studio in the
+  default browser once it is up (the URL is printed either way).
 - ``**kwargs``, extra server options forwarded to the underlying backends,
-  e.g. ``cli_host``, ``cli_port``, ``grpc_port``.
+  e.g. ``cli_host``, ``cli_port``, ``grpc_host``, ``grpc_port``.
 
 **Typical usage**
 
 .. code-block:: python
 
-   # gRPC for Weights Studio + a headless CLI server (attach on demand)
+   # gRPC + Weights Studio (opened in your browser) + a headless CLI server
    wl.serve(serving_grpc=True, serving_cli=True)
 
 keep_serving

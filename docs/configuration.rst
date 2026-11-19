@@ -356,8 +356,10 @@ All variables are optional; the built-in default is used when unset.
 Deploying the Studio
 ~~~~~~~~~~~~~~~~~~~~~
 
-All Weights Studio configuration variables are passed to the UI at launch time
-via ``weightslab start``.  There are two ways to supply them.
+All Weights Studio configuration variables are passed to the UI at launch time:
+by ``weightslab start``, or by ``wl.serve()`` for the UI it serves from the
+training process (set them before running the training script).  There are
+two ways to supply them.
 
 **Option 1, shell exports (quick, per-session)**
 
@@ -443,6 +445,15 @@ Logging
      - *(training script dir)*
      - Root directory where training log snapshots are saved.
        Defaults to a ``root_log_dir/`` folder next to your training script.
+   * - ``WEIGHTSLAB_UPDATE_CHECK``
+     - *(on)*
+     - Once the studio is connected to a backend, the UI server asks the public
+       PyPI index (pypi.org, never TestPyPI) for the latest stable WeightsLab
+       release, and the studio shows a notice at the top right when the
+       backend's version is older (pre-releases and dev builds don't count).
+       At most one request every 6 h per UI server, sending nothing but the
+       package name; offline simply means no notice. Set ``0``, ``false``,
+       ``no`` or ``off`` to turn it off.
    * - ``WEIGHTSLAB_PROJECTION``
      - *(on)*
      - Live 3-D parametric-UMAP projection of the model's representation
@@ -1065,11 +1076,20 @@ Backend Connection
      - Port of the WeightsLab gRPC backend to proxy to.
    * - ``WEIGHTSLAB_UI_HOST``
      - ``0.0.0.0``
-     - Interface the ``weightslab start`` HTTP server binds to.
+     - Interface the Weights Studio HTTP server binds to, for ``weightslab start``
+       and for the UI ``wl.serve()`` serves.
    * - ``WEIGHTSLAB_UI_PORT``
-     - ``50051``
-     - Preferred port for the ``weightslab start`` HTTP server. If that port is
-       already in use, WeightsLab picks a random available port.
+     - ``8080``
+     - Preferred port for the Weights Studio HTTP server (``weightslab start``,
+       and the UI ``wl.serve()`` serves, where the ``ui_port`` argument or the
+       ``ui_port`` config key take precedence). If that port is already in use,
+       WeightsLab picks a random available port.
+   * - ``WEIGHTSLAB_SERVE_UI``
+     - ``1``
+     - Set to ``0`` (``false`` / ``no`` / ``off``) to stop ``wl.serve()`` from
+       serving Weights Studio itself and opening it in the browser, without a
+       code change (e.g. CI or sweeps). Same as ``wl.serve(serving_ui=False)``;
+       ``weightslab start`` is unaffected.
 
 
 Vite Dev Server
@@ -1307,6 +1327,18 @@ case) to disable.
        notebook document is persisted as ``notebook.ipynb`` under the experiment
        ``root_log_dir``. Dev-server fallback: ``VITE_ENABLE_NOTEBOOK``. See
        :ref:`embedded-notebook` for how it works, with examples.
+   * - ``ENABLE_TUTORIAL``
+     - ``1``
+     - The new-user tour. A browser that never opened Weights Studio (no
+       ``wl_studio_seen`` cookie and no saved Studio settings) gets a
+       "New to WeightsLab?" notice at the top right; it opens a popup that plays
+       the tour video, then points to the MNIST tutorial notebook in Google
+       Colab. A **Tour** button in the header replays it. When disabled, none of
+       this is shown and nothing is stored. ``TUTORIAL_VIDEO_URL`` (any YouTube
+       link, or the video id) and ``TUTORIAL_COLAB_URL`` (an ``https`` URL)
+       replace the default video and notebook. Dev-server fallbacks:
+       ``VITE_ENABLE_TUTORIAL``, ``VITE_TUTORIAL_VIDEO_URL``,
+       ``VITE_TUTORIAL_COLAB_URL``.
 
 .. note::
 

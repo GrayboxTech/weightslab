@@ -702,10 +702,12 @@ def grpc_serve(
                 # Get root_log_dir from checkpoint_manager if available
                 root_log_dir = None
                 try:
-                    from weightslab.backend.ledgers import get_checkpoint_manager
+                    from weightslab.backend.ledgers import get_checkpoint_manager, get_viewer_workspace
                     checkpoint_mgr = get_checkpoint_manager()
                     if checkpoint_mgr and hasattr(checkpoint_mgr, 'root_log_dir'):
-                        root_log_dir = str(checkpoint_mgr.root_log_dir)
+                        # A read-only viewer writes its audit log / notebook to its
+                        # workspace, never into the experiment it shows.
+                        root_log_dir = get_viewer_workspace() or str(checkpoint_mgr.root_log_dir)
                         logger.debug(f"[gRPC] Using root_log_dir from checkpoint_manager: {root_log_dir}")
                 except Exception as e:
                     logger.debug(f"[gRPC] Could not get root_log_dir from checkpoint_manager: {e}")

@@ -155,6 +155,54 @@ jobs:
         run: |
           python -c "import weightslab; print(f'weightslab imported successfully')"
 
+  # ── uv install paths (always runs, alongside `install`) ──────────────────
+  # The ways uv users get weightslab, none of which the pip jobs exercise:
+  # the wheel installed into a uv-created env (no pip inside it), `uvx`, and
+  # the editable install of a checkout that `uv sync` performs. uv picks the
+  # CPU torch build with --torch-backend instead of --extra-index-url, which
+  # uv treats differently from pip (first-index strategy).
+  install-uv:
+    needs: gate
+    if: ${{ needs.gate.outputs.run_ci == 'true' }}
+    runs-on: ubuntu-latest
+    name: install with uv (Python 3.11)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags: a checkout's version is its nearest tag
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      # setup-uv publishes no floating major tag (no `@v10`): pin a release.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+
+      - name: Resolve dependencies for every platform
+        run: uv lock
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Install the wheel into a uv venv
+        run: |
+          uv venv --python 3.11 /tmp/wl-uv
+          uv pip install --python /tmp/wl-uv/bin/python dist/*.whl --torch-backend cpu
+          /tmp/wl-uv/bin/python -c "import importlib.util, weightslab; assert importlib.util.find_spec('pip') is None; print(f'weightslab {weightslab.__version__} imported in a pip-less uv env')"
+          /tmp/wl-uv/bin/weightslab --help
+
+      - name: Run the CLI with uvx
+        run: uvx --python 3.11 --torch-backend cpu --from "$(ls dist/*.whl)" weightslab --help
+
+      - name: Editable install of the checkout (what uv sync does)
+        run: |
+          uv venv --python 3.11 /tmp/wl-uv-dev
+          uv pip install --python /tmp/wl-uv-dev/bin/python -e . --torch-backend cpu
+          /tmp/wl-uv-dev/bin/python -c "import importlib.metadata as m; v = m.version('weightslab'); assert not v.startswith('0.'), f'no tag found: {v}'; print(f'editable version {v}')"
+
   # ── Full Python version matrix (PR and main only) ─────────────────────────
   # Verifies that `pip install` + basic import work across all supported Python
   # versions. Runs on every PR and every push to main; skipped on dev/other
@@ -193,6 +241,49 @@ jobs:
       - name: Verify installation
         run: |
           python -c "import weightslab; print(f'weightslab imported successfully on Python ${{ matrix.python-version }}')"
+
+  # ── Full Python version matrix, with uv (main only, like install-matrix) ──
+  # The same check as install-matrix, installing with uv instead of pip: a
+  # uv-created venv (no pip inside it) and the editable install `uv sync` does.
+  # `install-uv` covers the default version (3.11) on every CI run.
+  install-matrix-uv:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: '3.10'
+          - python-version: '3.11'
+          - python-version: '3.12'
+          - python-version: '3.13'
+          - python-version: '3.14'
+            allow-prereleases: true
+    name: install matrix with uv (Python ${{ matrix.python-version }})
+    continue-on-error: ${{ matrix.allow-prereleases == true }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags: a checkout's version is its nearest tag
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: ${{ matrix.allow-prereleases || false }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+
+      - name: Install project dependencies with uv
+        run: |
+          uv venv --python "${{ matrix.python-version }}" .venv-uv
+          uv pip install --python .venv-uv/bin/python -e . --torch-backend cpu
+
+      - name: Verify installation
+        run: |
+          .venv-uv/bin/python -c "import weightslab; print(f'weightslab imported successfully with uv on Python ${{ matrix.python-version }}')"
 
   test:
     if: ${{ needs.gate.outputs.run_ci == 'true' }}
@@ -462,4 +553,79 @@ jobs:
           import weightslab, importlib.metadata as m
           print('weightslab import OK on Python ${{ matrix.python-version }}')
           print('installed version:', m.version('weightslab'))
+          "
+
+  # ── Same install test from TestPyPI, with uv ─────────────────────────────
+  # Not a required check (the pip job above keeps its name). The published
+  # wheel comes from TestPyPI and its dependencies from PyPI: with uv, never
+  # mix the two as --index-url / --extra-index-url. uv takes each package from
+  # the first index that has it, and TestPyPI holds stale or squatted copies
+  # of common packages. The CPU torch build comes from --torch-backend.
+  test-install-from-pip-dev-uv:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    name: Test Install From Pip Dev with uv (Python ${{ matrix.python-version }})
+    needs: build-and-publish-dev
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: '3.10'
+          - python-version: '3.11'
+          - python-version: '3.12'
+          - python-version: '3.13'
+          - python-version: '3.14'
+            allow-prereleases: true
+    continue-on-error: ${{ matrix.allow-prereleases == true }}
+    permissions:
+      contents: read
+    steps:
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: ${{ matrix.allow-prereleases || false }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+
+      - name: Download the wheel from TestPyPI (wait until indexed)
+        env:
+          WL_VERSION: ${{ needs.build-and-publish-dev.outputs.published_version }}
+        run: |
+          if [ -z "${WL_VERSION}" ]; then
+            echo "Missing published version from upstream job"
+            exit 1
+          fi
+          for attempt in $(seq 1 60); do
+            echo "Checking TestPyPI for weightslab==${WL_VERSION} (attempt ${attempt}/60)"
+            if python -m pip download \
+                --index-url https://test.pypi.org/simple/ \
+                --no-deps --only-binary :all: \
+                "weightslab==${WL_VERSION}" \
+                -d /tmp/wl-wheel >/dev/null 2>&1; then
+              echo "Found weightslab==${WL_VERSION}"
+              break
+            fi
+            if [ "${attempt}" -eq 60 ]; then
+              echo "Timed out waiting for weightslab==${WL_VERSION} on TestPyPI"
+              exit 1
+            fi
+            sleep 7
+          done
+
+      - name: Install with uv into a uv venv
+        run: |
+          uv venv --python "${{ matrix.python-version }}" .venv-uv
+          uv pip install --python .venv-uv/bin/python /tmp/wl-wheel/weightslab-*.whl --torch-backend cpu
+
+      - name: Verify package import
+        env:
+          WL_VERSION: ${{ needs.build-and-publish-dev.outputs.published_version }}
+        run: |
+          .venv-uv/bin/python -c "
+          import os, weightslab, importlib.metadata as m
+          v = m.version('weightslab')
+          assert v == os.environ['WL_VERSION'], (v, os.environ['WL_VERSION'])
+          print('weightslab', v, 'import OK with uv on Python ${{ matrix.python-version }}')
           "

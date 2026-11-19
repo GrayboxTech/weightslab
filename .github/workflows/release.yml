@@ -329,6 +329,80 @@ jobs:
             print('installed version:', m.version('weightslab'))
             "
 
+  # ── Same install test from TestPyPI, with uv (Dev Release) ───────────────
+  # Informational: the pre-release does not wait for it. The wheel comes from
+  # TestPyPI and its dependencies from PyPI: with uv, never pass TestPyPI as
+  # --index-url plus PyPI as --extra-index-url (uv takes each package from the
+  # first index that has it, and TestPyPI holds stale copies of common
+  # packages). The CPU torch build comes from --torch-backend.
+  test-install-from-pip-dev-release-uv:
+    name: Test Install From TestPyPI with uv — Python ${{ matrix.python-version }} (Dev Release)
+    needs: build-and-publish-dev-release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: '3.10'
+          - python-version: '3.11'
+          - python-version: '3.12'
+          - python-version: '3.13'
+          - python-version: '3.14'
+            allow-prereleases: true
+    continue-on-error: ${{ matrix.allow-prereleases == true }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: ${{ matrix.allow-prereleases || false }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+
+      - name: Install from TestPyPI with uv (wait until indexed) + verify import
+        uses: nick-fields/retry@v3
+        env:
+          WL_VERSION: ${{ needs.build-and-publish-dev-release.outputs.published_version }}
+        with:
+          timeout_minutes: 15
+          max_attempts: 3
+          retry_on: any
+          shell: bash
+          command: |
+            if [ -z "${WL_VERSION}" ]; then
+              echo "Missing published_version from upstream job"; exit 1
+            fi
+
+            rm -rf /tmp/wl-wheel
+            for attempt in $(seq 1 60); do
+              echo "Checking TestPyPI for weightslab==${WL_VERSION} (attempt ${attempt}/60)"
+              if python -m pip download \
+                  --index-url https://test.pypi.org/simple/ \
+                  --no-deps --only-binary :all: \
+                  "weightslab==${WL_VERSION}" \
+                  -d /tmp/wl-wheel >/dev/null 2>&1; then
+                echo "Found weightslab==${WL_VERSION}"
+                break
+              fi
+              if [ "${attempt}" -eq 60 ]; then
+                echo "Timed out waiting for weightslab==${WL_VERSION} on TestPyPI"; exit 1
+              fi
+              sleep 7
+            done
+
+            rm -rf .venv-uv
+            uv venv --python "${{ matrix.python-version }}" .venv-uv
+            uv pip install --python .venv-uv/bin/python /tmp/wl-wheel/weightslab-*.whl --torch-backend cpu
+
+            .venv-uv/bin/python -c "
+            import os, weightslab, importlib.metadata as m
+            v = m.version('weightslab')
+            assert v == os.environ['WL_VERSION'], (v, os.environ['WL_VERSION'])
+            print('weightslab', v, 'import OK with uv on Python ${{ matrix.python-version }}')
+            "
+
   # Only for a dev pre-release tag (off main, name contains 'dev').
   create-dev-release:
     name: Create GitHub Pre-Release
@@ -735,6 +809,70 @@ jobs:
             print('installed version:', m.version('weightslab'))
             "
 
+  # ── Same install test from PyPI, with uv (Main Release) ──────────────────
+  # Informational: the release does not wait for it. What a uv user runs:
+  # `uv pip install weightslab --torch-backend cpu` into a uv-created venv
+  # (no pip inside it), then `uvx weightslab`.
+  test-install-from-pip-main-uv:
+    name: Test Install From PyPI with uv — Python ${{ matrix.python-version }} (Main Release)
+    needs: build-and-publish-main
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13']   # same versions as the pip job
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+
+      - name: Install from PyPI with uv (wait until indexed) + verify import
+        uses: nick-fields/retry@v3
+        env:
+          WL_VERSION: ${{ needs.build-and-publish-main.outputs.published_version }}
+        with:
+          timeout_minutes: 15
+          max_attempts: 3
+          retry_on: any
+          shell: bash
+          command: |
+            if [ -z "${WL_VERSION}" ]; then
+              echo "Missing published_version from upstream job"; exit 1
+            fi
+
+            for attempt in $(seq 1 60); do
+              echo "Checking PyPI for weightslab==${WL_VERSION} (attempt ${attempt}/60)"
+              if python -m pip download \
+                  --index-url https://pypi.org/simple/ \
+                  --no-deps \
+                  "weightslab==${WL_VERSION}" \
+                  -d /tmp/wl-probe >/dev/null 2>&1; then
+                echo "Found weightslab==${WL_VERSION}"
+                break
+              fi
+              if [ "${attempt}" -eq 60 ]; then
+                echo "Timed out waiting for weightslab==${WL_VERSION} on PyPI"; exit 1
+              fi
+              sleep 7
+            done
+
+            rm -rf .venv-uv
+            uv venv --python "${{ matrix.python-version }}" .venv-uv
+            uv pip install --python .venv-uv/bin/python --refresh "weightslab==${WL_VERSION}" --torch-backend cpu
+
+            .venv-uv/bin/python -c "
+            import os, weightslab, importlib.metadata as m
+            v = m.version('weightslab')
+            assert v == os.environ['WL_VERSION'], (v, os.environ['WL_VERSION'])
+            print('weightslab', v, 'import OK with uv on Python ${{ matrix.python-version }}')
+            "
+            uvx --python "${{ matrix.python-version }}" --torch-backend cpu --refresh --from "weightslab==${WL_VERSION}" weightslab --help
+
   create-main-release:
     name: Create GitHub Release
     needs: [test-install-from-pip-main]
@@ -1021,9 +1159,6 @@ jobs:
 
       # Each branch is rewritten from its fresh tip; a push rejected because the
       # branch moved meanwhile is retried on the new tip rather than rebased.
-      # refs/heads/ is spelled out: the repo also has a tag named "main", and a
-      # bare "main" refspec is ambiguous ("dst refspec main matches more than
-      # one" failed the v2.0.3 sync).
       - name: Commit weightslab/VERSION
         env:
           VERSION: ${{ steps.target.outputs.version }}
@@ -1034,7 +1169,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           for BRANCH in ${BRANCHES}; do
             for attempt in 1 2 3; do
-              git fetch --depth=1 origin "refs/heads/${BRANCH}"
+              git fetch --depth=1 origin "${BRANCH}"
               git checkout -q -B "${BRANCH}" FETCH_HEAD
               printf '%s\n' "${VERSION}" > weightslab/VERSION
               git add weightslab/VERSION
@@ -1043,7 +1178,7 @@ jobs:
                 continue 2
               fi
               git commit -q -m "release: weightslab/VERSION -> ${VERSION} [skip ci]"
-              if git push origin "HEAD:refs/heads/${BRANCH}"; then
+              if git push origin "HEAD:${BRANCH}"; then
                 echo "${BRANCH}: weightslab/VERSION -> ${VERSION}"
                 continue 2
               fi
@@ -1053,22 +1188,3 @@ jobs:
             echo "::error::Could not push weightslab/VERSION to ${BRANCH}"
             exit 1
           done
-
-  # ═══════════════════════════════════════════════════════════════════════════
-  # WHAT'S NEW — after a main release, regenerate docs/whats_new.rst from the
-  # GitHub releases, commit it to main and dev, and redeploy the docs.
-  # ═══════════════════════════════════════════════════════════════════════════
-  # The tag push already started docs-pages.yml, but that build ran before this
-  # release existed, so the page it published lacks it. whats-new.yml commits
-  # the refreshed page with "[skip ci]" and dispatches docs-pages.yml itself.
-  # After sync-version-file so the two never push to main/dev at the same time;
-  # !cancelled() so a failed VERSION sync does not hold the docs back.
-  update-whats-new:
-    name: Update docs What's New
-    needs: [create-main-release, sync-version-file]
-    if: ${{ !cancelled() && needs.create-main-release.result == 'success' }}
-    permissions:
-      contents: read
-      actions: write
-    uses: ./.github/workflows/whats-new.yml
-    secrets: inherit

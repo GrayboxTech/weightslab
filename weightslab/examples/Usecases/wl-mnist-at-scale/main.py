@@ -33,7 +33,9 @@ so the run starts the same every time.
 Run::
 
     python main.py --mnist-root <dir holding MNIST/raw>      # 1M samples
-    weightslab start                    # another terminal: open the Studio
+
+The Studio opens in your browser once it serves (wl.serve() serves it; an
+already running `weightslab start` is used instead).
 
 Memory, measured at 1M samples with the Studio connected (grid, projection,
 lasso, selection applied): 2.4 GB committed, about 2.3 GB per million samples
@@ -460,7 +462,7 @@ def main(argv=None) -> int:
         return 0
 
     wl.serve(serving_grpc=True, serving_cli=True, grpc_port=args.grpc_port)
-    print("[mnist-at-scale] serving -- open the Studio with `weightslab start` "
+    print("[mnist-at-scale] serving -- the Studio opens in your browser "
           f"(backend port {args.grpc_port}). Ctrl+C to stop.", flush=True)
     wl.keep_serving()
     return 0

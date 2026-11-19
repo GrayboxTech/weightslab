@@ -1672,7 +1672,24 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/experiment-report/view/"):
             self._serve_experiment_report(path[len("/experiment-report/view/"):])
             return
+        if path == "/weightslab/latest-version":
+            self._get_latest_version()
+            return
         self._serve_static()
+
+    def _get_latest_version(self) -> None:
+        """Latest stable WeightsLab on PyPI vs the backend version the studio is
+        connected to (``?installed=``), for its "new version" notice. See
+        weightslab.ui.update_check."""
+        from urllib.parse import parse_qs, urlsplit
+        from weightslab.ui import update_check
+        installed = (parse_qs(urlsplit(self.path).query).get("installed") or [""])[0]
+        try:
+            info = update_check.update_info(installed)
+        except Exception as exc:  # never break the studio over an update check
+            logger.debug("Update check failed: %s", exc)
+            info = {"enabled": True, "installed": installed, "latest": None, "update_available": False}
+        self._send_json(HTTPStatus.OK, info)
 
     def do_HEAD(self):  # noqa: N802
         self._serve_static(head_only=True)
@@ -2477,6 +2494,13 @@ _UI_ENV_GLOBALS = [
      ("ENABLE_HYPERPARAMETERS_OPTIMIZATION", "WS_ENABLE_HYPERPARAMETERS_OPTIMIZATION",
       "VITE_ENABLE_HYPERPARAMETERS_OPTIMIZATION")),
     ("WS_ENABLE_AGENT", ("ENABLE_AGENT", "WS_ENABLE_AGENT", "VITE_ENABLE_AGENT")),
+    # New-user tour (weights_studio src/ui/tutorial.ts): on/off, and the
+    # YouTube video / Colab notebook it shows instead of its defaults.
+    ("WS_ENABLE_TUTORIAL", ("ENABLE_TUTORIAL", "WS_ENABLE_TUTORIAL", "VITE_ENABLE_TUTORIAL")),
+    ("WS_TUTORIAL_VIDEO_URL",
+     ("TUTORIAL_VIDEO_URL", "WS_TUTORIAL_VIDEO_URL", "VITE_TUTORIAL_VIDEO_URL")),
+    ("WS_TUTORIAL_COLAB_URL",
+     ("TUTORIAL_COLAB_URL", "WS_TUTORIAL_COLAB_URL", "VITE_TUTORIAL_COLAB_URL")),
     # Shared with the SDK agent's own OPENCODE_URL config (agent.py's
     # _load_config) -- setting OPENCODE_URL once configures both sides, and
     # is also what _OpencodeSession.ensure() prefers over spawning its own
@@ -2649,7 +2673,9 @@ def serve_ui(
         "  WeightsLab UI is running:\n"
         f"      {url}\n"
         f"    proxying gRPC-Web  ->  {backend_host}:{backend_port}\n"
-        "    Press Ctrl+C to stop.\n\n"
+        # Non-blocking: hosted by another program (wl.serve()'s automatic UI),
+        # so it ends with that program, not with a Ctrl+C of its own.
+        + ("    Press Ctrl+C to stop.\n\n" if block else "    Stops when this process exits.\n\n")
     )
     sys.stdout.flush()
 

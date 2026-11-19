@@ -34,6 +34,62 @@ Create and activate a virtual environment and install WeightsLab.
       # Linux/macOS
       # source .venv/bin/activate
 
+Install with uv
+~~~~~~~~~~~~~~~
+
+With `uv <https://docs.astral.sh/uv/>`_, add WeightsLab to your project, or
+install it into any virtual environment:
+
+.. code-block:: bash
+
+   uv add weightslab           # uv project: recorded in pyproject.toml and uv.lock
+   uv pip install weightslab   # any virtual environment
+
+In a uv project, run the commands through ``uv run`` (``uv run weightslab start``,
+``uv run python train.py``) or activate ``.venv``. ``weightslab start example``
+works in uv environments too: they ship without pip, so the example's
+requirements are installed with uv instead.
+
+.. note:: Choosing the PyTorch build
+
+   ``uv pip install weightslab --torch-backend=auto`` picks the PyTorch build that
+   matches your GPU driver (or force one: ``cpu``, ``cu126``, ...).
+
+   Do **not** add the PyTorch index with ``--extra-index-url``, as you would with
+   pip. uv takes each package from the first index that carries it, and the
+   PyTorch index carries more than torch (an old ``torchmetrics``, among others),
+   so resolution fails: ``only torchmetrics==1.0.3 is available``.
+
+   In a uv project, route only torch and torchvision to the PyTorch index. They
+   must be direct dependencies of your project, since ``[tool.uv.sources]`` is
+   ignored for packages that only come in through weightslab:
+
+   .. code-block:: toml
+
+      [[tool.uv.index]]
+      name = "pytorch-cu126"
+      url = "https://download.pytorch.org/whl/cu126"
+      explicit = true
+
+      [tool.uv.sources]
+      torch = { index = "pytorch-cu126" }
+      torchvision = { index = "pytorch-cu126" }
+
+   then ``uv add weightslab torch torchvision``.
+
+To use only the ``weightslab`` command (for example the Studio UI,
+``weightslab start``) without adding WeightsLab to a project, run it with
+``uvx`` or install it as a uv tool:
+
+.. code-block:: bash
+
+   uvx --torch-backend=auto weightslab start                # one-off, cached environment
+   uv tool install weightslab --torch-backend=auto          # `weightslab` on your PATH
+   uv tool upgrade weightslab                               # later, to update it
+
+A training script still imports ``weightslab`` from its own environment, so
+install it there too (``uv add weightslab`` or ``uv pip install weightslab``).
+
 
 Try the bundled example
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -46,11 +102,9 @@ It run a small bundled experiment:
 
    weightslab start example --cls
 
-Then, in another terminal, launch the UI and open the URL printed by the command:
-
-.. code-block:: bash
-
-   weightslab start
+The example serves Weights Studio itself and opens it in your browser (the URL
+is printed too). If ``weightslab start`` is already running, the example uses
+that UI instead.
 
 
 Local integration in your own Python script (MNIST)
@@ -179,8 +233,8 @@ Migrating a real codebase? The full guides are
       ``(inputs, uids, labels)`` , those ``uids`` are what tie a loss value back
       to the sample that produced it, which is why they are handed to the loss
       as ``batch_ids``. The loop is open-ended: you stop it from the studio, not
-      with a step budget. And it does not start on its own , run
-      ``weightslab start`` in another terminal and press **Play**.
+      with a step budget. And it does not start on its own , ``wl.serve()``
+      opens Weights Studio in your browser: press **Play** there.
 
    .. tab-item:: WeightsLab From TensorBoard
 
@@ -431,13 +485,20 @@ Start by opening this notebook:
 Use Weightslab Studio (UI)
 --------------------------
 
-For a full visual experiment monitoring workflow (agent, samples, tags, discard/restore, plots), deploy the
-Weights Studio web app with the bundled CLI.
+For a full visual experiment monitoring workflow (agent, samples, tags, discard/restore, plots), use the
+Weights Studio web app. ``wl.serve()`` serves it from your training process and opens it in your
+browser (``http://localhost:8080`` by default; a busy port falls back to a free one). Turn that off
+with ``wl.serve(serving_ui=False)`` or ``WEIGHTSLAB_SERVE_UI=0``.
+
+Run it with the bundled CLI instead when you want a UI that outlives the training run, or to open
+an experiment directory up front (``weightslab start DIR``). When ``weightslab start`` is already
+running for the backend's port, ``wl.serve()`` uses it rather than starting a second UI.
 
 **Without certificates the UI runs unsecured (HTTP, no gRPC auth).** Once you have
 generated them with ``weightslab se``, ``weightslab start`` finds them in
 ``$WEIGHTSLAB_CERTS_DIR`` (else ``~/.weightslab-certs``) and serves HTTPS + gRPC auth
-automatically, the same rule the training backend applies, so both sides agree:
+automatically, the same rule the training backend applies, so both sides agree (the UI
+``wl.serve()`` serves follows the backend's TLS setting):
 
 .. code-block:: bash
 
@@ -453,7 +514,8 @@ automatically, the same rule the training backend applies, so both sides agree:
 Run ``weightslab``, ``weightslab help``, or ``weightslab -h`` to see the banner and the full
 command reference (``se``, ``start``, ``start example ...``).
 
-To stop the UI, press ``Ctrl+C`` in the terminal running ``weightslab start``.
+To stop the UI, press ``Ctrl+C`` in the terminal running ``weightslab start``. The UI
+``wl.serve()`` serves stops when the training process exits.
 
 Prefer a terminal over a browser? ``weightslab cli`` opens an interactive
 console connected to the running experiment (pause/resume, status, evaluate,

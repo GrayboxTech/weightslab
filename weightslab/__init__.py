@@ -71,7 +71,7 @@ for _name in (
     "signal_classifier", "resolve_signal_classifier",
     "LOSS_SHAPES", "get_current_experiment_hash", "pointcloud_thumbnail",
     "pointcloud_boxes", "ai_report_generation", "project_dataset",
-    "save_projection_coords",
+    "save_projection_coords", "load_experiment", "on_experiment_load",
 ):
     _LAZY_EXPORTS[_name] = (".src", _name)
 del _name
@@ -91,7 +91,7 @@ def __getattr__(name):  # PEP 562 module-level lazy attribute access
         package, install = extra
         raise ImportError(
             f"weightslab.{name} needs the optional {package!r} package: "
-            f"pip install '{install}'"
+            f"pip install '{install}' (in a uv project: uv add '{install}')"
         ) from error
     value = getattr(module, attr)
     globals()[name] = value  # cache so __getattr__ isn't hit again
@@ -252,7 +252,7 @@ if _IS_MAIN_PROCESS:
 __author__ = 'Alexandru-Andrei ROTARY'
 __maintainer__ = 'Guillaume PELLUET'
 __credits__ = 'GrayBx'
-__license__ = 'BSD 2-clause'
+__license__ = 'PolyForm-Noncommercial-1.0.0'  # commercial use: paid licence, see LICENSE
 __all__ = [
     "watch_or_edit",
     "serve",
@@ -300,6 +300,8 @@ __all__ = [
     "ai_report_generation",
     "project_dataset",
     "save_projection_coords",
+    "load_experiment",
+    "on_experiment_load",
     "classify_loss_shape",
     "write_loss_shapes",
     "write_signal_shapes",

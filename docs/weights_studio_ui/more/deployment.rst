@@ -11,9 +11,8 @@ Run a bundled example in one command (installs its requirements automatically)::
     weightslab start example --det    # detection
     weightslab start example --3d_det # 3D LiDAR point-cloud detection
 
-In another terminal, start the UI::
-
-    weightslab start
+The example serves the UI itself and opens it in your browser (an already
+running ``weightslab start`` is used instead).
 
 See ``weightslab start example --help`` for all options.
 

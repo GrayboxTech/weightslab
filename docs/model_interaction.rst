@@ -286,7 +286,7 @@ alone drives the CLI and the studio.
 
    weightslab start example --model    # run it (MNIST downloads on first run)
    weightslab cli                      # attach a terminal, in another shell
-   weightslab start                    # open Weights Studio, in a third shell
+   # Weights Studio opens in your browser on its own (wl.serve() serves it)
 
 .. literalinclude:: ../weightslab/examples/PyTorch/wl-standalone-model/main.py
    :language: python
