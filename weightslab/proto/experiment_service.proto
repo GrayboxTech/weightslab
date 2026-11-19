@@ -104,6 +104,23 @@ service ExperimentService {
   // finer detail for the SAME point budget, instead of ever shipping the whole
   // dataset. See ProjectionRequest.
   rpc GetProjection (ProjectionRequest) returns (ProjectionResponse);
+
+  // ---- Modeling (Weights Studio "Modeling" tab) ----------------------------
+  // The live model as a graph: every module (layers and the groups that hold
+  // them: encoder, decoder, head, ...) plus the data-flow edges between the
+  // layers, traced from one real forward pass. Works on any nn.Module, with or
+  // without compute_dependencies.
+  rpc GetModelArchitecture (ModelArchitectureRequest) returns (ModelArchitectureResponse);
+  // Run the model on some samples (explicit ids, or every sample of a tag) in
+  // the background and keep each layer's activations. Returns at once; poll
+  // GetModelRepresentation for progress and the per-layer summaries.
+  rpc StartModelRepresentation (ModelRepresentationRequest) returns (ModelRepresentationStatus);
+  rpc GetModelRepresentation (GetModelRepresentationRequest) returns (ModelRepresentationResponse);
+  // One layer (or group) in depth: per-neuron weight/activation health, the
+  // weight histogram, and input/output activation previews per sample.
+  rpc GetModelLayerDetails (ModelLayerDetailsRequest) returns (ModelLayerDetailsResponse);
+  // freeze / unfreeze / reset / perturb / prune / add on one layer.
+  rpc EditModelLayer (ModelLayerEditRequest) returns (ModelLayerEditResponse);
 }
 
 // --- Logger Data Sync ---
@@ -1137,4 +1154,188 @@ message ProjectionResponse {
   // WeightsLab did not compute (wl.save_projection_coords).
   string layer = 25;
   string layer_detail = 26;
+}
+
+// ============================================================================
+// Modeling (Weights Studio "Modeling" tab)
+// ============================================================================
+//
+// Node ids are qualified module names as named_modules() prints them
+// ("encoder.down1.conv"). A module called more than once per forward (a
+// shared ReLU) gets one node per call: "layer1.0.relu", "layer1.0.relu#2".
+// Two pseudo nodes carry the model's own input and output: "@input",
+// "@output".
+
+message ModelArchitectureRequest {
+  // Re-trace even when the structure has not changed since the last trace.
+  bool refresh = 1;
+}
+
+message ModelGraphNode {
+  string id = 1;
+  string name = 2;                 // last path segment (or "input"/"output")
+  string parent_id = 3;            // enclosing group's id, "" at top level
+  string type = 4;                 // module class name
+  string kind = 5;                 // "layer" | "group" | "input" | "output"
+  // Groups only: what the group does, guessed from its name --
+  // "encoder" | "bottleneck" | "decoder" | "head" | "embedding" | "neck" |
+  // "backbone" | "block".
+  string role = 6;
+  int32 layer_id = 7;              // WeightsLab module id; -1 when none
+  int64 parameter_count = 8;       // own + descendants'
+  int64 trainable_parameter_count = 9;
+  repeated int64 input_shape = 10; // as traced, batch dim included
+  repeated int64 output_shape = 11;
+  int32 input_neurons = 12;        // 0 when unknown
+  int32 output_neurons = 13;
+  int32 order = 14;                // execution order; -1 when never executed
+  int32 call_index = 15;           // 1 for the first call of a module
+  string module_id = 16;           // node id without the "#k" call suffix
+  bool frozen = 17;                // no trainable parameter left
+  int32 frozen_neuron_count = 18;
+  // Ops EditModelLayer accepts here: freeze, unfreeze, reset, perturb, prune, add.
+  repeated string supported_ops = 19;
+  string description = 20;         // the module's extra_repr()
+  int32 depth = 21;                // nesting depth, 0 at top level
+  bool executed = 22;              // seen in the traced forward
+}
+
+message ModelGraphEdge {
+  string source = 1;
+  string target = 2;
+  repeated int64 shape = 3;        // shape of the tensor that flows
+}
+
+message ModelArchitectureResponse {
+  bool success = 1;
+  string message = 2;
+  string model_name = 3;
+  int32 model_age = 4;
+  string task_type = 5;
+  repeated ModelGraphNode nodes = 6;
+  repeated ModelGraphEdge edges = 7;
+  // Bumps on every structural edit (prune/add) -- a representation made at an
+  // older version describes a model that no longer exists.
+  int32 architecture_version = 8;
+  // compute_dependencies was on: neuron-level prune/add/freeze are available.
+  bool dependencies_available = 9;
+  // Edges come from a real forward. False: no input could be built and the
+  // edges are only the layers' declaration order.
+  bool traced = 10;
+  string trace_message = 11;
+  int64 total_parameters = 12;
+  int64 trainable_parameters = 13;
+}
+
+message ModelRepresentationRequest {
+  repeated string sample_ids = 1;
+  repeated string origins = 2;     // parallel to sample_ids, may be empty
+  string tag = 3;                  // instead of ids: every sample with this tag
+  int32 max_samples = 4;           // cap, 0 = server default (256)
+  string origin = 5;               // restrict the tag to one split
+}
+
+message ModelRepresentationStatus {
+  string session_id = 1;
+  string state = 2;                // "running" | "done" | "error" | "cancelled" | "none"
+  int32 done = 3;
+  int32 total = 4;
+  string message = 5;
+  string source_label = 6;         // "3 samples", "tag 'hard' (42 samples)"
+  repeated string sample_ids = 7;  // the samples actually represented
+  repeated string origins = 8;
+  int32 architecture_version = 9;
+  int32 model_age = 10;
+  int32 requested = 11;            // before the max_samples cap
+  bool stale = 12;                 // the model changed since
+  string tag = 13;
+}
+
+message GetModelRepresentationRequest {
+  string session_id = 1;           // "" = the latest
+}
+
+message ModelNodeActivationSummary {
+  string node_id = 1;
+  float mean = 2;
+  float std = 3;
+  float min = 4;
+  float max = 5;
+  float inactive_fraction = 6;     // share of values <= 0
+  int32 channels = 7;
+  int32 dead_channels = 8;         // never > 0 on any represented sample
+  float mean_abs = 9;
+}
+
+message ModelRepresentationResponse {
+  ModelRepresentationStatus status = 1;
+  repeated ModelNodeActivationSummary nodes = 2;
+}
+
+message ModelLayerDetailsRequest {
+  string node_id = 1;
+  string session_id = 2;           // "" = the latest
+  int32 max_channels = 3;          // preview tiles per sample, 0 = 16
+  int32 max_samples = 4;           // samples with previews, 0 = 8
+}
+
+message ModelNeuronStat {
+  int32 index = 1;
+  float weight_norm = 2;
+  float weight_mean_abs = 3;
+  float activation_mean = 4;
+  float activation_max = 5;
+  float active_rate = 6;           // share of samples where it fired
+  bool frozen = 7;
+  string health = 8;               // "dead" | "weak" | "healthy" | "unknown"
+  bool has_activation = 9;
+}
+
+message ModelTensorPreview {
+  string sample_id = 1;
+  string origin = 2;
+  string direction = 3;            // "input" | "output"
+  repeated int64 shape = 4;        // the sample's tensor shape, no batch dim
+  int32 tiles = 5;
+  int32 height = 6;                // tile size
+  int32 width = 7;
+  bytes data = 8;                  // uint8, tiles*height*width, each tile min-max scaled
+  repeated float tile_min = 9;
+  repeated float tile_max = 10;
+  repeated int32 channel_indices = 11;
+  string layout = 12;              // "channels" | "sequence" | "vector"
+}
+
+message ModelLayerDetailsResponse {
+  bool success = 1;
+  string message = 2;
+  ModelGraphNode node = 3;
+  repeated ModelNeuronStat neurons = 4;
+  repeated float weight_histogram = 5;
+  float weight_hist_min = 6;
+  float weight_hist_max = 7;
+  repeated ModelTensorPreview previews = 8;
+  ModelNodeActivationSummary activation = 9;
+  string session_id = 10;
+  string neuron_axis = 11;         // what a "neuron" is here: "channel" | "feature" | ""
+  repeated string children = 12;   // groups: child node ids
+  // Where the neurons' "fired / never fired" verdict comes from: the layer
+  // itself, or the ReLU it feeds ("r1 (ReLU)") -- a conv or linear output is
+  // signed, so it is the nonlinearity after it that says a neuron is dead.
+  string health_source = 13;
+}
+
+message ModelLayerEditRequest {
+  string node_id = 1;
+  string op = 2;                   // freeze|unfreeze|reset|perturb|prune|add
+  repeated int32 neuron_indices = 3; // empty = the whole layer (not for prune)
+  int32 count = 4;                 // add
+  float ratio = 5;                 // perturb, (0, 1)
+}
+
+message ModelLayerEditResponse {
+  bool success = 1;
+  string message = 2;
+  ModelGraphNode node = 3;
+  int32 architecture_version = 4;
 }

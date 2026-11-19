@@ -1327,6 +1327,14 @@ case) to disable.
        notebook document is persisted as ``notebook.ipynb`` under the experiment
        ``root_log_dir``. Dev-server fallback: ``VITE_ENABLE_NOTEBOOK``. See
        :ref:`embedded-notebook` for how it works, with examples.
+   * - ``ENABLE_MODELING``
+     - ``1``
+     - When disabled, removes the **Main / Modeling** tab strip under the agent
+       bar and the Modeling tab: the model's architecture graph (groups, layers,
+       data flow), per-layer weight and activation health, activation previews
+       from "Model Representation" runs on grid samples or tags, and the layer
+       edits (freeze, reset, perturb, prune, add). Dev-server fallback:
+       ``VITE_ENABLE_MODELING``.
    * - ``ENABLE_TUTORIAL``
      - ``1``
      - The new-user tour. A browser that never opened Weights Studio (no

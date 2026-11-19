@@ -388,3 +388,161 @@ class ModelService:
         )
 
         return answer
+
+    # -------------------------------------------------------------------------
+    # Modeling tab (architecture graph, representations, layer edits)
+    # -------------------------------------------------------------------------
+    def _modeling_targets(self):
+        """(model, {loader_name: loader}) from the ledger, or (None, {})."""
+        self._ctx.ensure_components()
+        components = self._ctx.components
+        model = components.get("model")
+        loaders = {}
+        try:
+            from weightslab.backend.ledgers import get_dataloaders
+            for name in get_dataloaders():
+                loader = components.get(name)
+                if loader is not None:
+                    loaders[name] = loader
+        except Exception as exc:
+            logger.debug(f"[modeling] no dataloaders: {exc}")
+        try:
+            from weightslab.components.model_representation import resolve_inner
+            if resolve_inner(model) is None:
+                model = None
+        except Exception:
+            model = None
+        return model, loaders
+
+    @staticmethod
+    def _graph_node_pb(node: dict):
+        fields = {k: v for k, v in node.items() if k in pb2.ModelGraphNode.DESCRIPTOR.fields_by_name}
+        return pb2.ModelGraphNode(**fields)
+
+    @staticmethod
+    def _summary_pb(summary: dict):
+        fields = {k: v for k, v in summary.items()
+                  if k in pb2.ModelNodeActivationSummary.DESCRIPTOR.fields_by_name}
+        return pb2.ModelNodeActivationSummary(**fields)
+
+    def GetModelArchitecture(self, request, context):
+        from weightslab.components.model_representation import MANAGER
+        model, loaders = self._modeling_targets()
+        if model is None:
+            return pb2.ModelArchitectureResponse(success=False, message="No model registered")
+        try:
+            arch = MANAGER.architecture(model, loaders, refresh=bool(request.refresh))
+        except Exception as exc:
+            logger.error(f"[modeling] GetModelArchitecture failed: {exc}", exc_info=True)
+            return pb2.ModelArchitectureResponse(success=False, message=str(exc))
+        response = pb2.ModelArchitectureResponse(
+            success=bool(arch.get("success")),
+            message=arch.get("message", ""),
+            model_name=arch.get("model_name", ""),
+            model_age=int(arch.get("model_age", 0)),
+            task_type=arch.get("task_type", ""),
+            architecture_version=int(arch.get("architecture_version", 0)),
+            dependencies_available=bool(arch.get("dependencies_available")),
+            traced=bool(arch.get("traced")),
+            trace_message=arch.get("trace_message", ""),
+            total_parameters=int(arch.get("total_parameters", 0)),
+            trainable_parameters=int(arch.get("trainable_parameters", 0)),
+        )
+        response.nodes.extend(self._graph_node_pb(n) for n in arch.get("nodes", []))
+        response.edges.extend(
+            pb2.ModelGraphEdge(source=e["source"], target=e["target"], shape=e.get("shape") or [])
+            for e in arch.get("edges", []))
+        return response
+
+    def StartModelRepresentation(self, request, context):
+        from weightslab.components.model_representation import MANAGER
+        model, loaders = self._modeling_targets()
+        if model is None:
+            return pb2.ModelRepresentationStatus(state="error", message="No model registered")
+        try:
+            status = MANAGER.start(
+                model, loaders,
+                sample_ids=list(request.sample_ids), origins=list(request.origins),
+                tag=request.tag, tag_origin=request.origin, max_samples=int(request.max_samples))
+        except Exception as exc:
+            logger.error(f"[modeling] StartModelRepresentation failed: {exc}", exc_info=True)
+            return pb2.ModelRepresentationStatus(state="error", message=str(exc))
+        return pb2.ModelRepresentationStatus(**status)
+
+    def GetModelRepresentation(self, request, context):
+        from weightslab.components.model_representation import MANAGER
+        session = MANAGER.get(request.session_id)
+        if session is None:
+            return pb2.ModelRepresentationResponse(
+                status=pb2.ModelRepresentationStatus(state="none"))
+        response = pb2.ModelRepresentationResponse(
+            status=pb2.ModelRepresentationStatus(**session.status(MANAGER.is_stale(session))))
+        response.nodes.extend(self._summary_pb(s) for s in MANAGER.summaries(session) if len(s) > 1)
+        return response
+
+    def GetModelLayerDetails(self, request, context):
+        from weightslab.components.model_representation import MANAGER, layer_details
+        model, loaders = self._modeling_targets()
+        if model is None:
+            return pb2.ModelLayerDetailsResponse(success=False, message="No model registered")
+        try:
+            details = layer_details(
+                model, loaders, request.node_id, request.session_id,
+                max_channels=int(request.max_channels), max_samples=int(request.max_samples),
+                manager=MANAGER)
+        except Exception as exc:
+            logger.error(f"[modeling] GetModelLayerDetails failed: {exc}", exc_info=True)
+            return pb2.ModelLayerDetailsResponse(success=False, message=str(exc))
+        if not details.get("success"):
+            return pb2.ModelLayerDetailsResponse(success=False, message=details.get("message", ""))
+        response = pb2.ModelLayerDetailsResponse(
+            success=True,
+            node=self._graph_node_pb(details["node"]),
+            weight_histogram=details["weight_histogram"],
+            weight_hist_min=details["weight_hist_min"],
+            weight_hist_max=details["weight_hist_max"],
+            session_id=details["session_id"],
+            neuron_axis=details["neuron_axis"],
+            health_source=details.get("health_source", ""),
+            children=details["children"],
+        )
+        response.neurons.extend(pb2.ModelNeuronStat(**n) for n in details["neurons"])
+        response.previews.extend(pb2.ModelTensorPreview(**p) for p in details["previews"])
+        if details.get("activation") and len(details["activation"]) > 1:
+            response.activation.CopyFrom(self._summary_pb(details["activation"]))
+        return response
+
+    def EditModelLayer(self, request, context):
+        from weightslab.components.model_representation import MANAGER, edit_layer
+        model, loaders = self._modeling_targets()
+        if model is None:
+            return pb2.ModelLayerEditResponse(success=False, message="No model registered")
+        if not try_acquire_rlock():
+            self._abort_or_fail(context, f"Training lock not acquired within {_GRPC_LOCK_TIMEOUT_S:.0f}s")
+            return pb2.ModelLayerEditResponse(success=False, message="Lock timeout")
+        try:
+            result = edit_layer(
+                model, request.node_id, request.op,
+                neuron_indices=list(request.neuron_indices),
+                count=int(request.count or 1),
+                ratio=float(request.ratio) if request.ratio else 0.1,
+                manager=MANAGER)
+        except ValueError as exc:
+            return pb2.ModelLayerEditResponse(success=False, message=str(exc))
+        except Exception as exc:
+            logger.error(f"[modeling] EditModelLayer failed: {exc}", exc_info=True)
+            return pb2.ModelLayerEditResponse(success=False, message=f"{type(exc).__name__}: {exc}")
+        finally:
+            weightslab_rlock.release()
+        response = pb2.ModelLayerEditResponse(
+            success=True, message=result.get("message", ""),
+            architecture_version=int(MANAGER.version))
+        try:
+            arch = MANAGER.architecture(model, loaders)
+            node = next((n for n in arch["nodes"] if n["id"] == request.node_id), None)
+            if node is not None:
+                response.node.CopyFrom(self._graph_node_pb(node))
+            response.architecture_version = int(arch.get("architecture_version", MANAGER.version))
+        except Exception as exc:
+            logger.debug(f"[modeling] could not refresh the edited node: {exc}")
+        return response

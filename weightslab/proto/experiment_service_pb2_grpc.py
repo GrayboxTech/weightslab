@@ -224,6 +224,31 @@ class ExperimentServiceStub(object):
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ProjectionRequest.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ProjectionResponse.FromString,
                 _registered_method=True)
+        self.GetModelArchitecture = channel.unary_unary(
+                '/ExperimentService/GetModelArchitecture',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelArchitectureRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelArchitectureResponse.FromString,
+                _registered_method=True)
+        self.StartModelRepresentation = channel.unary_unary(
+                '/ExperimentService/StartModelRepresentation',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelRepresentationRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelRepresentationStatus.FromString,
+                _registered_method=True)
+        self.GetModelRepresentation = channel.unary_unary(
+                '/ExperimentService/GetModelRepresentation',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetModelRepresentationRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelRepresentationResponse.FromString,
+                _registered_method=True)
+        self.GetModelLayerDetails = channel.unary_unary(
+                '/ExperimentService/GetModelLayerDetails',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerDetailsRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerDetailsResponse.FromString,
+                _registered_method=True)
+        self.EditModelLayer = channel.unary_unary(
+                '/ExperimentService/EditModelLayer',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerEditRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerEditResponse.FromString,
+                _registered_method=True)
 
 
 class ExperimentServiceServicer(object):
@@ -510,6 +535,47 @@ class ExperimentServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetModelArchitecture(self, request, context):
+        """---- Modeling (Weights Studio "Modeling" tab) ----------------------------
+        The live model as a graph: every module (layers and the groups that hold
+        them: encoder, decoder, head, ...) plus the data-flow edges between the
+        layers, traced from one real forward pass. Works on any nn.Module, with or
+        without compute_dependencies.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def StartModelRepresentation(self, request, context):
+        """Run the model on some samples (explicit ids, or every sample of a tag) in
+        the background and keep each layer's activations. Returns at once; poll
+        GetModelRepresentation for progress and the per-layer summaries.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetModelRepresentation(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetModelLayerDetails(self, request, context):
+        """One layer (or group) in depth: per-neuron weight/activation health, the
+        weight histogram, and input/output activation previews per sample.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def EditModelLayer(self, request, context):
+        """freeze / unfreeze / reset / perturb / prune / add on one layer.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ExperimentServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -702,6 +768,31 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     servicer.GetProjection,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ProjectionRequest.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ProjectionResponse.SerializeToString,
+            ),
+            'GetModelArchitecture': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetModelArchitecture,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelArchitectureRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelArchitectureResponse.SerializeToString,
+            ),
+            'StartModelRepresentation': grpc.unary_unary_rpc_method_handler(
+                    servicer.StartModelRepresentation,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelRepresentationRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelRepresentationStatus.SerializeToString,
+            ),
+            'GetModelRepresentation': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetModelRepresentation,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetModelRepresentationRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelRepresentationResponse.SerializeToString,
+            ),
+            'GetModelLayerDetails': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetModelLayerDetails,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerDetailsRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerDetailsResponse.SerializeToString,
+            ),
+            'EditModelLayer': grpc.unary_unary_rpc_method_handler(
+                    servicer.EditModelLayer,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerEditRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerEditResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1730,6 +1821,141 @@ class ExperimentService(object):
             '/ExperimentService/GetProjection',
             weightslab_dot_proto_dot_experiment__service__pb2.ProjectionRequest.SerializeToString,
             weightslab_dot_proto_dot_experiment__service__pb2.ProjectionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetModelArchitecture(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetModelArchitecture',
+            weightslab_dot_proto_dot_experiment__service__pb2.ModelArchitectureRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ModelArchitectureResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def StartModelRepresentation(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/StartModelRepresentation',
+            weightslab_dot_proto_dot_experiment__service__pb2.ModelRepresentationRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ModelRepresentationStatus.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetModelRepresentation(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetModelRepresentation',
+            weightslab_dot_proto_dot_experiment__service__pb2.GetModelRepresentationRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ModelRepresentationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetModelLayerDetails(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetModelLayerDetails',
+            weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerDetailsRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerDetailsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def EditModelLayer(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/EditModelLayer',
+            weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerEditRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerEditResponse.FromString,
             options,
             channel_credentials,
             insecure,

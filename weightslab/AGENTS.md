@@ -430,6 +430,7 @@ Authoritative reference: `weightslab/docs/configuration.rst`. High-signal ones:
 | `ENABLE_HYPERPARAMETERS_OPTIMIZATION` | `1` | `0` makes HP inputs read-only, stops HP poll. |
 | `ENABLE_AGENT` | `1` | `0` removes agent chat bar. |
 | `ENABLE_NOTEBOOK` | `1` | `0` removes the notebook (shared in-process kernel against the live experiment; persisted as `notebook.ipynb`; `>`-prefixed cells ask the agent for code). |
+| `ENABLE_MODELING` | `1` | `0` removes the Main / Modeling tabs and the Modeling tab (model graph, activations, layer edits). |
 | `ENABLE_TUTORIAL` | `1` | `0` removes the new-user tour (notice → YouTube popup → MNIST Colab; header Tour button). `TUTORIAL_VIDEO_URL` / `TUTORIAL_COLAB_URL` override the video / notebook. |
 
 `VITE_*` vars are build-time (need a frontend rebuild); `WS_*`/`BB_*`/`ENABLE_*`
@@ -472,6 +473,15 @@ intentionally exceed this? Set `WEIGHTSLAB_DISABLE_WATCHDOGS=1`.
 **Pause/resume broken, or train/test stats mixed up.** Train/eval step isn't
 wrapped in `guard_training_context`/`guard_testing_context` — see §3.5.
 
+**Modeling tab: "Connections are approximate" / prune & add greyed out.**
+The graph's edges come from one traced forward pass on a real sample (first
+sample of a loader, else `dummy_input`, else `input_shape`). The banner means no
+input could be built or the forward failed (message shown); for unusual batch
+layouts register `set_modeling_inputs_fn` (see §3). Prune / add (and per-neuron
+freeze) need `compute_dependencies=True`; freeze, reset and perturb work anyway.
+A conv/linear neuron's "dead" verdict is read at the ReLU it feeds (the
+inspector says which), since its own output is signed.
+
 **Large weights/images fail to transfer.** Raise `GRPC_MAX_MESSAGE_BYTES`.
 
 **Agent bar says unconfigured.** Backed by a local OpenCode server
@@ -495,6 +505,7 @@ around here.
 - `src.py` — public verbs (`watch_or_edit`, `serve`, `keep_serving`, `tag_samples`, `query_*`, decorators), re-exported from `__init__.py`.
 - `trainer/services/` — `experiment_service.py` (gRPC servicer) → `{model,data,agent}_service.py`; `data_image_utils.py` (preview/mask encoding).
 - `components/` — `global_monitoring.py` (locks, `guard_*`, pause), `checkpoint_manager.py`, `evaluation_controller.py`.
+  `model_representation.py` -- Modeling tab: traced graph, representation sessions, layer edits.
 - `data/` — `dataframe_manager.py`, `data_samples_with_ops.py`, `sample_stats.py`, H5 storage (`h5_dataframe_store.py`, `h5_array_store.py`, `array_proxy.py`).
 - `backend/` — `ledgers.py` (`GLOBAL_LEDGER`), `logger.py`, `audit_logger.py`, `cli.py`.
 - `projection/parametric_umap.py` — live 3-D projection (§3.6b): feature hook, UMAP encoder, coordinate write-back, checkpoint pairing; `projection/custom.py` — user projections (`save_projection_coords`); served by `trainer/services/projection_service.py` (`GetProjection`).
