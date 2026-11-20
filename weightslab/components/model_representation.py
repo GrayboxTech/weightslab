@@ -62,7 +62,14 @@ PREVIEW_TILE = 32          # max side of a spatial (H x W) tile
 PREVIEW_VECTOR = 512       # max length of a feature-vector tile
 PREVIEW_SEQUENCE = 64      # max side of a (tokens x features) tile
 PREVIEW_BUDGET_BYTES = 96 * 1024 * 1024
+# A channel "fires" on a sample when its largest |value| exceeds ACTIVE_EPS
+# times the layer's largest |value| on that sample. Relative, not absolute:
+# an untrained network can carry its whole signal at 1e-6 scale (YOLO with
+# untrained BatchNorm statistics) without a single neuron being dead, while a
+# SiLU/GELU neuron stuck at -1e-8 next to channels at 1.0 is dead. Exact
+# zeros (a dead ReLU) are silent at any scale.
 ACTIVE_EPS = 1e-6
+ACTIVE_FLOOR = 1e-30
 _MAX_WALK = 256            # container items inspected when looking for tensors
 
 EDIT_OPS = ("freeze", "unfreeze", "reset", "perturb", "prune", "add")
@@ -322,12 +329,60 @@ def _resize_2d(x: th.Tensor, max_h: int, max_w: int) -> th.Tensor:
     return th.nn.functional.adaptive_avg_pool2d(x.unsqueeze(0), (th_, tw)).squeeze(0)
 
 
-def make_preview(sample: th.Tensor, channel_axis: Optional[int], max_channels: int) -> Optional[dict]:
+def _image_view(x: th.Tensor) -> Optional[th.Tensor]:
+    """(C, H, W) with C in 1 / 3 / 4 when *x* looks like an image, else None.
+
+    (C, H, W) and (H, W) qualify when both sides are >= 8 px; a clip or a
+    volume (C, T, H, W) shows its middle frame / slice. Point clouds (N, 4),
+    token ids and feature vectors never qualify.
+    """
+    if x.ndim == 4 and x.shape[0] in (1, 3, 4):
+        x = x[:, x.shape[1] // 2]
+    if x.ndim == 2:
+        x = x.unsqueeze(0)
+    if x.ndim != 3 or x.shape[0] not in (1, 3, 4):
+        return None
+    if min(int(x.shape[1]), int(x.shape[2])) < 8:
+        return None
+    return x
+
+
+def _image_preview(img: th.Tensor, shape: List[int], tile: int) -> dict:
+    """The model input as a picture: RGB / RGBA / gray, not one heatmap per
+    channel. Values already in [0, 1] or [0, 255] keep their colours; anything
+    else (a normalised input) is stretched over the WHOLE image -- one range
+    for all channels, so the colour balance survives. tile_min / tile_max hold
+    that range: value = min + byte / 255 * (max - min)."""
+    img = _resize_2d(img, tile, tile)
+    lo, hi = float(img.min()), float(img.max())
+    if lo >= 0.0 and hi <= 1.0:
+        lo, hi = 0.0, 1.0
+    elif lo >= 0.0 and hi <= 255.0:
+        lo, hi = 0.0, 255.0
+    span = max(hi - lo, 1e-12)
+    scaled = ((img - lo) / span * 255.0).round().clamp(0, 255).to(th.uint8)
+    return {
+        "shape": shape,
+        "tiles": 1,
+        "height": int(img.shape[1]),
+        "width": int(img.shape[2]),
+        "data": scaled.contiguous().numpy().tobytes(),   # planar: C x H x W
+        "tile_min": [lo],
+        "tile_max": [hi],
+        "channel_indices": list(range(int(img.shape[0]))),
+        "layout": "image",
+    }
+
+
+def make_preview(sample: th.Tensor, channel_axis: Optional[int], max_channels: int,
+                 tile: int = PREVIEW_TILE, as_image: bool = False) -> Optional[dict]:
     """A uint8 picture of one sample's tensor (batch dim already removed).
 
     ``channel_axis`` is in the sample's own coordinates: 0 = channel-first
     (conv maps: one tile per channel), -1 = feature-last (one tokens x features
-    tile), None = no neuron axis (one vector/flattened tile).
+    tile), None = no neuron axis (one vector/flattened tile). ``as_image``
+    (the model input): an image-shaped tensor becomes ONE natural picture
+    (layout "image", see _image_preview).
     """
     try:
         x = sample.detach().float().cpu()
@@ -336,6 +391,10 @@ def make_preview(sample: th.Tensor, channel_axis: Optional[int], max_channels: i
     if not th.isfinite(x).all():
         x = th.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     shape = [int(s) for s in x.shape]
+    if as_image:
+        img = _image_view(x)
+        if img is not None:
+            return _image_preview(img, shape, tile)
     channel_indices: List[int] = []
     if x.ndim == 0:
         x = x.reshape(1)
@@ -348,17 +407,18 @@ def make_preview(sample: th.Tensor, channel_axis: Optional[int], max_channels: i
             tiles = tiles.amax(dim=1)
         if tiles.ndim == 2:                # (C, L): 1-D maps
             tiles = tiles.unsqueeze(1)
-            tiles = _resize_2d(tiles, 1, 128)
+            tiles = _resize_2d(tiles, 1, max(128, tile * 4))
         else:
-            tiles = _resize_2d(tiles, PREVIEW_TILE, PREVIEW_TILE)
+            tiles = _resize_2d(tiles, tile, tile)
         layout = "channels"
     elif x.ndim == 1:
         tiles = x.reshape(1, 1, -1)
-        tiles = _resize_2d(tiles, 1, PREVIEW_VECTOR)
+        tiles = _resize_2d(tiles, 1, max(PREVIEW_VECTOR, tile * 16))
         layout = "vector"
     else:
         tiles = x.reshape(-1, x.shape[-1]).unsqueeze(0)   # tokens x features
-        tiles = _resize_2d(tiles, PREVIEW_SEQUENCE, PREVIEW_SEQUENCE)
+        side = max(PREVIEW_SEQUENCE, tile * 2)
+        tiles = _resize_2d(tiles, side, side)
         layout = "sequence"
 
     flat = tiles.reshape(tiles.shape[0], -1)
@@ -382,6 +442,13 @@ def make_preview(sample: th.Tensor, channel_axis: Optional[int], max_channels: i
 # =============================================================================
 # Statistics accumulator (one per node per session)
 # =============================================================================
+def _firing(absmax: th.Tensor) -> th.Tensor:
+    """Which channels fire, from their largest |value| (last dim = channels;
+    a leading dim, if any, is samples). See ACTIVE_EPS."""
+    scale = absmax.amax(dim=-1, keepdim=True)
+    return absmax > th.clamp(scale * ACTIVE_EPS, min=ACTIVE_FLOOR)
+
+
 class NodeAccumulator:
     """Running activation statistics of one node over every sample seen."""
 
@@ -428,7 +495,8 @@ class NodeAccumulator:
             self.ch_active = np.zeros(channels, dtype=np.int64)
         elif channels != self.channels:
             return
-        # A channel "fires" on a sample when it is non-zero anywhere on it.
+        # A channel "fires" on a sample when it is non-zero anywhere on it
+        # (relative to the layer's scale, see ACTIVE_EPS).
         # Non-zero, not positive: a conv or linear output is signed, and a
         # channel that is always negative still carries information -- it is
         # the ReLU after it that kills it, and that ReLU's own output (exactly
@@ -440,7 +508,7 @@ class NodeAccumulator:
             self.ch_abs += xc.abs().sum(dim=(0, 2)).double().cpu().numpy()
             self.ch_values += batch * xc.shape[2]
             self.ch_max = np.maximum(self.ch_max, xc.amax(dim=(0, 2)).double().cpu().numpy())
-            self.ch_active += (per_sample_absmax > ACTIVE_EPS).sum(dim=0).cpu().numpy()
+            self.ch_active += _firing(per_sample_absmax).sum(dim=0).cpu().numpy()
             self.ch_obs += batch
         else:
             xc = x.movedim(axis, 0).reshape(channels, -1)
@@ -448,7 +516,7 @@ class NodeAccumulator:
             self.ch_abs += xc.abs().sum(dim=1).double().cpu().numpy()
             self.ch_values += xc.shape[1]
             self.ch_max = np.maximum(self.ch_max, xc.amax(dim=1).double().cpu().numpy())
-            self.ch_active += (xc.abs().amax(dim=1) > ACTIVE_EPS).cpu().numpy().astype(np.int64)
+            self.ch_active += _firing(xc.abs().amax(dim=1)).cpu().numpy().astype(np.int64)
             self.ch_obs += 1
 
     def summary(self, node_id: str) -> dict:
@@ -555,6 +623,13 @@ class _CallTracker:
         self.names: Dict[int, str] = {}
         for name, module in root.named_modules():
             self.names.setdefault(id(module), name)
+        # A module registered under several paths (Ultralytics' Conv blocks
+        # all hold ONE shared SiLU as `.act`) is named, per call, by the path
+        # under the module calling it: model.6.cv1.act, not model.0.act#15.
+        self.paths: Dict[int, List[str]] = {}
+        for name, module in _all_named_modules(root):
+            self.paths.setdefault(id(module), []).append(name)
+        self.paths = {k: v for k, v in self.paths.items() if len(v) > 1}
         self.stack: List[_Frame] = []
         self.counts: Counter = Counter()
         self.on_pre = on_pre
@@ -601,6 +676,10 @@ class _CallTracker:
                 self.counts = Counter()
             if self.stack:
                 self.stack[-1].had_child = True
+                aliases = self.paths.get(id(module))
+                if aliases:
+                    caller = self.stack[-1].name
+                    name = next((p for p in aliases if _parent_name(p) == caller), name)
             frame = _Frame(module, name, self._node_id(name))
             frame.in_shape = _shape((args, kwargs))
             self.stack.append(frame)
@@ -625,6 +704,21 @@ class _CallTracker:
         except Exception as exc:
             logger.debug(f"[modeling] post-hook failed: {exc}")
         return None
+
+
+def _parent_name(path: str) -> str:
+    return path.rsplit(".", 1)[0] if "." in path else ""
+
+
+def _all_named_modules(root: nn.Module):
+    """``named_modules`` without de-duplication: a module shared by several
+    parents is listed under each of its paths (each can be its own node)."""
+    seen = set()
+    for name, module in root.named_modules(remove_duplicate=False):
+        if name in seen:
+            continue
+        seen.add(name)
+        yield name, module
 
 
 # =============================================================================
@@ -718,6 +812,39 @@ def guess_role(name: str) -> str:
         if tokens & words:
             return role
     return "block"
+
+
+def _declared_roles(inner: nn.Module) -> Dict[str, str]:
+    """Roles a model declares itself, where names say nothing.
+
+    Ultralytics models (YOLO detect / segment / pose / ...) are one
+    ``model`` Sequential of numbered blocks; their ``yaml`` lists which are
+    the ``backbone`` and which the ``head``. Backbone blocks -> "backbone",
+    the last block (Detect, Segment, ...) -> "head", the head blocks before
+    it (the FPN/PAN) -> "neck". Looked for on the model and one level down
+    (a ``YOLO`` wrapper holds the DetectionModel as ``.model``).
+    """
+    candidates = [("", inner)]
+    child = getattr(inner, "model", None)
+    if isinstance(child, nn.Module):
+        candidates.append(("model", child))
+    for prefix, module in candidates:
+        cfg = getattr(module, "yaml", None)
+        seq = getattr(module, "model", None)
+        if not isinstance(cfg, Mapping) or not isinstance(seq, nn.Sequential):
+            continue
+        backbone, head = cfg.get("backbone"), cfg.get("head")
+        if not isinstance(backbone, (list, tuple)) or not isinstance(head, (list, tuple)):
+            continue
+        n_back, n = len(backbone), len(seq)
+        if n != n_back + len(head) or n < 2:
+            continue
+        base = f"{prefix}.model" if prefix else "model"
+        return {
+            f"{base}.{i}": "backbone" if i < n_back else ("head" if i == n - 1 else "neck")
+            for i in range(n)
+        }
+    return {}
 
 
 # =============================================================================
@@ -816,7 +943,10 @@ def build_architecture(model, trace: Optional[ArchitectureTrace], version: int =
     if inner is None:
         return {"success": False, "message": "No model registered", "nodes": [], "edges": []}
 
-    modules = OrderedDict(inner.named_modules())
+    # Every path, shared modules included: the tracer names each call of a
+    # shared module by its path under the caller (see _CallTracker).
+    modules = OrderedDict(_all_named_modules(inner))
+    declared_roles = _declared_roles(inner)
     calls = trace.calls if trace is not None else OrderedDict()
     containers = trace.containers if trace is not None else {}
     leaf_modules = {rec["module_name"] for rec in calls.values()}
@@ -848,7 +978,8 @@ def build_architecture(model, trace: Optional[ArchitectureTrace], version: int =
         is_group = _has_children(module) and name not in leaf_modules
         if is_group:
             rec = containers.get(name, {})
-            node = dict(base, id=name, kind="group", role=guess_role(name) if depth <= 2 else "block",
+            role = declared_roles.get(name) or (guess_role(name) if depth <= 2 else "block")
+            node = dict(base, id=name, kind="group", role=role,
                         layer_id=-1, input_shape=rec.get("in_shape", []),
                         output_shape=rec.get("out_shape", []), order=-1, call_index=1,
                         frozen=bool(total) and trainable == 0, frozen_neuron_count=0,
@@ -1123,7 +1254,8 @@ class _Capture:
 
     def __init__(self, session: RepresentationSession, batch_ids: List[Tuple[str, str]],
                  batch: int, preview_rows: Dict[int, int], only: Optional[set] = None,
-                 max_channels: int = PREVIEW_CHANNELS, store_stats: bool = True):
+                 max_channels: int = PREVIEW_CHANNELS, store_stats: bool = True,
+                 tile: int = PREVIEW_TILE):
         self.session = session
         self.batch_ids = batch_ids
         self.batch = batch
@@ -1132,11 +1264,17 @@ class _Capture:
         self.max_channels = max_channels
         self.store_stats = store_stats
         self.shape_hints: Dict[Tuple[int, ...], int] = {}
+        self.tile = tile
+        # The model input of the current forward: previewed as the picture it
+        # is (RGB / gray), and so is every layer input that is this very
+        # tensor (typically the first conv).
+        self._model_input: Optional[th.Tensor] = None
 
     def _wanted(self, node_id: str) -> bool:
         return self.only is None or node_id in self.only
 
-    def _store_previews(self, node_id: str, direction: str, tensor: th.Tensor, axis: Optional[int]):
+    def _store_previews(self, node_id: str, direction: str, tensor: th.Tensor, axis: Optional[int],
+                        as_image: bool = False):
         if not self.preview_rows:
             return
         session = self.session
@@ -1153,7 +1291,7 @@ class _Capture:
         bucket = session.previews.setdefault(node_id, {}).setdefault(direction, [])
         for row, slot in self.preview_rows.items():
             sample = tensor[row] if per_sample else tensor
-            preview = make_preview(sample, slot_axis, self.max_channels)
+            preview = make_preview(sample, slot_axis, self.max_channels, self.tile, as_image=as_image)
             if preview is None:
                 continue
             sid, origin = session.preview_ids[slot]
@@ -1165,6 +1303,9 @@ class _Capture:
 
     def on_pre(self, frame: _Frame, args, kwargs):
         node_id = INPUT_NODE if frame.name == "" else frame.node_id
+        if frame.name == "":
+            # Recorded even when only one layer is wanted (the zoom).
+            self._model_input = _first_tensor((args, kwargs))
         if not self._wanted(node_id):
             return
         tensor = _first_tensor((args, kwargs))
@@ -1174,9 +1315,10 @@ class _Capture:
         if node_id == INPUT_NODE:
             if self.store_stats:
                 self.session.accs.setdefault(INPUT_NODE, NodeAccumulator()).update(tensor, axis, self.batch)
-            self._store_previews(INPUT_NODE, "output", tensor, axis)
+            self._store_previews(INPUT_NODE, "output", tensor, axis, as_image=True)
         else:
-            self._store_previews(node_id, "input", tensor, axis)
+            self._store_previews(node_id, "input", tensor, axis,
+                                 as_image=self._model_input is not None and tensor is self._model_input)
 
     def on_post(self, frame: _Frame, output):
         node_id = OUTPUT_NODE if frame.name == "" else (
@@ -1325,7 +1467,7 @@ class ModelRepresentationManager:
         return session.status(False)
 
     def _forward_chunk(self, session, model, inner, entry, chunk, slots, only=None,
-                       max_channels=PREVIEW_CHANNELS, store_stats=True):
+                       max_channels=PREVIEW_CHANNELS, store_stats=True, tile=PREVIEW_TILE):
         batch = build_batch(entry, [c[0] for c in chunk])
         inputs = _to_device(_inputs_from_batch(batch, inner), _model_device(inner))
         size = _batch_size_of(inputs)
@@ -1333,7 +1475,7 @@ class ModelRepresentationManager:
             size = len(chunk)
         rows = {row: slot for row, slot in slots.items() if row < size}
         capture = _Capture(session, [(c[0], c[1]) for c in chunk], size, rows, only,
-                           max_channels, store_stats)
+                           max_channels, store_stats, tile)
         with _inference_mode(model, inner), _CallTracker(inner, capture.on_pre, capture.on_post):
             _call_model(model, inputs)
         if self._trace_inputs is None:
@@ -1397,6 +1539,36 @@ class ModelRepresentationManager:
             thread.join(timeout)
         return self.get(session_id)
 
+    def clear(self) -> None:
+        """Forget every representation (a running one is cancelled)."""
+        with self._lock:
+            for session in self._sessions.values():
+                if session.state == "running":
+                    session.cancel.set()
+            self._sessions.clear()
+
+    def sample_previews(self, model, loaders, node_id: str, sample_id: str, origin: str = "",
+                        max_channels: int = 64, tile: int = 96) -> List[dict]:
+        """Input/output previews of ONE sample at *node_id*, at *tile* px.
+
+        Recomputed by a forward of that sample alone (never stored): the
+        activation zoom asks for one sample at a time, at a resolution the
+        session's thumbnails were never meant to keep.
+        """
+        inner = resolve_inner(model)
+        resolved = resolve_samples(loaders, [str(sample_id)], [origin] if origin else [])
+        if inner is None or not resolved:
+            return []
+        sid, org, entry = resolved[0]
+        scratch = RepresentationSession([sid], [org], "", "", 1, self.version, self.edit_count, 0)
+        scratch.preview_ids = [(sid, org)]
+        with _training_lock():
+            self._forward_chunk(scratch, model, inner, entry, [(sid, org)], {0: 0}, only={node_id},
+                                max_channels=max_channels, store_stats=False,
+                                tile=max(8, min(int(tile), 256)))
+        bucket = scratch.previews.get(node_id, {})
+        return [p for direction in ("input", "output") for p in (bucket.get(direction) or []) if p]
+
     def summaries(self, session: RepresentationSession) -> List[dict]:
         return [acc.summary(node_id) for node_id, acc in list(session.accs.items())]
 
@@ -1447,7 +1619,9 @@ def classify_health(weight_norm: Optional[float], active_rate: Optional[float],
 
 def layer_details(model, loaders, node_id: str, session_id: str = "",
                   max_channels: int = 0, max_samples: int = 0,
-                  manager: ModelRepresentationManager = MANAGER) -> dict:
+                  manager: ModelRepresentationManager = MANAGER,
+                  skip_previews: bool = False, sample_id: str = "", origin: str = "",
+                  tile_size: int = 0) -> dict:
     max_channels = max_channels if max_channels > 0 else PREVIEW_CHANNELS
     max_samples = max_samples if max_samples > 0 else PREVIEW_SAMPLES
     arch = manager.architecture(model, loaders)
@@ -1511,7 +1685,10 @@ def layer_details(model, loaders, node_id: str, session_id: str = "",
                     "health": classify_health(wn, rate, mabs, median_norm, median_act),
                     "has_activation": cstats is not None,
                 })
-        weights = [p.detach().float().reshape(-1) for p in module.parameters(recurse=False) if p.ndim >= 1]
+    if module is not None and node["kind"] in ("layer", "group"):
+        # A group's "weights graph" is every parameter it holds.
+        weights = [p.detach().float().reshape(-1)
+                   for p in module.parameters(recurse=node["kind"] == "group") if p.ndim >= 1]
         if weights:
             flat = th.cat(weights)
             if flat.numel() > 2_000_000:
@@ -1523,7 +1700,15 @@ def layer_details(model, loaders, node_id: str, session_id: str = "",
 
     previews: List[dict] = []
     activation = None
-    if session is not None:
+    if sample_id:
+        # The activation zoom: one sample, recomputed at a higher resolution.
+        try:
+            previews = manager.sample_previews(
+                model, loaders, node_id, sample_id, origin,
+                max_channels=max_channels, tile=tile_size or 96)
+        except Exception as exc:
+            logger.debug(f"[modeling] sample previews failed for {node_id}/{sample_id}: {exc}")
+    elif session is not None and not skip_previews:
         try:
             manager.ensure_previews(session, model, loaders, node_id, max_channels)
         except Exception as exc:
@@ -1536,6 +1721,7 @@ def layer_details(model, loaders, node_id: str, session_id: str = "",
                 if preview["tiles"] > max_channels and preview["layout"] == "channels":
                     preview = _truncate_preview(preview, max_channels)
                 previews.append(preview)
+    if session is not None:
         acc = session.accs.get(node_id)
         if acc is not None:
             activation = acc.summary(node_id)
@@ -1549,7 +1735,15 @@ def layer_details(model, loaders, node_id: str, session_id: str = "",
         "session_id": session.id if session is not None else "",
         "neuron_axis": neuron_axis, "children": children,
         "health_source": health_source,
+        "model_age": _model_age(model),
     }
+
+
+def _model_age(model) -> int:
+    try:
+        return int(model.get_age())
+    except Exception:
+        return 0
 
 
 # A ReLU's zero output is a neuron that did not fire; these keep the channel
@@ -1639,9 +1833,14 @@ def edit_layer(model, node_id: str, op: str, neuron_indices: Sequence[int] = (),
             raise ValueError(
                 f"{op} needs the model's layer dependencies: wrap it with "
                 "wl.watch_or_edit(model, flag='model', compute_dependencies=True)")
+        if op == "prune" and not indices:
+            raise ValueError("prune needs at least one neuron index")
+        # The architecture changes: checkpoints on BOTH sides of the edit must
+        # stay restorable (architectures are not dumped by default). Nothing
+        # is written now -- the checkpoint manager keeps the pre-edit model in
+        # memory and saves both architectures when training resumes.
+        _note_structural_edit(_checkpoint_manager(), model)
         if op == "prune":
-            if not indices:
-                raise ValueError("prune needs at least one neuron index")
             model.prune_neurons(layer_id, indices)
             message = f"pruned {len(indices)} neuron(s) from {module_id}"
         else:
@@ -1731,3 +1930,29 @@ def edit_layer(model, node_id: str, op: str, neuron_indices: Sequence[int] = (),
     manager.note_edit(structural=False)
     what = f"{len(indices)} neuron(s) of {module_id}" if indices else module_id
     return {"message": f"{op} {what}" + (f" (ratio {ratio:g})" if op == "perturb" else "")}
+
+
+def _checkpoint_manager():
+    """The registered CheckpointManager, or None (tests, model-only scripts)."""
+    try:
+        from weightslab.backend import ledgers
+        manager = ledgers.get_checkpoint_manager()
+        if manager is None or not callable(getattr(manager, "save_model_architecture", None)):
+            return None
+        return manager
+    except Exception:
+        return None
+
+
+def _note_structural_edit(checkpoints, model) -> None:
+    """Tell the checkpoint manager a structural edit is about to happen."""
+    if checkpoints is None:
+        return
+    try:
+        note = getattr(checkpoints, "note_structural_edit", None)
+        if callable(note):
+            note(model)
+        else:   # an older manager: ask for the dump at the next model change
+            checkpoints.request_architecture_dump()
+    except Exception as exc:
+        logger.warning(f"[modeling] could not record the structural edit: {exc}")

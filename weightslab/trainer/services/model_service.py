@@ -471,6 +471,10 @@ class ModelService:
 
     def GetModelRepresentation(self, request, context):
         from weightslab.components.model_representation import MANAGER
+        if request.clear:
+            MANAGER.clear()
+            return pb2.ModelRepresentationResponse(
+                status=pb2.ModelRepresentationStatus(state="none"))
         session = MANAGER.get(request.session_id)
         if session is None:
             return pb2.ModelRepresentationResponse(
@@ -489,7 +493,10 @@ class ModelService:
             details = layer_details(
                 model, loaders, request.node_id, request.session_id,
                 max_channels=int(request.max_channels), max_samples=int(request.max_samples),
-                manager=MANAGER)
+                manager=MANAGER,
+                skip_previews=bool(request.skip_previews),
+                sample_id=request.sample_id, origin=request.origin,
+                tile_size=int(request.tile_size))
         except Exception as exc:
             logger.error(f"[modeling] GetModelLayerDetails failed: {exc}", exc_info=True)
             return pb2.ModelLayerDetailsResponse(success=False, message=str(exc))
@@ -504,6 +511,7 @@ class ModelService:
             session_id=details["session_id"],
             neuron_axis=details["neuron_axis"],
             health_source=details.get("health_source", ""),
+            model_age=int(details.get("model_age", 0)),
             children=details["children"],
         )
         response.neurons.extend(pb2.ModelNeuronStat(**n) for n in details["neurons"])

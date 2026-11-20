@@ -213,6 +213,26 @@ class TestGraphDetails(unittest.TestCase):
         self.assertEqual(seq["layout"], "sequence")
         self.assertLessEqual(seq["width"], mr.PREVIEW_SEQUENCE)
 
+    def test_model_input_previews_as_a_picture(self):
+        # RGB in [0, 1]: one planar RGB picture, its own colours (no stretch).
+        rgb = mr.make_preview(th.rand(3, 28, 28) * 0.5, 0, 16, as_image=True)
+        self.assertEqual((rgb["layout"], rgb["tiles"], rgb["channel_indices"]), ("image", 1, [0, 1, 2]))
+        self.assertEqual((rgb["tile_min"], rgb["tile_max"]), ([0.0], [1.0]))
+        self.assertEqual(len(rgb["data"]), 3 * rgb["height"] * rgb["width"])
+        self.assertLessEqual(max(rgb["data"]), 128)              # 0.5 stays mid-grey, not stretched
+        # Gray, with or without a channel dim; 0..255 kept as is.
+        gray = mr.make_preview(th.rand(28, 28) * 255, None, 16, as_image=True)
+        self.assertEqual((gray["layout"], gray["channel_indices"], gray["tile_max"]), ("image", [0], [255.0]))
+        # A normalised input: one range for the whole image.
+        norm = mr.make_preview(th.randn(3, 20, 20) * 2, 0, 16, as_image=True)
+        self.assertLess(norm["tile_min"][0], 0.0)
+        # Not images: a point cloud, token ids, a 5-channel tensor.
+        self.assertNotEqual(mr.make_preview(th.randn(500, 4), -1, 16, as_image=True)["layout"], "image")
+        self.assertNotEqual(mr.make_preview(th.arange(12.0), None, 16, as_image=True)["layout"], "image")
+        self.assertEqual(mr.make_preview(th.randn(5, 28, 28), 0, 16, as_image=True)["layout"], "channels")
+        # Without as_image (any other layer): one heatmap tile per channel.
+        self.assertEqual(mr.make_preview(th.rand(3, 28, 28), 0, 16)["layout"], "channels")
+
     def test_accumulator_flags_dead_channels(self):
         acc = mr.NodeAccumulator()
         x = th.relu(th.randn(4, 3, 5, 5))
@@ -233,6 +253,71 @@ class TestGraphDetails(unittest.TestCase):
         self.assertEqual(acc.summary("n")["dead_channels"], 0)
         self.assertEqual(acc.channel_stats()["active_rate"][2], 1.0)
 
+    def test_firing_is_relative_to_the_layer_scale(self):
+        # A whole layer at 1e-6 scale (untrained BatchNorm statistics) is
+        # alive; one exact-zero channel in it is still dead.
+        acc = mr.NodeAccumulator()
+        x = th.rand(4, 3, 5, 5) * 2e-6 + 1e-7
+        x[:, 0] = 0.0
+        acc.update(x, 1, 4)
+        self.assertEqual(acc.summary("n")["dead_channels"], 1)
+        # A SiLU neuron stuck at -1e-8 next to channels at ~1 is dead.
+        acc = mr.NodeAccumulator()
+        x = th.rand(4, 3, 5, 5) + 0.5
+        x[:, 2] = -1e-8
+        acc.update(x, 1, 4)
+        self.assertEqual(acc.summary("n")["dead_channels"], 1)
+        self.assertEqual(acc.channel_stats()["active_rate"][2], 0.0)
+
+    def test_shared_module_is_named_under_each_caller(self):
+        # Ultralytics' Conv blocks all hold ONE SiLU instance as `.act`: each
+        # call belongs to the block that made it, not to the first owner.
+        shared = nn.SiLU()
+
+        class Block(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lin = nn.Linear(4, 4)
+                self.act = shared
+
+            def forward(self, x):
+                return self.act(self.lin(x))
+
+        model = nn.Sequential(Block(), Block(), Block())
+        arch = mr.build_architecture(model, mr.trace_architecture(model, th.randn(2, 4)))
+        layers = {n["id"]: n for n in arch["nodes"] if n["kind"] == "layer" and n["executed"]}
+        for i in range(3):
+            self.assertIn(f"{i}.act", layers)
+            self.assertEqual(layers[f"{i}.act"]["parent_id"], str(i))
+        self.assertFalse([k for k in layers if "#" in k])
+        edges = {(e["source"], e["target"]) for e in arch["edges"]}
+        self.assertIn(("1.lin", "1.act"), edges)
+        self.assertIn(("1.act", "2.lin"), edges)
+        # A representation names the calls the same way.
+        manager = mr.ModelRepresentationManager()
+        loader = _FakeLoader(_Vectors(), "train")
+        status = manager.start(model, {"train_loader": loader}, ["1000", "1001"], ["train", "train"])
+        session = manager.wait(status["session_id"], timeout=60)
+        self.assertEqual(session.state, "done", session.message)
+        summaries = {s["node_id"] for s in manager.summaries(session)}
+        self.assertTrue({"0.act", "1.act", "2.act"} <= summaries)
+
+    def test_ultralytics_style_yaml_declares_backbone_neck_head(self):
+        class Yolo(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.yaml = {"backbone": [[-1, 1, "Conv", []]] * 2, "head": [[-1, 1, "Conv", []]] * 3}
+                self.model = nn.Sequential(*[nn.Sequential(nn.Linear(4, 4), nn.ReLU()) for _ in range(5)])
+
+            def forward(self, x):
+                return self.model(x)
+
+        model = Yolo()
+        arch = mr.build_architecture(model, mr.trace_architecture(model, th.randn(1, 4)))
+        roles = {n["id"]: n["role"] for n in arch["nodes"] if n["kind"] == "group"}
+        self.assertEqual([roles[f"model.{i}"] for i in range(5)],
+                         ["backbone", "backbone", "neck", "neck", "head"])
+
 
 # ---------------------------------------------------------------------------
 # Sessions, details and edits on a registered-like setup (no gRPC)
@@ -248,6 +333,18 @@ class _Digits(Dataset):
 
     def __getitem__(self, i):
         return self.x[i], self.y[i]
+
+
+class _Vectors(Dataset):
+    def __init__(self, n=8):
+        g = th.Generator().manual_seed(0)
+        self.x = th.randn(n, 4, generator=g)
+
+    def __len__(self):
+        return len(self.x)
+
+    def __getitem__(self, i):
+        return self.x[i], 0
 
 
 class _FakeTrackedDataset:
@@ -315,6 +412,11 @@ class TestSessionsAndEdits(unittest.TestCase):
         self.assertEqual(out[0]["layout"], "channels")
         self.assertEqual(session.previews["fc3"]["output"][0]["layout"], "vector")
         self.assertEqual(session.previews["c1"]["input"][0]["height"], 28)
+        # The model input, and the first conv's input (the same tensor), are
+        # pictures; the conv's output stays one heatmap per channel.
+        self.assertEqual(session.previews[mr.INPUT_NODE]["output"][0]["layout"], "image")
+        self.assertEqual(session.previews["c1"]["input"][0]["layout"], "image")
+        self.assertEqual(session.previews["c1"]["output"][0]["layout"], "channels")
         # The model's age is untouched by representation forwards.
         self.assertEqual(model.get_age(), 0)
 
@@ -347,6 +449,46 @@ class TestSessionsAndEdits(unittest.TestCase):
         node = next(n for n in arch["nodes"] if n["id"] == mr.INPUT_NODE)
         self.assertEqual(node["output_shape"], [1, 1, 16, 16])
 
+    def test_clear_skip_previews_and_zoom(self):
+        manager = mr.ModelRepresentationManager()
+        model = _fashion_cnn(False)
+        self._run(manager, model, ["1000", "1001"])
+
+        # Cards: weights + neurons only, no previews, model age reported.
+        light = mr.layer_details(model, self.loaders, "c1", manager=manager, skip_previews=True)
+        self.assertTrue(light["success"])
+        self.assertEqual(light["previews"], [])
+        self.assertEqual(len(light["neurons"]), 4)
+        self.assertEqual(light["model_age"], 0)
+        self.assertIsNotNone(light["activation"])
+
+        stored = [p for p in manager.get().previews["c1"]["output"] if p]
+        # Zoom: one sample, recomputed bigger than the 28 px thumbnails.
+        zoom = mr.layer_details(model, self.loaders, "c1", manager=manager,
+                                sample_id="1001", origin="train", tile_size=64, max_channels=64)
+        self.assertEqual({p["direction"] for p in zoom["previews"]}, {"input", "output"})
+        self.assertTrue(all(p["sample_id"] == "1001" for p in zoom["previews"]))
+        out = next(p for p in zoom["previews"] if p["direction"] == "output")
+        self.assertEqual((out["tiles"], out["height"]), (4, 28))   # 28 px input: never upscaled
+
+        # ...and never written into the session's own thumbnails.
+        self.assertEqual([p for p in manager.get().previews["c1"]["output"] if p], stored)
+
+        # Clear: nothing left to show.
+        manager.clear()
+        self.assertIsNone(manager.get())
+
+    def test_group_details_have_a_weight_histogram(self):
+        model = nn.Sequential(nn.Sequential(nn.Linear(4, 8), nn.ReLU()), nn.Linear(8, 2))
+        loader = _FakeLoader(type("V", (Dataset,), {
+            "__len__": lambda self: 3, "__getitem__": lambda self, i: (th.rand(4), i)})(), "train")
+        manager = mr.ModelRepresentationManager()
+        details = mr.layer_details(model, {"train_loader": loader}, "0", manager=manager)
+        self.assertTrue(details["success"], details.get("message"))
+        self.assertEqual(details["node"]["kind"], "group")
+        self.assertEqual(len(details["weight_histogram"]), 40)
+        self.assertEqual(sum(details["weight_histogram"]), 8 * 4 + 8)   # every parameter
+
     def test_unknown_samples_error_cleanly(self):
         manager = mr.ModelRepresentationManager()
         status = manager.start(_fashion_cnn(False), self.loaders, ["nope"], [])
@@ -373,6 +515,10 @@ class TestSessionsAndEdits(unittest.TestCase):
         manager = mr.ModelRepresentationManager()
         model = _fashion_cnn(False)
         with th.no_grad():
+            # Inputs are in [0, 1]: positive weights + bias always fire (a
+            # random init can leave a channel negative everywhere by chance).
+            model.model.c1.weight.uniform_(0.01, 0.1)
+            model.model.c1.bias.fill_(0.1)
             model.model.c1.weight[2].zero_()
             model.model.c1.bias[2] = -1.0           # channel 2 can never fire
         self._run(manager, model, ["1000", "1001", "1002"])

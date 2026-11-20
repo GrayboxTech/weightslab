@@ -166,8 +166,12 @@ Conventions that matter for correctness:
   compute_dependencies=True)`. A model whose batch is not `(inputs, ids,
   labels, ...)` (or a dict of kwargs) tells it how to call the model with
   `weightslab.components.model_representation.set_modeling_inputs_fn(fn)`.
+  A module shared by several parents (Ultralytics' one SiLU behind every
+  `Conv.act`) gets one node per caller (`model.6.cv1.act`); Ultralytics blocks
+  take backbone / neck / head roles from the model's `yaml`.
   Code: `weightslab/weightslab/components/model_representation.py`; tests:
-  `tests/model/test_model_representation.py` (sweeps the whole baseline zoo).
+  `tests/model/test_model_representation.py` (sweeps the whole baseline zoo)
+  and `test_model_representation_ultralytics.py` (YOLO11 detect + segment).
 
 Recording values (pick by what the value is *about*, not by convenience):
 
@@ -323,7 +327,13 @@ input could be built or the forward failed (message shown); for unusual batch
 layouts register `set_modeling_inputs_fn` (see §3). Prune / add (and per-neuron
 freeze) need `compute_dependencies=True`; freeze, reset and perturb work anyway.
 A conv/linear neuron's "dead" verdict is read at the ReLU it feeds (the
-inspector says which), since its own output is signed.
+inspector says which), since its own output is signed. An add / prune writes
+nothing at edit time: the architectures on both sides of the edit are saved
+when training resumes (the pre-edit one waits in memory, so restoring an older
+checkpoint before resuming still works). "Fired" is relative: a
+channel fires on a sample when its largest |value| exceeds 1e-6 x the layer's
+largest |value| on it (an untrained net whose whole signal sits at 1e-6 scale
+is not "dead"; exact zeros always are).
 
 **Large weights/images fail to transfer.** Raise `GRPC_MAX_MESSAGE_BYTES`.
 
@@ -370,7 +380,10 @@ OpenRouter** initialized from the UI via `/init` (then `/model` to switch,
   `gridDataManager.ts`, `BboxRenderer.ts`, `SegmentationRenderer.ts`,
   `PointCloudViewer.ts`).
 - `modeling/` — the Modeling tab: `appTabs.ts` (Main / Modeling tabs under the agent bar),
-  `modelGraphLayout.ts` (pure layout, unit-tested), `modelingView.ts` (graph, inspector, edits).
+  `modelGraphLayout.ts` (pure layout, unit-tested), `modelingView.ts` (graph, inspector, edits),
+  `layerPopups.ts` (weights & neurons cards: resizable, click to inspect, drag carries the
+  cards below), `chartZoom.ts` / `activationZoom.ts` (neurons & weights / activation zooms),
+  `neuronGrid.ts` + `render.ts` (shared canvases and menus).
 - `ui/` — `server.py` (pure-Python HTTP + gRPC-Web proxy), `static/` (bundled SPA),
   `utils/` (cert-generation scripts, sync-frontend helper).
 

@@ -1253,6 +1253,9 @@ message ModelRepresentationStatus {
 
 message GetModelRepresentationRequest {
   string session_id = 1;           // "" = the latest
+  // Drop every representation (cancelling a running one) and answer
+  // state "none": the "Clear" button of the Modeling tab.
+  bool clear = 2;
 }
 
 message ModelNodeActivationSummary {
@@ -1277,6 +1280,14 @@ message ModelLayerDetailsRequest {
   string session_id = 2;           // "" = the latest
   int32 max_channels = 3;          // preview tiles per sample, 0 = 16
   int32 max_samples = 4;           // samples with previews, 0 = 8
+  // Weights and neurons only (the layer cards / training overview): no
+  // activation previews, so it is cheap enough to poll.
+  bool skip_previews = 5;
+  // One sample at a higher resolution (the activation zoom): previews of
+  // just this sample, recomputed with tiles up to `tile_size` px.
+  string sample_id = 6;
+  string origin = 7;
+  int32 tile_size = 8;
 }
 
 message ModelNeuronStat {
@@ -1323,6 +1334,7 @@ message ModelLayerDetailsResponse {
   // itself, or the ReLU it feeds ("r1 (ReLU)") -- a conv or linear output is
   // signed, so it is the nonlinearity after it that says a neuron is dead.
   string health_source = 13;
+  int32 model_age = 14;            // training step the weights were read at
 }
 
 message ModelLayerEditRequest {

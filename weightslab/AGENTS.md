@@ -480,7 +480,13 @@ input could be built or the forward failed (message shown); for unusual batch
 layouts register `set_modeling_inputs_fn` (see §3). Prune / add (and per-neuron
 freeze) need `compute_dependencies=True`; freeze, reset and perturb work anyway.
 A conv/linear neuron's "dead" verdict is read at the ReLU it feeds (the
-inspector says which), since its own output is signed.
+inspector says which), since its own output is signed. An add / prune writes
+nothing at edit time: the architectures on both sides of the edit are saved
+when training resumes (the pre-edit one waits in memory, so restoring an older
+checkpoint before resuming still works). "Fired" is relative: a
+channel fires on a sample when its largest |value| exceeds 1e-6 x the layer's
+largest |value| on it (an untrained net whose whole signal sits at 1e-6 scale
+is not "dead"; exact zeros always are).
 
 **Large weights/images fail to transfer.** Raise `GRPC_MAX_MESSAGE_BYTES`.
 
