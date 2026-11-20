@@ -554,3 +554,68 @@ class ModelService:
         except Exception as exc:
             logger.debug(f"[modeling] could not refresh the edited node: {exc}")
         return response
+
+    # ---- Compare A vs B ------------------------------------------------------
+    @staticmethod
+    def _comparison_status_pb(status: dict):
+        fields = dict(status)
+        sides = {k: pb2.ModelComparisonSideStatus(**fields.pop(k)) for k in ("a", "b") if k in fields}
+        return pb2.ModelComparisonStatus(**fields, **sides)
+
+    @staticmethod
+    def _node_diff_pb(diff: dict):
+        fields = {k: v for k, v in diff.items() if k in pb2.ModelNodeDiff.DESCRIPTOR.fields_by_name}
+        return pb2.ModelNodeDiff(**fields)
+
+    @staticmethod
+    def _comparison_side(side) -> dict:
+        return {"tag": side.tag, "sample_ids": list(side.sample_ids), "origins": list(side.origins),
+                "label": side.label, "origin": side.origin}
+
+    def StartModelComparison(self, request, context):
+        from weightslab.components.model_comparison import COMPARE
+        model, loaders = self._modeling_targets()
+        if model is None:
+            return pb2.ModelComparisonStatus(state="error", message="No model registered")
+        try:
+            status = COMPARE.start(
+                model, loaders, self._comparison_side(request.a), self._comparison_side(request.b),
+                max_samples=int(request.max_samples))
+        except Exception as exc:
+            logger.error(f"[modeling] StartModelComparison failed: {exc}", exc_info=True)
+            return pb2.ModelComparisonStatus(state="error", message=str(exc))
+        return self._comparison_status_pb(status)
+
+    def GetModelComparison(self, request, context):
+        from weightslab.components.model_comparison import COMPARE
+        if request.clear:
+            COMPARE.clear()
+            return pb2.ModelComparisonResponse(status=pb2.ModelComparisonStatus(state="none"))
+        session = COMPARE.get(request.comparison_id)
+        if session is None:
+            return pb2.ModelComparisonResponse(status=pb2.ModelComparisonStatus(state="none"))
+        response = pb2.ModelComparisonResponse(
+            status=self._comparison_status_pb(session.status(COMPARE.is_stale(session))))
+        try:
+            response.nodes.extend(self._node_diff_pb(d) for d in COMPARE.diffs(session))
+        except Exception as exc:
+            logger.debug(f"[modeling] comparison diffs failed: {exc}", exc_info=True)
+        return response
+
+    def GetModelLayerComparison(self, request, context):
+        from weightslab.components.model_comparison import COMPARE
+        try:
+            result = COMPARE.layer(request.comparison_id, request.node_id)
+        except Exception as exc:
+            logger.error(f"[modeling] GetModelLayerComparison failed: {exc}", exc_info=True)
+            return pb2.ModelLayerComparisonResponse(success=False, message=str(exc))
+        response = pb2.ModelLayerComparisonResponse(
+            success=bool(result.get("success")), message=result.get("message", ""),
+            mode=result.get("mode", ""), neuron_axis=result.get("neuron_axis", ""))
+        session = result.get("session")
+        if session is not None:
+            response.status.CopyFrom(self._comparison_status_pb(session.status(COMPARE.is_stale(session))))
+        if result.get("summary"):
+            response.summary.CopyFrom(self._node_diff_pb(result["summary"]))
+        response.neurons.extend(pb2.ModelNeuronDiff(**n) for n in result.get("neurons", []))
+        return response

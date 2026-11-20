@@ -249,6 +249,21 @@ class ExperimentServiceStub(object):
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerEditRequest.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerEditResponse.FromString,
                 _registered_method=True)
+        self.StartModelComparison = channel.unary_unary(
+                '/ExperimentService/StartModelComparison',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelComparisonRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelComparisonStatus.FromString,
+                _registered_method=True)
+        self.GetModelComparison = channel.unary_unary(
+                '/ExperimentService/GetModelComparison',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetModelComparisonRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelComparisonResponse.FromString,
+                _registered_method=True)
+        self.GetModelLayerComparison = channel.unary_unary(
+                '/ExperimentService/GetModelLayerComparison',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerComparisonRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerComparisonResponse.FromString,
+                _registered_method=True)
 
 
 class ExperimentServiceServicer(object):
@@ -576,6 +591,28 @@ class ExperimentServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def StartModelComparison(self, request, context):
+        """Compare A vs B: run the model on two sets of samples (a tag, a grid
+        selection, or one sample each) and diff every layer -- where do their
+        representations part? Returns at once; poll GetModelComparison.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetModelComparison(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetModelLayerComparison(self, request, context):
+        """One layer of a comparison, neuron by neuron.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ExperimentServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -793,6 +830,21 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     servicer.EditModelLayer,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerEditRequest.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerEditResponse.SerializeToString,
+            ),
+            'StartModelComparison': grpc.unary_unary_rpc_method_handler(
+                    servicer.StartModelComparison,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelComparisonRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelComparisonStatus.SerializeToString,
+            ),
+            'GetModelComparison': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetModelComparison,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetModelComparisonRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelComparisonResponse.SerializeToString,
+            ),
+            'GetModelLayerComparison': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetModelLayerComparison,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerComparisonRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerComparisonResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1956,6 +2008,87 @@ class ExperimentService(object):
             '/ExperimentService/EditModelLayer',
             weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerEditRequest.SerializeToString,
             weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerEditResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def StartModelComparison(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/StartModelComparison',
+            weightslab_dot_proto_dot_experiment__service__pb2.ModelComparisonRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ModelComparisonStatus.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetModelComparison(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetModelComparison',
+            weightslab_dot_proto_dot_experiment__service__pb2.GetModelComparisonRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ModelComparisonResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetModelLayerComparison(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetModelLayerComparison',
+            weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerComparisonRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerComparisonResponse.FromString,
             options,
             channel_credentials,
             insecure,

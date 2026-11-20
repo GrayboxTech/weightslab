@@ -169,6 +169,14 @@ Conventions that matter for correctness:
   A module shared by several parents (Ultralytics' one SiLU behind every
   `Conv.act`) gets one node per caller (`model.6.cv1.act`); Ultralytics blocks
   take backbone / neck / head roles from the model's `yaml`.
+  **Compare A vs B** (`model_comparison.py`, RPCs `StartModelComparison` /
+  `GetModelComparison` / `GetModelLayerComparison`): two tags / selections run
+  through the model; per layer a score -- pair mode (1 sample vs 1): normalized
+  squared distance of the two activation maps, 0..2; group mode: RMS of the
+  per-neuron Cohen's d -- plus per-neuron effects and "fires only on A / B".
+  Samples in both sides are left out of both; each side is capped (256, an
+  even seeded subset). Studio: grid / tag right-click → "Compare: Set as A",
+  then "Compare with A"; two selected samples → "Compare These 2 Samples".
   Code: `weightslab/weightslab/components/model_representation.py`; tests:
   `tests/model/test_model_representation.py` (sweeps the whole baseline zoo)
   and `test_model_representation_ultralytics.py` (YOLO11 detect + segment).
@@ -366,6 +374,7 @@ OpenRouter** initialized from the UI via `/init` (then `/model` to switch,
   `{model,data,agent}_service.py`; `data_image_utils.py` (preview/mask encoding).
 - `components/` — `global_monitoring.py` (locks, `guard_*` contexts, pause),
   `model_representation.py` (Modeling tab: traced graph, representation sessions, layer edits),
+  `model_comparison.py` (Modeling tab: compare A vs B per layer / neuron),
   `checkpoint_manager.py`, `evaluation_controller.py`.
 - `data/` — `dataframe_manager.py`, `data_samples_with_ops.py`, `sample_stats.py`,
   H5 storage (`h5_dataframe_store.py`, `h5_array_store.py`, `array_proxy.py`).
@@ -383,7 +392,8 @@ OpenRouter** initialized from the UI via `/init` (then `/model` to switch,
   `modelGraphLayout.ts` (pure layout, unit-tested), `modelingView.ts` (graph, inspector, edits),
   `layerPopups.ts` (weights & neurons cards: resizable, click to inspect, drag carries the
   cards below), `chartZoom.ts` / `activationZoom.ts` (neurons & weights / activation zooms),
-  `neuronGrid.ts` + `render.ts` (shared canvases and menus).
+  `neuronGrid.ts` + `render.ts` (shared canvases and menus), `compare.ts` (compare A vs B:
+  picking A / B, scores, divergence profile, A | B | A - B maps).
 - `ui/` — `server.py` (pure-Python HTTP + gRPC-Web proxy), `static/` (bundled SPA),
   `utils/` (cert-generation scripts, sync-frontend helper).
 

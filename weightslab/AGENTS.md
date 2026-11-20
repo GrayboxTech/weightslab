@@ -512,6 +512,7 @@ around here.
 - `trainer/services/` — `experiment_service.py` (gRPC servicer) → `{model,data,agent}_service.py`; `data_image_utils.py` (preview/mask encoding).
 - `components/` — `global_monitoring.py` (locks, `guard_*`, pause), `checkpoint_manager.py`, `evaluation_controller.py`.
   `model_representation.py` -- Modeling tab: traced graph, representation sessions, layer edits.
+  `model_comparison.py` -- Modeling tab: compare A vs B (pair: activation-map distance; group: per-neuron Cohen's d).
 - `data/` — `dataframe_manager.py`, `data_samples_with_ops.py`, `sample_stats.py`, H5 storage (`h5_dataframe_store.py`, `h5_array_store.py`, `array_proxy.py`).
 - `backend/` — `ledgers.py` (`GLOBAL_LEDGER`), `logger.py`, `audit_logger.py`, `cli.py`.
 - `projection/parametric_umap.py` — live 3-D projection (§3.6b): feature hook, UMAP encoder, coordinate write-back, checkpoint pairing; `projection/custom.py` — user projections (`save_projection_coords`); served by `trainer/services/projection_service.py` (`GetProjection`).

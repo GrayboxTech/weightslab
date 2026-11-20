@@ -364,6 +364,17 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         logger.debug(f"\nExperimentServiceServicer.EditModelLayer({request})")
         return self._exp_service.model_service.EditModelLayer(request, context)
 
+    def StartModelComparison(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.StartModelComparison({request})")
+        return self._exp_service.model_service.StartModelComparison(request, context)
+
+    def GetModelComparison(self, request, context):
+        return self._exp_service.model_service.GetModelComparison(request, context)
+
+    def GetModelLayerComparison(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.GetModelLayerComparison({request})")
+        return self._exp_service.model_service.GetModelLayerComparison(request, context)
+
     # -------------------------------------------------------------------------
     # Data service helpers + RPCs (for weights_studio UI)
     # -------------------------------------------------------------------------

@@ -121,6 +121,13 @@ service ExperimentService {
   rpc GetModelLayerDetails (ModelLayerDetailsRequest) returns (ModelLayerDetailsResponse);
   // freeze / unfreeze / reset / perturb / prune / add on one layer.
   rpc EditModelLayer (ModelLayerEditRequest) returns (ModelLayerEditResponse);
+  // Compare A vs B: run the model on two sets of samples (a tag, a grid
+  // selection, or one sample each) and diff every layer -- where do their
+  // representations part? Returns at once; poll GetModelComparison.
+  rpc StartModelComparison (ModelComparisonRequest) returns (ModelComparisonStatus);
+  rpc GetModelComparison (GetModelComparisonRequest) returns (ModelComparisonResponse);
+  // One layer of a comparison, neuron by neuron.
+  rpc GetModelLayerComparison (ModelLayerComparisonRequest) returns (ModelLayerComparisonResponse);
 }
 
 // --- Logger Data Sync ---
@@ -1350,4 +1357,109 @@ message ModelLayerEditResponse {
   string message = 2;
   ModelGraphNode node = 3;
   int32 architecture_version = 4;
+}
+
+// ---- Compare A vs B ---------------------------------------------------------
+// Two modes, picked from the sides' sizes:
+//  * "pair"  -- one sample against one sample. A layer's score is the
+//    normalized squared distance of the two activation maps,
+//    |a - b|^2 / (|a|^2 + |b|^2), in [0, 2]: 0 = identical, 1 = unrelated
+//    (orthogonal), 2 = opposite; equal to the cosine distance when the two
+//    maps have the same energy, larger when one is weaker.
+//  * "group" -- sets of samples. Each sample's neurons are pooled (a
+//    channel's mean over its positions); a neuron's effect is Cohen's d of
+//    A against B (difference of means / pooled std, clipped to +-10); a
+//    layer's score is the RMS effect over its neurons (~0: A and B look alike
+//    there, >= 0.8: a large difference).
+
+message ModelComparisonSide {
+  string tag = 1;                  // every sample with this tag...
+  repeated string sample_ids = 2;  // ...or these
+  repeated string origins = 3;     // parallel to sample_ids, may be empty
+  string label = 4;                // shown in the UI; "" = derived
+  string origin = 5;               // restrict the tag to one split
+}
+
+message ModelComparisonRequest {
+  ModelComparisonSide a = 1;
+  ModelComparisonSide b = 2;
+  int32 max_samples = 3;           // per side, 0 = server default (256)
+}
+
+message ModelComparisonSideStatus {
+  string label = 1;
+  string tag = 2;
+  int32 requested = 3;             // before the overlap drop and the cap
+  int32 count = 4;                 // samples actually compared
+  repeated string sample_ids = 5;
+  repeated string origins = 6;
+}
+
+message ModelComparisonStatus {
+  string comparison_id = 1;
+  string state = 2;                // "running" | "done" | "error" | "cancelled" | "none"
+  int32 done = 3;
+  int32 total = 4;
+  string message = 5;
+  string mode = 6;                 // "pair" | "group"
+  ModelComparisonSideStatus a = 7;
+  ModelComparisonSideStatus b = 8;
+  int32 overlap_dropped = 9;       // samples in both A and B, left out of both
+  int32 architecture_version = 10;
+  int32 model_age = 11;
+  bool stale = 12;                 // the model changed since
+}
+
+message GetModelComparisonRequest {
+  string comparison_id = 1;        // "" = the latest
+  bool clear = 2;                  // drop every comparison, answer state "none"
+}
+
+message ModelNodeDiff {
+  string node_id = 1;
+  float score = 2;                 // see the modes above
+  // Cosine distance of the neurons' pooled values (pair) or of the two
+  // centroids (group): 0 = same direction.
+  float cosine_distance = 3;
+  int32 channels = 4;
+  int32 strong_channels = 5;       // |effect| >= 0.8
+  int32 only_a = 6;                // fire on A, (almost) never on B
+  int32 only_b = 7;
+  float rate_a = 8;                // mean share of neurons firing on A
+  float rate_b = 9;
+  float mean_abs_a = 10;
+  float mean_abs_b = 11;
+}
+
+message ModelComparisonResponse {
+  ModelComparisonStatus status = 1;
+  repeated ModelNodeDiff nodes = 2;
+}
+
+message ModelLayerComparisonRequest {
+  string comparison_id = 1;        // "" = the latest
+  string node_id = 2;
+}
+
+message ModelNeuronDiff {
+  int32 index = 1;
+  float mean_a = 2;                // pooled value (pair) / mean over A (group)
+  float mean_b = 3;
+  float std_a = 4;                 // group only
+  float std_b = 5;
+  // group: Cohen's d; pair: (a - b) / the layer's RMS value -- either way
+  // > 0 means stronger on A, and |effect| >= 0.8 is a large difference.
+  float effect = 6;
+  float rate_a = 7;                // share of A where it fired (pair: 0 / 1)
+  float rate_b = 8;
+}
+
+message ModelLayerComparisonResponse {
+  bool success = 1;
+  string message = 2;
+  ModelNodeDiff summary = 3;
+  repeated ModelNeuronDiff neurons = 4;
+  string mode = 5;
+  string neuron_axis = 6;          // "channel" | "feature" | ""
+  ModelComparisonStatus status = 7;
 }
