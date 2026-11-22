@@ -1,5 +1,6 @@
 """Compare A vs B (the Modeling tab): per-layer divergence and per-neuron
 effects, in pair mode (one sample each) and group mode (sets of samples)."""
+import threading
 import unittest
 from unittest import mock
 
@@ -11,18 +12,13 @@ from weightslab.components import model_comparison as mc
 from weightslab.components import model_representation as mr
 
 
-class _NoLock:
-    def acquire(self, timeout=None):
-        return True
-
-    def release(self):
-        pass
-
-
 def setUpModule():
+    # A real lock, as in production: a comparison that replaces a running
+    # one must not run its forwards at the same time as the old one (both
+    # would hook the same modules from two threads).
     global _lock_patch
     _lock_patch = mock.patch(
-        "weightslab.components.global_monitoring.weightslab_rlock", _NoLock())
+        "weightslab.components.global_monitoring.weightslab_rlock", threading.RLock())
     _lock_patch.start()
 
 
