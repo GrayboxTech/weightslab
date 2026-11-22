@@ -28,6 +28,15 @@ torch.fx -- which cannot trace most detection, LiDAR or Hugging Face models):
 Node ids are ``named_modules()`` names. A module called more than once per
 forward gets one node per call (``relu``, ``relu#2``), which keeps the graph a
 DAG; edits always address the module (``module_id``).
+
+Transformers. A residual add of two different branches becomes its own small
+node (kind ``op``, ``<block>.add``, ``<block>.add#2``): the residual stream
+reads input -> +attention -> +MLP -> ... instead of every later layer being
+wired to every earlier one. Attention weights computed functionally inside an
+attention module (``softmax`` over (B, heads, T, S), or
+``scaled_dot_product_attention``) are captured as that module's "attention"
+previews, one tile per head. The q / k / v projections' neurons are grouped
+by head (``neuron_groups``), and token-id inputs are previewed as tokens.
 """
 from __future__ import annotations
 
@@ -374,6 +383,44 @@ def _image_preview(img: th.Tensor, shape: List[int], tile: int) -> dict:
     }
 
 
+TOKEN_PREVIEW_MAX = 512
+
+
+def _token_preview(sample: th.Tensor) -> dict:
+    """A sequence of token ids (a language model's input): the ids themselves
+    (layout "tokens"), plus a one-row strip of them for a uniform payload."""
+    ids = [int(v) for v in sample.detach().reshape(-1)[:TOKEN_PREVIEW_MAX].cpu().tolist()]
+    x = th.tensor(ids or [0], dtype=th.float32)
+    lo, hi = float(x.min()), float(x.max())
+    data = ((x - lo) / max(hi - lo, 1e-12) * 255.0).round().clamp(0, 255).to(th.uint8)
+    return {
+        "shape": [int(s) for s in sample.shape], "tiles": 1, "height": 1, "width": int(x.numel()),
+        "data": data.numpy().tobytes(), "tile_min": [lo], "tile_max": [hi],
+        "channel_indices": [], "layout": "tokens", "token_ids": ids,
+    }
+
+
+def _token_text(inner: Optional[nn.Module], ids: Sequence[int]) -> List[str]:
+    """The text of each token id when the model can tell (a ``decode_tokens``
+    method, or an ``itos`` table as in nanoGPT's char-level ``meta.pkl``)."""
+    if inner is None or not ids:
+        return []
+    decode = getattr(inner, "decode_tokens", None)
+    try:
+        if callable(decode):
+            out = decode(list(ids))
+            if isinstance(out, (list, tuple)) and len(out) == len(ids):
+                return [str(t) for t in out]
+        itos = getattr(inner, "itos", None)
+        if isinstance(itos, Mapping):
+            return [str(itos.get(int(i), "")) for i in ids]
+        if isinstance(itos, (list, tuple)):
+            return [str(itos[int(i)]) if 0 <= int(i) < len(itos) else "" for i in ids]
+    except Exception:
+        return []
+    return []
+
+
 def make_preview(sample: th.Tensor, channel_axis: Optional[int], max_channels: int,
                  tile: int = PREVIEW_TILE, as_image: bool = False) -> Optional[dict]:
     """A uint8 picture of one sample's tensor (batch dim already removed).
@@ -384,6 +431,9 @@ def make_preview(sample: th.Tensor, channel_axis: Optional[int], max_channels: i
     (the model input): an image-shaped tensor becomes ONE natural picture
     (layout "image", see _image_preview).
     """
+    if not sample.is_floating_point() and not sample.is_complex() and sample.ndim == 1 \
+            and sample.dtype != th.bool:
+        return _token_preview(sample)
     try:
         x = sample.detach().float().cpu()
     except Exception:
@@ -587,17 +637,38 @@ class _Provenance:
         return found
 
 
-class _ProvenanceMode(TorchFunctionMode):
-    """Propagates provenance through every torch function (add, cat, view...)."""
+_ADD_NAMES = frozenset({"add", "add_", "__add__", "__radd__", "__iadd__"})
 
-    def __init__(self, provenance: _Provenance):
+
+class _ProvenanceMode(TorchFunctionMode):
+    """Propagates provenance through every torch function (add, cat, view...).
+
+    ``on_merge``: an add of two tensors coming from different nodes (a
+    residual / skip connection) is handed to it; it names a merge node, and
+    the sum's provenance becomes that node alone -- so a transformer's
+    residual stream is a chain of "+" nodes, not every later layer wired to
+    every earlier one.
+    """
+
+    def __init__(self, provenance: _Provenance, on_merge: Optional[Callable] = None):
         super().__init__()
         self.provenance = provenance
+        self.on_merge = on_merge
 
     def __torch_function__(self, func, types, args=(), kwargs=None):
         kwargs = kwargs or {}
         out = func(*args, **kwargs)
         try:
+            if self.on_merge is not None and len(args) >= 2 \
+                    and getattr(func, "__name__", "") in _ADD_NAMES \
+                    and isinstance(args[0], th.Tensor) and isinstance(args[1], th.Tensor):
+                a = self.provenance._map.get(id(args[0]))
+                b = self.provenance._map.get(id(args[1]))
+                if a and b and a != b:
+                    merged = self.on_merge(a | b, out)
+                    if merged:
+                        self.provenance.mark(out, frozenset({merged}))
+                        return out
             srcs = set()
             for tensor in _iter_tensors((args, kwargs)):
                 found = self.provenance._map.get(id(tensor))
@@ -728,6 +799,7 @@ class ArchitectureTrace:
     def __init__(self):
         self.calls: "OrderedDict[str, dict]" = OrderedDict()   # node id -> call record
         self.containers: Dict[str, dict] = {}                   # module name -> first call
+        self.merges: "OrderedDict[str, dict]" = OrderedDict()  # "+" node id -> record
         self.edges: Dict[Tuple[str, str], List[int]] = {}
         self.input_shape: List[int] = []
         self.output_shape: List[int] = []
@@ -770,17 +842,52 @@ def trace_architecture(model, inputs) -> ArchitectureTrace:
                 trace.edges[(src, frame.node_id)] = shape
         provenance.mark(output, frozenset({frame.node_id}))
 
+    tracker = _CallTracker(inner, on_pre, on_post)
+    merge_counts: Counter = Counter()
+
+    def on_merge(sources: frozenset, out) -> str:
+        frame = tracker.stack[-1] if tracker.stack else None
+        if frame is None:
+            return ""
+        # Inside a module with no submodule, the module's own output stands
+        # for whatever it adds up.
+        if frame.name and not _has_children(frame.module):
+            return ""
+        scope = frame.name
+        merge_counts[scope] += 1
+        k = merge_counts[scope]
+        base = f"{scope}.add" if scope else "add"
+        node_id = base if k == 1 else f"{base}#{k}"
+        shape = _shape(out)
+        trace.merges[node_id] = {"node_id": node_id, "scope": scope, "order": order[0],
+                                 "out_shape": shape, "call_index": k}
+        order[0] += 1
+        for src in sources:
+            if src != node_id:
+                trace.edges[(src, node_id)] = shape
+        return node_id
+
     device = _model_device(inner)
     inputs = _to_device(inputs, device)
     provenance.mark(inputs, frozenset({INPUT_NODE}))
     trace.input_shape = _shape(inputs)
     try:
-        with _inference_mode(model, inner), _CallTracker(inner, on_pre, on_post), \
-                _ProvenanceMode(provenance):
+        with _inference_mode(model, inner), tracker, _ProvenanceMode(provenance, on_merge):
             output = _call_model(model, inputs)
         trace.output_shape = _shape(output)
         for src, shape in provenance.sources(output).items():
             trace.edges[(src, OUTPUT_NODE)] = shape
+        # A merge whose sum went nowhere happened inside a module that then
+        # ran as one unit (its output stands for it): drop it.
+        while True:
+            used = {src for (src, _dst) in trace.edges}
+            dead = [m for m in trace.merges if m not in used]
+            if not dead:
+                break
+            for m in dead:
+                del trace.merges[m]
+                for key in [k for k in trace.edges if k[1] == m]:
+                    del trace.edges[key]
         trace.traced = bool(trace.calls)
         if not trace.traced:
             trace.message = "the forward pass ran no module"
@@ -795,6 +902,9 @@ def trace_architecture(model, inputs) -> ArchitectureTrace:
 
 # ---- roles ------------------------------------------------------------------
 _ROLE_TOKENS = (
+    ("attention", {"attn", "attention", "mha", "selfattention", "crossattention"}),
+    ("mlp", {"mlp", "ffn", "feedforward", "ff"}),
+    ("backbone", {"transformer", "trunk"}),
     ("embedding", {"embed", "embeds", "embedding", "embeddings", "wte", "wpe", "emb"}),
     ("bottleneck", {"bottleneck", "bridge", "middle", "mid", "latent", "center", "bottom"}),
     ("neck", {"neck", "fpn", "pan"}),
@@ -812,6 +922,21 @@ def guess_role(name: str) -> str:
         if tokens & words:
             return role
     return "block"
+
+
+# Roles that hold at any depth (a transformer's attention / MLP sit 3-4
+# levels down): from the module's class, else its name.
+_DEEP_ROLES = ("attention", "mlp")
+
+
+def _deep_role(name: str, module: nn.Module) -> str:
+    kind = type(module).__name__.lower()
+    if "attention" in kind or kind.endswith("attn"):
+        return "attention"
+    if "mlp" in kind or "feedforward" in kind or kind.endswith("ffn"):
+        return "mlp"
+    role = guess_role(name)
+    return role if role in _DEEP_ROLES else ""
 
 
 def _declared_roles(inner: nn.Module) -> Dict[str, str]:
@@ -886,6 +1011,73 @@ def neuron_weight_stats(module: nn.Module) -> Optional[Tuple[np.ndarray, np.ndar
         return wm.norm(dim=1).cpu().numpy(), wm.abs().mean(dim=1).cpu().numpy()
 
 
+class FrozenRows:
+    """Some output neurons of a layer kept fixed, on any layer (no
+    dependencies needed): a forward pre-hook puts their weights back before
+    every forward, so neither gradients nor momentum / weight decay can move
+    them. Picklable (checkpoints dump the model with its hooks)."""
+
+    ATTR = "_wl_frozen_rows"
+
+    def __init__(self):
+        self.rows: Dict[str, Tuple[int, List[int], th.Tensor]] = {}   # param -> (axis, idx, values)
+
+    @staticmethod
+    def of(module: nn.Module, create: bool = False) -> Optional["FrozenRows"]:
+        hook = getattr(module, FrozenRows.ATTR, None)
+        if hook is None and create:
+            hook = FrozenRows()
+            object.__setattr__(module, FrozenRows.ATTR, hook)
+            module.register_forward_pre_hook(hook)
+        return hook
+
+    def indices(self) -> set:
+        entry = self.rows.get("weight")
+        return set(entry[1]) if entry else set()
+
+    def restore(self, module: nn.Module) -> None:
+        with th.no_grad():
+            for pname, (axis, idx, values) in self.rows.items():
+                param = getattr(module, pname, None)
+                if isinstance(param, th.Tensor) and idx and max(idx) < param.shape[axis]:
+                    index = th.as_tensor(idx, device=param.device)
+                    param.data.index_copy_(axis, index, values.to(param.device, param.dtype))
+
+    def __call__(self, module, args):
+        if self.rows:
+            self.restore(module)
+        return None
+
+    def set(self, module: nn.Module, indices: Sequence[int]) -> None:
+        """Freeze *indices* too (already frozen ones keep their values)."""
+        self.restore(module)
+        keep = sorted(self.indices() | {int(i) for i in indices})
+        self._capture(module, keep)
+
+    def unset(self, module: nn.Module, indices: Optional[Sequence[int]]) -> None:
+        self.restore(module)
+        keep = [] if indices is None else sorted(self.indices() - {int(i) for i in indices})
+        self._capture(module, keep)
+
+    def recapture(self, module: nn.Module) -> None:
+        """After an explicit edit of frozen rows (reset / perturb): keep the new values."""
+        self._capture(module, sorted(self.indices()))
+
+    def _capture(self, module: nn.Module, keep: List[int]) -> None:
+        self.rows = {}
+        if not keep:
+            return
+        weight = getattr(module, "weight", None)
+        if isinstance(weight, th.Tensor):
+            axis = _weight_out_axis(module) if weight.ndim > 1 else 0
+            self.rows["weight"] = (axis, keep, weight.detach().index_select(axis, th.as_tensor(
+                keep, device=weight.device)).clone().cpu())
+        bias = getattr(module, "bias", None)
+        if isinstance(bias, th.Tensor) and bias.ndim == 1:
+            self.rows["bias"] = (0, keep, bias.detach().index_select(0, th.as_tensor(
+                keep, device=bias.device)).clone().cpu())
+
+
 def _frozen_neurons(module: nn.Module, tracked: bool) -> Tuple[bool, int, set]:
     """(whole layer frozen, frozen neuron count, frozen indices)."""
     params = list(module.parameters(recurse=False))
@@ -894,6 +1086,9 @@ def _frozen_neurons(module: nn.Module, tracked: bool) -> Tuple[bool, int, set]:
     if tracked:
         lrs = (getattr(module, "neuron_2_lr", {}) or {}).get("weight", {})
         indices = {int(i) for i, lr in dict(lrs).items() if float(lr) == 0.0}
+    hook = FrozenRows.of(module)
+    if hook is not None:
+        indices |= hook.indices()
     return whole, len(indices), indices
 
 
@@ -957,6 +1152,18 @@ def build_architecture(model, trace: Optional[ArchitectureTrace], version: int =
     # A module that ran as one unit hides its children (they never ran).
     hidden_prefixes = tuple(f"{name}." for name in leaf_modules if name in modules and _has_children(modules[name]))
 
+    # A parameter held by several modules (a language model's lm_head tied to
+    # its token embedding): editing one edits the others -- say so.
+    owners: Dict[int, List[str]] = {}
+    for name, module in modules.items():
+        for param in module.parameters(recurse=False):
+            if name not in owners.setdefault(id(param), []):
+                owners[id(param)].append(name)
+
+    def _tied_with(name: str, module: nn.Module) -> List[str]:
+        return sorted({o for param in module.parameters(recurse=False)
+                       for o in owners.get(id(param), []) if o != name})
+
     nodes: List[dict] = []
     group_ids: List[str] = []
     for name, module in modules.items():
@@ -965,20 +1172,26 @@ def build_architecture(model, trace: Optional[ArchitectureTrace], version: int =
         parent = name.rsplit(".", 1)[0] if "." in name else ""
         depth = name.count(".")
         total, trainable = _count_params(module)
+        description = _extra_repr(module)
+        tied = _tied_with(name, module)
+        if tied:
+            description = f"{description}; weights tied with {', '.join(tied)}" if description \
+                else f"weights tied with {', '.join(tied)}"
         base = {
             "name": name.rsplit(".", 1)[-1],
             "parent_id": parent,
             "type": _module_type(module),
             "parameter_count": total,
             "trainable_parameter_count": trainable,
-            "description": _extra_repr(module),
+            "description": description,
             "depth": depth,
             "module_id": name,
         }
         is_group = _has_children(module) and name not in leaf_modules
         if is_group:
             rec = containers.get(name, {})
-            role = declared_roles.get(name) or (guess_role(name) if depth <= 2 else "block")
+            role = declared_roles.get(name) or _deep_role(name, module) \
+                or (guess_role(name) if depth <= 2 else "block")
             node = dict(base, id=name, kind="group", role=role,
                         layer_id=-1, input_shape=rec.get("in_shape", []),
                         output_shape=rec.get("out_shape", []), order=-1, call_index=1,
@@ -1027,6 +1240,23 @@ def build_architecture(model, trace: Optional[ArchitectureTrace], version: int =
             if group["order"] < 0 or node["order"] < group["order"]:
                 group["order"] = node["order"]
             parent = group["parent_id"]
+
+    # Residual adds ("+" nodes), inside the group they happened in.
+    group_set = set(group_ids)
+    for rec in (trace.merges.values() if trace is not None else []):
+        parent = rec["scope"]
+        while parent and parent not in group_set:
+            parent = _parent_name(parent)
+        nodes.append({
+            "id": rec["node_id"], "name": "add", "kind": "op", "parent_id": parent, "type": "Add",
+            "role": "", "layer_id": -1, "parameter_count": 0, "trainable_parameter_count": 0,
+            "description": "adds two branches (a residual / skip connection)",
+            "depth": parent.count(".") + 1 if parent else 0, "module_id": "",
+            "input_shape": rec["out_shape"], "output_shape": rec["out_shape"],
+            "order": int(rec["order"]), "call_index": int(rec["call_index"]),
+            "frozen": False, "frozen_neuron_count": 0, "supported_ops": [],
+            "input_neurons": 0, "output_neurons": 0, "executed": True,
+        })
 
     _assign_bottleneck(nodes)
 
@@ -1249,6 +1479,70 @@ class RepresentationSession:
         }
 
 
+def _sdpa_weights(q, k, v=None, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None,
+                  enable_gqa=False, **_ignored) -> Optional[th.Tensor]:
+    """The attention weights F.scaled_dot_product_attention used (it never
+    returns them): softmax(q k^T * scale + mask), (B, heads, T, S)."""
+    if not isinstance(q, th.Tensor) or not isinstance(k, th.Tensor) or q.ndim < 3:
+        return None
+    if q.ndim >= 4 and k.shape[-3] != q.shape[-3] and q.shape[-3] % k.shape[-3] == 0:
+        k = k.repeat_interleave(q.shape[-3] // k.shape[-3], dim=-3)
+    L, S = q.shape[-2], k.shape[-2]
+    scale = float(scale) if scale is not None else 1.0 / math.sqrt(q.shape[-1])
+    att = (q.float() @ k.float().transpose(-2, -1)) * scale
+    if is_causal:
+        keep = th.ones(L, S, dtype=th.bool, device=att.device).tril()
+        att = att.masked_fill(~keep, float("-inf"))
+    if isinstance(attn_mask, th.Tensor):
+        if attn_mask.dtype == th.bool:
+            att = att.masked_fill(~attn_mask, float("-inf"))
+        else:
+            att = att + attn_mask.float()
+    return th.nan_to_num(att.softmax(dim=-1), nan=0.0)
+
+
+_ATTENTION_TOKENS = frozenset({"attn", "attention", "mha", "selfattention", "crossattention"})
+
+
+def _is_attention_module(name: str, module: Optional[nn.Module]) -> bool:
+    kind = type(module).__name__.lower() if module is not None else ""
+    if "attention" in kind or kind.endswith("attn"):
+        return True
+    return bool(set(_tokens(name.rsplit(".", 1)[-1])) & _ATTENTION_TOKENS)
+
+
+def _has_attention(inner: nn.Module) -> bool:
+    """Any module that looks like attention (worth watching for weights)."""
+    return any(_is_attention_module(name, m) for name, m in inner.named_modules() if name)
+
+
+class _AttentionMode(TorchFunctionMode):
+    """Catches attention weights computed functionally inside a module: a
+    softmax over the last dim of a (B, heads, T, S) tensor in an attention
+    module, or F.scaled_dot_product_attention (weights recomputed)."""
+
+    def __init__(self, on_weights: Callable[[th.Tensor, bool], None]):
+        super().__init__()
+        self.on_weights = on_weights
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        out = func(*args, **kwargs)
+        try:
+            name = getattr(func, "__name__", "")
+            if name == "scaled_dot_product_attention":
+                weights = _sdpa_weights(*args, **kwargs)
+                if weights is not None:
+                    self.on_weights(weights, True)
+            elif name == "softmax" and isinstance(out, th.Tensor) and out.ndim == 4:
+                dim = kwargs.get("dim", args[1] if len(args) > 1 else None)
+                if dim in (-1, 3):
+                    self.on_weights(out, False)
+        except Exception as exc:
+            logger.debug(f"[modeling] attention capture failed: {exc}")
+        return out
+
+
 class _Capture:
     """Hook callbacks that feed a session from forward passes."""
 
@@ -1269,12 +1563,28 @@ class _Capture:
         # is (RGB / gray), and so is every layer input that is this very
         # tensor (typically the first conv).
         self._model_input: Optional[th.Tensor] = None
+        self.tracker: Optional["_CallTracker"] = None    # set by the forward
+        self.inner: Optional[nn.Module] = None
+
+    def on_attention(self, weights: th.Tensor, explicit: bool) -> None:
+        """Attention weights (B, heads, T, S) seen inside the current module:
+        its "attention" previews, one tile per head."""
+        stack = self.tracker.stack if self.tracker is not None else []
+        frame = stack[-1] if stack else None
+        if frame is None or not frame.name:
+            return
+        if not explicit and not _is_attention_module(frame.name, frame.module):
+            return
+        node_id = frame.name if frame.had_child else frame.node_id
+        if not self._wanted(node_id) or weights.ndim != 4:
+            return
+        self._store_previews(node_id, "attention", weights.detach(), 1, layout="attention")
 
     def _wanted(self, node_id: str) -> bool:
         return self.only is None or node_id in self.only
 
     def _store_previews(self, node_id: str, direction: str, tensor: th.Tensor, axis: Optional[int],
-                        as_image: bool = False):
+                        as_image: bool = False, layout: str = ""):
         if not self.preview_rows:
             return
         session = self.session
@@ -1294,6 +1604,12 @@ class _Capture:
             preview = make_preview(sample, slot_axis, self.max_channels, self.tile, as_image=as_image)
             if preview is None:
                 continue
+            if layout:
+                preview["layout"] = layout
+            if preview.get("layout") == "tokens":
+                text = _token_text(self.inner, preview.get("token_ids") or [])
+                if text:
+                    preview["token_text"] = text
             sid, origin = session.preview_ids[slot]
             preview.update(sample_id=sid, origin=origin, direction=direction)
             while len(bucket) <= slot:
@@ -1387,6 +1703,9 @@ class ModelRepresentationManager:
             return dummy[:1]
         shape = getattr(inner, "input_shape", None)
         if isinstance(shape, (tuple, list)) and shape and all(isinstance(s, int) for s in shape):
+            vocab = getattr(inner, "vocab_size", None)
+            if isinstance(vocab, int) and vocab > 0:     # a language model: token ids
+                return th.randint(0, vocab, (1,) + tuple(shape[1:]))
             return th.randn((1,) + tuple(shape[1:]))
         return None
 
@@ -1476,14 +1795,31 @@ class ModelRepresentationManager:
         rows = {row: slot for row, slot in slots.items() if row < size}
         capture = _Capture(session, [(c[0], c[1]) for c in chunk], size, rows, only,
                            max_channels, store_stats, tile)
-        with _inference_mode(model, inner), _CallTracker(inner, capture.on_pre, capture.on_post):
-            _call_model(model, inputs)
+        tracker = _CallTracker(inner, capture.on_pre, capture.on_post)
+        capture.tracker = tracker
+        capture.inner = inner
+        with _inference_mode(model, inner), tracker:
+            if rows and self._watch_attention(inner):
+                with _AttentionMode(capture.on_attention):
+                    _call_model(model, inputs)
+            else:
+                _call_model(model, inputs)
         if self._trace_inputs is None:
             try:
                 single = build_batch(entry, [chunk[0][0]])
                 self._trace_inputs = _inputs_from_batch(single, inner)
             except Exception:
                 pass
+
+    def _watch_attention(self, inner: nn.Module) -> bool:
+        """Whether forwards should catch attention weights: the model has
+        attention-like modules (cached per structure)."""
+        key = (id(inner), self.version)
+        cached = getattr(self, "_attention_key", None)
+        if cached != key:
+            self._attention_key = key
+            self._attention_on = _has_attention(inner)
+        return self._attention_on
 
     def _run(self, session: RepresentationSession, model, resolved) -> None:
         inner = resolve_inner(model)
@@ -1567,7 +1903,7 @@ class ModelRepresentationManager:
                                 max_channels=max_channels, store_stats=False,
                                 tile=max(8, min(int(tile), 256)))
         bucket = scratch.previews.get(node_id, {})
-        return [p for direction in ("input", "output") for p in (bucket.get(direction) or []) if p]
+        return [p for direction in ("input", "output", "attention") for p in (bucket.get(direction) or []) if p]
 
     def summaries(self, session: RepresentationSession) -> List[dict]:
         return [acc.summary(node_id) for node_id, acc in list(session.accs.items())]
@@ -1714,7 +2050,7 @@ def layer_details(model, loaders, node_id: str, session_id: str = "",
         except Exception as exc:
             logger.debug(f"[modeling] lazy previews failed for {node_id}: {exc}")
         bucket = session.previews.get(node_id, {})
-        for direction in ("input", "output"):
+        for direction in ("input", "output", "attention"):
             for preview in (bucket.get(direction) or [])[:max_samples]:
                 if preview is None:
                     continue
@@ -1736,7 +2072,52 @@ def layer_details(model, loaders, node_id: str, session_id: str = "",
         "neuron_axis": neuron_axis, "children": children,
         "health_source": health_source,
         "model_age": _model_age(model),
+        "neuron_groups": neuron_groups(inner, node_id, len(neurons)) if neurons else [],
     }
+
+
+_HEAD_ATTRS = ("n_head", "num_heads", "n_heads", "nhead", "num_attention_heads", "heads")
+_WIDTH_ATTRS = ("n_embd", "embed_dim", "hidden_size", "d_model", "dim", "embedding_dim")
+# Output projections: their OUTPUT neurons are the residual width, not heads.
+_OUT_PROJ_NAMES = frozenset({"wo", "o", "o_proj", "out_proj", "c_proj", "proj", "dense", "out"})
+
+
+def neuron_groups(inner: Optional[nn.Module], node_id: str, n_neurons: int) -> List[dict]:
+    """How a projection's output neurons split into attention heads (and, for
+    a fused projection, into q / k / v): [{label, start, size, kind}]. Empty
+    when the layer is not a per-head projection of an attention module."""
+    if inner is None or n_neurons <= 0:
+        return []
+    module_id = node_id.split("#", 1)[0]
+    leaf = module_id.rsplit(".", 1)[-1].lower()
+    if leaf in _OUT_PROJ_NAMES:
+        return []
+    parent_id = _parent_name(module_id)
+    try:
+        parent = inner.get_submodule(parent_id) if parent_id else inner
+    except Exception:
+        return []
+    if not _is_attention_module(parent_id, parent):
+        return []
+    heads = next((int(getattr(parent, a)) for a in _HEAD_ATTRS
+                  if isinstance(getattr(parent, a, None), int) and int(getattr(parent, a)) > 0), 0)
+    if heads <= 0:
+        return []
+    width = next((int(getattr(parent, a)) for a in _WIDTH_ATTRS
+                  if isinstance(getattr(parent, a, None), int) and int(getattr(parent, a)) > 0), 0)
+    if width and n_neurons % width == 0 and n_neurons // width in (1, 2, 3):
+        parts = n_neurons // width
+    else:
+        fused = {"qkv", "c_attn", "in_proj", "wqkv"}
+        parts = 3 if leaf in fused or "qkv" in leaf else (2 if leaf in {"kv", "wkv", "kv_proj"} else 1)
+        width = n_neurons // parts
+    if width % heads or parts * width != n_neurons:
+        return []
+    head_dim = width // heads
+    names = {1: [""], 2: ["k", "v"], 3: ["q", "k", "v"]}[parts]
+    return [{"label": f"{(names[p] + ' · ') if names[p] else ''}head {h}", "start": p * width + h * head_dim,
+             "size": head_dim, "kind": names[p] or "head"}
+            for p in range(parts) for h in range(heads)]
 
 
 def _model_age(model) -> int:
@@ -1855,11 +2236,20 @@ def edit_layer(model, node_id: str, op: str, neuron_indices: Sequence[int] = (),
         if tracked and indices and not is_group:
             (model.freeze_neurons if frozen else model.unfreeze_neurons)(layer_id, indices)
             message = f"{op} {len(indices)} neuron(s) of {module_id}"
+        elif indices and not is_group:
+            # Any layer: the frozen rows are put back before every forward.
+            weight = getattr(module, "weight", None)
+            if not isinstance(weight, th.Tensor):
+                raise ValueError(f"{module_id} has no weights")
+            axis = _weight_out_axis(module) if weight.ndim > 1 else 0
+            if max(indices) >= weight.shape[axis]:
+                raise ValueError(f"neuron index {max(indices)} out of range for {module_id} "
+                                 f"({weight.shape[axis]} neurons)")
+            hook = FrozenRows.of(module, create=frozen)
+            if hook is not None:
+                (hook.set if frozen else hook.unset)(module, indices)
+            message = f"{op} {len(indices)} neuron(s) of {module_id}"
         else:
-            if indices and not is_group:
-                raise ValueError(
-                    "neuron-level freezing needs compute_dependencies=True; "
-                    "leave the selection empty to freeze the whole layer")
             params = list(module.parameters())
             if not params:
                 raise ValueError(f"{module_id} has no parameters")
@@ -1871,6 +2261,12 @@ def edit_layer(model, node_id: str, op: str, neuron_indices: Sequence[int] = (),
                     pass
             for param in params:
                 param.requires_grad_(not frozen)
+            if not frozen:
+                # Unfreezing the layer lifts its per-neuron freezes too.
+                for sub_module in ([module] if not is_group else list(module.modules())):
+                    hook = FrozenRows.of(sub_module)
+                    if hook is not None:
+                        hook.unset(sub_module, None)
             message = f"{op} {module_id} ({sum(p.numel() for p in params):,} parameters)"
         manager.note_edit(structural=False)
         return {"message": message}
@@ -1898,6 +2294,9 @@ def edit_layer(model, node_id: str, op: str, neuron_indices: Sequence[int] = (),
         weight = getattr(target, "weight", None)
         if not isinstance(weight, th.Tensor):
             continue
+        frozen_rows = FrozenRows.of(target)
+        if frozen_rows is not None:
+            frozen_rows.restore(target)       # edit the frozen values, not drifted ones
         axis = _weight_out_axis(target) if weight.ndim > 1 else 0
         if indices and max(indices) >= weight.shape[axis]:
             raise ValueError(f"neuron index {max(indices)} out of range for {module_id} "
@@ -1924,6 +2323,8 @@ def edit_layer(model, node_id: str, op: str, neuron_indices: Sequence[int] = (),
                     bsel = indices if indices else slice(None)
                     b = bias[bsel]
                     bias[bsel] = b + float(ratio) * b * th.randint_like(b, -1, 2).float()
+        if frozen_rows is not None:
+            frozen_rows.recapture(target)     # an explicit edit sticks, frozen or not
         done += 1
     if not done:
         raise ValueError(f"{module_id} has no weights to {op}")

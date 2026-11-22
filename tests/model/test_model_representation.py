@@ -46,6 +46,14 @@ def discover():
     return sorted(found, key=lambda row: row[0])
 
 
+def example_input(model, shape):
+    """One input the model accepts: token ids for a language model, noise otherwise."""
+    vocab = getattr(model, "vocab_size", None)
+    if vocab:
+        return th.randint(0, int(vocab), (1,) + tuple(shape[1:]))
+    return th.randn((1,) + tuple(shape[1:]))
+
+
 def reachable_from(edges, start):
     graph = defaultdict(list)
     for edge in edges:
@@ -87,7 +95,7 @@ class TestZooArchitectures(unittest.TestCase):
         self.assertGreater(len(models), 10)
         for name, model, shape in models:
             with self.subTest(model=name):
-                trace = mr.trace_architecture(model, th.randn((1,) + shape[1:]))
+                trace = mr.trace_architecture(model, example_input(model, shape))
                 self.assertTrue(trace.traced, f"{name}: {trace.message}")
                 arch = mr.build_architecture(model, trace)
                 nodes = {n["id"]: n for n in arch["nodes"]}

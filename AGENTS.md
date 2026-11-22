@@ -177,6 +177,19 @@ Conventions that matter for correctness:
   Samples in both sides are left out of both; each side is capped (256, an
   even seeded subset). Studio: grid / tag right-click → "Compare: Set as A",
   then "Compare with A"; two selected samples → "Compare These 2 Samples".
+  **Transformers** (`MicroGPT`, `NanoGPT` in the baseline zoo; token-id inputs
+  are recognised by the model's `vocab_size`): a residual add of two branches
+  is its own small "+" node (kind `op`), so the residual stream is a chain,
+  not every layer wired to every earlier one; attention / MLP groups get
+  those roles; attention weights computed inside an attention module
+  (`softmax` over (B, heads, T, S), or `scaled_dot_product_attention`) are
+  previewed per head; q / k / v projection neurons are grouped by head
+  (`neuron_groups`) so a head can be selected and frozen / reset / perturbed;
+  the input shows as tokens (text through the model's `itos` or
+  `decode_tokens`). Single neurons can be frozen on ANY layer, without
+  `compute_dependencies` (their weights are put back before every forward).
+  Prune / add on a transformer still need the dependency engine, which cannot
+  trace one yet (attention reshapes, tied embeddings).
   Code: `weightslab/weightslab/components/model_representation.py`; tests:
   `tests/model/test_model_representation.py` (sweeps the whole baseline zoo)
   and `test_model_representation_ultralytics.py` (YOLO11 detect + segment).
