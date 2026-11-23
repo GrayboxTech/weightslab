@@ -24,9 +24,16 @@ log() { echo "$*" >&2; }
 
 # weights_studio's branches, listed once. Retried, and fatal when it keeps
 # failing: a network blip must not silently ship a different UI.
+#
+# Listed from OUTSIDE the weightslab checkout: actions/checkout stores this
+# repo's GITHUB_TOKEN as an http extraheader in the checkout's local git
+# config, and inside it that header replaces the weights_studio token in
+# CLONE_URL -- GitHub then answers "Repository not found" for the private
+# repo. (git clone is unaffected: it does not read the current repo's config.)
+LISTING_DIR="${RUNNER_TEMP:-/tmp}"
 heads=""
 for attempt in 1 2 3; do
-  if heads="$(git ls-remote --heads "${CLONE_URL}")" && [ -n "${heads}" ]; then
+  if heads="$(cd "${LISTING_DIR}" && git ls-remote --heads "${CLONE_URL}")" && [ -n "${heads}" ]; then
     break
   fi
   heads=""
