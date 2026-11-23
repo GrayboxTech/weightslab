@@ -47,6 +47,14 @@ fi
 ws_branches="$(printf '%s\n' "${heads}" | sed -n 's#^[0-9a-f]*[[:space:]]*refs/heads/##p')"
 ws_has() { printf '%s\n' "${ws_branches}" | grep -Fxq -- "$1"; }
 
+# actions/checkout fetches a pushed tag as a lightweight ref, without its
+# message (the v2.0.5.dev0 run never saw its "@v2.0.5--fx"). Fetch the tag
+# object itself so an annotated tag's message can name the branch.
+if [ -n "${TAG}" ]; then
+  git fetch --quiet --no-tags origin "+refs/tags/${TAG}:refs/tags/${TAG}" \
+    || log "Could not fetch the tag ${TAG}; reading the local tag and the commit message"
+fi
+
 if [ -n "${TAG}" ] && git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
   TAG_COMMIT="$(git rev-list -n 1 "refs/tags/${TAG}")"
 else
