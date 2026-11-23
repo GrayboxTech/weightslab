@@ -199,6 +199,16 @@ class ExperimentServiceStub(object):
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.SetExperimentRunNotesRequest.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.SetExperimentRunNotesResponse.FromString,
                 _registered_method=True)
+        self.MergeExperimentRuns = channel.unary_unary(
+                '/ExperimentService/MergeExperimentRuns',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.MergeExperimentRunsRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.MergeExperimentRunsResponse.FromString,
+                _registered_method=True)
+        self.SplitExperimentRun = channel.unary_unary(
+                '/ExperimentService/SplitExperimentRun',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.SplitExperimentRunRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.SplitExperimentRunResponse.FromString,
+                _registered_method=True)
         self.TriggerEvaluation = channel.unary_unary(
                 '/ExperimentService/TriggerEvaluation',
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.TriggerEvaluationRequest.SerializeToString,
@@ -470,6 +480,21 @@ class ExperimentServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def MergeExperimentRuns(self, request, context):
+        """Merge two or more runs, no two of which share a training step, into one
+        (the run reaching the latest step keeps its hash), and undo it. Lossless:
+        a split gives back exactly the runs that were merged.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SplitExperimentRun(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def TriggerEvaluation(self, request, context):
         """Evaluation mode
         """
@@ -677,6 +702,16 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     servicer.SetExperimentRunNotes,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.SetExperimentRunNotesRequest.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.SetExperimentRunNotesResponse.SerializeToString,
+            ),
+            'MergeExperimentRuns': grpc.unary_unary_rpc_method_handler(
+                    servicer.MergeExperimentRuns,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.MergeExperimentRunsRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.MergeExperimentRunsResponse.SerializeToString,
+            ),
+            'SplitExperimentRun': grpc.unary_unary_rpc_method_handler(
+                    servicer.SplitExperimentRun,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.SplitExperimentRunRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.SplitExperimentRunResponse.SerializeToString,
             ),
             'TriggerEvaluation': grpc.unary_unary_rpc_method_handler(
                     servicer.TriggerEvaluation,
@@ -1595,6 +1630,60 @@ class ExperimentService(object):
             '/ExperimentService/SetExperimentRunNotes',
             weightslab_dot_proto_dot_experiment__service__pb2.SetExperimentRunNotesRequest.SerializeToString,
             weightslab_dot_proto_dot_experiment__service__pb2.SetExperimentRunNotesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def MergeExperimentRuns(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/MergeExperimentRuns',
+            weightslab_dot_proto_dot_experiment__service__pb2.MergeExperimentRunsRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.MergeExperimentRunsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SplitExperimentRun(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/SplitExperimentRun',
+            weightslab_dot_proto_dot_experiment__service__pb2.SplitExperimentRunRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.SplitExperimentRunResponse.FromString,
             options,
             channel_credentials,
             insecure,
