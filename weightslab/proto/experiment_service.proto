@@ -87,6 +87,11 @@ service ExperimentService {
   rpc ListExperimentRuns (ListExperimentRunsRequest) returns (ListExperimentRunsResponse);
   rpc RenameExperimentRun (RenameExperimentRunRequest) returns (RenameExperimentRunResponse);
   rpc SetExperimentRunNotes (SetExperimentRunNotesRequest) returns (SetExperimentRunNotesResponse);
+  // Merge two or more runs, no two of which share a training step, into one
+  // (the run reaching the latest step keeps its hash), and undo it. Lossless:
+  // a split gives back exactly the runs that were merged.
+  rpc MergeExperimentRuns (MergeExperimentRunsRequest) returns (MergeExperimentRunsResponse);
+  rpc SplitExperimentRun (SplitExperimentRunRequest) returns (SplitExperimentRunResponse);
 
   // Evaluation mode
   rpc TriggerEvaluation (TriggerEvaluationRequest) returns (TriggerEvaluationResponse);
@@ -855,6 +860,46 @@ message ExperimentRunInfo {
   string last_used = 5;            // ISO-8601
   int32 latest_weight_step = 6;    // -1 if no weight checkpoint saved yet
   bool is_current = 7;             // Whether this is the manager's currently loaded run
+  // Set only on a merged run: the original runs it is made of, oldest first.
+  // The run's own segment comes last with last_step = -1 (still growing).
+  repeated MergedRunSegment merged_segments = 8;
+}
+
+// One original run inside a merged run, by the steps it trained.
+message MergedRunSegment {
+  string experiment_hash = 1;
+  string experiment_name = 2;
+  int64 first_step = 3;
+  int64 last_step = 4;             // -1: the merged run's own, still-growing segment
+}
+
+// Steps no run trained between two segments of a merged run: the curve is
+// drawn dashed from after_step to before_step.
+message RunStepGap {
+  int64 after_step = 1;
+  int64 before_step = 2;
+}
+
+message MergeExperimentRunsRequest {
+  repeated string experiment_hashes = 1;   // two or more
+}
+
+message MergeExperimentRunsResponse {
+  bool success = 1;
+  string message = 2;                      // why it was refused, e.g. the overlapping steps
+  string merged_hash = 3;                  // the run that kept its hash
+  repeated string absorbed_hashes = 4;     // gone from the runs list, back on split
+  repeated RunStepGap gaps = 5;
+}
+
+message SplitExperimentRunRequest {
+  string experiment_hash = 1;
+}
+
+message SplitExperimentRunResponse {
+  bool success = 1;
+  string message = 2;
+  repeated string restored_hashes = 3;
 }
 
 message ListExperimentRunsRequest {}

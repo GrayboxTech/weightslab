@@ -604,7 +604,14 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                     target_step=target_step,
                 )
             else:
-                success = checkpoint_manager.load_state(experiment_hash, load_logger=False) # Don't load logger for full restore to avoid overwriting signals already in memory
+                # The run's hyperparameters too: left as they were, resuming
+                # trained the restored weights with the previously loaded run's
+                # settings, and so logged under that run's hash.
+                success = checkpoint_manager.load_state(
+                    experiment_hash,
+                    load_config=True,
+                    load_logger=False,  # don't overwrite the signals already in memory
+                )
 
             # Reply
             if success:
@@ -688,6 +695,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                         else -1
                     ),
                     is_current=bool(run.get('is_current', False)),
+                    merged_segments=self._merged_segments_pb(checkpoint_manager, run),
                 )
                 for run in checkpoint_manager.list_runs()
             ]
@@ -744,6 +752,82 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         except Exception as e:
             logger.error(f"Error setting experiment run notes: {str(e)}")
             return pb2.SetExperimentRunNotesResponse(success=False, message=f"Error: {str(e)}")
+
+    @staticmethod
+    def _merged_segments_pb(checkpoint_manager, run: dict) -> list:
+        """A merged run's original runs, oldest first (empty for any other run)."""
+        if not run.get('merged_from'):
+            return []
+        names = {m.get('hash'): m.get('experiment_name', '') for m in run.get('merged_from') or []}
+        names[run.get('hash', '')] = run.get('experiment_name', '') or ''
+        try:
+            segments = checkpoint_manager.run_merge_segments(run.get('hash', ''), run)
+        except Exception as e:
+            logger.debug(f"Could not read merge segments of {run.get('hash')}: {e}")
+            return []
+        return [
+            pb2.MergedRunSegment(
+                experiment_hash=h, experiment_name=names.get(h, '') or '',
+                first_step=int(lo), last_step=int(hi),
+            )
+            for h, lo, hi in segments
+        ]
+
+    def MergeExperimentRuns(self, request, context):
+        """Merge two or more runs that share no step into one; the latest run keeps its hash."""
+        hashes = [h for h in request.experiment_hashes if h]
+        try:
+            checkpoint_manager = self._get_checkpoint_manager()
+            if checkpoint_manager is None:
+                return pb2.MergeExperimentRunsResponse(
+                    success=False, message="Checkpoint manager not initialized")
+            if len(hashes) < 2:
+                return pb2.MergeExperimentRunsResponse(
+                    success=False, message=f"Pick at least two runs to merge (got {len(hashes)}).")
+
+            result = checkpoint_manager.merge_runs(hashes)
+            self._log_audit(
+                "experiment_merge",
+                "success" if result.get('success') else "failed",
+                {"experiment_hashes": hashes, "merged_hash": result.get('merged_hash', '')},
+                error=None if result.get('success') else result.get('message'),
+            )
+            return pb2.MergeExperimentRunsResponse(
+                success=bool(result.get('success')),
+                message=result.get('message', ''),
+                merged_hash=result.get('merged_hash', '') or '',
+                absorbed_hashes=list(result.get('absorbed_hashes') or []),
+                gaps=[pb2.RunStepGap(after_step=int(a), before_step=int(b))
+                      for a, b in result.get('gaps') or []],
+            )
+        except Exception as e:
+            logger.error(f"Error merging experiment runs {hashes}: {e}")
+            return pb2.MergeExperimentRunsResponse(success=False, message=f"Error: {e}")
+
+    def SplitExperimentRun(self, request, context):
+        """Give back the runs a merged run is made of."""
+        try:
+            checkpoint_manager = self._get_checkpoint_manager()
+            if checkpoint_manager is None:
+                return pb2.SplitExperimentRunResponse(
+                    success=False, message="Checkpoint manager not initialized")
+
+            result = checkpoint_manager.split_run(request.experiment_hash)
+            self._log_audit(
+                "experiment_split",
+                "success" if result.get('success') else "failed",
+                {"experiment_hash": request.experiment_hash,
+                 "restored_hashes": list(result.get('restored_hashes') or [])},
+                error=None if result.get('success') else result.get('message'),
+            )
+            return pb2.SplitExperimentRunResponse(
+                success=bool(result.get('success')),
+                message=result.get('message', ''),
+                restored_hashes=list(result.get('restored_hashes') or []),
+            )
+        except Exception as e:
+            logger.error(f"Error splitting experiment run {request.experiment_hash}: {e}")
+            return pb2.SplitExperimentRunResponse(success=False, message=f"Error: {e}")
 
     # -------------------------------------------------------------------------
     # Evaluation mode RPC handlers
