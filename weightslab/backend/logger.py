@@ -33,6 +33,7 @@ import functools
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections import defaultdict, deque
@@ -494,7 +495,8 @@ class LoggerQueue:
                 trend_margin DOUBLE,
                 value_min DOUBLE,
                 value_max DOUBLE,
-                seq BIGINT
+                seq BIGINT,
+                origin_hash VARCHAR
             );
             CREATE TABLE IF NOT EXISTS {prefix}per_sample (
                 metric_name VARCHAR,
@@ -502,7 +504,8 @@ class LoggerQueue:
                 sample_id VARCHAR,
                 step INTEGER,
                 value REAL,
-                seq BIGINT
+                seq BIGINT,
+                origin_hash VARCHAR
             );
             CREATE TABLE IF NOT EXISTS {prefix}per_instance (
                 metric_name VARCHAR,
@@ -511,7 +514,8 @@ class LoggerQueue:
                 annotation_id INTEGER,
                 step INTEGER,
                 value REAL,
-                seq BIGINT
+                seq BIGINT,
+                origin_hash VARCHAR
             );
         """
 
@@ -531,7 +535,19 @@ class LoggerQueue:
         ("trend_margin", "DOUBLE", "NULL"),
         ("value_min", "DOUBLE", "NULL"),
         ("value_max", "DOUBLE", "NULL"),
+        ("origin_hash", "VARCHAR", "NULL"),
     )
+
+    # `origin_hash` is the hash a row was logged under before a run merge
+    # rewrote its experiment_hash (see merge_run_histories). NULL for every row
+    # that was never merged, which is all of them until a merge happens; it is
+    # what lets split_run_histories put each row back exactly where it came
+    # from. Present on all three tables, so an older DB file gets it everywhere.
+    _COLUMN_MIGRATIONS = {
+        "signals": _SIGNAL_MIGRATIONS,
+        "per_sample": (("origin_hash", "VARCHAR", "NULL"),),
+        "per_instance": (("origin_hash", "VARCHAR", "NULL"),),
+    }
 
     # Indexes for the read paths that filter rather than scan. DuckDB is
     # columnar and leans on zone maps, so these matter less than on a row store
@@ -586,28 +602,30 @@ class LoggerQueue:
         self._ensure_indexes()
 
     def _migrate_signal_columns(self) -> None:
-        """Add any post-release `signals` columns missing from an older DB file."""
-        try:
-            existing = {
-                row[0] for row in self._conn.execute(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name = 'signals'"
-                ).fetchall()
-            }
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("Could not introspect signals columns: %s", exc)
-            return
-
-        for name, ddl_type, default in self._SIGNAL_MIGRATIONS:
-            if name in existing:
-                continue
+        """Add any post-release columns missing from an older DB file's tables."""
+        for table, migrations in self._COLUMN_MIGRATIONS.items():
             try:
-                self._conn.execute(
-                    f"ALTER TABLE signals ADD COLUMN {name} {ddl_type} DEFAULT {default}"
-                )
-                logger.info("Migrated signal history: added signals.%s", name)
-            except Exception as exc:
-                logger.warning("Failed to add signals.%s: %s", name, exc)
+                existing = {
+                    row[0] for row in self._conn.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = ? AND table_catalog = current_database()",
+                        [table],
+                    ).fetchall()
+                }
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("Could not introspect %s columns: %s", table, exc)
+                continue
+
+            for name, ddl_type, default in migrations:
+                if name in existing:
+                    continue
+                try:
+                    self._conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {name} {ddl_type} DEFAULT {default}"
+                    )
+                    logger.info("Migrated signal history: added %s.%s", table, name)
+                except Exception as exc:
+                    logger.warning("Failed to add %s.%s: %s", table, name, exc)
 
     _HISTORY_TABLES = ("signals", "per_sample", "per_instance")
 
@@ -650,7 +668,7 @@ class LoggerQueue:
                     self._conn.execute(self._schema_ddl(prefix="ondisk."))
                     for tbl in self._HISTORY_TABLES:
                         self._conn.execute(
-                            f"INSERT INTO ondisk.{tbl} SELECT * FROM {tbl}"
+                            f"INSERT INTO ondisk.{tbl} BY NAME SELECT * FROM {tbl}"
                         )
                     self._conn.execute("DETACH ondisk")
 
@@ -742,7 +760,11 @@ class LoggerQueue:
                 copied_any = False
                 for tbl in self._HISTORY_TABLES:
                     try:
-                        self._conn.execute(f"INSERT INTO {tbl} SELECT * FROM incoming.{tbl}")
+                        # BY NAME: a sibling DB written by an older weightslab
+                        # lacks the later columns (or holds them in another
+                        # order, as ALTER-added columns land at the end), so a
+                        # positional SELECT * would fail or misalign them.
+                        self._conn.execute(f"INSERT INTO {tbl} BY NAME SELECT * FROM incoming.{tbl}")
                         copied_any = True
                     except Exception as exc:
                         # Table may be missing in an older-schema sibling DB;
@@ -829,13 +851,15 @@ class LoggerQueue:
             if self._stage_sample:
                 df = pd.DataFrame(self._stage_sample, columns=_SAMPLE_COLS)
                 self._conn.register("_stg_ps", df)
-                self._conn.execute("INSERT INTO per_sample SELECT * FROM _stg_ps")
+                cols = ", ".join(_SAMPLE_COLS)
+                self._conn.execute(f"INSERT INTO per_sample ({cols}) SELECT {cols} FROM _stg_ps")
                 self._conn.unregister("_stg_ps")
                 self._stage_sample = []
             if self._stage_instance:
                 df = pd.DataFrame(self._stage_instance, columns=_INSTANCE_COLS)
                 self._conn.register("_stg_pi", df)
-                self._conn.execute("INSERT INTO per_instance SELECT * FROM _stg_pi")
+                cols = ", ".join(_INSTANCE_COLS)
+                self._conn.execute(f"INSERT INTO per_instance ({cols}) SELECT {cols} FROM _stg_pi")
                 self._conn.unregister("_stg_pi")
                 self._stage_instance = []
 
@@ -2588,6 +2612,242 @@ class LoggerQueue:
                     entry.pop("point_note", None)
 
         return bool(matched)
+
+    # ------------------------------------------------------------------
+    # Run merge / split (driven by CheckpointManager.merge_runs/split_run)
+    # ------------------------------------------------------------------
+    # A merge rewrites the absorbed run's rows to the kept run's hash, so every
+    # read path (curves, per-sample history, break-by-slices, step samples)
+    # sees one run with no change of its own. Each rewritten row keeps the hash
+    # it was logged under in `origin_hash`, which is all a split needs to put it
+    # back. Evaluation markers live under `<hash>_<n>`; they move to the next
+    # free `<kept>_<m>` numbers so they never collide with the kept run's own.
+
+    @staticmethod
+    def _evaluation_hash_pattern(hashes) -> str:
+        """Regex matching the evaluation hashes ``<hash>_<n>`` of any of *hashes*."""
+        alternatives = "|".join(re.escape(str(h)) for h in hashes)
+        return f"^({alternatives})_[0-9]+$"
+
+    def _evaluation_hashes_of(self, hashes) -> dict:
+        """``{eval_hash: n}`` for every ``<hash>_<n>`` of *hashes* in any table."""
+        pattern = self._evaluation_hash_pattern(hashes)
+        found = {}
+        for tbl in self._HISTORY_TABLES:
+            for (h,) in self._conn.execute(
+                f"SELECT DISTINCT experiment_hash FROM {tbl} "
+                "WHERE regexp_matches(experiment_hash, ?)", [pattern]
+            ).fetchall():
+                found[h] = int(h.rsplit("_", 1)[1])
+        return found
+
+    def run_segments(self, exp_hash: str) -> list:
+        """The pieces a run's training curves are made of, oldest first.
+
+        ``[(hash, first_step, last_step)]`` over the run's training points
+        (evaluation markers excluded). A run that was never merged is one
+        segment under its own hash; a merged run has one segment per original
+        run, keyed by the hash that run was logged under. Empty when the run
+        has logged nothing.
+        """
+        if not exp_hash:
+            return []
+        with self._lock:
+            self._flush_stage()
+            rows = self._conn.execute(
+                "SELECT COALESCE(origin_hash, experiment_hash) AS seg, MIN(step), MAX(step) "
+                "FROM signals WHERE experiment_hash = ? "
+                "AND NOT COALESCE(is_evaluation_marker, FALSE) "
+                "GROUP BY seg ORDER BY 2, 3",
+                [str(exp_hash)],
+            ).fetchall()
+        return [(seg, int(lo), int(hi)) for seg, lo, hi in rows]
+
+    def run_signal_segments(self, exp_hash: str) -> list:
+        """``[(signal, first_step, last_step)]`` of *exp_hash*, one per signal
+        and per original run (a merged run's pieces stay apart, so the steps
+        between them don't count as covered). Training points only."""
+        if not exp_hash:
+            return []
+        with self._lock:
+            self._flush_stage()
+            rows = self._conn.execute(
+                "SELECT metric_name, COALESCE(origin_hash, experiment_hash), MIN(step), MAX(step) "
+                "FROM signals WHERE experiment_hash = ? "
+                "AND NOT COALESCE(is_evaluation_marker, FALSE) "
+                "GROUP BY 1, 2 ORDER BY 1, 3",
+                [str(exp_hash)],
+            ).fetchall()
+        return [(metric, int(lo), int(hi)) for metric, _seg, lo, hi in rows]
+
+    def add_run_end_note(self, exp_hash: str, note: str, skip_prefixes=()) -> int:
+        """Append *note* to the last training point of every curve of *exp_hash*.
+
+        Curves whose name starts with one of *skip_prefixes* get none. An
+        existing note on that point is kept, with *note* on a new line after
+        it. Returns how many points were annotated. remove_point_note_text takes
+        it off again.
+        """
+        note = str(note or "").strip()
+        if not exp_hash or not note:
+            return 0
+        skip_prefixes = tuple(skip_prefixes or ())
+        with self._lock:
+            self._flush_stage()
+            ends = [
+                (metric_name, step) for metric_name, step in self._conn.execute(
+                    "SELECT metric_name, MAX(step) FROM signals "
+                    "WHERE experiment_hash = ? AND NOT COALESCE(is_evaluation_marker, FALSE) "
+                    "GROUP BY metric_name",
+                    [str(exp_hash)],
+                ).fetchall()
+                if not (skip_prefixes and str(metric_name).startswith(skip_prefixes))
+            ]
+            for metric_name, step in ends:
+                self._conn.execute(
+                    "UPDATE signals SET point_note = CASE "
+                    "WHEN COALESCE(point_note, '') = '' THEN ? "
+                    "ELSE point_note || chr(10) || ? END "
+                    "WHERE metric_name = ? AND experiment_hash = ? AND step = ? "
+                    "AND NOT COALESCE(is_evaluation_marker, FALSE)",
+                    [note, note, metric_name, str(exp_hash), int(step)],
+                )
+        return len(ends)
+
+    def remove_point_note_text(self, exp_hash: str, note: str) -> int:
+        """Take the line *note* out of every point note of *exp_hash* holding it.
+
+        The inverse of add_run_end_note: a note the user wrote on the same point
+        stays. Returns how many points changed.
+        """
+        note = str(note or "").strip()
+        if not exp_hash or not note:
+            return 0
+        with self._lock:
+            self._flush_stage()
+            rows = self._conn.execute(
+                "SELECT DISTINCT metric_name, step, point_note FROM signals "
+                "WHERE experiment_hash = ? AND contains(point_note, ?)",
+                [str(exp_hash), note],
+            ).fetchall()
+            changed = 0
+            for metric_name, step, current in rows:
+                kept = "\n".join(line for line in str(current).split("\n") if line.strip() != note)
+                if kept == current:
+                    continue
+                self._conn.execute(
+                    "UPDATE signals SET point_note = ? "
+                    "WHERE metric_name = ? AND experiment_hash = ? AND step = ? AND point_note = ?",
+                    [kept, metric_name, str(exp_hash), int(step), current],
+                )
+                changed += 1
+        return changed
+
+    def _rename_hashes(self, renames: dict, rows_sql: str, extra_params=()) -> int:
+        """Run one UPDATE per (old -> new) hash over every history table."""
+        moved = 0
+        for tbl in self._HISTORY_TABLES:
+            for old, new in renames.items():
+                result = self._conn.execute(
+                    f"UPDATE {tbl} SET {rows_sql} WHERE experiment_hash = ?",
+                    [new, *extra_params, old],
+                ).fetchone()
+                moved += int(result[0]) if result else 0
+        return moved
+
+    def _retarget_runtime_state(self, renames: dict) -> None:
+        """Point the in-memory per-hash state at the renamed hashes."""
+        for entry in self._pending_queue:
+            if isinstance(entry, dict) and entry.get("experiment_hash") in renames:
+                entry["experiment_hash"] = renames[entry["experiment_hash"]]
+        for key in list(self._loss_shape_dirty_samples):
+            graph_name, h = key
+            if h in renames:
+                self._loss_shape_dirty_samples[(graph_name, renames[h])] |= \
+                    self._loss_shape_dirty_samples.pop(key)
+        self._invalidate_qps_cache()
+
+    def merge_run_histories(self, keeper: str, absorbed) -> dict:
+        """Move the history of every *absorbed* run under *keeper*'s hash.
+
+        All three tables, training points and evaluation markers alike. Each
+        moved row remembers the hash it was logged under (``origin_hash``, kept
+        through later merges), so split_run_histories can undo this exactly.
+        Atomic: on any failure nothing has moved. Returns ``{"rows": n,
+        "evaluation_hashes": {old: new}}``.
+        """
+        keeper = str(keeper or "")
+        absorbed = [str(h) for h in dict.fromkeys(absorbed or []) if h and str(h) != keeper]
+        if not keeper or not absorbed:
+            return {"rows": 0, "evaluation_hashes": {}}
+
+        with self._lock:
+            self._flush_stage()
+            kept_evals = self._evaluation_hashes_of([keeper])
+            next_n = max(kept_evals.values(), default=0) + 1
+            eval_renames = {}
+            for old in sorted(self._evaluation_hashes_of(absorbed).items(),
+                              key=lambda item: (item[0].rsplit("_", 1)[0], item[1])):
+                eval_renames[old[0]] = f"{keeper}_{next_n}"
+                next_n += 1
+            renames = {h: keeper for h in absorbed}
+            renames.update(eval_renames)
+
+            self._conn.begin()
+            try:
+                moved = self._rename_hashes(
+                    renames, "origin_hash = COALESCE(origin_hash, experiment_hash), experiment_hash = ?")
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+            self._retarget_runtime_state(renames)
+
+        logger.info(f"[LoggerQueue] Merged {absorbed} into {keeper} ({moved} rows, "
+                    f"{len(eval_renames)} evaluation(s) renumbered)")
+        return {"rows": moved, "evaluation_hashes": eval_renames}
+
+    def split_run_histories(self, keeper: str, members) -> dict:
+        """Undo merge_run_histories: give every *members* row back its own hash.
+
+        Rows of *keeper* (and of its evaluation hashes) whose ``origin_hash`` is
+        one of *members*, or one of their ``<member>_<n>`` evaluation hashes,
+        return to that hash. Rows the kept run logged itself, before or after
+        the merge, stay where they are. Returns ``{"rows": n}``.
+        """
+        keeper = str(keeper or "")
+        members = [str(h) for h in dict.fromkeys(members or []) if h and str(h) != keeper]
+        if not keeper or not members:
+            return {"rows": 0}
+
+        placeholders = ",".join("?" * len(members))
+        where = (
+            "origin_hash IS NOT NULL "
+            "AND (experiment_hash = ? OR regexp_matches(experiment_hash, ?)) "
+            f"AND (origin_hash IN ({placeholders}) OR regexp_matches(origin_hash, ?))"
+        )
+        params = [keeper, self._evaluation_hash_pattern([keeper]),
+                  *members, self._evaluation_hash_pattern(members)]
+
+        with self._lock:
+            self._flush_stage()
+            self._conn.begin()
+            try:
+                moved = 0
+                for tbl in self._HISTORY_TABLES:
+                    result = self._conn.execute(
+                        f"UPDATE {tbl} SET experiment_hash = origin_hash, origin_hash = NULL "
+                        f"WHERE {where}", params,
+                    ).fetchone()
+                    moved += int(result[0]) if result else 0
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+            self._invalidate_qps_cache()
+
+        logger.info(f"[LoggerQueue] Split {members} back out of {keeper} ({moved} rows)")
+        return {"rows": moved}
 
     # ------------------------------------------------------------------
     # Snapshot loading (checkpoint persistence)
