@@ -1183,6 +1183,19 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           for BRANCH in ${BRANCHES}; do
+            # A branch the repository no longer has is skipped, not an error:
+            # dev was removed after 2.0.5, and fetching it failed the run of a
+            # release already published (and written to main). ls-remote exits
+            # 2 when the branch does not exist; any other failure still fails.
+            rc=0
+            git ls-remote --exit-code --heads origin "refs/heads/${BRANCH}" >/dev/null || rc=$?
+            if [ "${rc}" -eq 2 ]; then
+              echo "::notice::${BRANCH}: no such branch; weightslab/VERSION not written there"
+              continue
+            elif [ "${rc}" -ne 0 ]; then
+              echo "::error::Could not list branch ${BRANCH} (git ls-remote exit ${rc})"
+              exit 1
+            fi
             for attempt in 1 2 3; do
               # Fully qualified refs: a bare "main" is ambiguous when a tag of the
               # same name exists (a stray "main" tag made git fetch the tag and
