@@ -195,20 +195,16 @@ Running the bundled example
 2. Set ``data_root`` in ``config.yaml`` to your YOLO-format ``data.yaml``
    file (or adjust the path in ``main.py``).
 
-3. Start the studio in a separate terminal:
-
-   .. code-block:: bash
-
-      weightslab start
-
-4. Run the example:
+3. Run the example:
 
    .. code-block:: bash
 
       python weightslab/examples/Ultralytics/wl-detection/main.py
 
-5. Open the URL printed by ``weightslab start`` to monitor training, inspect per-sample
-   signals, tag difficult images, and discard outliers.
+4. Weights Studio opens in your browser once the example serves (the URL is also
+   printed). Use it to monitor training, inspect per-sample signals, tag difficult
+   images, and discard outliers. If ``weightslab start`` is already running, the
+   example uses that studio instead.
 
 Platform notes
 --------------

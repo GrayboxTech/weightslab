@@ -70,6 +70,26 @@ def _disable_resource_monitor():
             os.environ["WEIGHTSLAB_DISABLE_RESOURCE_MONITORING"] = previous
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _no_automatic_studio():
+    """Keep ``wl.serve()``'s automatic Weights Studio out of the suite.
+
+    ``wl.serve()`` now serves the UI itself (weightslab/ui/embedded.py) and
+    opens it in the browser. Every test that serves gRPC would otherwise bind a
+    UI port and pop a browser tab on the developer's machine. Tests of the
+    automatic UI turn it back on for themselves (monkeypatch).
+    """
+    previous = os.environ.get("WEIGHTSLAB_SERVE_UI")
+    os.environ["WEIGHTSLAB_SERVE_UI"] = "0"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("WEIGHTSLAB_SERVE_UI", None)
+        else:
+            os.environ["WEIGHTSLAB_SERVE_UI"] = previous
+
+
 # The test modules that spawn (fake) OpenCode servers.
 _OPENCODE_SPAWNING_MODULES = (
     "test_opencode_process",

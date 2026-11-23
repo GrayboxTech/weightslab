@@ -15,8 +15,8 @@ How the console fits
 Start the server
 ------------------
 
-From your training script (recommended), starts the server; a client REPL
-window opens automatically:
+From your training script (recommended), starts the server **headless**: no
+REPL window pops up, attach later on demand with ``weightslab cli`` (see below):
 
 .. code-block:: python
 
@@ -25,13 +25,13 @@ window opens automatically:
    wl.serve(serving_grpc=True, serving_cli=True)   # serving_cli defaults to True
    wl.keep_serving()
 
-To start the server **headless** (no REPL window pops up; attach later on
-demand), pass ``spawn_cli_client=False``, see the ``serve`` entry in
+To also open a client REPL in a new console window right away, pass
+``spawn_cli_client=True``, see the ``serve`` entry in
 :doc:`../user_functions`:
 
 .. code-block:: python
 
-   wl.serve(serving_cli=True, spawn_cli_client=False)
+   wl.serve(serving_cli=True, spawn_cli_client=True)
 
 Low-level equivalents (rarely needed directly, ``wl.serve``/``weightslab
 cli`` cover the normal workflow):

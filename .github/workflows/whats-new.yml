@@ -1,0 +1,116 @@
+name: Docs What's New
+
+# Regenerates docs/whats_new.rst from the GitHub releases
+# (docs/_scripts/update_whats_new.py), commits it to main and dev, then
+# redeploys the docs site.
+#
+# Triggers:
+#   - workflow_call: release.yml calls it once a stable release is published.
+#     That release is created with GITHUB_TOKEN, and events caused by
+#     GITHUB_TOKEN start no workflow, so the `release` trigger below never
+#     fires for it; hence the explicit call.
+#   - release published/edited by a person, e.g. release notes fixed in the
+#     GitHub UI. Pre-releases are skipped: the page lists stable releases only.
+#   - workflow_dispatch: by hand from the Actions tab.
+#
+# main and dev reject pushes from GITHUB_TOKEN (PR + status-check rulesets), so
+# the commit is pushed with VERSION_SYNC_TOKEN (a ruleset bypass actor), the
+# same token release.yml's sync-version-file job uses. "[skip ci]" keeps that
+# push from starting ci.yml (a TestPyPI publish on main) and docs-pages.yml;
+# the docs are redeployed explicitly instead, with a workflow_dispatch, which
+# GITHUB_TOKEN is allowed to trigger.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  release:
+    types: [published, edited]
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  update:
+    name: Regenerate What's New
+    if: ${{ github.event_name != 'release' || !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: whats-new
+      cancel-in-progress: false
+    steps:
+      - name: Require the push token
+        env:
+          VERSION_SYNC_TOKEN: ${{ secrets.VERSION_SYNC_TOKEN }}
+        run: |
+          if [ -z "${VERSION_SYNC_TOKEN}" ]; then
+            echo "::error::VERSION_SYNC_TOKEN is not set; main/dev reject pushes from GITHUB_TOKEN, so docs/whats_new.rst cannot be committed."
+            exit 1
+          fi
+
+      # refs/heads/ spelled out everywhere: the repo also has a tag named
+      # "main", which makes a bare "main" refspec ambiguous.
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/heads/main
+          token: ${{ secrets.VERSION_SYNC_TOKEN }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      # Generated once, from main's copy of the script, then written to every
+      # branch. The script leaves the file untouched when only its
+      # "Last generated" date would change.
+      - name: Regenerate docs/whats_new.rst
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python docs/_scripts/update_whats_new.py
+          cp docs/whats_new.rst "${RUNNER_TEMP}/whats_new.rst"
+
+      # Each branch is rewritten from its fresh tip; a push rejected because the
+      # branch moved meanwhile is retried on the new tip rather than rebased.
+      - name: Commit to main and dev
+        id: commit
+        env:
+          GENERATED: ${{ runner.temp }}/whats_new.rst
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          without_date() { grep -v '^\.\. Last generated:' "$1" || true; }
+          PUSHED=false
+          for BRANCH in main dev; do
+            for attempt in 1 2 3; do
+              git fetch --depth=1 origin "refs/heads/${BRANCH}"
+              git checkout -q -B "${BRANCH}" FETCH_HEAD
+              if [ -f docs/whats_new.rst ] && \
+                 [ "$(without_date docs/whats_new.rst)" = "$(without_date "${GENERATED}")" ]; then
+                echo "${BRANCH}: docs/whats_new.rst is up to date"
+                continue 2
+              fi
+              cp "${GENERATED}" docs/whats_new.rst
+              git add docs/whats_new.rst
+              git commit -q -m "docs: refresh What's New from the GitHub releases [skip ci]"
+              if git push origin "HEAD:refs/heads/${BRANCH}"; then
+                echo "${BRANCH}: docs/whats_new.rst updated"
+                PUSHED=true
+                continue 2
+              fi
+              echo "Push to ${BRANCH} rejected (attempt ${attempt}/3); retrying on its new tip"
+              sleep 5
+            done
+            echo "::error::Could not push docs/whats_new.rst to ${BRANCH}"
+            exit 1
+          done
+          echo "pushed=${PUSHED}" >> "$GITHUB_OUTPUT"
+
+      # docs-pages.yml builds every whitelisted branch and tag in one run
+      # (sphinx-multiversion), so a single dispatch refreshes main/latest and dev.
+      - name: Redeploy the docs
+        if: ${{ steps.commit.outputs.pushed == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run docs-pages.yml --repo "${GITHUB_REPOSITORY}" --ref main

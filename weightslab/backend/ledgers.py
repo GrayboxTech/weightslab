@@ -1500,6 +1500,19 @@ def register_checkpoint_manager(manager: Any = None, weak: bool = False, name: s
 def get_checkpoint_manager(name: str = DEFAULT_NAME) -> Any:
     return GLOBAL_LEDGER.get_checkpoint_manager(name)
 
+def get_viewer_workspace(name: str = DEFAULT_NAME) -> Optional[str]:
+    """Where a read-only checkpoint manager's session (a viewer over existing
+    experiments) writes its own files -- data view, logs, audit log, notebook --
+    instead of root_log_dir, whose experiment folders it never writes to. None
+    when the registered manager is not read-only."""
+    try:
+        cm = GLOBAL_LEDGER.get_checkpoint_manager(name)
+        if getattr(cm, "read_only", False) is True and getattr(cm, "workspace_dir", None):
+            return str(cm.workspace_dir)
+    except Exception:
+        pass
+    return None
+
 def list_checkpoint_managers() -> List[str]:
     return GLOBAL_LEDGER.list_checkpoint_managers()
 

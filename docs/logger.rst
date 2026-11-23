@@ -146,7 +146,7 @@ persisted history export, and a CLI/UI report.
 
    weightslab start example --logger    # run it (MNIST downloads on first run)
    weightslab cli                       # attach a terminal, in another shell
-   weightslab start                     # open Weights Studio, in a third shell
+   # Weights Studio opens in your browser on its own (wl.serve() serves it)
 
 .. literalinclude:: ../weightslab/examples/PyTorch/wl-standalone-logger/main.py
    :language: python

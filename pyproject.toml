@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61", "wheel", "build", "setuptools_scm[toml]>=8"]
+requires = ["setuptools>=77", "wheel", "build", "setuptools_scm[toml]>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -11,12 +11,12 @@ authors = [
   { name = "Alexandru-Andrei Rotaru", email = "alexandru@graybx.com" },
   { name = "Guillaue Pelluet", email = "guillaue@graybx.com" }
 ]
-license = { text = "BSD 2-clause" }
+license = "PolyForm-Noncommercial-1.0.0"  # commercial use: paid licence from Graybox SAS, see LICENSE
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 classifiers = [
   "Development Status :: 1 - Planning",
   "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: BSD License",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3.10",
 ]
@@ -146,6 +146,18 @@ utest = [
   "pytest>=9.0.2",
 ]
 
+# Contributor tooling (PEP 735). `uv sync` installs the `dev` group by default;
+# pip >= 25.1 reads it with `pip install --group dev`. Tests also need the
+# `utest` extra: `uv sync --extra utest`.
+[dependency-groups]
+dev = [
+  "pytest>=9.0.2",
+  "pytest-timeout>=2.3",
+  "grpcio-tools>=1.62,<2",
+  "torchinfo>=1.8,<2",
+  "httpx>=0.27,<1",
+]
+
 [project.scripts]
 weightslab = "weightslab.cli:main"
 
@@ -198,9 +210,20 @@ weightslab = [
 [tool.setuptools_scm]
 # Write the generated version into a small module so your package can import it at runtime
 write_to = "weightslab/_version.py"
-# Optional: choose version/local schemes — defaults are usually fine
-version_scheme = "guess-next-dev"
+# A build from a checkout takes the nearest tag as-is (v2.0.3.dev5 -> 2.0.3.dev5),
+# the same value weightslab/VERSION and the runtime `git describe` fallback in
+# __init__._resolve_version report. "guess-next-dev" refused to bump a .devN tag
+# ("The 2.0.3.dev5 can't be bumped"), so every build from a commit after a dev
+# tag failed: `pip install -e .`, `pip install git+...`, and the editable install
+# `uv sync` / `uv run` perform on every call. Published builds never reach this:
+# ci.yml and release.yml pin the version via SETUPTOOLS_SCM_PRETEND_VERSION_FOR_WEIGHTSLAB.
+version_scheme = "only-version"
 local_scheme = "no-local-version"
+
+[tool.uv]
+# The version is dynamic (setuptools_scm), so uv must rebuild the editable
+# install when the commit or tags move, not only when pyproject.toml changes.
+cache-keys = [{ file = "pyproject.toml" }, { git = { commit = true, tags = true } }]
 
 [tool.pytest.ini_options]
 markers = [

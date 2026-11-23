@@ -1256,7 +1256,12 @@ class DataService:
         self._load_existing_tags()
 
     def _resolve_root_log_dir(self) -> Path:
-        """Resolve root log directory from hyperparams/env, fallback to ./logs."""
+        """Resolve root log directory from hyperparams/env, fallback to ./logs.
+        A read-only viewer's own files go to its workspace (see get_viewer_workspace)."""
+        from weightslab.backend.ledgers import get_viewer_workspace
+        workspace = get_viewer_workspace()
+        if workspace:
+            return Path(workspace)
         root = None
         try:
             hp = self._ctx.components.get("hyperparams")
@@ -2413,10 +2418,13 @@ class DataService:
 
                     # Resize middle slice for thumbnail if requested (maintain aspect ratio)
                     if target_width != original_size[0] or target_height != original_size[1]:
-                        # BILINEAR is ~2x faster than LANCZOS and sufficient for small thumbnails;
-                        # use LANCZOS only for full-resolution modal views where quality matters.
-                        _resample = Image.Resampling.LANCZOS if is_full_resolution else Image.Resampling.BILINEAR
-                        middle_pil = middle_pil.resize((target_width, target_height), _resample)
+                        # LANCZOS keeps thumbnails sharp; reducing_gap first shrinks by an
+                        # integer factor with a box filter (cheap), so a 2048 px photo
+                        # going to a ~200 px cell costs about what BILINEAR did.
+                        middle_pil = middle_pil.resize(
+                            (target_width, target_height), Image.Resampling.LANCZOS,
+                            reducing_gap=None if is_full_resolution else 2.0,
+                        )
 
                     # Keep masks in sync with thumbnail size, but only for thumbnail paths.
                     # Full-resolution modal requests keep original mask resolution.
@@ -2498,12 +2506,9 @@ class DataService:
                             try:
                                 resized_view = view_pil
                                 if resized_view.size != (target_width, target_height):
-                                    _view_resample = (
-                                        Image.Resampling.LANCZOS if is_full_resolution
-                                        else Image.Resampling.BILINEAR
-                                    )
                                     resized_view = resized_view.resize(
-                                        (target_width, target_height), _view_resample
+                                        (target_width, target_height), Image.Resampling.LANCZOS,
+                                        reducing_gap=None if is_full_resolution else 2.0,
                                     )
                                 view_bytes, view_shape, _ = encode_image_to_raw_bytes(
                                     np_img=None,
@@ -4285,6 +4290,27 @@ class DataService:
 
 
 
+    def _view_lacks_samples(self, dfm, dirty, any_held: bool) -> bool:
+        """_fastUpdateInternals' answer when dirty samples are missing from the view.
+
+        A filtered view leaves samples out on purpose: there is nothing to add,
+        and a rebuild only pays off when the batch also touched rows it shows.
+
+        An unfiltered view holds every sample, so a missing one is NEW -- a
+        loader registered after the view was built, from a notebook cell say --
+        and only the full rebuild can add it. That rebuild can bail (the 10 s
+        throttle; _bg_view_refresh runs the differential pass again first, on a
+        queue already drained here), and the ids were never offered again: the
+        new split never reached the studio. So they go back on the queue until
+        a rebuild actually swaps in (clear_view_dirty).
+        """
+        if getattr(self, "_is_filtered", False):
+            return not any_held
+        requeue = getattr(dfm, "requeue_view_dirty", None)
+        if requeue is not None:
+            requeue(dirty)
+        return False
+
     def _fastUpdateInternals(self, max_dirty: int = 250_000) -> bool:
         """O(change) view refresh. True if applied, False -> caller must rebuild.
 
@@ -4415,12 +4441,8 @@ class DataService:
             # index (built once with the cached keys above, then reused).
             _pos = _view_keys.get_indexer(_sub_keys)
             _found = _pos >= 0
-            if not _found.any():
-                return True
-            # A dirty sample the view does not hold is a structural change (a
-            # new sample): only the full rebuild can add it.
             if not _found.all():
-                return False
+                return self._view_lacks_samples(dfm, dirty, any_held=bool(_found.any()))
             _rows = _pos
             _take = np.arange(len(_pos))
         else:
@@ -4436,10 +4458,9 @@ class DataService:
             # source (indexed by sample_id alone) can mean.
             _src = _sub_keys.get_indexer(_view_keys)      # sub row per view row, -1 if none
             _rows = np.flatnonzero(_src >= 0)
-            if _rows.size == 0:
-                return True
-            if len(set(_sub_keys)) != len(set(_view_keys[_rows])):
-                return False
+            _held = len(set(_view_keys[_rows]))
+            if _held != len(set(_sub_keys)):
+                return self._view_lacks_samples(dfm, dirty, any_held=_held > 0)
             _take = _src[_rows]
         for c in sub.columns:
             _ci = view.columns.get_loc(c)

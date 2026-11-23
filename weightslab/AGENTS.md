@@ -41,11 +41,16 @@ A user wraps their PyTorch training script with WeightsLab so a running
 experiment becomes inspectable/editable; Weights Studio is the UI.
 
 ```
-Browser  →  weightslab start :8080 (grpc-web → grpc proxy)  →  Python gRPC servicer  →  training loop
+Browser  →  Weights Studio :8080 (grpc-web → grpc proxy)  →  Python gRPC servicer  →  training loop
 ```
 
-- `weightslab start`: pure-Python HTTP server, serves the bundled SPA and
-  translates grpc-web↔gRPC. No Docker, no Envoy. Not running ⇒ no UI to load.
+- Weights Studio server: pure-Python HTTP server, serves the bundled SPA and
+  translates grpc-web↔gRPC. No Docker, no Envoy. `wl.serve()` runs it in a
+  background thread of the training process (up with the backend, opens the
+  browser, gone at exit); `weightslab start` runs it as its own process (UI that
+  outlives runs, chosen experiment dir, remote/tunnel). `wl.serve()` skips its
+  own when a `weightslab start` already serves its gRPC port, in Colab, with
+  `serving_ui=False` or `WEIGHTSLAB_SERVE_UI=0`. Neither running ⇒ no UI to load.
 - gRPC servicer and training loop share **one process, different threads**,
   coordinated by locks in `weightslab/weightslab/components/global_monitoring.py`.
 - Proto is the single source of truth: `weightslab/weightslab/proto/experiment_service.proto`.
@@ -56,7 +61,15 @@ Browser  →  weightslab start :8080 (grpc-web → grpc proxy)  →  Python gRPC
 
 ```bash
 pip install weightslab
+# or with uv: uv add weightslab | uv pip install weightslab --torch-backend=auto
+# CLI only:   uvx --torch-backend=auto weightslab start | uv tool install weightslab
 ```
+
+With uv, choose the PyTorch build with `--torch-backend` (`auto`, `cpu`,
+`cu126`, ...), never with `--extra-index-url`: uv takes each package from the
+first index that has it, and the PyTorch index holds an old `torchmetrics`
+(resolution fails with "only torchmetrics==1.0.3 is available"). Full recipe,
+including a uv project that pins torch to a CUDA index: `docs/quickstart.rst`.
 
 ```python
 import weightslab as wl
@@ -65,6 +78,10 @@ wl.serve(serving_grpc=True, serving_cli=True)
 # ... training loop ...
 wl.keep_serving()   # keep process alive for the UI
 ```
+
+Running the script opens Weights Studio: `wl.serve()` serves it at
+http://localhost:8080 by default (busy port ⇒ a free one; URL printed). No second
+terminal needed. Optional, for a UI that outlives the run (`wl.serve()` then uses it):
 
 ```bash
 weightslab start   # http://localhost:8080 by default
@@ -78,7 +95,8 @@ etc. aren't in the `.rst` docs; the examples are the primary source).
 
 TLS/UI deploy details: `weightslab/docs/weights_studio.rst`. TLS turns on once
 certs exist: `weightslab se` once, then `weightslab start` and the backend use
-them automatically (`--no-certs` forces HTTP). Windows: `se` uses the
+them automatically (`--no-certs` forces HTTP); `wl.serve()`'s own UI follows the
+backend's TLS. Windows: `se` uses the
 PowerShell script + Windows `openssl`; `--force-ubuntu` uses WSL bash instead.
 
 ---
@@ -170,6 +188,8 @@ CONFIG = {
     "training_steps_to_do": 1_000_000,          # WL counts training STEPS (model.get_age()), never "epochs"/an epoch loop
     "eval_full_to_train_steps_ratio": 100,      # -> agent's "eval ratio" tuning; NOT "eval_every_epochs"/"eval_every_n"
     "experiment_dump_to_train_steps_ratio": 100,# -> agent's "dump ratio" tuning; NOT "dump_every_epochs"/"checkpoint_every"
+    # Optional: keep only the k best of those dumps on one logged signal (docs/checkpointing.rst):
+    # "checkpoint_manager": {"keep_best": {"signal": "val-acc", "k": 5, "mode": "max"}},
     "optimizer": {"lr": 1e-3},                  # nested under "optimizer" -> agent's "learning rate" tuning
     "data": {
         "train_loader": {"batch_size": 64},     # nested under "data.<loader_name>" -> agent's "batch size" tuning
@@ -365,7 +385,8 @@ The automatic `tag:loss_shape` tag (§3.6) uses these same primitives.
 
 ### 3.10 Verifying an integration headlessly
 
-Watch model/optimizer/data/loss/metrics, `wl.serve(serving_grpc=True, grpc_port=...)`,
+Watch model/optimizer/data/loss/metrics, `wl.serve(serving_grpc=True, grpc_port=...)`
+(add `serving_ui=False`, or set `WEIGHTSLAB_SERVE_UI=0`, so it opens no browser),
 `wl.start_training()`, run real steps inside the guard contexts,
 `wl.drain_signals()`, then assert on `wl.write_dataframe(..., format="csv")`
 columns or a raw gRPC `GetDataSamples` call's `raw_data.type` (e.g. `"vector"`
@@ -386,6 +407,7 @@ Authoritative reference: `weightslab/docs/configuration.rst`. High-signal ones:
 | `WEIGHTSLAB_LOG_FILE_LEVEL` | *(unset = all)* | The session log file (`<root_log_dir>/weightslab_logs/`) keeps every record whatever the terminal shows; set this to cap the file too. |
 | `WEIGHTSLAB_TQDM_LOG_INTERVAL` | `30` | Seconds between snapshots of live `tqdm` bars into the log (`0` disables); tqdm never goes through `logging`. |
 | `GRPC_BACKEND_HOST`/`PORT` | `0.0.0.0`/`50051` | Backend gRPC bind address. |
+| `WEIGHTSLAB_SERVE_UI` | `1` | `0` stops `wl.serve()` serving/opening Weights Studio itself, no code change (CI, sweeps). |
 | `GRPC_TLS_ENABLED` | `0` | TLS on the gRPC socket; set to `1` automatically when certs are found, `0`/`false` forces plaintext. |
 | `GRPC_TLS_REQUIRE_CLIENT_AUTH` | `0` | mTLS; must match what `weightslab start` presents. |
 | `WEIGHTSLAB_CERTS_DIR` | `~/.weightslab-certs` | Cert lookup — single source of truth; falls back to `~/.weightslab-certs` when unset/relative/without certs. |
@@ -395,7 +417,7 @@ Authoritative reference: `weightslab/docs/configuration.rst`. High-signal ones:
 | `WEIGHTSLAB_PROJECTION` | on | Live 3-D parametric-UMAP projection (beta). `0`/`false`/`no`/`off` removes the hook entirely. Also `_EVERY` (50), `_DIM` (3), `_NEIGHBORS` (15), `_GRAPH` (512, kNN graph buffer). |
 | `GRPC_WATCHDOG_STUCK_SECONDS` | `60` | Lock/RPC stuck threshold + lock-acquire timeout. |
 
-**Frontend — runtime `window.*` globals (injected at `weightslab start` time; restart+reload to apply):**
+**Frontend — runtime `window.*` globals (injected when the UI server starts — `weightslab start` or `wl.serve()`; restart+reload to apply):**
 
 | Variable | Default | Why |
 |---|---|---|
@@ -408,6 +430,7 @@ Authoritative reference: `weightslab/docs/configuration.rst`. High-signal ones:
 | `ENABLE_HYPERPARAMETERS_OPTIMIZATION` | `1` | `0` makes HP inputs read-only, stops HP poll. |
 | `ENABLE_AGENT` | `1` | `0` removes agent chat bar. |
 | `ENABLE_NOTEBOOK` | `1` | `0` removes the notebook (shared in-process kernel against the live experiment; persisted as `notebook.ipynb`; `>`-prefixed cells ask the agent for code). |
+| `ENABLE_TUTORIAL` | `1` | `0` removes the new-user tour (notice → YouTube popup → MNIST Colab; header Tour button). `TUTORIAL_VIDEO_URL` / `TUTORIAL_COLAB_URL` override the video / notebook. |
 
 `VITE_*` vars are build-time (need a frontend rebuild); `WS_*`/`BB_*`/`ENABLE_*`
 are runtime (need only restart + reload). `ENABLE_*` default on; `0`/`false`/`no`/`off` disables.
@@ -417,10 +440,12 @@ are runtime (need only restart + reload). `ENABLE_*` default on; `0`/`false`/`no
 ## 5. Troubleshooting
 
 **Sample grid empty / "failed to fetch" / gRPC errors.** Check in order: (1)
-backend serving on `0.0.0.0:50051`; (2) `weightslab start` running, browser
-reaches `:8080`; (3) TLS mismatch — UI and backend each enable TLS when they
-find certs, so both must see the same `WEIGHTSLAB_CERTS_DIR` (or drop TLS on
-both: `weightslab start --no-certs`, `GRPC_TLS_ENABLED=0`).
+backend serving on `0.0.0.0:50051`; (2) UI server (`wl.serve()`'s own or
+`weightslab start`) running, browser reaches `:8080` (or the printed port); (3)
+TLS mismatch — a separate `weightslab start` and the backend each enable TLS when
+they find certs, so both must see the same `WEIGHTSLAB_CERTS_DIR` (or drop TLS on
+both: `weightslab start --no-certs`, `GRPC_TLS_ENABLED=0`); `wl.serve()`'s own
+UI always matches the backend.
 
 **`weightslab se` hangs with no output (Windows).** Only on the WSL path
 (`--force-ubuntu`, or the fallback after PowerShell fails): a stuck WSL distro
@@ -428,7 +453,8 @@ blocks forever (output captured, no timeout). `wsl -e echo ok` hangs too →
 `wsl --shutdown`, or drop `--force-ubuntu`.
 
 **Env var change not taking effect.** `VITE_*` → rebuild frontend.
-`WS_*`/`BB_*`/`ENABLE_*` → restart `weightslab start` + reload tab.
+`WS_*`/`BB_*`/`ENABLE_*` → restart `weightslab start` (or the training script,
+for `wl.serve()`'s UI) + reload tab.
 
 **Grid flashes empty on auto-refresh.** Refreshes now skip while a
 `GetDataSamples` fetch is in flight (`isFetchInProgress()` in

@@ -687,7 +687,15 @@ class DataSampleTrackingWrapper(Dataset):
         _UID_CNT += n_samples
 
     def _resolve_root_log_dir(self) -> Optional[Path]:
-        """Resolve root log directory from hyperparams if not provided."""
+        """Resolve root log directory from hyperparams if not provided. A read-only
+        viewer's data view is kept in its workspace (see get_viewer_workspace)."""
+        try:
+            from weightslab.backend.ledgers import get_viewer_workspace
+            workspace = get_viewer_workspace()
+            if workspace:
+                return Path(workspace)
+        except Exception:
+            pass
         try:
             hp_name = resolve_hp_name()
             hp = get_hyperparams(hp_name) if hp_name else None
@@ -1168,7 +1176,8 @@ class DataSampleTrackingWrapper(Dataset):
     def get_prediction_mask(self, sample_id):
         # Detection: check if prediction_raw contains bboxes
         pred_raw = self.get(sample_id=sample_id, stat_name=SampleStatsEx.PREDICTION)
-        return get_mask(sample_id, pred_raw)
+        # Physical index: self[i] resolves i against physical_uids, not unique_ids.
+        return get_mask(pred_raw, dataset=self, dataset_index=self._sid_to_physical_idx.get(str(sample_id)))
 
     def get(self, sample_id: int, stat_name: str, raw: bool = False):
         """
