@@ -188,8 +188,27 @@ Conventions that matter for correctness:
   the input shows as tokens (text through the model's `itos` or
   `decode_tokens`). Single neurons can be frozen on ANY layer, without
   `compute_dependencies` (their weights are put back before every forward).
-  Prune / add on a transformer still need the dependency engine, which cannot
-  trace one yet (attention reshapes, tied embeddings).
+  **Neuron prune / add on any model** (`weightslab/utils/neuron_graph.py`,
+  built by `compute_dependencies=True`): one forward on the example input
+  under a `TorchFunctionMode` says which index of which parameter / buffer goes
+  with which neuron -- the next layer's input columns (all `H*W` of a channel
+  after a flatten), batch norm statistics, both branches of a residual add, a
+  slice of a concatenation, the same position in every head / group / chunk
+  (`view(B, T, n_head, -1)`, grouped convs, `GroupNorm`, `chunk(3)` of a fused
+  q/k/v), tied weights (`lm_head` = `wte`). An edit removes / inserts those
+  indices everywhere, updates the modules' sizes (`out_features`, `groups`,
+  `normalized_shape`, `nn.Unflatten`'s size ...), then re-runs the example:
+  an error or a changed output shape rolls it back and the edit is refused
+  with the reason. Added neurons read nothing yet (their incoming columns are
+  zero), so an add keeps the function. Fixed (never edited): the model
+  outputs (classes, vocabulary, image channels -- "a model output"), the
+  vocabulary rows of an embedding, dimensions an unknown op touches. A forward
+  that hard-codes a size (`view(B, T, 4, 8)`) makes edits through it refuse:
+  derive sizes from the tensors. `ModelInterface.neuron_edit_blocker(id)`
+  says why a layer cannot change; the Modeling tab only offers prune / add
+  where they can. Freeze / reset still follow torch.fx's layer dependencies
+  when the model has them; a model torch.fx cannot trace (the GPTs) freezes /
+  resets per layer (frozen rows put back before every forward).
   Code: `weightslab/weightslab/components/model_representation.py`; tests:
   `tests/model/test_model_representation.py` (sweeps the whole baseline zoo)
   and `test_model_representation_ultralytics.py` (YOLO11 detect + segment).
@@ -347,6 +366,11 @@ sample of a loader, else `dummy_input`, else `input_shape`). The banner means no
 input could be built or the forward failed (message shown); for unusual batch
 layouts register `set_modeling_inputs_fn` (see §3). Prune / add (and per-neuron
 freeze) need `compute_dependencies=True`; freeze, reset and perturb work anyway.
+Prune / add missing on ONE layer: its neurons cannot change (the model output,
+an embedding's vocabulary, an op the neuron graph does not follow);
+`model.neuron_edit_blocker(layer_id)` gives the reason. "the model does not run
+after this prune": the forward hard-codes a size (`view(B, T, 4, 8)`,
+`split(self.n_embd)`) -- write `view(B, T, n_head, -1)` / `chunk(3)`.
 A conv/linear neuron's "dead" verdict is read at the ReLU it feeds (the
 inspector says which), since its own output is signed. An add / prune writes
 nothing at edit time: the architectures on both sides of the edit are saved

@@ -135,8 +135,15 @@ class NetworkWithOpsTest(unittest.TestCase):
             neuron_indices=2,
             op_type=ArchitectureNeuronsOpType.ADD
         )
+        # The last layer is the model output (its classes cannot change):
+        # prune the last hidden layer instead.
+        hidden = next(
+            layer.get_module_id() for layer in reversed(self.dummy_network.layers)
+            if list(layer.parameters(recurse=False))
+            and not self.dummy_network.neuron_edit_blocker(layer.get_module_id())
+        )
         self.dummy_network.operate(
-            -1,
+            hidden,
             neuron_indices=set([0, 1, 2]),
             op_type=ArchitectureNeuronsOpType.PRUNE
         )
@@ -191,6 +198,9 @@ class NetworkWithOpsTest(unittest.TestCase):
         # Ensure we actually prune something; default to pruning first neuron
         if not to_remove_ids:
             to_remove_ids.update({0})
+        # A layer keeps at least one neuron.
+        if len(to_remove_ids) >= int(neurons_before):
+            to_remove_ids = set(sorted(to_remove_ids)[:-1])
         with self.dummy_network as model:
             model.operate(
                 0,

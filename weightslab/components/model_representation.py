@@ -1099,7 +1099,8 @@ def _layer_neurons(module: nn.Module, tracked: bool, out_shape: List[int]) -> Tu
         try:
             n_in = getter("in_neurons") if callable(getter) else getattr(module, "in_neurons", 0)
             n_out = getter("out_neurons") if callable(getter) else getattr(module, "out_neurons", 0)
-            return int(n_in or 0), int(n_out or 0)
+            if n_out:
+                return int(n_in or 0), int(n_out or 0)
         except Exception:
             pass
     for a_in, a_out in (("in_channels", "out_channels"), ("in_features", "out_features"),
@@ -1118,7 +1119,7 @@ def _layer_neurons(module: nn.Module, tracked: bool, out_shape: List[int]) -> Tu
     return 0, 0
 
 
-def supported_ops(module: nn.Module, tracked: bool) -> List[str]:
+def supported_ops(module: nn.Module, tracked: bool, editable: bool = True) -> List[str]:
     params = list(module.parameters(recurse=False))
     if not params:
         return []
@@ -1128,9 +1129,28 @@ def supported_ops(module: nn.Module, tracked: bool) -> List[str]:
         if tracked or callable(getattr(module, "reset_parameters", None)):
             ops.append("reset")
         ops.append("perturb")
-        if tracked:
+        if tracked and editable:
             ops += ["prune", "add"]
     return ops
+
+
+def _neuron_editable(model, module: nn.Module) -> bool:
+    """False when the neuron graph says this layer's neurons cannot change
+    (the model output, the vocabulary ...)."""
+    editor = getattr(model, "_neuron_editor", None)
+    if editor is None:
+        return True
+    try:
+        return editor.editable(module)
+    except Exception:
+        return False
+
+
+def _legacy(model) -> bool:
+    """Freeze / reset go through the layer dependencies (WeightsLab's per
+    neuron learning rates) when the model has them; otherwise they act on
+    the layer itself (frozen rows put back before every forward)."""
+    return bool(getattr(model, "_legacy_deps", True))
 
 
 def build_architecture(model, trace: Optional[ArchitectureTrace], version: int = 0) -> dict:
@@ -1204,7 +1224,7 @@ def build_architecture(model, trace: Optional[ArchitectureTrace], version: int =
 
         tracked, layer_id = _is_tracked(model, module)
         whole_frozen, frozen_count, _ = _frozen_neurons(module, tracked)
-        ops = supported_ops(module, tracked)
+        ops = supported_ops(module, tracked, _neuron_editable(model, module) if tracked else True)
         records = calls_by_module.get(name) or [None]
         for i, rec in enumerate(records):
             out_shape = rec["out_shape"] if rec else []
@@ -2216,24 +2236,29 @@ def edit_layer(model, node_id: str, op: str, neuron_indices: Sequence[int] = (),
                 "wl.watch_or_edit(model, flag='model', compute_dependencies=True)")
         if op == "prune" and not indices:
             raise ValueError("prune needs at least one neuron index")
+        blocker = getattr(model, "neuron_edit_blocker", None)
+        why = blocker(layer_id) if callable(blocker) else None
+        if why:
+            raise ValueError(f"cannot {op} neurons of {module_id}: {why}")
         # The architecture changes: checkpoints on BOTH sides of the edit must
         # stay restorable (architectures are not dumped by default). Nothing
         # is written now -- the checkpoint manager keeps the pre-edit model in
         # memory and saves both architectures when training resumes.
         _note_structural_edit(_checkpoint_manager(), model)
         if op == "prune":
-            model.prune_neurons(layer_id, indices)
-            message = f"pruned {len(indices)} neuron(s) from {module_id}"
+            result = model.prune_neurons(layer_id, indices)
+            message = f"pruned {_edited(result, len(indices))} neuron(s) from {module_id}"
         else:
             count = int(count or 1)
-            model.add_neurons(layer_id, count=count)
-            message = f"added {count} neuron(s) to {module_id}"
+            result = model.add_neurons(layer_id, count=count)
+            message = f"added {_edited(result, count)} neuron(s) to {module_id}"
+        message += _coupled_note(result, module_id, len(indices) if op == "prune" else int(count or 1))
         manager.note_edit(structural=True)
         return {"message": message}
 
     if op in ("freeze", "unfreeze"):
         frozen = op == "freeze"
-        if tracked and indices and not is_group:
+        if tracked and _legacy(model) and indices and not is_group:
             (model.freeze_neurons if frozen else model.unfreeze_neurons)(layer_id, indices)
             message = f"{op} {len(indices)} neuron(s) of {module_id}"
         elif indices and not is_group:
@@ -2253,7 +2278,7 @@ def edit_layer(model, node_id: str, op: str, neuron_indices: Sequence[int] = (),
             params = list(module.parameters())
             if not params:
                 raise ValueError(f"{module_id} has no parameters")
-            if not frozen and tracked:
+            if not frozen and tracked and _legacy(model):
                 # Per-neuron freezes are learning rates of 0 -- lift them too.
                 try:
                     model.unfreeze_neurons(layer_id, None)
@@ -2284,7 +2309,7 @@ def edit_layer(model, node_id: str, op: str, neuron_indices: Sequence[int] = (),
     done = 0
     for target in targets:
         t_tracked, t_id = _is_tracked(model, target)
-        if t_tracked:
+        if t_tracked and _legacy(model):
             if op == "reset":
                 model.reset_neurons(t_id, indices or None)
             else:
@@ -2343,6 +2368,26 @@ def _checkpoint_manager():
         return manager
     except Exception:
         return None
+
+
+def _edited(result, asked: int) -> int:
+    n = getattr(result, "neurons", 0)
+    return int(n) if n else asked
+
+
+def _coupled_note(result, module_id: str, asked: int) -> str:
+    """' -- 4 per head (q, k, v), with 3 coupled layers: a, b, c'."""
+    if result is None:
+        return ""
+    layers = [n for n in getattr(result, "layers", []) if n != module_id]
+    parts = []
+    n = int(getattr(result, "neurons", 0) or 0)
+    if n > asked:
+        parts.append(f"{n - asked} more to keep the layer's structure (heads / groups / chunks)")
+    if layers:
+        shown = ", ".join(layers[:4]) + (f" +{len(layers) - 4}" if len(layers) > 4 else "")
+        parts.append(f"{len(layers)} coupled layer{'s' if len(layers) != 1 else ''}: {shown}")
+    return f" ({'; '.join(parts)})" if parts else ""
 
 
 def _note_structural_edit(checkpoints, model) -> None:

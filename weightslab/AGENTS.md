@@ -479,6 +479,11 @@ sample of a loader, else `dummy_input`, else `input_shape`). The banner means no
 input could be built or the forward failed (message shown); for unusual batch
 layouts register `set_modeling_inputs_fn` (see §3). Prune / add (and per-neuron
 freeze) need `compute_dependencies=True`; freeze, reset and perturb work anyway.
+Prune / add missing on ONE layer: its neurons cannot change (the model output,
+an embedding's vocabulary, an op the neuron graph does not follow);
+`model.neuron_edit_blocker(layer_id)` gives the reason. "the model does not run
+after this prune": the forward hard-codes a size (`view(B, T, 4, 8)`,
+`split(self.n_embd)`) -- write `view(B, T, n_head, -1)` / `chunk(3)`.
 A conv/linear neuron's "dead" verdict is read at the ReLU it feeds (the
 inspector says which), since its own output is signed. An add / prune writes
 nothing at edit time: the architectures on both sides of the edit are saved
@@ -514,6 +519,7 @@ around here.
   `model_representation.py` -- Modeling tab: traced graph, representation sessions, layer edits.
   `model_comparison.py` -- Modeling tab: compare A vs B (pair: activation-map distance; group: per-neuron Cohen's d).
   Transformers: residual adds as "+" nodes, attention maps per head, q/k/v head groups, token previews, per-neuron freeze on any layer (`FrozenRows`).
+  Neuron prune / add on any model: `weightslab/utils/neuron_graph.py` (`NeuronEditor`, built by `compute_dependencies=True`) -- couplings traced from one forward (residuals, concatenations, flatten, heads, groups, chunks, tied weights), edits verified by re-running the example and rolled back otherwise; model outputs stay fixed. Tests: `tests/model/test_neuron_graph.py`, `test_modeling_zoo.py`, `test_dependency_patterns.py`.
 - `data/` — `dataframe_manager.py`, `data_samples_with_ops.py`, `sample_stats.py`, H5 storage (`h5_dataframe_store.py`, `h5_array_store.py`, `array_proxy.py`).
 - `backend/` — `ledgers.py` (`GLOBAL_LEDGER`), `logger.py`, `audit_logger.py`, `cli.py`.
 - `projection/parametric_umap.py` — live 3-D projection (§3.6b): feature hook, UMAP encoder, coordinate write-back, checkpoint pairing; `projection/custom.py` — user projections (`save_projection_coords`); served by `trainer/services/projection_service.py` (`GetProjection`).

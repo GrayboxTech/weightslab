@@ -388,7 +388,6 @@ class MinimalSubOperation(nn.Module):
         return self.tail(merged)
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class DependencyPatternTest(unittest.TestCase):
     """Base class for dependency pattern tests"""
 
@@ -436,7 +435,6 @@ class DependencyPatternTest(unittest.TestCase):
             self.fail(f"Model operation failed: {e}")
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestSAMEDependencies(DependencyPatternTest):
     """Test models with SAME dependency patterns"""
 
@@ -485,7 +483,6 @@ class TestSAMEDependencies(DependencyPatternTest):
         self.operate(self.model, self.dummy_input)
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestINCOMINGDependencies(DependencyPatternTest):
     """Test models with INCOMING dependency patterns"""
 
@@ -534,7 +531,6 @@ class TestINCOMINGDependencies(DependencyPatternTest):
         self.operate(self.model, self.dummy_input)
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestMixedDependencies(DependencyPatternTest):
     """Test models with mixed dependency patterns"""
 
@@ -582,7 +578,6 @@ class TestMixedDependencies(DependencyPatternTest):
         self.operate(self.model, self.dummy_input)
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestResidualConnections(DependencyPatternTest):
     """Test models with residual (REC) dependency patterns"""
 
@@ -623,7 +618,6 @@ class TestResidualConnections(DependencyPatternTest):
         self.operate(self.model, self.dummy_input)
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestConcatenationSkipConnections(DependencyPatternTest):
     """Test models with concatenation skip connections (REC dependencies)"""
 
@@ -664,7 +658,6 @@ class TestConcatenationSkipConnections(DependencyPatternTest):
         self.operate(self.model, self.dummy_input)
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestNonLearnableLayers(DependencyPatternTest):
     """Test models with non-learnable layers (MaxPool, ReLU, etc.)"""
 
@@ -729,7 +722,6 @@ class TestNonLearnableLayers(DependencyPatternTest):
         self.operate(self.model, self.dummy_input)
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestUpsampling(DependencyPatternTest):
     """Test models with upsampling layers"""
 
@@ -784,7 +776,6 @@ class TestUpsampling(DependencyPatternTest):
         self.operate(self.model, self.dummy_input)
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestInferDependencyType(unittest.TestCase):
     """Test the _infer_dependency_type helper function"""
 
@@ -819,7 +810,6 @@ class TestInferDependencyType(unittest.TestCase):
         self.assertEqual(dep_type, DepType.SAME)
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestGroupedConv(DependencyPatternTest):
     def setUp(self):
         self.model = MinimalGroupedConv()
@@ -856,7 +846,6 @@ class TestGroupedConv(DependencyPatternTest):
         self.operate(self.model, self.dummy_input)
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestDepthwisePointwiseWithLinear(DependencyPatternTest):
     def setUp(self):
         self.model = MinimalDepthwisePointwiseWithLinear()
@@ -891,7 +880,6 @@ class TestDepthwisePointwiseWithLinear(DependencyPatternTest):
         self.operate(self.model, self.dummy_input)
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestConvTranspose(DependencyPatternTest):
     def setUp(self):
         self.model = MinimalConvTransposeChain()
@@ -924,7 +912,6 @@ class TestConvTranspose(DependencyPatternTest):
         self.assertEqual(same_deps_ids, [[0, 1], [1, 2]])
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestLinearChain(DependencyPatternTest):
     def setUp(self):
         self.model = MinimalLinearChain()
@@ -959,7 +946,6 @@ class TestLinearChain(DependencyPatternTest):
         self.assertEqual(same_deps_ids, [[0, 1], [1, 2], [2, 3]])
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestConv1DChain(DependencyPatternTest):
     def setUp(self):
         self.model = MinimalConv1DChain()
@@ -992,7 +978,6 @@ class TestConv1DChain(DependencyPatternTest):
         self.assertEqual(same_deps_ids, [[0, 1], [1, 2], [2, 3]])
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestConv3DChain(DependencyPatternTest):
     def setUp(self):
         self.model = MinimalConv3DChain()
@@ -1025,7 +1010,6 @@ class TestConv3DChain(DependencyPatternTest):
         self.assertEqual(same_deps_ids, [[0, 1], [1, 2], [2, 3]])
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestResidualOfResidual(DependencyPatternTest):
     def setUp(self):
         self.model = ResidualOfResidual(channels=16)
@@ -1060,7 +1044,6 @@ class TestResidualOfResidual(DependencyPatternTest):
         self.operate(self.model, self.dummy_input)
 
 
-@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestMulSubMerges(DependencyPatternTest):
     def setUp(self):
         self.model_mul = MinimalMulOperation()

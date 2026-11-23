@@ -1,11 +1,13 @@
 """Every Modeling feature on every model of the baseline zoo.
 
 `test_model_representation.py` checks that each zoo model *traces*; this
-sweep runs the whole Modeling tab on each of them, the way the Studio does:
-architecture, a representation session, every layer's details (neurons,
-weights, previews, the one-sample zoom), whole-layer edits followed by a
-forward, and compare A vs B (pair and group). A model family the Modeling tab
-cannot handle fails here, by name.
+sweep runs the whole Modeling tab on each of them, the way the Studio does,
+on the model wrapped with ``compute_dependencies=True``: architecture, a
+representation session, every layer's details (neurons, weights, previews,
+the one-sample zoom), whole-layer edits followed by a forward, neuron prune /
+add on a layer of every type the model has (the neuron graph keeps every
+coupled tensor in step), and compare A vs B (pair and group). A model family
+the Modeling tab cannot handle fails here, by name.
 
 Inputs are shrunk to 64 px where a model accepts it, so the sweep stays in
 minutes; token models (``vocab_size``) get token ids.
@@ -17,6 +19,7 @@ from unittest import mock
 import torch as th
 import torch.nn as nn
 
+from weightslab.backend.model_interface import ModelInterface
 from weightslab.components import model_comparison as mc
 from weightslab.components import model_representation as mr
 
@@ -92,6 +95,16 @@ def _samples(model: nn.Module, n: int = 6):
     return [th.randn(shape, generator=g) for _ in range(n)]
 
 
+def _shapes(out):
+    if isinstance(out, th.Tensor):
+        return [tuple(out.shape)]
+    if isinstance(out, dict):
+        return [s for v in out.values() for s in _shapes(v)]
+    if isinstance(out, (list, tuple)):
+        return [s for v in out for s in _shapes(v)]
+    return []
+
+
 def discover():
     found = []
     for name, obj in vars(zoo).items():
@@ -119,6 +132,9 @@ class TestModelingOnTheZoo(unittest.TestCase):
 
     def _sweep(self, name, model):
         items = _samples(model)
+        model = ModelInterface(model, dummy_input=items[0].unsqueeze(0), compute_dependencies=True,
+                               register=False, skip_previous_auto_load=True, log_model_signals=False)
+        self.assertIsNotNone(model._neuron_editor, f"{name}: no neuron graph")
         loaders = {"train_loader": _Loader(items)}
         rep = mr.ModelRepresentationManager()
 
@@ -154,7 +170,30 @@ class TestModelingOnTheZoo(unittest.TestCase):
                 mr.edit_layer(model, first, op, manager=rep, ratio=0.1)
         model.eval()
         with th.no_grad():
-            model(items[0].unsqueeze(0))
+            reference = _shapes(model(items[0].unsqueeze(0)))
+
+        # Neuron prune / add on one layer of each type: every coupled tensor
+        # follows, the outputs keep their shape. The output layer cannot change.
+        nodes = {n["id"]: n for n in rep.architecture(model, loaders)["nodes"]}
+        editable = [n for n in weighted if "prune" in nodes[n["id"]]["supported_ops"]]
+        self.assertTrue(editable, f"{name}: no layer can be pruned")
+        by_type = {}
+        for n in editable:
+            by_type.setdefault(n["type"], n["id"])
+        for layer_type, node_id in by_type.items():
+            for op in ("prune", "add"):
+                try:
+                    mr.edit_layer(model, node_id, op, neuron_indices=[0], count=1, manager=rep)
+                except ValueError as exc:
+                    if op == "prune" and "every neuron" in str(exc):
+                        continue
+                    self.fail(f"{name}/{node_id} ({layer_type}) {op}: {exc}")
+                model.eval()
+                with th.no_grad():
+                    self.assertEqual(_shapes(model(items[0].unsqueeze(0))), reference,
+                                     f"{name}/{node_id} {op}")
+        details = mr.layer_details(model, loaders, editable[0]["id"], manager=rep, skip_previews=True)
+        self.assertTrue(details["success"], f"{name}: details after the edits")
 
         # Compare A vs B: pair and group.
         cm = mc.ComparisonManager(rep)
