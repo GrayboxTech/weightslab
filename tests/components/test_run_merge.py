@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 import duckdb
+import torch.nn as nn
 
 import weightslab.proto.experiment_service_pb2 as pb2
 from weightslab.backend.logger import LoggerQueue
@@ -678,6 +679,140 @@ class TestRunMergeRpcs(_RunsFixture):
                 pb2.MergeExperimentRunsRequest(experiment_hashes=[A, K]), None).success)
             self.assertFalse(service.SplitExperimentRun(
                 pb2.SplitExperimentRunRequest(experiment_hash=K), None).success)
+
+
+# ---------------------------------------------------------------------------
+# Loading a run back and resuming it (a merged run, or any run)
+# ---------------------------------------------------------------------------
+
+class _AgedModel(nn.Linear):
+    """A model that reports a training age, like a watched WeightsLab model."""
+
+    def __init__(self, age):
+        super().__init__(3, 2)
+        self.age = age
+
+    def get_age(self):
+        return self.age
+
+
+class TestResumeAfterLoad(_RunsFixture):
+    """Load Current State of run X then Resume continues X itself when X was
+    restored at its last step; an earlier step is still a new run (a branch).
+    Resuming used to train under whichever run was loaded before (#302)."""
+
+    HP = {"lr": 0.1, "batch_size": 32}
+    DATA = {"uids": [1, 2, 3], "discarded": [], "tags": {}}
+
+    def recorded_run(self, model, init_step=0):
+        """Make (HP, model started at init_step, DATA) the current, recorded run."""
+        self.cm._model_init_step = init_step
+        run = self.cm.hash_generator.generate_hash(model=model, config=self.HP, data_state=self.DATA,
+                                                   model_init_step=init_step)
+        self.cm.current_exp_hash = run
+        return run
+
+    def continue_from_here(self, run, model):
+        with patch.object(self.cm, "get_model_snapshot", return_value=model):
+            self.cm._continue_run_from_here(run)
+
+    def resume(self, model, hp=None):
+        return self.cm.update_experiment_hash(model_snapshot=model, hp_snapshot=hp or self.HP,
+                                              dfm_snapshot=self.DATA)
+
+    def test_restored_at_run_end_reads_the_last_trained_step(self):
+        log_run(self.lg, K, range(0, 10))
+        log_run(self.lg, K, [30], metrics=("resource/cpu",))   # sampled while paused: not training
+        self.assertTrue(self.cm._restored_at_run_end(K, 9))
+        self.assertTrue(self.cm._restored_at_run_end(K, 12))
+        self.assertFalse(self.cm._restored_at_run_end(K, 5))
+        self.assertFalse(self.cm._restored_at_run_end(A, 9))   # nothing logged
+
+    def test_restored_at_its_end_resuming_continues_the_run(self):
+        model = _AgedModel(10)
+        run = self.recorded_run(model, init_step=0)
+        self.cm._model_init_step = 10            # load_state: training restarts from step 10
+        self.continue_from_here(run, model)
+
+        new_hash, is_new, changed = self.resume(model)
+        self.assertEqual((new_hash, is_new, changed), (run, False, set()))
+        self.assertEqual(self.cm.current_exp_hash, run)
+
+    def test_restored_at_an_earlier_step_resuming_is_a_new_run(self):
+        model = _AgedModel(5)
+        run = self.recorded_run(model, init_step=0)
+        self.cm._model_init_step = 5             # no continuation: the run logged past step 5
+
+        new_hash, is_new, changed = self.resume(model)
+        self.assertTrue(is_new)
+        self.assertNotEqual(new_hash, run)
+        self.assertEqual(changed, {"model"})
+
+    def test_a_changed_setting_after_the_restore_makes_one_new_run_not_two(self):
+        model = _AgedModel(10)
+        run = self.recorded_run(model, init_step=0)
+        self.cm._model_init_step = 10
+        self.continue_from_here(run, model)
+
+        changed_hp = {**self.HP, "batch_size": 64}
+        new_hash, is_new, _ = self.resume(model, hp=changed_hp)
+        self.assertTrue(is_new)
+        self.assertNotEqual(new_hash[:8], run[:8])     # new hyperparameters
+        self.assertEqual(new_hash[8:16], run[8:16])    # same model as the run it carries on
+        # Resuming again changes nothing more: still that one new run.
+        self.assertEqual(self.resume(model, hp=changed_hp)[:2], (new_hash, False))
+
+    def test_continuation_ends_with_a_real_model_change(self):
+        model = _AgedModel(10)
+        run = self.recorded_run(model, init_step=0)
+        self.cm._model_init_step = 10
+        self.continue_from_here(run, model)
+        other = nn.Sequential(nn.Linear(3, 4), nn.ReLU(), nn.Linear(4, 2))   # another architecture
+        new_hash, is_new, changed = self.resume(other)
+        self.assertTrue(is_new)
+        self.assertIn("model", changed)
+
+    def test_continuation_survives_a_restart(self):
+        model = _AgedModel(10)
+        run = self.recorded_run(model, init_step=0)
+        self.cm._model_init_step = 10
+        self.continue_from_here(run, model)
+        self.cm._save_manager_state()
+        restarted = CheckpointManager(root_log_dir=str(self.cm.root_log_dir))
+        self.assertEqual(restarted._continued_run, self.cm._continued_run)
+
+    def test_leaving_a_run_saves_its_last_step(self):
+        self.runs(**{K: "kept"})
+        model = _AgedModel(9)
+        with patch("weightslab.components.checkpoint_manager.get_model", return_value=model):
+            self.cm._save_run_end(K)
+        info = self.manifest_runs()[K]
+        self.assertEqual(info["latest_weight_step"], 9)
+        self.assertTrue((self.cm.models_dir / K[8:-8] / f"{K}_step_000009.pt").exists())
+
+    def test_leaving_a_run_saves_nothing_when_its_end_is_saved_or_it_was_merged_away(self):
+        self.runs(**{K: "kept", A: "absorbed"})
+        experiments = self.manifest_runs()
+        experiments[K]["latest_weight_step"] = 9
+        experiments[A]["merged_into"] = K
+        self.cm._write_manifest({"experiments": experiments, "latest_hash": K})
+        with patch("weightslab.components.checkpoint_manager.get_model", return_value=_AgedModel(9)), \
+                patch.object(self.cm, "save_model_checkpoint") as save:
+            self.cm._save_run_end(K)
+            self.cm._save_run_end(A)
+            self.cm._save_run_end("not-a-recorded-run")
+        save.assert_not_called()
+
+
+class TestRestoreCheckpointRpc(_RunsFixture):
+    def test_load_current_state_restores_the_runs_hyperparameters(self):
+        with patch("weightslab.trainer.services.experiment_service.DataService"):
+            service = ExperimentService(_Ctx({"checkpoint_manager": self.cm, "hyperparams": {}}))
+        with patch.object(self.cm, "load_state", return_value=True) as load_state:
+            response = service.RestoreCheckpoint(pb2.RestoreCheckpointRequest(experiment_hash=K), None)
+        self.assertTrue(response.success, response.message)
+        self.assertTrue(load_state.call_args.kwargs.get("load_config"),
+                        "Load Current State must restore the run's hyperparameters")
 
 
 if __name__ == "__main__":

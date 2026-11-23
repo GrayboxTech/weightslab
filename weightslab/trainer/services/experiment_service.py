@@ -604,7 +604,14 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                     target_step=target_step,
                 )
             else:
-                success = checkpoint_manager.load_state(experiment_hash, load_logger=False) # Don't load logger for full restore to avoid overwriting signals already in memory
+                # The run's hyperparameters too: left as they were, resuming
+                # trained the restored weights with the previously loaded run's
+                # settings, and so logged under that run's hash.
+                success = checkpoint_manager.load_state(
+                    experiment_hash,
+                    load_config=True,
+                    load_logger=False,  # don't overwrite the signals already in memory
+                )
 
             # Reply
             if success:

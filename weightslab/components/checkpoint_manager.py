@@ -213,6 +213,10 @@ class CheckpointManager:
         # Step tracking
         self._step_counter = None
         self._model_init_step = 0
+        # (run hash, live model hash) after a restore at that run's last step:
+        # while the live model still hashes the same, it is that run's own
+        # model, so resuming continues the run (see _continues_run).
+        self._continued_run: Optional[tuple] = None
         self._last_time_loaded: Optional[float] = time.time() # Track last load time for model hash uniqueness
 
         # First time only
@@ -1172,6 +1176,95 @@ class CheckpointManager:
                 best, best_distance = h, distance
         return best
 
+    def _save_run_end(self, run_hash: Optional[str]) -> None:
+        """Save run *run_hash*'s weights where it stops, as the experiment leaves it.
+
+        Pausing saves nothing, so a run left between two periodic dumps had no
+        weights at its last step: loading it again could only restart from an
+        earlier step, i.e. as a new run. Called when the experiment moves to
+        another run -- a changed setting on resume, or loading another run --
+        while the live model still holds this run's final weights. Nothing is
+        saved when the run's latest checkpoint is already at that step.
+        """
+        if self.read_only or not run_hash:
+            return
+        info = (self._load_manifest().get('experiments') or {}).get(run_hash)
+        if not info or info.get('merged_into'):
+            return
+        try:
+            model = get_model()
+            age = int(model.get_age()) if model is not None and hasattr(model, 'get_age') else None
+        except Exception:
+            age = None
+        if age is None:
+            return
+        last_saved = info.get('latest_weight_step')
+        if last_saved is not None and int(last_saved) >= age:
+            return
+        previous = self.current_exp_hash
+        self.current_exp_hash = run_hash
+        try:
+            saved = self.save_model_checkpoint(model=model, save_optimizer=True, step=age)
+            if saved is not None:
+                logger.info(f"Saved run {run_hash[:16]} at its last step {age} before leaving it")
+        except Exception as e:
+            logger.warning(f"Could not save run {run_hash[:16]} at its last step: {e}")
+        finally:
+            self.current_exp_hash = previous
+
+    def _restored_at_run_end(self, exp_hash: str, step: int) -> bool:
+        """Whether *step* is at or past the last step run *exp_hash* trained.
+
+        Read from the signal history (training points, ``resource/*`` aside).
+        False when nothing is logged for the run, or no history is loaded.
+        """
+        signal_logger = self._history_logger()
+        if signal_logger is None or not hasattr(signal_logger, 'run_signal_segments'):
+            return False
+        try:
+            last = max((hi for signal, _lo, hi in signal_logger.run_signal_segments(exp_hash)
+                        if not str(signal).startswith(self.SYSTEM_SIGNAL_PREFIXES)), default=None)
+        except Exception as e:
+            logger.debug(f"Could not read the last step of {exp_hash}: {e}")
+            return False
+        return last is not None and int(step) >= int(last)
+
+    def _live_model_hash(self, model=None) -> Optional[str]:
+        """The live model's hash, as update_experiment_hash computes it."""
+        try:
+            model = self.get_model_snapshot() if model is None else model
+            if model is None:
+                return None
+            return self.hash_generator._hash_model(
+                model, model_init_step=self._model_init_step,
+                _last_time_loaded=self._last_time_loaded)
+        except Exception as e:
+            logger.debug(f"Could not hash the live model: {e}")
+            return None
+
+    def _continue_run_from_here(self, exp_hash: str) -> None:
+        """Mark the restored model as run *exp_hash*'s own (see _continues_run).
+
+        Its hash now includes the restored step as the step training started
+        from, so it no longer matches the run's recorded one: without this,
+        the next resume would file the run's continuation as a new run.
+        """
+        live = self._live_model_hash()
+        if live is None:
+            return
+        self._continued_run = (exp_hash, live)
+        logger.info(f"Restored at the last step of run {exp_hash[:16]}: resuming continues it")
+
+    def _continues_run(self, model) -> bool:
+        """Whether the live model is still the restored run's own (see _continue_run_from_here)."""
+        if not self._continued_run:
+            return False
+        run, model_hash = self._continued_run
+        if run != self.current_exp_hash:
+            self._continued_run = None   # another run since: no longer applies
+            return False
+        return self._live_model_hash(model) == model_hash
+
     def _history_logger(self):
         try:
             signal_logger = ledgers.get_logger()
@@ -1502,9 +1595,14 @@ class CheckpointManager:
         data_snapshot = self.get_dataframe_snapshot() if dfm_snapshot is None else dfm_snapshot
         model_snapshot = self.get_model_snapshot() if model_snapshot is None else model_snapshot
 
+        # Restored at the current run's last step: the model is still that
+        # run's own as long as it hashes as it did then, so it keeps the run's
+        # model hash (-1: "keep the previous one") and resuming continues it.
+        continuing = self._continues_run(model_snapshot)
+
         # Check what changed
         has_changed, changed_components = self.hash_generator.has_changed(
-            model=model_snapshot,
+            model=None if continuing else model_snapshot,
             config=hp_snapshot,
             data_state=data_snapshot,
             model_init_step=self._model_init_step,
@@ -1517,7 +1615,7 @@ class CheckpointManager:
 
         # Generate new hash with all components
         new_hash = self.hash_generator.generate_hash(
-            model=model_snapshot,
+            model=-1 if continuing else model_snapshot,
             config=hp_snapshot,
             data_state=data_snapshot,
             model_init_step=self._model_init_step,
@@ -1535,8 +1633,15 @@ class CheckpointManager:
 
             # Update hash
             old_hash = self.current_exp_hash
+            # Leaving that run: keep its final weights (see _save_run_end).
+            if old_hash and old_hash != new_hash:
+                self._save_run_end(old_hash)
             self.current_exp_hash = new_hash
             self.previous_exp_hash = old_hash
+            # A setting changed while continuing a restored run: the new run
+            # carries on the same model, under the model hash it just took.
+            if continuing and self._continued_run:
+                self._continued_run = (new_hash, self._continued_run[1])
             self.hash_by_module[0] = self.hash_generator.get_component_hashes().get('hp', None)
             self.hash_by_module[1] = self.hash_generator.get_component_hashes().get('model', None)
             self.hash_by_module[2] = self.hash_generator.get_component_hashes().get('data', None)
@@ -1673,6 +1778,7 @@ class CheckpointManager:
             'previous_exp_hash': self.previous_exp_hash,
             'step_counter': self._step_counter,
             'model_init_step': self._model_init_step,
+            'continued_run': list(self._continued_run) if self._continued_run else None,
             'last_updated': datetime.now().isoformat(),
             'component_hashes': self.hash_generator.get_component_hashes(),
         }
@@ -2465,6 +2571,9 @@ class CheckpointManager:
             self.previous_exp_hash = state.get('previous_exp_hash')
             self._step_counter = state.get('step_counter', 0)
             self._model_init_step = state.get('model_init_step', 0)
+            continued = state.get('continued_run')
+            self._continued_run = (tuple(continued) if isinstance(continued, (list, tuple))
+                                   and len(continued) == 2 else None)
 
             component_hashes = state.get('component_hashes')
 
@@ -3007,6 +3116,7 @@ class CheckpointManager:
 
         # A step on a merged run's curve may belong to a run merged into it,
         # whose weight files are still saved under that run's own hash.
+        requested_hash = exp_hash
         owner = self.resolve_run_for_step(exp_hash, target_step)
         if owner != exp_hash:
             logger.info(f"Step {target_step} of merged run {exp_hash} was trained by run {owner}: loading that one")
@@ -3015,6 +3125,11 @@ class CheckpointManager:
         # A viewer that wraps no model has nothing to put weights into.
         if self.read_only and not self._has_registered_model():
             load_model = load_weights = False
+
+        # Leaving the current run for another one: keep its final weights, so
+        # it can be loaded back where it stopped (see _save_run_end).
+        if self.current_exp_hash and self.current_exp_hash not in (requested_hash, exp_hash):
+            self._save_run_end(self.current_exp_hash)
 
         # Load checkpoint data
         self._last_loaded_checkpoint_file = None  # set only if weights load below
@@ -3303,6 +3418,15 @@ class CheckpointManager:
                 'combined': exp_hash
             }
             self.hash_generator.restore_hashes(component_hashes, combined_hash=exp_hash)
+            # Restored where the run stopped, resuming continues that run.
+            # The model hash includes the step training (re)started from, so
+            # without this the run would come back as a new one the moment
+            # training resumes. An earlier step stays a new run (a branch):
+            # resuming retrains steps the run already logged.
+            self._continued_run = None
+            if (requested_hash == exp_hash and applied_step is not None
+                    and self._restored_at_run_end(exp_hash, applied_step)):
+                self._continue_run_from_here(exp_hash)
             self._save_manager_state()
             if self.read_only:
                 self._view_loaded = True
