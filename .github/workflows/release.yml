@@ -155,21 +155,23 @@ jobs:
           fi
           CLONE_URL="https://x-access-token:${WEIGHTS_STUDIO_TOKEN}@github.com/GrayboxTech/weights_studio.git"
 
-          # Mirror the weightslab tag routing: a dev-named tag vendors the
-          # weights_studio "dev" branch; every other tag vendors main. No
-          # ls-remote probe -- it added a flaky network round-trip and a
-          # branch that's known to exist. This used to guess the ref from
-          # which weightslab branches happened to contain the tagged commit
-          # -- fragile, and NOT tied to is_dev_release, so it could silently
-          # vendor the wrong UI.
-          UI_REF="main"
+          # Which weights_studio branch to vendor (.github/scripts/resolve_ui_ref.sh):
+          # "@<branch>" in the tag or tagged commit's message, else the
+          # weights_studio branch named like the weightslab branch the tag
+          # is on, else the default -- dev for a dev tag, main otherwise.
+          # Deterministic from the tag (no guess from which branches contain
+          # the commit), and fatal if the branch list cannot be fetched.
+          DEFAULT_UI_REF="main"
           if [ "${IS_DEV_RELEASE}" = "true" ]; then
-            UI_REF="dev"
+            DEFAULT_UI_REF="dev"
           fi
+          UI_REF="$(bash .github/scripts/resolve_ui_ref.sh "${CLONE_URL}" "${DEFAULT_UI_REF}")"
           echo "Using weights_studio ref: ${UI_REF}"
 
           rm -rf /tmp/weights_studio
           git clone --depth 1 --branch "${UI_REF}" "${CLONE_URL}" /tmp/weights_studio
+          UI_SHA="$(git -C /tmp/weights_studio rev-parse --short HEAD)"
+          echo "Weights Studio UI: \`${UI_REF}\` @ \`${UI_SHA}\`" >> "${GITHUB_STEP_SUMMARY}"
 
           pushd /tmp/weights_studio >/dev/null
           npm ci
@@ -680,11 +682,15 @@ jobs:
             exit 1
           fi
           CLONE_URL="https://x-access-token:${WEIGHTS_STUDIO_TOKEN}@github.com/GrayboxTech/weights_studio.git"
-          UI_REF="main"
+          # Same rules as the dev release (.github/scripts/resolve_ui_ref.sh).
+          # A release tag is on main, so without an "@<branch>" this is main.
+          UI_REF="$(bash .github/scripts/resolve_ui_ref.sh "${CLONE_URL}" main)"
           echo "Using weights_studio ref: ${UI_REF}"
 
           rm -rf /tmp/weights_studio
           git clone --depth 1 --branch "${UI_REF}" "${CLONE_URL}" /tmp/weights_studio
+          UI_SHA="$(git -C /tmp/weights_studio rev-parse --short HEAD)"
+          echo "Weights Studio UI: \`${UI_REF}\` @ \`${UI_SHA}\`" >> "${GITHUB_STEP_SUMMARY}"
 
           pushd /tmp/weights_studio >/dev/null
           npm ci
