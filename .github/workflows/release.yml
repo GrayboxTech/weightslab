@@ -111,8 +111,10 @@ jobs:
 
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # DEV RELEASE — tag on dev branch, not yet merged to main
-  # Publishes to TestPyPI and creates a GitHub pre-release.
+  # DEV RELEASE — a tag whose name contains "dev", on any branch (there is no
+  # dev branch any more; main is the only long-lived one). Every tag runs this
+  # job: TestPyPI first, then a GitHub pre-release for a dev tag, or the PyPI
+  # release below for a release tag on main.
   # ═══════════════════════════════════════════════════════════════════════════
 
   build-and-publish-dev-release:
@@ -145,7 +147,6 @@ jobs:
           # to it, so the clone below must authenticate with a real
           # cross-repo PAT instead.
           WEIGHTS_STUDIO_TOKEN: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
-          IS_DEV_RELEASE: ${{ needs.detect-target.outputs.is_dev_release }}
         run: |
           set -euo pipefail
 
@@ -158,14 +159,10 @@ jobs:
           # Which weights_studio branch to vendor (.github/scripts/resolve_ui_ref.sh):
           # "@<branch>" in the tag or tagged commit's message, else the
           # weights_studio branch named like the weightslab branch the tag
-          # is on, else the default -- dev for a dev tag, main otherwise.
+          # is on, else main (there is no dev branch any more).
           # Deterministic from the tag (no guess from which branches contain
           # the commit), and fatal if the branch list cannot be fetched.
-          DEFAULT_UI_REF="main"
-          if [ "${IS_DEV_RELEASE}" = "true" ]; then
-            DEFAULT_UI_REF="dev"
-          fi
-          UI_REF="$(bash .github/scripts/resolve_ui_ref.sh "${CLONE_URL}" "${DEFAULT_UI_REF}")"
+          UI_REF="$(bash .github/scripts/resolve_ui_ref.sh "${CLONE_URL}" main)"
           echo "Using weights_studio ref: ${UI_REF}"
 
           rm -rf /tmp/weights_studio
@@ -216,7 +213,7 @@ jobs:
 
       # The packaged weightslab/VERSION states the version being published, so
       # the artifact agrees with itself before it is uploaded (the commit back
-      # to dev/main is sync-version-file's job, after the release).
+      # to main, for a release tag, is sync-version-file's job afterwards).
       - name: Write weightslab/VERSION
         env:
           PUBLISH_VERSION: ${{ steps.compute_version.outputs.publish_version }}
@@ -477,7 +474,7 @@ jobs:
           # fetched below, one lightweight call per PR, only for the small
           # number of PRs that actually match this release.
           export PRS_JSON
-          PRS_JSON=$(gh pr list --state merged --base "dev" --limit 100 \
+          PRS_JSON=$(gh pr list --state merged --base "main" --limit 100 \
             --json number,title,mergedAt,url,author,body \
             2>/dev/null || echo "[]")
 
@@ -709,7 +706,7 @@ jobs:
 
       # The packaged weightslab/VERSION states the version being published:
       # the tag's own, PEP 440-normalized (v2.0.3 -> 2.0.3). The commit back to
-      # main/dev is sync-version-file's job, after the release.
+      # main is sync-version-file's job, after the release.
       #
       # The build is then pinned to that same version. Writing the file dirties
       # the checkout, and setuptools_scm's guess-next-dev turns a dirty tree at
@@ -1113,26 +1110,26 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # VERSION FILE SYNC — after either release, commit the tag's version into
-  # weightslab/VERSION: on main AND dev for a main release, on dev only for a
-  # dev release (a dev version never lands on main this way).
+  # VERSION FILE SYNC — after a release to PyPI, commit the tag's version into
+  # weightslab/VERSION on main. A dev pre-release writes it nowhere: there is
+  # no dev branch any more, and a dev version never lands on main.
   # ═══════════════════════════════════════════════════════════════════════════
   # weightslab/VERSION is the last-resort source of weightslab.__version__ (and
   # so of the telemetry version): read only when there is no git metadata, no
   # setuptools_scm-built _version.py and no installed dist metadata. It never
   # overrides a git-derived version, so builds and checkouts are unaffected.
   #
-  # main and dev both reject direct pushes (PR + status-check rulesets) unless
-  # the pusher is a ruleset bypass actor, which GITHUB_TOKEN is not — hence
+  # main rejects direct pushes (PR + status-check rulesets) unless the pusher
+  # is a ruleset bypass actor, which GITHUB_TOKEN is not — hence
   # VERSION_SYNC_TOKEN: a token of a bypass actor with contents:write on this
   # repo. "[skip ci]" stops that push from re-triggering ci.yml/docs-pages.yml
   # (a PAT push triggers workflows, a GITHUB_TOKEN push would not), which would
   # otherwise run a TestPyPI publish for the push to main.
   sync-version-file:
     name: Sync weightslab/VERSION
-    needs: [detect-target, create-dev-release, create-main-release]
-    # !cancelled(): exactly one of the two release jobs is skipped on any tag.
-    if: ${{ !cancelled() && (needs.create-main-release.result == 'success' || needs.create-dev-release.result == 'success') }}
+    needs: [detect-target, create-main-release]
+    # Main releases only (see above): create-main-release is skipped on a dev tag.
+    if: ${{ !cancelled() && needs.create-main-release.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1142,7 +1139,7 @@ jobs:
           VERSION_SYNC_TOKEN: ${{ secrets.VERSION_SYNC_TOKEN }}
         run: |
           if [ -z "${VERSION_SYNC_TOKEN}" ]; then
-            echo "::error::VERSION_SYNC_TOKEN is not set; main/dev reject pushes from GITHUB_TOKEN, so weightslab/VERSION was not updated for ${GITHUB_REF_NAME}. The release itself is published."
+            echo "::error::VERSION_SYNC_TOKEN is not set; main rejects pushes from GITHUB_TOKEN, so weightslab/VERSION was not updated for ${GITHUB_REF_NAME}. The release itself is published."
             exit 1
           fi
 
@@ -1154,16 +1151,11 @@ jobs:
       # v2.0.2 -> 2.0.2, v1.3.1-dev0 -> 1.3.1.dev0.
       - name: Compute version and target branches
         id: target
-        env:
-          IS_MAIN: ${{ needs.detect-target.outputs.is_main }}
         run: |
           set -euo pipefail
           python -m pip install --quiet packaging
           VERSION="$(python -c 'import os; from packaging.version import Version; print(Version(os.environ["GITHUB_REF_NAME"]))')"
-          BRANCHES="dev"
-          if [ "${IS_MAIN}" = "true" ]; then
-            BRANCHES="main dev"
-          fi
+          BRANCHES="main"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "branches=${BRANCHES}" >> $GITHUB_OUTPUT
           echo "Tag ${GITHUB_REF_NAME} -> weightslab/VERSION=${VERSION} on: ${BRANCHES}"
@@ -1183,10 +1175,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           for BRANCH in ${BRANCHES}; do
-            # A branch the repository no longer has is skipped, not an error:
-            # dev was removed after 2.0.5, and fetching it failed the run of a
-            # release already published (and written to main). ls-remote exits
-            # 2 when the branch does not exist; any other failure still fails.
+            # A branch the repository does not have is skipped, not an error
+            # (the removed dev branch failed the v2.0.5 run after the release
+            # was published). ls-remote exits 2 when the branch does not
+            # exist; any other failure still fails the job.
             rc=0
             git ls-remote --exit-code --heads origin "refs/heads/${BRANCH}" >/dev/null || rc=$?
             if [ "${rc}" -eq 2 ]; then

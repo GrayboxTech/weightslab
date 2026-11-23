@@ -175,7 +175,7 @@ if _IS_MAIN_PROCESS and grpc_tls_enabled and os.environ.get('WEIGHTSLAB_SKIP_SEC
 #   1. live git checkout  -> derive from the current (or nearest older) git tag
 #   2. built/installed pkg -> the generated _version.py, else dist metadata
 #   3. committed release   -> weightslab/VERSION, the last release tag, written
-#                             onto main/dev by release.yml (sync-version-file)
+#                             onto main by release.yml (sync-version-file)
 #   4. last resort         -> a UTC timestamp (keeps import from ever failing)
 def _resolve_version() -> str:
     pkg_dir = os.path.dirname(os.path.abspath(__file__))

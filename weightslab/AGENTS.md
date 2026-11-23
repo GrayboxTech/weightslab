@@ -519,6 +519,7 @@ around here.
 - Repos sit side by side (`…/weightslab`, `…/weights_studio`) — proto codegen reaches across by relative path.
 - Editing the proto is cross-repo: edit `experiment_service.proto`, regenerate Python stubs, run `npm run generate-proto:data` in weights_studio. One-sided edits leave the build broken.
 - Tests: backend `python -m pytest weightslab/tests/...`; frontend `npm run test` (vitest); Playwright E2E lives in **weights_studio** (`test:realtime:*`, `test:e2e:*`).
-- CI on non-`main`/`dev` branches only runs with `[force ci]` in the commit message (both repos).
+- `main` is the only long-lived branch in both repos (`dev` was removed after 2.0.5); PRs target `main`.
+- CI on branches other than `main` only runs with `[force ci]` in the commit message (both repos; weightslab also always runs `v*` release branches).
 - TLS/auth in the bundled UI is decided by cert presence under `WEIGHTSLAB_CERTS_DIR` — don't hardcode secure/insecure.
 - To make this guide available to pip users, ship it as package data (`weightslab/weightslab/AGENTS.md`) so the §0 skill can find it; the root `AGENTS.md`/gitignored `CLAUDE.md` is the contributor-facing source.

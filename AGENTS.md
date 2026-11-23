@@ -366,8 +366,11 @@ OpenRouter** initialized from the UI via `/init` (then `/model` to switch,
 - **Tests:** backend `python -m pytest weightslab/tests/...`; frontend unit
   `npm run test` (vitest); E2E/user-simulation Playwright lives in
   **weights_studio** (`test:realtime:*`, `test:e2e:*`), not here.
-- **CI on a custom branch:** pushes to non-`main`/`dev` branches only run CI when
-  the commit message contains `[force ci]` (both repos).
+- **Branches:** `main` is the only long-lived branch in both repos (`dev` was
+  removed after 2.0.5); PRs target `main`.
+- **CI on a custom branch:** pushes to branches other than `main` only run CI
+  when the commit message contains `[force ci]` (both repos; weightslab also
+  always runs `v*` release branches).
 - **TLS/auth in the bundled UI** is decided by cert presence under
   `WEIGHTSLAB_CERTS_DIR` (single source of truth) — don't hardcode secure/insecure.
 - **To make this guide available to pip users**, ship it as package data inside
