@@ -52,7 +52,7 @@ jobs:
           # dev-named tag is never a main release, no matter where it sits.
           IS_MAIN=false
           if [ "${IS_DEV_RELEASE}" != "true" ]; then
-            git fetch origin main
+            git fetch origin +refs/heads/main:refs/remotes/origin/main
             TAG_COMMIT="$(git rev-list -n 1 "${GITHUB_REF}")"
             if git merge-base --is-ancestor "${TAG_COMMIT}" origin/main; then
               IS_MAIN=true
@@ -64,6 +64,15 @@ jobs:
             SHOULD_RUN=true
           else
             SHOULD_RUN=false
+          fi
+
+          # A manual run (workflow_dispatch) on a branch has GITHUB_REF_NAME set
+          # to the branch name: on main it passed the ancestor check and
+          # published a GitHub release, and so a git tag, literally named "main"
+          # (2026-05-18), which later broke the VERSION sync. Only tags release.
+          if [[ "${GITHUB_REF}" != refs/tags/* ]]; then
+            SHOULD_RUN=false
+            echo "::warning::${GITHUB_REF} is not a tag; run this workflow from a v* tag to release."
           fi
           echo "should_run=${SHOULD_RUN}" >> $GITHUB_OUTPUT
 
@@ -1169,7 +1178,10 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           for BRANCH in ${BRANCHES}; do
             for attempt in 1 2 3; do
-              git fetch --depth=1 origin "${BRANCH}"
+              # Fully qualified refs: a bare "main" is ambiguous when a tag of the
+              # same name exists (a stray "main" tag made git fetch the tag and
+              # reject the push with "dst refspec main matches more than one").
+              git fetch --depth=1 origin "refs/heads/${BRANCH}"
               git checkout -q -B "${BRANCH}" FETCH_HEAD
               printf '%s\n' "${VERSION}" > weightslab/VERSION
               git add weightslab/VERSION
@@ -1178,7 +1190,7 @@ jobs:
                 continue 2
               fi
               git commit -q -m "release: weightslab/VERSION -> ${VERSION} [skip ci]"
-              if git push origin "HEAD:${BRANCH}"; then
+              if git push origin "HEAD:refs/heads/${BRANCH}"; then
                 echo "${BRANCH}: weightslab/VERSION -> ${VERSION}"
                 continue 2
               fi
