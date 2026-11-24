@@ -53,10 +53,7 @@ def tearDownModule():
     # in the process silently lost its gradients (test_neuron_graph) or read
     # audit_mode=True (test_logger). Leave the ledger as we found it.
     from weightslab.backend import ledgers
-    try:
-        ledgers.unregister_model()
-    except Exception:
-        pass
+    ledgers.GLOBAL_LEDGER.unregister_model()
 
 
 class _Tracked:
