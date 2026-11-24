@@ -330,6 +330,43 @@ class TestGraphDetails(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Sessions, details and edits on a registered-like setup (no gRPC)
 # ---------------------------------------------------------------------------
+class TestCallTrackerThreads(unittest.TestCase):
+    """Two sessions' trackers hook the same modules from two threads."""
+
+    def test_trackers_ignore_other_threads_and_half_registered_hooks(self):
+        model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 2))
+        x = th.randn(4, 8)
+        mine = []
+        errors = []
+        stop = threading.Event()
+
+        def churn():
+            # Another session: its own tracker on the same model, entered and
+            # left over and over (hooks added / removed while we run).
+            while not stop.is_set():
+                other = mr._CallTracker(model, on_pre=lambda f, a, k: errors.append("other saw a call"))
+                with other:
+                    pass
+
+        tracker = mr._CallTracker(model, on_pre=lambda f, a, k: mine.append(f.name))
+        thread = threading.Thread(target=churn, daemon=True)
+        thread.start()
+        try:
+            with tracker, th.no_grad():
+                for _ in range(300):
+                    tracker.reset()
+                    try:
+                        model(x)
+                    except TypeError as exc:      # hook(module, args) without kwargs
+                        errors.append(str(exc))
+                        break
+        finally:
+            stop.set()
+            thread.join(timeout=10)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(mine), 300 * 4)        # the Sequential + its 3 layers, every call
+
+
 class _Digits(Dataset):
     def __init__(self, n=24):
         g = th.Generator().manual_seed(0)

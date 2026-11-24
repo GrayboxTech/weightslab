@@ -705,6 +705,10 @@ class _CallTracker:
         self.on_pre = on_pre
         self.on_post = on_post
         self.handles = []
+        # The thread whose forwards this tracker follows. Another session's
+        # tracker hooks the same modules from its own thread; without this,
+        # each would also record the other's calls.
+        self.thread: Optional[int] = None
 
     def _node_id(self, name: str) -> str:
         k = self.counts[name]
@@ -714,6 +718,7 @@ class _CallTracker:
         return name if k == 0 else f"{name}#{k + 1}"
 
     def __enter__(self):
+        self.thread = threading.get_ident()
         for module in self.root.modules():
             if _is_internal(module):
                 continue
@@ -737,7 +742,13 @@ class _CallTracker:
         self.stack = []
         self.counts = Counter()
 
-    def _pre(self, module, args, kwargs):
+    def _pre(self, module, args, kwargs=None):
+        # kwargs may be missing: torch reads "with_kwargs" from a second dict,
+        # so a forward in another thread can catch this hook while it is being
+        # added or removed and call it as hook(module, args).
+        if threading.get_ident() != self.thread:
+            return None
+        kwargs = kwargs or {}
         try:
             name = self.names.get(id(module))
             if name is None:
@@ -759,7 +770,10 @@ class _CallTracker:
             logger.debug(f"[modeling] pre-hook failed: {exc}")
         return None
 
-    def _post(self, module, args, kwargs, output):
+    def _post(self, module, args, *rest):
+        if threading.get_ident() != self.thread:
+            return None
+        output = rest[-1] if rest else None      # (kwargs, output) or (output,): see _pre
         try:
             frame = None
             while self.stack:

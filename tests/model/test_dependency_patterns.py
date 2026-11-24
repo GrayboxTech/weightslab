@@ -26,6 +26,15 @@ from weightslab.backend.model_interface import ModelInterface
 os.environ['WEIGHTSLAB_LOG_LEVEL'] = 'DEBUG'
 
 
+def tearDownModule():
+    # ModelInterface registers itself in the ledger even with register=False,
+    # and these tests leave it in eval / audit mode. Tensor.backward is a no-op
+    # while the registered model is in audit mode, so later modules lost their
+    # gradients under plain unittest (the release job). Leave the ledger clean.
+    from weightslab.backend import ledgers
+    ledgers.GLOBAL_LEDGER.unregister_model()
+
+
 class MinimalSAMEDependencies(nn.Module):
     """
     Tests SAME dependency type: Conv -> BN -> ReLU

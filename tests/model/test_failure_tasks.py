@@ -20,6 +20,12 @@ from weightslab.components import failure_tasks as ft
 
 def setUpModule():
     global _lock_patch
+    # A model an earlier test module left registered (ModelInterface registers
+    # itself even with register=False) may sit in audit mode, which turns
+    # Tensor.backward into a no-op. pytest's conftest undoes that between
+    # modules; the release job runs plain unittest, so start clean here too.
+    from weightslab.backend import ledgers
+    ledgers.GLOBAL_LEDGER.unregister_model()
     _lock_patch = mock.patch(
         "weightslab.components.global_monitoring.weightslab_rlock", threading.RLock())
     _lock_patch.start()

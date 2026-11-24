@@ -7,6 +7,15 @@ from weightslab.backend.logger import LoggerQueue
 from weightslab.src import _log_signal
 
 
+def setUpModule():
+    # A model an earlier test module left registered (ModelInterface registers
+    # itself even with register=False) may sit in audit mode, which turns
+    # Tensor.backward into a no-op. pytest's conftest undoes that between
+    # modules; the release job runs plain unittest, so start clean here too.
+    from weightslab.backend import ledgers
+    ledgers.GLOBAL_LEDGER.unregister_model()
+
+
 @unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestLoggerQueue(unittest.TestCase):
     def test_cnn_dummy_train_and_test_logging_modes(self):
