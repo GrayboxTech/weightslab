@@ -111,8 +111,10 @@ jobs:
 
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # DEV RELEASE — tag on dev branch, not yet merged to main
-  # Publishes to TestPyPI and creates a GitHub pre-release.
+  # DEV RELEASE — a tag whose name contains "dev", on any branch (there is no
+  # dev branch any more; main is the only long-lived one). Every tag runs this
+  # job: TestPyPI first, then a GitHub pre-release for a dev tag, or the PyPI
+  # release below for a release tag on main.
   # ═══════════════════════════════════════════════════════════════════════════
 
   build-and-publish-dev-release:
@@ -145,7 +147,6 @@ jobs:
           # to it, so the clone below must authenticate with a real
           # cross-repo PAT instead.
           WEIGHTS_STUDIO_TOKEN: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
-          IS_DEV_RELEASE: ${{ needs.detect-target.outputs.is_dev_release }}
         run: |
           set -euo pipefail
 
@@ -155,21 +156,19 @@ jobs:
           fi
           CLONE_URL="https://x-access-token:${WEIGHTS_STUDIO_TOKEN}@github.com/GrayboxTech/weights_studio.git"
 
-          # Mirror the weightslab tag routing: a dev-named tag vendors the
-          # weights_studio "dev" branch; every other tag vendors main. No
-          # ls-remote probe -- it added a flaky network round-trip and a
-          # branch that's known to exist. This used to guess the ref from
-          # which weightslab branches happened to contain the tagged commit
-          # -- fragile, and NOT tied to is_dev_release, so it could silently
-          # vendor the wrong UI.
-          UI_REF="main"
-          if [ "${IS_DEV_RELEASE}" = "true" ]; then
-            UI_REF="dev"
-          fi
+          # Which weights_studio branch to vendor (.github/scripts/resolve_ui_ref.sh):
+          # "@<branch>" in the tag or tagged commit's message, else the
+          # weights_studio branch named like the weightslab branch the tag
+          # is on, else main (there is no dev branch any more).
+          # Deterministic from the tag (no guess from which branches contain
+          # the commit), and fatal if the branch list cannot be fetched.
+          UI_REF="$(bash .github/scripts/resolve_ui_ref.sh "${CLONE_URL}" main)"
           echo "Using weights_studio ref: ${UI_REF}"
 
           rm -rf /tmp/weights_studio
           git clone --depth 1 --branch "${UI_REF}" "${CLONE_URL}" /tmp/weights_studio
+          UI_SHA="$(git -C /tmp/weights_studio rev-parse --short HEAD)"
+          echo "Weights Studio UI: \`${UI_REF}\` @ \`${UI_SHA}\`" >> "${GITHUB_STEP_SUMMARY}"
 
           pushd /tmp/weights_studio >/dev/null
           npm ci
@@ -214,7 +213,7 @@ jobs:
 
       # The packaged weightslab/VERSION states the version being published, so
       # the artifact agrees with itself before it is uploaded (the commit back
-      # to dev/main is sync-version-file's job, after the release).
+      # to main, for a release tag, is sync-version-file's job afterwards).
       - name: Write weightslab/VERSION
         env:
           PUBLISH_VERSION: ${{ steps.compute_version.outputs.publish_version }}
@@ -475,7 +474,7 @@ jobs:
           # fetched below, one lightweight call per PR, only for the small
           # number of PRs that actually match this release.
           export PRS_JSON
-          PRS_JSON=$(gh pr list --state merged --base "dev" --limit 100 \
+          PRS_JSON=$(gh pr list --state merged --base "main" --limit 100 \
             --json number,title,mergedAt,url,author,body \
             2>/dev/null || echo "[]")
 
@@ -680,11 +679,15 @@ jobs:
             exit 1
           fi
           CLONE_URL="https://x-access-token:${WEIGHTS_STUDIO_TOKEN}@github.com/GrayboxTech/weights_studio.git"
-          UI_REF="main"
+          # Same rules as the dev release (.github/scripts/resolve_ui_ref.sh).
+          # A release tag is on main, so without an "@<branch>" this is main.
+          UI_REF="$(bash .github/scripts/resolve_ui_ref.sh "${CLONE_URL}" main)"
           echo "Using weights_studio ref: ${UI_REF}"
 
           rm -rf /tmp/weights_studio
           git clone --depth 1 --branch "${UI_REF}" "${CLONE_URL}" /tmp/weights_studio
+          UI_SHA="$(git -C /tmp/weights_studio rev-parse --short HEAD)"
+          echo "Weights Studio UI: \`${UI_REF}\` @ \`${UI_SHA}\`" >> "${GITHUB_STEP_SUMMARY}"
 
           pushd /tmp/weights_studio >/dev/null
           npm ci
@@ -703,7 +706,7 @@ jobs:
 
       # The packaged weightslab/VERSION states the version being published:
       # the tag's own, PEP 440-normalized (v2.0.3 -> 2.0.3). The commit back to
-      # main/dev is sync-version-file's job, after the release.
+      # main is sync-version-file's job, after the release.
       #
       # The build is then pinned to that same version. Writing the file dirties
       # the checkout, and setuptools_scm's guess-next-dev turns a dirty tree at
@@ -1107,36 +1110,47 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # VERSION FILE SYNC — after either release, commit the tag's version into
-  # weightslab/VERSION: on main AND dev for a main release, on dev only for a
-  # dev release (a dev version never lands on main this way).
+  # VERSION FILE + WHAT'S NEW SYNC — after a release to PyPI, commit the tag's
+  # version into weightslab/VERSION on main, regenerate docs/whats_new.rst from
+  # the GitHub releases in the same commit, then redeploy the docs. A dev
+  # pre-release does none of this: there is no dev branch any more, a dev
+  # version never lands on main, and the page lists stable releases only.
   # ═══════════════════════════════════════════════════════════════════════════
   # weightslab/VERSION is the last-resort source of weightslab.__version__ (and
   # so of the telemetry version): read only when there is no git metadata, no
   # setuptools_scm-built _version.py and no installed dist metadata. It never
   # overrides a git-derived version, so builds and checkouts are unaffected.
   #
-  # main and dev both reject direct pushes (PR + status-check rulesets) unless
-  # the pusher is a ruleset bypass actor, which GITHUB_TOKEN is not — hence
+  # What's New: the docs build the tag push started ran before this release
+  # existed, so its page lacks it, and the "[skip ci]" push below starts no docs
+  # build either; hence the explicit docs-pages.yml dispatch (allowed for
+  # GITHUB_TOKEN, needs actions: write). This lives in this job on purpose: as a
+  # separate trailing job (update-whats-new) it was dropped by a merge, and
+  # v2.0.4 and v2.0.5 never reached the page. A page that fails to regenerate
+  # never holds the VERSION sync back, but it does fail the job.
+  #
+  # main rejects direct pushes (PR + status-check rulesets) unless the pusher
+  # is a ruleset bypass actor, which GITHUB_TOKEN is not — hence
   # VERSION_SYNC_TOKEN: a token of a bypass actor with contents:write on this
   # repo. "[skip ci]" stops that push from re-triggering ci.yml/docs-pages.yml
   # (a PAT push triggers workflows, a GITHUB_TOKEN push would not), which would
   # otherwise run a TestPyPI publish for the push to main.
   sync-version-file:
-    name: Sync weightslab/VERSION
-    needs: [detect-target, create-dev-release, create-main-release]
-    # !cancelled(): exactly one of the two release jobs is skipped on any tag.
-    if: ${{ !cancelled() && (needs.create-main-release.result == 'success' || needs.create-dev-release.result == 'success') }}
+    name: Sync weightslab/VERSION and What's New
+    needs: [detect-target, create-main-release]
+    # Main releases only (see above): create-main-release is skipped on a dev tag.
+    if: ${{ !cancelled() && needs.create-main-release.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: write   # dispatch docs-pages.yml
     steps:
       - name: Require the push token
         env:
           VERSION_SYNC_TOKEN: ${{ secrets.VERSION_SYNC_TOKEN }}
         run: |
           if [ -z "${VERSION_SYNC_TOKEN}" ]; then
-            echo "::error::VERSION_SYNC_TOKEN is not set; main/dev reject pushes from GITHUB_TOKEN, so weightslab/VERSION was not updated for ${GITHUB_REF_NAME}. The release itself is published."
+            echo "::error::VERSION_SYNC_TOKEN is not set; main rejects pushes from GITHUB_TOKEN, so weightslab/VERSION and What's New were not updated for ${GITHUB_REF_NAME}. The release itself is published."
             exit 1
           fi
 
@@ -1148,16 +1162,11 @@ jobs:
       # v2.0.2 -> 2.0.2, v1.3.1-dev0 -> 1.3.1.dev0.
       - name: Compute version and target branches
         id: target
-        env:
-          IS_MAIN: ${{ needs.detect-target.outputs.is_main }}
         run: |
           set -euo pipefail
           python -m pip install --quiet packaging
           VERSION="$(python -c 'import os; from packaging.version import Version; print(Version(os.environ["GITHUB_REF_NAME"]))')"
-          BRANCHES="dev"
-          if [ "${IS_MAIN}" = "true" ]; then
-            BRANCHES="main dev"
-          fi
+          BRANCHES="main"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "branches=${BRANCHES}" >> $GITHUB_OUTPUT
           echo "Tag ${GITHUB_REF_NAME} -> weightslab/VERSION=${VERSION} on: ${BRANCHES}"
@@ -1166,17 +1175,52 @@ jobs:
         with:
           token: ${{ secrets.VERSION_SYNC_TOKEN }}
 
+      # Generated once, from the tag's copy of the script (stdlib only), then
+      # written to each branch by the next step. The working copy is restored so
+      # switching branches there cannot hit a local change.
+      - name: Regenerate docs/whats_new.rst
+        id: whats_new
+        continue-on-error: true   # reported by the last step, after the VERSION sync
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python docs/_scripts/update_whats_new.py
+          cp docs/whats_new.rst "${RUNNER_TEMP}/whats_new.rst"
+          git checkout -- docs/whats_new.rst
+          grep -q "releases/tag/${GITHUB_REF_NAME}$" "${RUNNER_TEMP}/whats_new.rst" \
+            || echo "::warning::${GITHUB_REF_NAME} is not on the regenerated What's New page (no 'Welcome' section in its release notes?)"
+
       # Each branch is rewritten from its fresh tip; a push rejected because the
       # branch moved meanwhile is retried on the new tip rather than rebased.
-      - name: Commit weightslab/VERSION
+      # The page is copied only when more than its "Last generated" date differs.
+      - name: Commit weightslab/VERSION and What's New
+        id: commit
         env:
           VERSION: ${{ steps.target.outputs.version }}
           BRANCHES: ${{ steps.target.outputs.branches }}
+          WHATS_NEW: ${{ steps.whats_new.outcome == 'success' }}
+          GENERATED: ${{ runner.temp }}/whats_new.rst
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          without_date() { grep -v '^\.\. Last generated:' "$1" 2>/dev/null || true; }
+          REDEPLOY_DOCS=false
           for BRANCH in ${BRANCHES}; do
+            # A branch the repository does not have is skipped, not an error
+            # (the removed dev branch failed the v2.0.5 run after the release
+            # was published). ls-remote exits 2 when the branch does not
+            # exist; any other failure still fails the job.
+            rc=0
+            git ls-remote --exit-code --heads origin "refs/heads/${BRANCH}" >/dev/null || rc=$?
+            if [ "${rc}" -eq 2 ]; then
+              echo "::notice::${BRANCH}: no such branch; weightslab/VERSION not written there"
+              continue
+            elif [ "${rc}" -ne 0 ]; then
+              echo "::error::Could not list branch ${BRANCH} (git ls-remote exit ${rc})"
+              exit 1
+            fi
             for attempt in 1 2 3; do
               # Fully qualified refs: a bare "main" is ambiguous when a tag of the
               # same name exists (a stray "main" tag made git fetch the tag and
@@ -1185,18 +1229,50 @@ jobs:
               git checkout -q -B "${BRANCH}" FETCH_HEAD
               printf '%s\n' "${VERSION}" > weightslab/VERSION
               git add weightslab/VERSION
-              if git diff --cached --quiet; then
-                echo "${BRANCH}: weightslab/VERSION is already ${VERSION}"
-                continue 2
+              if [ "${WHATS_NEW}" = "true" ] && \
+                 [ "$(without_date docs/whats_new.rst)" != "$(without_date "${GENERATED}")" ]; then
+                cp "${GENERATED}" docs/whats_new.rst
+                git add docs/whats_new.rst
               fi
-              git commit -q -m "release: weightslab/VERSION -> ${VERSION} [skip ci]"
+              VERSION_CHANGED=false
+              PAGE_CHANGED=false
+              git diff --cached --quiet -- weightslab/VERSION || VERSION_CHANGED=true
+              git diff --cached --quiet -- docs/whats_new.rst || PAGE_CHANGED=true
+              case "${VERSION_CHANGED}/${PAGE_CHANGED}" in
+                true/true)  WHAT="weightslab/VERSION -> ${VERSION}, What's New" ;;
+                true/false) WHAT="weightslab/VERSION -> ${VERSION}" ;;
+                false/true) WHAT="What's New for ${VERSION}" ;;
+                *)
+                  echo "${BRANCH}: weightslab/VERSION is already ${VERSION}, What's New up to date"
+                  continue 2 ;;
+              esac
+              git commit -q -m "release: ${WHAT} [skip ci]"
               if git push origin "HEAD:refs/heads/${BRANCH}"; then
-                echo "${BRANCH}: weightslab/VERSION -> ${VERSION}"
+                echo "${BRANCH}: ${WHAT}"
+                if [ "${PAGE_CHANGED}" = "true" ]; then
+                  REDEPLOY_DOCS=true
+                fi
                 continue 2
               fi
               echo "Push to ${BRANCH} rejected (attempt ${attempt}/3); retrying on its new tip"
               sleep 5
             done
-            echo "::error::Could not push weightslab/VERSION to ${BRANCH}"
+            echo "::error::Could not push to ${BRANCH}"
             exit 1
           done
+          echo "redeploy_docs=${REDEPLOY_DOCS}" >> "$GITHUB_OUTPUT"
+
+      # docs-pages.yml builds every whitelisted branch and tag in one run
+      # (sphinx-multiversion), so one dispatch refreshes main/latest.
+      # refs/heads/main, not "main": the repo also has a tag named "main".
+      - name: Redeploy the docs
+        if: ${{ steps.commit.outputs.redeploy_docs == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run docs-pages.yml --repo "${GITHUB_REPOSITORY}" --ref refs/heads/main
+
+      - name: Report a What's New failure
+        if: ${{ steps.whats_new.outcome == 'failure' }}
+        run: |
+          echo "::error::docs/whats_new.rst could not be regenerated (see the 'Regenerate docs/whats_new.rst' step). weightslab/VERSION was synced. Refresh the page from the Actions tab: Docs What's New > Run workflow."
+          exit 1
