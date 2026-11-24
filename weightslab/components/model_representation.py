@@ -41,7 +41,6 @@ by head (``neuron_groups``), and token-id inputs are previewed as tokens.
 from __future__ import annotations
 
 import copy
-import inspect
 import logging
 import math
 import os
@@ -52,7 +51,7 @@ import uuid
 from collections import Counter, OrderedDict
 from collections.abc import Mapping
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch as th
