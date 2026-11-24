@@ -51,7 +51,6 @@ import io
 import json
 import logging
 import math
-import os
 import threading
 import time
 import uuid
@@ -74,7 +73,6 @@ from weightslab.components.model_representation import (
     _inference_mode,
     _inputs_from_batch,
     _loader_entries,
-    _locate,
     _model_device,
     _to_device,
     _token_text,
@@ -91,10 +89,11 @@ from weightslab.components.failure_tasks import (
     Task,
     detect_task,
     draw_mark,
-    set_failure_boxes_fn,
-    set_failure_loss_fn,
-    set_failure_task,
 )
+# The hooks are documented as importable from here (re-exports).
+from weightslab.components.failure_tasks import set_failure_boxes_fn as set_failure_boxes_fn
+from weightslab.components.failure_tasks import set_failure_loss_fn as set_failure_loss_fn
+from weightslab.components.failure_tasks import set_failure_task as set_failure_task
 
 logger = logging.getLogger(__name__)
 
