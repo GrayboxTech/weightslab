@@ -120,3 +120,40 @@ def _private_opencode_machine_lock(request, monkeypatch):
     lock = request.getfixturevalue("tmp_path") / ".weightslab" / opencode_process.LOCK_FILENAME
     monkeypatch.setattr(opencode_process, "machine_lock_path", lambda: lock)
     yield
+
+
+def _ledger_model():
+    from weightslab.backend import ledgers
+    try:
+        model = ledgers.get_model()
+    except Exception:
+        return None
+    try:
+        return object.__getattribute__(model, "_obj")      # unwrap the ledger Proxy
+    except AttributeError:
+        return model
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _no_model_leaks_between_modules():
+    """Put the ledger's model back as each test module found it.
+
+    ``ModelInterface`` registers itself in the global ledger (even with
+    ``register=False``: the checkpoint auto-load needs it there), and a test
+    that ends with that model in eval mode leaves it in *audit mode*.
+    WeightsLab patches ``Tensor.backward`` to do nothing while the registered
+    model is in audit mode -- so every later module in the process silently
+    lost its gradients (tests/model/test_neuron_graph.py after the zoo
+    sweep), and LoggerQueue tagged its signals ``audit_mode=True``
+    (tests/model/test_logger.py after test_dependency_patterns.py). Order
+    dependent, so green alone and red in CI.
+    """
+    before = _ledger_model()
+    yield
+    after = _ledger_model()
+    if after is None or after is before:
+        return
+    from weightslab.backend import ledgers
+    ledgers.GLOBAL_LEDGER.unregister_model()
+    if before is not None:
+        ledgers.register_model(before)
