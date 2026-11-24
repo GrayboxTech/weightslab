@@ -49,6 +49,17 @@ def setUpModule():
 
 def tearDownModule():
     _lock_patch.stop()
+    # ModelInterface registers itself in the ledger even with register=False
+    # (the checkpoint auto-load needs it there), and the sweep leaves the last
+    # zoo model in eval / audit mode. WeightsLab's Tensor.backward patch is a
+    # no-op while the registered model is in audit mode, so every later test
+    # in the process silently lost its gradients (test_neuron_graph) or read
+    # audit_mode=True (test_logger). Leave the ledger as we found it.
+    from weightslab.backend import ledgers
+    try:
+        ledgers.unregister_model()
+    except Exception:
+        pass
 
 
 class _Tracked:
