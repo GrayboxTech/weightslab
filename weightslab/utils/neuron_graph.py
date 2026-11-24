@@ -637,12 +637,9 @@ def _r_reduce(g, name, args, kwargs, out):
     if not isinstance(x, th.Tensor):
         return
     tags = g._tag(x)
-    dim = _arg(args, kwargs, 1, "dim", None)
-    if name == "norm":
-        dim = _arg(args, kwargs, 2, "dim", None)
-        keepdim = bool(_arg(args, kwargs, 3, "keepdim", False))
-    else:
-        keepdim = bool(_arg(args, kwargs, 2, "keepdim", False))
+    # norm(x, p, dim, ...) puts dim third. keepdim needs no reading: the
+    # output's rank says whether the reduced dimensions were kept.
+    dim = _arg(args, kwargs, 2 if name == "norm" else 1, "dim", None)
     if isinstance(dim, (int, list, tuple)) or dim is None:
         reduced = set(_dims(dim, x.ndim)) if x.ndim else set()
     else:
