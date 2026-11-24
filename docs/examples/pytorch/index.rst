@@ -4,7 +4,8 @@ PyTorch Basics
 ==============
 
 Full training scripts using raw PyTorch, each illustrating a different
-computer vision task with WeightsLab fully wired in.
+task (computer vision, and a character-level language model) with WeightsLab
+fully wired in.
 
 .. raw:: html
 
@@ -22,3 +23,4 @@ computer vision task with WeightsLab fully wired in.
    detection
    clustering
    generation
+   shakespeare_char

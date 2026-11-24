@@ -39,6 +39,9 @@ Expanding the chat history opens a tabbed window:
 - **Frontend Agent**, the main conversation, carried over from the landing
   page when the backend connected. Replies to the docked chat bar land in this
   same transcript, so there is one conversation rather than two.
+- **Why fail?**, the guided analysis of failing samples, started from the
+  grid's or a tag's **Why do these fail?** (see :doc:`why_fail`). It runs on
+  the backend, not on the chat agent, so it needs no model provider.
 - **One tab per running** ``/loop`` **job**, created when the job starts and
   closable when you're done with it.
 

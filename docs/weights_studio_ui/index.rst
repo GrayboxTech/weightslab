@@ -64,7 +64,7 @@ Sections
 --------
 
 Everything the studio puts on screen, what it is for, and how to drive it —
-grouped into four parts. Each page below covers its own subsections; see the
+grouped by part of the screen. Each page below covers its own subsections; see the
 page itself for the details.
 
 .. toctree::
@@ -74,6 +74,8 @@ page itself for the details.
    agent
    left_panel
    main_area
+   modeling
+   why_fail
    more/index
 
 - :doc:`landing_page`, the pre-experiment surface: agent chat, local Jupyter,
@@ -87,4 +89,10 @@ page itself for the details.
 - :doc:`main_area`, the Plots Board (search, merged curves, error bands,
   right-click actions, resource monitoring) and the Data Board (grid/list
   modes, quick filters, selection, tagging, the detail modal).
+- :doc:`modeling`, the Modeling tab (beta): the architecture graph, layer
+  health on samples you pick, weights & neurons cards, freeze / reset /
+  prune / add, Compare A vs B, and transformers.
+- :doc:`why_fail`, the guided analysis of failing samples (beta): look-alikes,
+  where the model parts ways, suspect neurons, categories, tags, and gated
+  repairs.
 - :doc:`more/index`, More to know.
