@@ -275,7 +275,9 @@ Selection and the context menu
 - **Drag** a rectangle across cells to select a range.
 - **Ctrl+click** to add or remove individual cells.
 - **Right-click** the selection for the context menu: manage tags, discard
-  samples, restore discarded ones.
+  samples, restore discarded ones; run **Model Representation**, **Compare**
+  (set as A, compare with A, compare these 2 samples) for the
+  :doc:`modeling` tab; and **Why do these fail?** (:doc:`why_fail`).
 
 Discarding removes samples from the model's active set without deleting
 anything, the counter in the bottom bar shows *total* against *active*, and

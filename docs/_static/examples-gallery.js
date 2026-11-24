@@ -62,6 +62,13 @@
       colab: COLAB + 'PyTorch/wl-generation.ipynb'
     },
     {
+      badge: 'PyTorch', color: 'pytorch',
+      title: 'Language Model, tiny Shakespeare',
+      desc: "A character-level GPT (Karpathy's nanoGPT or microgpt) on tiny Shakespeare. Each 64-character window is a sample: sort them by loss, watch the attention heads in the Modeling tab, and read generated text as it trains.",
+      tags: ['language model', 'llm', 'transformer', 'gpt', 'text', 'shakespeare'],
+      url: 'examples/pytorch/shakespeare_char.html'
+    },
+    {
       badge: 'Lightning', color: 'lightning',
       title: 'Classification, MNIST (Lightning)',
       desc: 'Same MNIST classification wrapped in a LightningModule. WeightsLab hooks replace only the guard functions, the rest is unchanged.',
