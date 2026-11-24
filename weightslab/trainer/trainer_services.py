@@ -343,6 +343,39 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         return self._exp_service.model_service.GetActivations(request, context)
 
     # -------------------------------------------------------------------------
+    # Modeling tab
+    # -------------------------------------------------------------------------
+    def GetModelArchitecture(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.GetModelArchitecture({request})")
+        return self._exp_service.model_service.GetModelArchitecture(request, context)
+
+    def StartModelRepresentation(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.StartModelRepresentation({request})")
+        return self._exp_service.model_service.StartModelRepresentation(request, context)
+
+    def GetModelRepresentation(self, request, context):
+        return self._exp_service.model_service.GetModelRepresentation(request, context)
+
+    def GetModelLayerDetails(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.GetModelLayerDetails({request})")
+        return self._exp_service.model_service.GetModelLayerDetails(request, context)
+
+    def EditModelLayer(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.EditModelLayer({request})")
+        return self._exp_service.model_service.EditModelLayer(request, context)
+
+    def StartModelComparison(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.StartModelComparison({request})")
+        return self._exp_service.model_service.StartModelComparison(request, context)
+
+    def GetModelComparison(self, request, context):
+        return self._exp_service.model_service.GetModelComparison(request, context)
+
+    def GetModelLayerComparison(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.GetModelLayerComparison({request})")
+        return self._exp_service.model_service.GetModelLayerComparison(request, context)
+
+    # -------------------------------------------------------------------------
     # Data service helpers + RPCs (for weights_studio UI)
     # -------------------------------------------------------------------------
     def ApplyDataQuery(self, request, context):

@@ -155,6 +155,32 @@ Conventions that matter for correctness:
   supports both `hp.get("lr")` and `hp["lr"]` (subscript == `.get`), and stays
   live — reads reflect in-place updates and re-registration.
 
+- **Modeling tab (Weights Studio, v3).** Works on any wrapped model, no extra
+  call: the architecture graph is traced from one real forward pass (groups such
+  as encoder / bottleneck / decoder / head from the module tree, data-flow edges
+  from tensor provenance -- no torch.fx). "Model Representation" (grid or tag
+  right-click) runs the model on those samples in a background thread, under
+  the training lock, and keeps per-layer activation stats + previews.
+  Freeze / unfreeze / reset / perturb work on any layer; neuron-level prune /
+  add / freeze need `wl.watch_or_edit(model, flag="model",
+  compute_dependencies=True)`. A model whose batch is not `(inputs, ids,
+  labels, ...)` (or a dict of kwargs) tells it how to call the model with
+  `weightslab.components.model_representation.set_modeling_inputs_fn(fn)`.
+  A module shared by several parents (Ultralytics' one SiLU behind every
+  `Conv.act`) gets one node per caller (`model.6.cv1.act`); Ultralytics blocks
+  take backbone / neck / head roles from the model's `yaml`.
+  **Compare A vs B** (`model_comparison.py`, RPCs `StartModelComparison` /
+  `GetModelComparison` / `GetModelLayerComparison`): two tags / selections run
+  through the model; per layer a score -- pair mode (1 sample vs 1): normalized
+  squared distance of the two activation maps, 0..2; group mode: RMS of the
+  per-neuron Cohen's d -- plus per-neuron effects and "fires only on A / B".
+  Samples in both sides are left out of both; each side is capped (256, an
+  even seeded subset). Studio: grid / tag right-click → "Compare: Set as A",
+  then "Compare with A"; two selected samples → "Compare These 2 Samples".
+  Code: `weightslab/weightslab/components/model_representation.py`; tests:
+  `tests/model/test_model_representation.py` (sweeps the whole baseline zoo)
+  and `test_model_representation_ultralytics.py` (YOLO11 detect + segment).
+
 Recording values (pick by what the value is *about*, not by convenience):
 
 | Value describes | Verb | Example |
@@ -226,6 +252,7 @@ ones when debugging:
 | `ENABLE_HYPERPARAMETERS_OPTIMIZATION` | `1` | `0`/`false` removes the Hyperparameters section, makes HP inputs read-only, and stops the HP poll. |
 | `ENABLE_AGENT` | `1` | `0`/`false` removes the agent chat bar + history panel and stops the agent health poll. |
 | `ENABLE_NOTEBOOK` | `1` | `0`/`false` removes the notebook button (left of the logo) + notebook window. The notebook runs Python in a shared in-process kernel against the live experiment (`df`, model, checkpoints), persisted as `notebook.ipynb` under `root_log_dir`; `>`-prefixed cells ask the agent to propose code. |
+| `ENABLE_MODELING` | `1` | `0`/`false` removes the Main / Modeling tab strip under the agent bar and the Modeling tab (architecture graph, per-layer weight/activation health, Model Representation runs, layer edits). |
 | `ENABLE_TUTORIAL` | `1` | `0`/`false` removes the new-user tour: the "New to WeightsLab?" notice (shown when no `wl_studio_seen` cookie and no saved Studio settings), its video popup ending on the MNIST Colab notebook, and the header **Tour** button. `TUTORIAL_VIDEO_URL` / `TUTORIAL_COLAB_URL` replace the video / notebook. |
 
 > **VITE_ vs WS_/BB_/ENABLE_:** `VITE_*` variables are baked at **build time**
@@ -301,6 +328,21 @@ forward path (pass `projection={"layer": "<named_modules() name>"}`);
 `skipped_nonfinite > 0` means the model's features went NaN. Training is never
 affected by any of these. Full page: `weightslab/docs/projection.rst`.
 
+**Modeling tab: "Connections are approximate" / prune & add greyed out.**
+The graph's edges come from one traced forward pass on a real sample (first
+sample of a loader, else `dummy_input`, else `input_shape`). The banner means no
+input could be built or the forward failed (message shown); for unusual batch
+layouts register `set_modeling_inputs_fn` (see §3). Prune / add (and per-neuron
+freeze) need `compute_dependencies=True`; freeze, reset and perturb work anyway.
+A conv/linear neuron's "dead" verdict is read at the ReLU it feeds (the
+inspector says which), since its own output is signed. An add / prune writes
+nothing at edit time: the architectures on both sides of the edit are saved
+when training resumes (the pre-edit one waits in memory, so restoring an older
+checkpoint before resuming still works). "Fired" is relative: a
+channel fires on a sample when its largest |value| exceeds 1e-6 x the layer's
+largest |value| on it (an untrained net whose whole signal sits at 1e-6 scale
+is not "dead"; exact zeros always are).
+
 **Large weights/images fail to transfer.** Raise `GRPC_MAX_MESSAGE_BYTES`.
 
 **uv: "No solution found … only torchmetrics==1.0.3 is available".** The
@@ -331,6 +373,8 @@ OpenRouter** initialized from the UI via `/init` (then `/model` to switch,
 - `trainer/services/` — `experiment_service.py` (gRPC servicer) delegating to
   `{model,data,agent}_service.py`; `data_image_utils.py` (preview/mask encoding).
 - `components/` — `global_monitoring.py` (locks, `guard_*` contexts, pause),
+  `model_representation.py` (Modeling tab: traced graph, representation sessions, layer edits),
+  `model_comparison.py` (Modeling tab: compare A vs B per layer / neuron),
   `checkpoint_manager.py`, `evaluation_controller.py`.
 - `data/` — `dataframe_manager.py`, `data_samples_with_ops.py`, `sample_stats.py`,
   H5 storage (`h5_dataframe_store.py`, `h5_array_store.py`, `array_proxy.py`).
@@ -344,6 +388,12 @@ OpenRouter** initialized from the UI via `/init` (then `/model` to switch,
 - `grid_data/` — grid + modal rendering (`GridCell.ts`, `DataImageService.ts`,
   `gridDataManager.ts`, `BboxRenderer.ts`, `SegmentationRenderer.ts`,
   `PointCloudViewer.ts`).
+- `modeling/` — the Modeling tab: `appTabs.ts` (Main / Modeling tabs under the agent bar),
+  `modelGraphLayout.ts` (pure layout, unit-tested), `modelingView.ts` (graph, inspector, edits),
+  `layerPopups.ts` (weights & neurons cards: resizable, click to inspect, drag carries the
+  cards below), `chartZoom.ts` / `activationZoom.ts` (neurons & weights / activation zooms),
+  `neuronGrid.ts` + `render.ts` (shared canvases and menus), `compare.ts` (compare A vs B:
+  picking A / B, scores, divergence profile, A | B | A - B maps).
 - `ui/` — `server.py` (pure-Python HTTP + gRPC-Web proxy), `static/` (bundled SPA),
   `utils/` (cert-generation scripts, sync-frontend helper).
 

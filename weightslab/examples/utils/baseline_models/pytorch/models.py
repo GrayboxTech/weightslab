@@ -57,6 +57,47 @@ class FashionCNN(nn.Module):
         return self.s4(x)
 
 
+class GroupedMNISTCNN(nn.Module):
+    """A small MNIST CNN built from named groups, for the Modeling tab.
+
+    ``encoder`` holds three conv -> batch-norm -> ReLU blocks with a max-pool
+    after the first two; ``head`` flattens and classifies. Every group can be
+    folded/unfolded in the Studio graph, and with ``compute_dependencies=True``
+    neurons can be added/pruned in any block (the change propagates to the
+    batch norm, the next conv and, from the last block, the classifier).
+    """
+
+    def __init__(self, num_classes: int = 10, width: int = 8):
+        super().__init__()
+        from collections import OrderedDict
+
+        self.input_shape = (1, 1, 28, 28)
+
+        def block(c_in: int, c_out: int) -> nn.Sequential:
+            return nn.Sequential(OrderedDict([
+                ("conv", nn.Conv2d(c_in, c_out, 3, padding=1)),
+                ("bn", nn.BatchNorm2d(c_out)),
+                ("relu", nn.ReLU()),
+            ]))
+
+        self.encoder = nn.Sequential(OrderedDict([
+            ("block1", block(1, width)),
+            ("pool1", nn.MaxPool2d(2)),           # 28 -> 14
+            ("block2", block(width, 2 * width)),
+            ("pool2", nn.MaxPool2d(2)),           # 14 -> 7
+            ("block3", block(2 * width, 2 * width)),
+        ]))
+        self.head = nn.Sequential(OrderedDict([
+            ("flatten", nn.Flatten()),
+            ("fc1", nn.Linear(2 * width * 7 * 7, 64)),
+            ("relu", nn.ReLU()),
+            ("fc2", nn.Linear(64, num_classes)),
+        ]))
+
+    def forward(self, x):
+        return self.head(self.encoder(x))
+
+
 class FashionCNNSequential(nn.Module):
     def __init__(self):
         super().__init__()

@@ -2494,6 +2494,9 @@ _UI_ENV_GLOBALS = [
      ("ENABLE_HYPERPARAMETERS_OPTIMIZATION", "WS_ENABLE_HYPERPARAMETERS_OPTIMIZATION",
       "VITE_ENABLE_HYPERPARAMETERS_OPTIMIZATION")),
     ("WS_ENABLE_AGENT", ("ENABLE_AGENT", "WS_ENABLE_AGENT", "VITE_ENABLE_AGENT")),
+    # The Modeling tab (weights_studio src/modeling/): architecture graph,
+    # per-layer activations and edits. Off removes the Main/Modeling tab strip.
+    ("WS_ENABLE_MODELING", ("ENABLE_MODELING", "WS_ENABLE_MODELING", "VITE_ENABLE_MODELING")),
     # New-user tour (weights_studio src/ui/tutorial.ts): on/off, and the
     # YouTube video / Colab notebook it shows instead of its defaults.
     ("WS_ENABLE_TUTORIAL", ("ENABLE_TUTORIAL", "WS_ENABLE_TUTORIAL", "VITE_ENABLE_TUTORIAL")),

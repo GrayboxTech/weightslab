@@ -73,6 +73,16 @@ logger = logging.getLogger(__name__)
 _EXPERIMENT_LOAD_HOOKS: List[Any] = []
 
 
+def _unwrap_ledger_model():
+    """The registered model object (not its Proxy), or None."""
+    try:
+        model = get_model()
+        target = object.__getattribute__(model, '_obj') if hasattr(type(model), '__getattr__') else model
+    except Exception:
+        return None
+    return target
+
+
 def register_experiment_load_hook(fn):
     """Run ``fn(exp_hash, root_dir)`` after every experiment load (returns ``fn``)."""
     if fn not in _EXPERIMENT_LOAD_HOOKS:
@@ -225,6 +235,14 @@ class CheckpointManager:
         self._pending_data_state = None
         self._has_pending_changes = False
         self._pending_components = set()
+        # Set by structural edits (Modeling tab prune/add): the next model
+        # change dumps the architecture even though dump_model_architecture is
+        # off, so checkpoints on both sides of the edit stay restorable.
+        # Nothing is written at edit time: the architecture being edited away
+        # waits in memory (model hash, serialized model) and reaches the disk
+        # with the edited one, when the changes are persisted -- on resume.
+        self._architecture_dump_requested = False
+        self._pending_previous_architecture = None
 
         # Load existing state if available
         self._load_manager_state()
@@ -1396,6 +1414,18 @@ class CheckpointManager:
             should_save_weights = True
             weights_model = model
 
+        if 'model' in changed_components and self._architecture_dump_requested:
+            # A structural edit happened: this model hash is a new architecture.
+            # Both sides of the edit are saved now, not at edit time.
+            self._write_pending_previous_architecture()
+            arch_model = model if model is not None else _unwrap_ledger_model()
+            if arch_model is not None:
+                try:
+                    self.save_model_architecture(arch_model)
+                    self._architecture_dump_requested = False
+                except Exception as e:
+                    logger.warning(f"Could not save the edited model architecture: {e}")
+
         if ('hp' in changed_components or 'config' in changed_components) and config is not None and dump_config_state:
             logger.info("Dumping hyperparameters config...")
             self.save_config(config)
@@ -1529,6 +1559,17 @@ class CheckpointManager:
         except Exception as exc:
             logger.debug(f"Could not re-attach projection: {exc}")
 
+    @staticmethod
+    def _rebind_optimizer(model) -> None:
+        """Point the registered optimizer(s) at a model object that replaced the old one."""
+        update = getattr(model, 'update_optimizer', None)
+        if not callable(update):
+            return
+        try:
+            update()
+        except Exception as exc:
+            logger.warning(f"Could not rebind the optimizer to the restored model: {exc}")
+
     @_writes()
     def save_model_checkpoint(
         self,
@@ -1657,6 +1698,73 @@ class CheckpointManager:
         except Exception as e:
             logger.error(f"Failed to save model checkpoint: {e}")
             return None
+
+    @_writes()
+    def request_architecture_dump(self) -> None:
+        """Dump the architecture at the next model change (see _save_changes)."""
+        self._architecture_dump_requested = True
+
+    def note_structural_edit(self, model) -> None:
+        """Call BEFORE a structural edit (add / prune neurons).
+
+        Writes nothing: both architectures -- the one being edited away and
+        the edited one -- are saved when the changes are persisted, i.e. when
+        training resumes (see _save_changes). Edits tried without training
+        on never reach the disk. Until then the pre-edit architecture is kept
+        in memory, so its checkpoints can still be restored (load_checkpoint
+        falls back to it). Only the first edit since the last save matters:
+        later ones edit a model no checkpoint has.
+        """
+        self._architecture_dump_requested = True
+        if self._pending_previous_architecture is not None or self.current_exp_hash is None:
+            return
+        model_hash = self.current_exp_hash[8:-8]
+        if self._architecture_file(model_hash).exists():
+            return
+        try:
+            self._pending_previous_architecture = (model_hash, self._serialize_architecture(model))
+        except Exception as e:
+            logger.warning(f"Could not keep the architecture before the edit: {e}")
+
+    def _architecture_file(self, model_hash: str) -> Path:
+        return self.models_dir / model_hash / f"{model_hash}_architecture.pkl"
+
+    @staticmethod
+    def _serialize_architecture(model) -> bytes:
+        """The model as an architecture file holds it (dill, lock links removed)."""
+        if isinstance(model, ledgers.Proxy):   # the ledger handle, not the model
+            model = object.__getattribute__(model, '_obj')
+        guards = {}
+        for name in ('guard_training_context', 'guard_testing_context'):
+            if name in getattr(model, '__dict__', {}):
+                guards[name] = model.__dict__.pop(name)
+        try:
+            return dill.dumps(model) if dill is not None else pickle.dumps(model)
+        finally:
+            model.__dict__.update(guards)
+
+    @_writes()
+    def _write_pending_previous_architecture(self) -> None:
+        """Persist the pre-edit architecture kept by note_structural_edit."""
+        pending = self._pending_previous_architecture
+        self._pending_previous_architecture = None
+        if pending is None:
+            return
+        model_hash, blob = pending
+        arch_file = self._architecture_file(model_hash)
+        if arch_file.exists():
+            return
+        try:
+            os.makedirs(arch_file.parent, exist_ok=True)
+            tmp = arch_file.with_name(arch_file.name + '.tmp')
+            with open(tmp, 'wb') as f:
+                f.write(blob)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, arch_file)
+            logger.info(f"Saved model architecture (before the edit): {arch_file.name}")
+        except Exception as e:
+            logger.warning(f"Could not save the architecture before the edit: {e}")
 
     @_writes()
     def save_model_architecture(
@@ -2376,7 +2484,10 @@ class CheckpointManager:
 
         # Load model architecture if different, or load only RNG state for reproducibility if model hash is unchanged
         model_rng_loaded = False
-        if load_model and (target_model_hash != current_model_hash or force):
+        # After a structural edit not yet persisted, the live model no longer
+        # matches the hash recorded for it: its architecture must be reloaded.
+        structure_edited = bool(self._architecture_dump_requested)
+        if load_model and (target_model_hash != current_model_hash or force or structure_edited):
             model_dir = models_base / exp_hash[8:-8]
             arch_ref_file = model_dir / f"{exp_hash[8:-8]}_architecture_ref.json"
 
@@ -2409,6 +2520,20 @@ class CheckpointManager:
                     self._last_time_loaded = time.time() # Update last loaded time after successful load
                 except Exception as e:
                     logger.error(f" [ERROR] Failed to load model architecture: {e}")
+            elif (self._pending_previous_architecture is not None
+                    and self._pending_previous_architecture[0] == actual_arch_hash):
+                # Edited, not resumed yet: the pre-edit architecture is in memory.
+                try:
+                    result['model'] = dill.loads(self._pending_previous_architecture[1])
+                    if not hasattr(result['model'], 'guard_training_context'):
+                        result['model'].guard_training_context = guard_training_context
+                    if not hasattr(result['model'], 'guard_testing_context'):
+                        result['model'].guard_testing_context = guard_testing_context
+                    result['loaded_components'].add('model')
+                    logger.info(f" [OK] Loaded model architecture {actual_arch_hash[:16]} from before the edit (in memory)")
+                    self._last_time_loaded = time.time()
+                except Exception as e:
+                    logger.error(f" [ERROR] Failed to load the pre-edit model architecture: {e}")
             else:
                 logger.warning(f" [WARNING] Model architecture file not found: {actual_arch_file}")
 
@@ -2692,7 +2817,8 @@ class CheckpointManager:
         if 'model' in checkpoint_data['loaded_components']:
             try:
                 model = checkpoint_data['model'] # Include model architecture, weights, and optimizer state at this level
-                # model.update_optimizer() # Update optimizer with new model parameters if needed
+                if model is None:
+                    raise ValueError("the checkpoint carries no model architecture")
 
                 # Remove existing locks
                 if hasattr(model, 'guard_testing_context'):
@@ -2705,6 +2831,10 @@ class CheckpointManager:
                 # A NEW model object: the projection's hook is still on the
                 # old one, which nothing calls any more.
                 self._reattach_projection(model)
+                # ...and the optimizer still holds the OLD parameters: without
+                # this, training would silently stop updating the restored
+                # model. (Its state, if the checkpoint has one, loads below.)
+                self._rebind_optimizer(model)
 
                 # Set Model Training Guard
                 guard_training_context.model = model # Train
@@ -2778,10 +2908,23 @@ class CheckpointManager:
                         self.error_loading_checkpoint.append('weights')
                         return False
 
+                    if model_data.get('model') is None:
+                        # Registering None here used to "succeed" and leave the
+                        # ledger without a model: the next forward of the
+                        # training loop died with "Proxy target not set".
+                        logger.error(
+                            f"[ERROR] Cannot restore {exp_hash[:16]}: its weights do not fit the current "
+                            "model (the architecture changed since, e.g. neurons were added or pruned) "
+                            "and no architecture was saved for it. The current model is kept unchanged.")
+                        if 'weights' not in self.error_loading_checkpoint:
+                            self.error_loading_checkpoint.append('weights')
+                        return False
+
                 try:
                     model = model_data['model']
                     ledgers.register_model(model)
                     self._reattach_projection(model)
+                    self._rebind_optimizer(model)
                     weights = checkpoint_data['weights']
                     if model and weights and 'model_state_dict' in weights:
                         model.load_state_dict(weights['model_state_dict'])
