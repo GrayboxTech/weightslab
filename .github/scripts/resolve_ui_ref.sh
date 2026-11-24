@@ -5,19 +5,22 @@
 #      commit's message -- e.g. "2.0.5 pre-release @feature/foo" -- when
 #      weights_studio has that branch;
 #   2. the weights_studio branch named like the weightslab branch the tag sits
-#      on, i.e. a branch whose tip is the tagged commit (a dev tag prefers a
-#      specific branch over dev/main; a release tag is on main, main first);
-#   3. otherwise the default: dev for a dev tag, main for a release tag.
+#      on, i.e. a branch whose tip is the tagged commit (a dev tag prefers its
+#      own branch over main; a release tag is on main, main first);
+#   3. otherwise the default: main.
+#
+# There is no dev branch any more (removed after 2.0.5): main is the only
+# long-lived branch in both repositories.
 #
 # A "@name" that is no weights_studio branch (a person's handle, a typo) is
 # skipped with a note, never an error.
 #
-# Usage: resolve_ui_ref.sh <weights_studio clone url> <default ref>
+# Usage: resolve_ui_ref.sh <weights_studio clone url> [default ref, main]
 # Prints the chosen branch on stdout; the reasoning goes to stderr (job log).
 set -euo pipefail
 
 CLONE_URL="$1"
-DEFAULT_REF="$2"
+DEFAULT_REF="${2:-main}"
 TAG="${GITHUB_REF_NAME:-}"
 
 log() { echo "$*" >&2; }
@@ -82,13 +85,14 @@ done
 git fetch --quiet --no-tags origin '+refs/heads/*:refs/remotes/origin/*' \
   || log "Could not refresh the weightslab branches; using what the checkout fetched"
 here="$(git for-each-ref --points-at "${TAG_COMMIT}" --format='%(refname:lstrip=3)' refs/remotes/origin | grep -vx 'HEAD' || true)"
-specific="$(printf '%s\n' "${here}" | grep -vxE 'main|dev' || true)"
+specific="$(printf '%s\n' "${here}" | grep -vx 'main' || true)"
 on_main="$(printf '%s\n' "${here}" | grep -x 'main' || true)"
-on_dev="$(printf '%s\n' "${here}" | grep -x 'dev' || true)"
-if [ "${DEFAULT_REF}" = "main" ]; then
-  candidates="${on_main} ${specific} ${on_dev}"
+# A dev tag (its name contains "dev", as release.yml decides) prefers its own
+# branch over main; a release tag takes main first.
+if [[ "${TAG}" == *dev* ]]; then
+  candidates="${specific} ${on_main}"
 else
-  candidates="${specific} ${on_dev} ${on_main}"
+  candidates="${on_main} ${specific}"
 fi
 for name in ${candidates}; do
   if ws_has "${name}"; then
