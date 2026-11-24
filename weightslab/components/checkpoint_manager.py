@@ -1766,6 +1766,7 @@ class CheckpointManager:
         except Exception as e:
             logger.warning(f"Could not save the architecture before the edit: {e}")
 
+    @_writes()
     def save_model_architecture(
         self,
         model: th.nn.Module,

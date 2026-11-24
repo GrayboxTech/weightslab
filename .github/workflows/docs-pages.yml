@@ -31,7 +31,7 @@ jobs:
         id: check
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            git fetch origin main
+            git fetch origin +refs/heads/main:refs/remotes/origin/main
             TAG_COMMIT="$(git rev-list -n 1 "${{ github.ref }}")"
             IS_ON_MAIN=$(git merge-base --is-ancestor "${TAG_COMMIT}" origin/main \
                          && echo "true" || echo "false")

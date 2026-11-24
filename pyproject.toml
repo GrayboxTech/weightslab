@@ -12,7 +12,7 @@ authors = [
   { name = "Guillaue Pelluet", email = "guillaue@graybx.com" }
 ]
 license = "PolyForm-Noncommercial-1.0.0"  # commercial use: paid licence from Graybox SAS, see LICENSE
-license-files = ["LICENSE", "LICENSE-PolyForm-Noncommercial-1.0.0.md"]
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 classifiers = [
   "Development Status :: 1 - Planning",
