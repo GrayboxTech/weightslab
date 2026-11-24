@@ -620,3 +620,61 @@ class ModelService:
             response.summary.CopyFrom(self._node_diff_pb(result["summary"]))
         response.neurons.extend(pb2.ModelNeuronDiff(**n) for n in result.get("neurons", []))
         return response
+
+    # ---- Failure analysis ("Why do these fail?") ------------------------------
+    @staticmethod
+    def _failure_state_pb(status: dict, success: bool = True, message: str = ""):
+        fields = dict(status)
+        question = fields.pop("question", None)
+        messages = fields.pop("messages", [])
+        state = pb2.FailureAnalysisState(
+            success=success, message=message or fields.pop("message", ""),
+            **{k: v for k, v in fields.items() if k in pb2.FailureAnalysisState.DESCRIPTOR.fields_by_name
+               and k != "message"})
+        state.messages.extend(pb2.FailureAnalysisMessage(**m) for m in messages)
+        if question:
+            state.question.CopyFrom(pb2.FailureAnalysisQuestion(
+                id=question["id"], text=question["text"], multiple=bool(question["multiple"]),
+                defaults=list(question.get("defaults") or []),
+                confirm_label=question.get("confirm_label", ""),
+                choices=[pb2.FailureAnalysisChoice(id=c["id"], label=c["label"], hint=c.get("hint", ""),
+                                                   primary=bool(c.get("primary")))
+                         for c in question["choices"]]))
+        return state
+
+    def StartFailureAnalysis(self, request, context):
+        import json
+        from weightslab.components.failure_analysis import FAILURES
+        model, loaders = self._modeling_targets()
+        if model is None:
+            return pb2.FailureAnalysisState(success=False, state="error", message="No model registered")
+        try:
+            options = json.loads(request.options_json) if request.options_json else {}
+            session = FAILURES.start(
+                model, loaders, tag=request.tag, sample_ids=list(request.sample_ids),
+                origins=list(request.origins), origin=request.origin,
+                automatic=bool(request.automatic), options=options)
+        except Exception as exc:
+            logger.error(f"[failures] StartFailureAnalysis failed: {exc}", exc_info=True)
+            return pb2.FailureAnalysisState(success=False, state="error", message=str(exc))
+        return self._failure_state_pb(session.status())
+
+    def GetFailureAnalysis(self, request, context):
+        from weightslab.components.failure_analysis import FAILURES
+        session = FAILURES.get(request.session_id)
+        if session is None:
+            return pb2.FailureAnalysisState(success=True, state="none")
+        if request.set_automatic:
+            session.set_automatic(bool(request.automatic))
+        if request.cancel:
+            session.cancel.set()
+            session.answered.set()
+        return self._failure_state_pb(session.status(int(request.since)))
+
+    def AnswerFailureAnalysis(self, request, context):
+        from weightslab.components.failure_analysis import FAILURES
+        session = FAILURES.get(request.session_id)
+        if session is None:
+            return pb2.FailureAnalysisState(success=False, state="none", message="no analysis")
+        ok, why = session.answer(request.question_id, request.choice, list(request.choices))
+        return self._failure_state_pb(session.status(), success=ok, message=why)

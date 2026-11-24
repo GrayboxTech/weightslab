@@ -1,0 +1,41 @@
+# Character-level GPT on Karpathy's tiny Shakespeare (see main.py).
+experiment_name: shakespeare_char
+device: auto                  # cuda when available, else cpu
+# root_log_dir: ./logs        # checkpoints, data grid, samples.txt (default: a temp dir)
+# data_root: ./data           # where tinyshakespeare.txt is downloaded (default: <root_log_dir>/data)
+skip_checkpoint_load: false   # false = resume from this experiment's newest weights
+
+model:
+  class: NanoGPT              # or MicroGPT (Karpathy's microgpt: RMSNorm, ReLU MLP, no biases)
+  block_size: 64              # characters per sample (the context)
+  n_embd: 128
+  n_head: 4
+  n_layer: 4
+  dropout: 0.1                # NanoGPT only
+  # Karpathy's "baby GPT" (GPU): block_size 256, n_embd 384, n_head 6, n_layer 6, dropout 0.2
+
+optimizer:
+  lr: 0.001
+
+data:
+  train_share: 0.9            # first 90% of the text for training, the rest for test
+  train_loader:
+    batch_size: 64
+    shuffle: true
+    stride: 32                # one window every 32 characters (~31k training windows)
+  test_loader:
+    batch_size: 128
+    stride: 64                # ~1.7k test windows, no overlap
+
+eval_full_to_train_steps_ratio: 500   # full test pass every N steps
+experiment_dump_to_train_steps_ratio: 500
+sample_every: 500                     # generate a sample every N steps
+tqdm_display: true
+is_training: false                    # press Train in the Studio to start
+
+ledger_enable_flushing_threads: true
+ledger_enable_h5_persistence: true
+ledger_flush_max_rows: 15000
+ledger_flush_interval: 30.0
+
+serving_grpc: true

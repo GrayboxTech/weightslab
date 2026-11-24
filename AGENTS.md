@@ -209,6 +209,39 @@ Conventions that matter for correctness:
   where they can. Freeze / reset still follow torch.fx's layer dependencies
   when the model has them; a model torch.fx cannot trace (the GPTs) freezes /
   resets per layer (frozen rows put back before every forward).
+  **"Why do these fail?"** (`weightslab/components/failure_analysis.py`,
+  RPCs Start/Get/AnswerFailureAnalysis; Studio: right-click a selection or a
+  tag, then the Agent Window's "Why fail?" tab): a guided analysis of failing
+  samples that asks before each step, or runs them all with **Automatic**.
+  Check (true -> predicted) -> look-alikes (same class, predicted right,
+  nearest in the model's own features, from train / val) -> compare
+  (per-layer Cohen's d; suspects must beat a shuffled-label baseline, on the
+  mean or the max) -> test (silence the suspects during an eval only,
+  replaced by their look-alike average; narrowed by halves) -> explain (top
+  samples; one category per failure: spurious feature / mislabeled / unlike
+  training / boundary) -> fix (tags `wopt_*`, and / or repair candidates
+  fine-tuned from the current weights -- control, replay, targeted layer,
+  reset neurons -- each checked by a gate: held-out failures fixed beyond the
+  control, accuracy kept, few flips, no class dropping; the model changes only
+  when the best one is accepted; training is held paused meanwhile). Caps and
+  time budgets (`DEFAULTS`, overridable via `options_json`) keep big models /
+  datasets bounded. What "failing" means is per task
+  (`weightslab/components/failure_tasks.py`): predicted wrong
+  (classification), the image's IoU (segmentation, wrong pixels drawn red),
+  the F1 of its boxes (detection, true / predicted boxes drawn), the share of
+  next tokens predicted right (language models; labels equal to the inputs
+  are shifted), else the per-sample loss registered with `flag="loss"`
+  ranked against train / val. Continuous scores ask where failing starts;
+  "fixed" / "worse" then need a change of at least `delta` (0.1). The task
+  comes from `set_failure_task(...)` / `model.wl_failure_task`, else
+  `task_type`, else the output and target shapes. Detection needs boxes per
+  image (torchvision dicts, `[x1, y1, x2, y2, class, conf]` rows, or
+  `set_failure_boxes_fn` / `model.wl_failure_boxes(output)`) and repairs
+  with your loss (`set_failure_loss_fn` / `model.wl_failure_loss`, or the
+  registered one); `set_failure_targets_fn` reads unusual batches (e.g. an
+  Ultralytics batch dict). These `set_failure_*` hooks all import from
+  `weightslab.components.failure_analysis`. A repair that fails the gate is never applied
+  automatically; by hand, the closest one can be applied anyway.
   Code: `weightslab/weightslab/components/model_representation.py`; tests:
   `tests/model/test_model_representation.py` (sweeps the whole baseline zoo)
   and `test_model_representation_ultralytics.py` (YOLO11 detect + segment).

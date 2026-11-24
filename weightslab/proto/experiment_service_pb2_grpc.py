@@ -264,6 +264,21 @@ class ExperimentServiceStub(object):
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerComparisonRequest.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerComparisonResponse.FromString,
                 _registered_method=True)
+        self.StartFailureAnalysis = channel.unary_unary(
+                '/ExperimentService/StartFailureAnalysis',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.FailureAnalysisRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.FailureAnalysisState.FromString,
+                _registered_method=True)
+        self.GetFailureAnalysis = channel.unary_unary(
+                '/ExperimentService/GetFailureAnalysis',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetFailureAnalysisRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.FailureAnalysisState.FromString,
+                _registered_method=True)
+        self.AnswerFailureAnalysis = channel.unary_unary(
+                '/ExperimentService/AnswerFailureAnalysis',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.FailureAnalysisAnswer.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.FailureAnalysisState.FromString,
+                _registered_method=True)
 
 
 class ExperimentServiceServicer(object):
@@ -613,6 +628,29 @@ class ExperimentServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def StartFailureAnalysis(self, request, context):
+        """"Why do these fail?": a guided analysis of failing samples (similar
+        healthy samples, suspect neurons, a silencing test, top samples) and an
+        optional repair, as a conversation that asks before each step unless it
+        runs automatically. Returns at once; poll GetFailureAnalysis, answer the
+        pending question with AnswerFailureAnalysis.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetFailureAnalysis(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def AnswerFailureAnalysis(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ExperimentServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -845,6 +883,21 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     servicer.GetModelLayerComparison,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerComparisonRequest.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerComparisonResponse.SerializeToString,
+            ),
+            'StartFailureAnalysis': grpc.unary_unary_rpc_method_handler(
+                    servicer.StartFailureAnalysis,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.FailureAnalysisRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.FailureAnalysisState.SerializeToString,
+            ),
+            'GetFailureAnalysis': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetFailureAnalysis,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetFailureAnalysisRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.FailureAnalysisState.SerializeToString,
+            ),
+            'AnswerFailureAnalysis': grpc.unary_unary_rpc_method_handler(
+                    servicer.AnswerFailureAnalysis,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.FailureAnalysisAnswer.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.FailureAnalysisState.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -2089,6 +2142,87 @@ class ExperimentService(object):
             '/ExperimentService/GetModelLayerComparison',
             weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerComparisonRequest.SerializeToString,
             weightslab_dot_proto_dot_experiment__service__pb2.ModelLayerComparisonResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def StartFailureAnalysis(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/StartFailureAnalysis',
+            weightslab_dot_proto_dot_experiment__service__pb2.FailureAnalysisRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.FailureAnalysisState.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetFailureAnalysis(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetFailureAnalysis',
+            weightslab_dot_proto_dot_experiment__service__pb2.GetFailureAnalysisRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.FailureAnalysisState.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def AnswerFailureAnalysis(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/AnswerFailureAnalysis',
+            weightslab_dot_proto_dot_experiment__service__pb2.FailureAnalysisAnswer.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.FailureAnalysisState.FromString,
             options,
             channel_credentials,
             insecure,
