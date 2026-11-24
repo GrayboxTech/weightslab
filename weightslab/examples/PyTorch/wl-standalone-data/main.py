@@ -26,7 +26,8 @@ Drive it
       list_uids train_loader --discarded
       dump                              sanitized ledger snapshot
 
-    weightslab start                    # open Weights Studio (another terminal)
+    Weights Studio opens in your browser on its own: wl.serve() serves it
+    (an already running `weightslab start` is used instead).
 """
 
 import argparse
@@ -104,8 +105,9 @@ def parse_args(argv=None):
     p.add_argument("--no-cli", action="store_true", help="Do not start the CLI server.")
     p.add_argument("--no-grpc", action="store_true", help="Do not start the gRPC backend.")
     p.add_argument("--grpc-port", type=int, default=50051,
-                   help="gRPC port for Weights Studio (must match `weightslab start "
-                        "--backend-port`).")
+                   help="gRPC port for Weights Studio (the UI wl.serve() opens follows "
+                        "it; a separate `weightslab start` needs the same "
+                        "--backend-port).")
     p.add_argument("--serve-timeout", type=int, default=None,
                    help="Seconds to keep serving after the pass (default: forever).")
     return p.parse_args(argv)
@@ -152,7 +154,7 @@ def main(argv=None) -> int:
     wl.serve(serving_grpc=not args.no_grpc, serving_cli=not args.no_cli,
              grpc_port=args.grpc_port)
     print("=" * 70)
-    print(" DATA-ONLY standalone — attach with `weightslab cli`, UI with `weightslab start`")
+    print(" DATA-ONLY standalone — attach with `weightslab cli`; Weights Studio opens in your browser")
     print(f" train={len(train_loader.dataset)} val={len(val_loader.dataset)} log_dir={log_dir}")
     print("=" * 70)
     # wl.start_training(timeout=3)

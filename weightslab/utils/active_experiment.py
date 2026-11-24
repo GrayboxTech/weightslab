@@ -307,6 +307,20 @@ def live_ui_experiment_dir() -> Optional[str]:
     return _sole_live_dir("ui")
 
 
+def live_ui_for_backend(backend_port: int) -> Optional[dict]:
+    """The record of a ``weightslab start`` that is *still running* and proxies
+    to ``backend_port``, or None.
+
+    Lets ``wl.serve()`` see that a UI for its backend is already up, so it does
+    not start a second one (see weightslab.ui.embedded). Only an entry naming
+    this port counts: a UI pointed at another backend does not show this one.
+    """
+    for entry in reversed(_live_entries("ui")):
+        if entry.get("backend_port") == backend_port:
+            return entry
+    return None
+
+
 def backend_experiment_dir() -> Optional[str]:
     """Directory of the most recent recorded ``wl.serve()``, live or not."""
     for entry in reversed(entries("backend")):

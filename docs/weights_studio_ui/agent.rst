@@ -88,7 +88,8 @@ Typical setup:
    (or the landing page's login modal), OpenRouter, Anthropic, a local Ollama
    endpoint, anything OpenCode supports.
 2. Start WeightsLab (``wl.serve(serving_grpc=True)``).
-3. Start Weights Studio (``weightslab start``).
+3. Open Weights Studio (``wl.serve()`` opens it in your browser, or run
+   ``weightslab start``).
 4. Ask questions in the agent bar, or type ``/init`` first to pick a specific
    model.
 

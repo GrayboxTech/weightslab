@@ -306,7 +306,10 @@ class LoggerQueue:
         # exists, persist history to an on-disk DuckDB file under its loggers/
         # dir. (The reverse ordering — CM created after the logger — is handled
         # by CheckpointManager.__init__ calling set_db_path on the live logger.)
-        if db_path == ":memory:":
+        # A read-only checkpoint manager (a viewer over existing runs) never has
+        # its logger write into a run's database: history stays in memory.
+        read_only_cm = getattr(self.chkpt_manager, "read_only", False) is True
+        if db_path == ":memory:" and not read_only_cm:
             try:
                 loggers_dir = getattr(self.chkpt_manager, "loggers_dir", None)
                 if loggers_dir:
@@ -319,7 +322,7 @@ class LoggerQueue:
         # in now (the reverse ordering is handled by
         # CheckpointManager._bind_logger_to_disk; merge_from_disk is
         # idempotent so both call sites firing is harmless).
-        if getattr(self.chkpt_manager, "is_multi_root", False):
+        if getattr(self.chkpt_manager, "is_multi_root", False) is True or read_only_cm:
             try:
                 self.chkpt_manager._merge_sibling_logger_histories()
             except Exception as exc:
@@ -709,12 +712,30 @@ class LoggerQueue:
                 # init-ordering call site) — skip to avoid duplicating rows.
                 return False
 
+            copy_dir = None
             try:
                 self._flush_stage()
                 escaped = other_db_path.replace("'", "''")
-                self._conn.execute(f"ATTACH '{escaped}' AS incoming (READ_ONLY)")
+                try:
+                    self._conn.execute(f"ATTACH '{escaped}' AS incoming (READ_ONLY)")
+                except Exception as exc:
+                    # Held open by a run that is still training (DuckDB locks the
+                    # file): merge from a copy of it (and of its WAL) instead.
+                    import shutil
+                    import tempfile
+                    copy_dir = tempfile.mkdtemp(prefix="wl_merge_")
+                    copy = os.path.join(copy_dir, "loggers.duckdb")
+                    shutil.copy2(other_db_path, copy)
+                    if os.path.exists(other_db_path + ".wal"):
+                        shutil.copy2(other_db_path + ".wal", copy + ".wal")
+                    logger.info(f"[LoggerQueue] {other_db_path} is in use ({exc}); merging from a copy")
+                    escaped = copy.replace("'", "''")
+                    self._conn.execute(f"ATTACH '{escaped}' AS incoming (READ_ONLY)")
             except Exception as exc:
                 logger.warning(f"[LoggerQueue] Failed to attach {other_db_path} for merge: {exc}")
+                if copy_dir:
+                    import shutil
+                    shutil.rmtree(copy_dir, ignore_errors=True)
                 return False
 
             try:
@@ -732,6 +753,9 @@ class LoggerQueue:
                     self._conn.execute("DETACH incoming")
                 except Exception:
                     pass
+                if copy_dir:
+                    import shutil
+                    shutil.rmtree(copy_dir, ignore_errors=True)
 
             if copied_any:
                 self._merged_source_dbs.add(other_db_path)

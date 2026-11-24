@@ -29,8 +29,8 @@ Backend environment variables (set before starting ``wl.serve()``)
 | ``WEIGHTSLAB_DISABLE_WATCHDOGS`` | ``0``                   | ``1`` = disable watchdogs (use with breakpoints)   |
 +----------------------------------+-------------------------+----------------------------------------------------+
 
-UI server environment variables (set before ``weightslab start``)
------------------------------------------------------------------
+UI server environment variables (set before ``weightslab start`` or ``wl.serve()``)
+-----------------------------------------------------------------------------------
 
 +---------------------------+-------------------------+--------------------------------------------------+
 | Variable                  | Default                 | Description                                      |
@@ -38,6 +38,9 @@ UI server environment variables (set before ``weightslab start``)
 | ``WEIGHTSLAB_UI_HOST``    | ``0.0.0.0``             | Interface the UI server binds to                 |
 +---------------------------+-------------------------+--------------------------------------------------+
 | ``WEIGHTSLAB_UI_PORT``    | ``8080``                | HTTP port (``--port`` flag overrides)            |
++---------------------------+-------------------------+--------------------------------------------------+
+| ``WEIGHTSLAB_SERVE_UI``   | ``1``                   | ``0`` = ``wl.serve()`` does not serve (or open)  |
+|                           |                         | the UI itself; ``weightslab start`` unaffected   |
 +---------------------------+-------------------------+--------------------------------------------------+
 | ``GRPC_BACKEND_HOST``     | ``localhost``           | Backend gRPC host to proxy to                    |
 +---------------------------+-------------------------+--------------------------------------------------+

@@ -59,12 +59,18 @@ experiment becomes inspectable/editable; Weights Studio is the UI for that.
 **Wire path (the thing that breaks most often):**
 
 ```
-Browser  →  weightslab start :8080 (grpc-web → grpc proxy)  →  Python gRPC servicer  →  training loop
+Browser  →  Weights Studio :8080 (grpc-web → grpc proxy)  →  Python gRPC servicer  →  training loop
 ```
 
-- `weightslab start` is a pure-Python HTTP server that serves the bundled SPA
-  and translates grpc-web (browser) to raw gRPC (backend). No Docker, no Envoy.
-  If `weightslab start` is not running, the browser has no UI to load.
+- The Weights Studio server is a pure-Python HTTP server that serves the bundled
+  SPA and translates grpc-web (browser) to raw gRPC (backend). No Docker, no
+  Envoy. `wl.serve()` runs it in a background thread of the training process
+  (it starts with the backend, opens the browser, and stops when the process
+  exits); `weightslab start` runs the same server as its own process (a UI that
+  outlives runs, a chosen experiment dir, remote/tunnel setups). `wl.serve()`
+  skips its own UI when a `weightslab start` already serves its gRPC port, in
+  Google Colab, with `serving_ui=False`, or with `WEIGHTSLAB_SERVE_UI=0`. If
+  neither server is running, the browser has no UI to load.
 - The gRPC servicer and the training loop run in the **same process, different
   threads**, coordinated by locks in
   `weightslab/weightslab/components/global_monitoring.py`.
@@ -76,8 +82,14 @@ Browser  →  weightslab start :8080 (grpc-web → grpc proxy)  →  Python gRPC
 ## 2. Install & run (the happy path)
 
 ```bash
-pip install weightslab
+pip install weightslab        # or: uv add weightslab / uv pip install weightslab
 ```
+
+With uv, pick the PyTorch build with `--torch-backend` (`uv pip install
+weightslab --torch-backend=auto`), never `--extra-index-url` (see §5). For the
+CLI alone (e.g. only the Studio UI): `uvx --torch-backend=auto weightslab start`
+or `uv tool install weightslab --torch-backend=auto`; a training script still
+needs weightslab in its own environment.
 
 In your training script:
 
@@ -89,10 +101,14 @@ wl.serve(serving_grpc=True, serving_cli=True)   # background threads, same proce
 wl.keep_serving()                                # keep the process alive for the UI
 ```
 
-Then start the UI in another terminal and open it in a browser:
+Running the script opens Weights Studio in the browser: `wl.serve()` serves it
+at http://localhost:8080 by default (a busy port falls back to a free one; the
+URL is printed). No second terminal is needed. `weightslab start` stays
+available for a UI that outlives the run, and when one is already running for
+the same gRPC port, `wl.serve()` uses it instead of starting its own:
 
 ```bash
-weightslab start   # serves at http://localhost:8080 by default
+weightslab start   # optional; serves at http://localhost:8080 by default
 ```
 
 Working starting points live in
@@ -102,7 +118,8 @@ Working starting points live in
 UI deployment details (port, TLS, certs) are documented in
 `weightslab/docs/weights_studio.rst`. TLS turns on once certs exist: run
 `weightslab se` once, and `weightslab start` and the backend then use them
-automatically (`weightslab start --no-certs` forces HTTP). On Windows `se` uses the PowerShell script and
+automatically (`weightslab start --no-certs` forces HTTP); the UI `wl.serve()`
+serves always follows the backend's TLS setting. On Windows `se` uses the PowerShell script and
 the Windows `openssl`; `weightslab se --force-ubuntu` uses the bash script
 through WSL instead.
 
@@ -186,6 +203,7 @@ ones when debugging:
 | `WEIGHTSLAB_LOG_FILE_LEVEL` | *(unset = all)* | The session log file keeps every record whatever the terminal shows; set this to cap the file too. Log lives in `<root_log_dir>/weightslab_logs/`. |
 | `WEIGHTSLAB_TQDM_LOG_INTERVAL` | `30` | Seconds between snapshots of live `tqdm` bars into the log (`0` disables). tqdm never goes through `logging`, so without this the file has no record of training progress. |
 | `GRPC_BACKEND_HOST` / `GRPC_BACKEND_PORT` | `0.0.0.0` / `50051` | Backend gRPC bind address. |
+| `WEIGHTSLAB_SERVE_UI` | `1` | `0`/`false` stops `wl.serve()` from serving (and opening) Weights Studio itself, without a code change (CI, sweeps). `weightslab start` still works. |
 | `GRPC_TLS_ENABLED` | `0` | TLS on the gRPC socket. Set to `1` automatically when certs are found; `0`/`false` forces plaintext (also for `weightslab start`). |
 | `GRPC_TLS_REQUIRE_CLIENT_AUTH` | `0` | mTLS. Must match what `weightslab start` presents when it uses certs. |
 | `WEIGHTSLAB_CERTS_DIR` | `~/.weightslab-certs` | Where cert files are looked up (single source of truth). Falls back to `~/.weightslab-certs` when unset, not an absolute path, or holding no certs. |
@@ -199,7 +217,7 @@ ones when debugging:
 
 | Variable | Default | Why you touch it |
 |---|---|---|
-| `WS_SERVER_HOST` / `WS_SERVER_PORT` / `WS_SERVER_PROTOCOL` | `localhost` / `8080` / `http` | How the browser reaches the `weightslab start` server. The #1 connection-issue knob. |
+| `WS_SERVER_HOST` / `WS_SERVER_PORT` / `WS_SERVER_PROTOCOL` | `localhost` / `8080` / `http` | How the browser reaches the UI server (`weightslab start`, or the one `wl.serve()` runs). The #1 connection-issue knob. |
 | `WS_HISTOGRAM_MAX_BINS` | `512` | Cap on metadata histogram bars. |
 | `BB_THUMB_RENDER` | `10` | Max bounding boxes drawn per **thumbnail**, per overlay (GT and PRED capped independently). |
 | `BB_MODAL_RENDER` | `100` | Max bounding boxes drawn per **modal** image, per overlay. A `?` button in the modal shows the active limit. |
@@ -208,10 +226,12 @@ ones when debugging:
 | `ENABLE_HYPERPARAMETERS_OPTIMIZATION` | `1` | `0`/`false` removes the Hyperparameters section, makes HP inputs read-only, and stops the HP poll. |
 | `ENABLE_AGENT` | `1` | `0`/`false` removes the agent chat bar + history panel and stops the agent health poll. |
 | `ENABLE_NOTEBOOK` | `1` | `0`/`false` removes the notebook button (left of the logo) + notebook window. The notebook runs Python in a shared in-process kernel against the live experiment (`df`, model, checkpoints), persisted as `notebook.ipynb` under `root_log_dir`; `>`-prefixed cells ask the agent to propose code. |
+| `ENABLE_TUTORIAL` | `1` | `0`/`false` removes the new-user tour: the "New to WeightsLab?" notice (shown when no `wl_studio_seen` cookie and no saved Studio settings), its video popup ending on the MNIST Colab notebook, and the header **Tour** button. `TUTORIAL_VIDEO_URL` / `TUTORIAL_COLAB_URL` replace the video / notebook. |
 
 > **VITE_ vs WS_/BB_/ENABLE_:** `VITE_*` variables are baked at **build time**
 > (changing them needs a frontend rebuild). `WS_*` / `BB_*` / `ENABLE_*` are
-> injected into `config.js` at `weightslab start` time and read as `window.*`
+> injected into `config.js` when the UI server starts (`weightslab start`, or
+> `wl.serve()`'s own UI) and read as `window.*`
 > globals — changing them needs only a restart + browser reload. Each `ENABLE_*`
 > defaults to on; set it to `0`/`false`/`no`/`off` to disable. Full reference:
 > `weightslab/docs/configuration.rst` (“Feature toggles”).
@@ -225,10 +245,12 @@ distilled from issues hit in development).
 
 **UI loads but the sample grid is empty / "failed to fetch" / gRPC errors.**
 The wire path (§1) is broken somewhere. Check in order: (1) backend actually
-serving on `0.0.0.0:50051`; (2) `weightslab start` is running and the browser
-can reach it on `:8080`; (3) **TLS mismatch** — the UI and the backend each
-turn TLS on when they find certs, so both must see the same
-`WEIGHTSLAB_CERTS_DIR` (the browser console prints `TLS: ENABLED/DISABLED`).
+serving on `0.0.0.0:50051`; (2) the UI server (`wl.serve()`'s own, or
+`weightslab start`) is running and the browser can reach it on `:8080` (or the
+port it printed); (3) **TLS mismatch** — a separate `weightslab start` and the
+backend each turn TLS on when they find certs, so both must see the same
+`WEIGHTSLAB_CERTS_DIR` (the browser console prints `TLS: ENABLED/DISABLED`;
+the UI `wl.serve()` serves itself always matches the backend).
 For local debugging drop TLS on both sides (`weightslab start --no-certs`;
 `GRPC_TLS_ENABLED=0` for the backend).
 
@@ -241,8 +263,9 @@ Confirm with `wsl -e echo ok` (it hangs too). Fix with `wsl --shutdown`, or drop
 
 **Changed an env var, restarted, but the UI still uses the old value.**
 - `VITE_*` is build-time → you must **rebuild** the frontend, not just restart.
-- `WS_*` / `BB_*` / `ENABLE_*` are injected at `weightslab start` time → you
-  must **restart `weightslab start`** then reload the tab.
+- `WS_*` / `BB_*` / `ENABLE_*` are injected when the UI server starts → you
+  must **restart `weightslab start`** (or the training script, for the UI
+  `wl.serve()` serves) then reload the tab.
 
 **Sample grid flashes empty cells when auto-refresh fires.**
 An auto-refresh (timer or manual) that lands while a `GetDataSamples` grid fetch
@@ -279,6 +302,19 @@ forward path (pass `projection={"layer": "<named_modules() name>"}`);
 affected by any of these. Full page: `weightslab/docs/projection.rst`.
 
 **Large weights/images fail to transfer.** Raise `GRPC_MAX_MESSAGE_BYTES`.
+
+**uv: "No solution found … only torchmetrics==1.0.3 is available".** The
+PyTorch index was passed with `--extra-index-url` (the pip habit). uv takes each
+package from the first index that has it, and that index carries an old
+`torchmetrics` (and numpy, pillow…). Use `--torch-backend=auto|cpu|cu126` with
+`uv pip install` / `uvx`; in a uv project, an `explicit = true` index plus
+`[tool.uv.sources]` for torch/torchvision, which must be direct dependencies
+(sources are ignored for transitive ones). Full recipe: `docs/quickstart.rst`.
+
+**`pip install -e .` / `uv sync` fails: "The 2.0.3.dev5 can't be bumped".** A
+checkout older than the `only-version` setuptools_scm scheme in `pyproject.toml`
+(`guess-next-dev` refused to bump a `.devN` tag). Update the checkout, or set
+`SETUPTOOLS_SCM_PRETEND_VERSION_FOR_WEIGHTSLAB=<version>` for that build.
 
 **The agent bar says it's unconfigured.** The LLM agent needs a provider: a
 local **Ollama** server (`provider: ollama`, available immediately) or **cloud
@@ -324,6 +360,9 @@ OpenRouter** initialized from the UI via `/init` (then `/model` to switch,
   `experiment_service.proto`; regenerate Python stubs from the repo root; run
   `npm run generate-proto:data` in weights_studio. Editing one side only leaves
   the build broken.
+- **uv:** `uv sync --extra utest` makes an editable env with the `dev` group
+  (pytest, grpcio-tools, …); then `uv run pytest tests/...`. The version comes
+  from the nearest git tag; `uv.lock` is gitignored.
 - **Tests:** backend `python -m pytest weightslab/tests/...`; frontend unit
   `npm run test` (vitest); E2E/user-simulation Playwright lives in
   **weights_studio** (`test:realtime:*`, `test:e2e:*`), not here.

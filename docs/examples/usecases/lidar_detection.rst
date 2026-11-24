@@ -120,7 +120,7 @@ and override ``load_points`` and optionally ``render_thumbnail_2d``:
 
    .. code-block:: bash
 
-    weightslab start                   # 1. deploy the studio
+    weightslab start                   # 1. optional: a studio that outlives the demo
       weightslab start example --2d_det  # 2a. 2D pillar-grid detection
       # or
       weightslab start example --3d_det  # 2b. 3D bounding-box detection

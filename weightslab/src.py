@@ -1360,8 +1360,12 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 if hp_name:
                     hp_dict = get_hyperparams(hp_name)
 
-                    # Use root_log_dir from hyperparameters if available
-                    if isinstance(hp_dict, dict) and 'root_log_dir' in hp_dict:
+                    # Use root_log_dir from hyperparameters if available (a
+                    # read-only viewer keeps its data view in its workspace)
+                    from weightslab.backend.ledgers import get_viewer_workspace
+                    if get_viewer_workspace():
+                        kwargs['root_log_dir'] = get_viewer_workspace()
+                    elif isinstance(hp_dict, dict) and 'root_log_dir' in hp_dict:
                         kwargs['root_log_dir'] = hp_dict['root_log_dir']
 
                     # Update kwargs with relevant hyperparameters
@@ -1546,18 +1550,28 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 # _resolve_configured_root_log_dir for the resolution order).
                 _hp_cfg['root_log_dir'] = _resolve_configured_root_log_dir(
                     _hp_cfg.get('root_log_dir'))
+                # checkpoint_manager.read_only: a viewer over the experiments found
+                # under root_log_dir (see CheckpointManager). It writes its own
+                # files to its workspace, never into root_log_dir.
+                _cm_cfg = _hp_cfg.get('checkpoint_manager') if hasattr(_hp_cfg, 'get') else None
+                _read_only = bool(_cm_cfg.get('read_only', False)) if hasattr(_cm_cfg, 'get') else False
+                _workspace = _cm_cfg.get('workspace') if hasattr(_cm_cfg, 'get') else None
+                if _read_only:
+                    _workspace = os.path.abspath(str(_workspace or os.path.join(
+                        str(_hp_cfg['root_log_dir']), CheckpointManager.VIEWER_WORKSPACE_DIRNAME)))
+                _writes_to = _workspace if _read_only else _hp_cfg['root_log_dir']
                 # The experiment directory is now settled, so move the session
                 # log into it. Done here rather than in the branches below so it
                 # happens for every route (dict, YAML path, hyperparameters
                 # restored from a checkpoint), not only when the caller passed
                 # root_log_dir through `defaults`/kwargs.
-                _update_log_directory(_hp_cfg['root_log_dir'])
+                _update_log_directory(_writes_to)
                 # Publish where training ACTUALLY writes, so the UI lists this
                 # run's reports/notebooks even when the two resolved their
                 # directory by different routes.
                 try:
                     from weightslab.utils.active_experiment import record_backend_experiment
-                    record_backend_experiment(_hp_cfg['root_log_dir'])
+                    record_backend_experiment(_writes_to)
                 except Exception as _exc:  # noqa: BLE001 -- advisory only
                     logger.debug("Could not record the backend experiment dir: %s", _exc)
                 try:
@@ -1571,7 +1585,8 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                             raise KeyError("No manager in ledger")
                     except (KeyError, AttributeError):
                         # Create new manager and register it
-                        _checkpoint_manager = CheckpointManager(root_log_dir=_hp_cfg['root_log_dir'])
+                        _checkpoint_manager = CheckpointManager(root_log_dir=_hp_cfg['root_log_dir'],
+                                                                read_only=_read_only, workspace=_workspace)
                         try:
                             ledgers.register_checkpoint_manager(_checkpoint_manager)
                             logger.info("Registered new checkpoint manager in ledger")
@@ -1584,7 +1599,10 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 checkpoint_hp_loaded = False
                 try:
                     chkpt_manager = get_checkpoint_manager()
-                    if chkpt_manager != None and isinstance(chkpt_manager, ledgers.Proxy):
+                    # A read-only viewer keeps its own hyperparameters (a run's
+                    # saved config names that run's paths, not the viewer's).
+                    if (chkpt_manager != None and isinstance(chkpt_manager, ledgers.Proxy)
+                            and getattr(chkpt_manager, 'read_only', False) is not True):
                         # Try to get latest hash and load hyperparameters from checkpoint
                         latest_hash = None
                         if hasattr(chkpt_manager, 'current_exp_hash') and chkpt_manager.current_exp_hash:
@@ -1718,6 +1736,13 @@ def _register_pid_with_ui_server() -> None:
     origin = os.environ.get("WEIGHTSLAB_UI_ORIGIN")
     if not origin:
         return
+    # A UI this process serves ITSELF (wl.serve()'s automatic Weights Studio)
+    # also publishes WEIGHTSLAB_UI_ORIGIN. Registering with it would make that
+    # server kill this very process when it shuts down at exit. (Not loaded
+    # means not running: no need to import the UI server just to ask.)
+    _embedded_ui = sys.modules.get("weightslab.ui.embedded")
+    if _embedded_ui is not None and _embedded_ui.is_running():
+        return
 
     def _post() -> None:
         try:
@@ -1748,11 +1773,17 @@ def _register_pid_with_ui_server() -> None:
 
 def serve(serving_cli: bool = True, serving_grpc: bool = True,
           spawn_cli_client: bool = False, serving_bore: bool = False,
-          bore_port: int = None, allow_unconfigured: bool = True, **kwargs):
+          bore_port: int = None, allow_unconfigured: bool = True,
+          serving_ui: bool = True, ui_port: int = None,
+          ui_open_browser: bool = True, **kwargs):
     """Start WeightsLab services.
 
+    With the defaults, ``wl.serve()`` starts the gRPC backend, Weights Studio
+    (the web UI, opened in your browser) and a headless CLI server.
+
     Args:
-        serving_cli: Start the interactive CLI server.
+        serving_cli: Start the interactive CLI server (headless unless
+            ``spawn_cli_client`` is set; attach with ``weightslab cli``).
         serving_grpc: Start the gRPC server. In a notebook/Colab, if this is on
             but ``serving_bore`` is off, a warning suggests ``serving_bore=True``
             (the UI runs on your own machine and needs a tunnel to reach here).
@@ -1764,10 +1795,10 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
             ``WEIGHTSLAB_DISABLE_EMBEDDED_KERNEL=1`` is set. Only one kernel is
             ever embedded per process — a second ``serve()`` call reuses it.
         spawn_cli_client: When ``serving_cli`` is True, also open the interactive
-            REPL in a new console window (the default, backward-compatible
-            behavior). Set to ``False`` to start the CLI server *headless* — it
-            still advertises its port, so you can attach on demand from any
-            terminal with ``weightslab cli`` (or ``weightslab cli --port <port>``).
+            REPL in a new console window. Defaults to ``False``: the CLI server
+            starts *headless* — it still advertises its port, so you can attach
+            on demand from any terminal with ``weightslab cli`` (or
+            ``weightslab cli --port <port>``).
         serving_bore: Expose the gRPC backend to the internet via a zero-signup
             `bore <https://github.com/ekzhang/bore>`_ raw-TCP relay, so a Weights
             Studio running on another machine can reach it (e.g. training in
@@ -1779,26 +1810,41 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
         bore_port: Port to expose when ``serving_bore`` is set. Defaults to the
             gRPC port (``grpc_port`` kwarg, else ``$GRPC_BACKEND_PORT``, else
             50051).
-        allow_unconfigured: Escape hatch for the serving-config guard. ``serve``
-            reads hyperparameters once, here, for TLS, ports and
-            ``root_log_dir``; if none were wrapped
-            (``wl.watch_or_edit(params, flag="hyperparameters")``) those settings
-            silently fall back to env vars / defaults. Serving over the network
-            (``serving_grpc`` / ``serving_bore``) without config therefore
-            raises, because the backend may come up without TLS/auth. Pass
-            ``True`` (or set ``WL_ALLOW_UNCONFIGURED_SERVE=1``) to downgrade the
-            error to a warning and serve anyway. CLI-only serving always warns
-            (never raises), regardless of this flag.
+        allow_unconfigured: The serving-config guard. ``serve`` reads
+            hyperparameters once, here, for TLS, ports and ``root_log_dir``; if
+            none were wrapped (``wl.watch_or_edit(params, flag="hyperparameters")``)
+            those settings fall back to env vars / defaults, and the backend may
+            come up without TLS/auth. Defaults to ``True``: serving without
+            config only logs a warning. Pass ``False`` to make network serving
+            (``serving_grpc`` / ``serving_bore``) without config raise instead;
+            ``WL_ALLOW_UNCONFIGURED_SERVE=1`` then downgrades it back to the
+            warning. CLI-only serving always warns (never raises).
+        serving_ui: Serve Weights Studio from this process, proxying to the
+            gRPC backend, so no separate ``weightslab start`` is needed. The UI
+            comes up with the backend and stops when this process exits.
+            Skipped when ``serving_grpc`` is off, in Google Colab (the browser
+            is on another machine: use ``serving_bore=True`` and
+            ``weightslab start`` + ``weightslab tunnel`` locally), when a
+            ``weightslab start`` already serves this backend, when this process
+            was launched from Weights Studio, or when the environment sets
+            ``WEIGHTSLAB_SERVE_UI=0``. TLS follows the backend's.
+        ui_port: Preferred port for Weights Studio. Defaults to ``ui_port`` in
+            the config, else ``$WEIGHTSLAB_UI_PORT``, else 8080; a busy port
+            falls back to a free one. The interface is ``$WEIGHTSLAB_UI_HOST``
+            (default ``0.0.0.0``), as for ``weightslab start``.
+        ui_open_browser: Open Weights Studio in the default browser once it is
+            up (the URL is printed either way).
         **kwargs: Extra server options passed to underlying backends
-            (e.g. ``cli_host``, ``cli_port``, ``grpc_port``).
+            (e.g. ``cli_host``, ``cli_port``, ``grpc_host``, ``grpc_port``).
 
     Returns:
         The public ``host:port`` bore endpoint string when ``serving_bore`` is
         set and the tunnel came up, otherwise ``None``.
 
     Raises:
-        RuntimeError: If ``serving_grpc`` or ``serving_bore`` is requested before
-            any serving config was wrapped and the escape hatch is not set.
+        RuntimeError: If ``allow_unconfigured=False`` and ``serving_grpc`` or
+            ``serving_bore`` is requested before any serving config was wrapped
+            (unless ``WL_ALLOW_UNCONFIGURED_SERVE=1``).
     """
 
     # ------------------------------------------------------------------
@@ -1831,6 +1877,16 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
     # Before anything that can block: whatever happens next, this process
     # should not outlive the workspace that owns it.
     _register_pid_with_ui_server()
+
+    # A read-only viewer over existing experiments shows the current (most
+    # recent) one's last state from the first page load on.
+    try:
+        _cm = get_checkpoint_manager()
+        if (_cm is not None and getattr(_cm, 'read_only', False) is True
+                and not getattr(_cm, '_view_loaded', False)):
+            load_experiment()
+    except Exception as e:  # noqa: BLE001 -- never block serving on it
+        logger.warning(f"Could not load the current experiment before serving: {e}")
 
     # Mirror tqdm progress bars into the session log. A bar paints itself onto
     # the terminal and never touches `logging`, so a log file read after the run
@@ -1898,6 +1954,37 @@ def serve(serving_cli: bool = True, serving_grpc: bool = True,
             "backend directly. Pass serving_bore=True to open a tunnel and sync "
             "with the UI: wl.serve(serving_grpc=True, serving_bore=True)."
         )
+
+    # Weights Studio itself, from this process (weightslab/ui/embedded.py), so
+    # the UI no longer needs its own `weightslab start`. Not in Colab: the
+    # browser is on another machine there (tunnel above). Never fatal.
+    if serving_ui and serving_grpc and not _running_in_colab():
+        try:
+            from weightslab.ui import embedded as _embedded_ui
+            _backend_port = int(kwargs.get("grpc_port")
+                                or os.getenv("GRPC_BACKEND_PORT", 50051))
+            _backend_host = str(kwargs.get("grpc_host")
+                                or os.getenv("GRPC_BACKEND_HOST", "0.0.0.0"))
+            if _backend_host in ("0.0.0.0", "::", "[::]", ""):
+                _backend_host = "localhost"
+            _ui_dir = None
+            try:
+                _hp = ledgers.get_hyperparams()
+                _ui_dir = _hp["root_log_dir"] if _hp is not None else None
+            except Exception:  # noqa: BLE001 -- no hyperparameters registered
+                _ui_dir = None
+            _embedded_ui.start(
+                _backend_port,
+                backend_host=_backend_host,
+                experiment_dir=str(_ui_dir) if _ui_dir else None,
+                ui_port=ui_port,
+                open_browser=ui_open_browser,
+            )
+        except Exception as exc:  # noqa: BLE001 -- never break serving on the UI
+            logger.warning(f"Could not start Weights Studio ({exc}); run `weightslab start`.")
+    elif serving_ui and serving_grpc:
+        logger.info("Weights Studio is not started in Colab: run `weightslab start` "
+                    "on your own machine (see serving_bore).")
 
     bore_endpoint = None
     if serving_bore:
@@ -3738,6 +3825,58 @@ def _make_default_eval_fn(model):
             pass
 
     return _default_eval
+
+
+def load_experiment(exp_hash: str = None) -> bool:
+    """Load an experiment's last state into this process.
+
+    Its per-sample state replaces the data grid's -- last signal values, tags,
+    discards and predictions, from its data store (``checkpoints/data/data.h5``
+    and ``arrays.h5``) or, when only that remains, its newest
+    ``*_dataframe.parquet`` export -- and its weights are loaded when a model is
+    registered. The UI's run restore does the same.
+
+    Made for a viewer over finished runs: wrap hyperparameters with
+    ``root_log_dir`` set to the folder holding the runs (each in its own
+    subfolder, at any depth up to 3) and ``checkpoint_manager: {read_only:
+    True}``. The current experiment is then the most recent run found, no new
+    experiment is created, nothing is written into the runs, and every run is
+    listed in the UI's runs popup, ready to load. ``serve()`` loads the current
+    one when nothing was loaded yet.
+
+    Args:
+        exp_hash: The run to load (any hash listed in the runs popup, from any
+            discovered folder). Default: the current experiment.
+
+    Returns:
+        True when the state was applied.
+    """
+    cm = get_checkpoint_manager()
+    if cm is None or not hasattr(cm, 'load_experiment'):
+        logger.warning("load_experiment: no checkpoint manager (wrap hyperparameters with root_log_dir first)")
+        return False
+    ok = bool(cm.load_experiment(exp_hash))
+    if not ok:
+        logger.warning(f"load_experiment: could not load {exp_hash or 'the current experiment'}")
+    return ok
+
+
+def on_experiment_load(func):
+    """Decorator: run ``func(exp_hash, root_dir)`` after each experiment load
+    (``load_experiment``, the UI's run restore, auto-resume).
+
+    ``root_dir`` is the experiment folder owning ``exp_hash``. Use it to attach
+    what WeightsLab did not persist for that run, e.g. predictions the training
+    script kept in its own files::
+
+        @wl.on_experiment_load
+        def show_predictions(exp_hash, root_dir):
+            z = np.load(root_dir / "preds.npz")
+            wl.save_signals(signals={"pred_pixels": z["masks"].sum((1, 2))},
+                            batch_ids=z["ids"], preds=z["masks"], log=False)
+    """
+    from weightslab.components.checkpoint_manager import register_experiment_load_hook
+    return register_experiment_load_hook(func)
 
 
 def eval_fn(func):

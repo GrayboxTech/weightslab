@@ -694,7 +694,8 @@ class ModelInterface(NetworkWithOps):
                     existing_manager.save_model_checkpoint(
                         save_optimizer=True,
                         force_dump_pending=False,
-                        update_manifest=True
+                        update_manifest=True,
+                        rotate=True,
                     )
                 except Exception:
                     pass
