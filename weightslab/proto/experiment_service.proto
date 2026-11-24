@@ -1183,10 +1183,12 @@ message ModelGraphNode {
   string name = 2;                 // last path segment (or "input"/"output")
   string parent_id = 3;            // enclosing group's id, "" at top level
   string type = 4;                 // module class name
-  string kind = 5;                 // "layer" | "group" | "input" | "output"
-  // Groups only: what the group does, guessed from its name --
+  // "layer" | "group" | "input" | "output" | "op" (a residual add of two
+  // branches: no module, no weights)
+  string kind = 5;
+  // Groups only: what the group does, guessed from its name (or class) --
   // "encoder" | "bottleneck" | "decoder" | "head" | "embedding" | "neck" |
-  // "backbone" | "block".
+  // "backbone" | "attention" | "mlp" | "block".
   string role = 6;
   int32 layer_id = 7;              // WeightsLab module id; -1 when none
   int64 parameter_count = 8;       // own + descendants'
@@ -1321,7 +1323,22 @@ message ModelTensorPreview {
   repeated float tile_min = 9;
   repeated float tile_max = 10;
   repeated int32 channel_indices = 11;
-  string layout = 12;              // "channels" | "sequence" | "vector"
+  // "channels" | "sequence" | "vector" | "image" (the model input as a
+  // picture) | "attention" (one tile per head: query x key weights) |
+  // "tokens" (a language model's input: token_ids, and token_text when the
+  // model can decode them)
+  string layout = 12;
+  repeated int64 token_ids = 13;
+  repeated string token_text = 14;
+}
+
+// A run of a layer's output neurons that belong together: an attention
+// head of a q / k / v projection ("head 2", "k · head 0" in a fused one).
+message ModelNeuronGroup {
+  string label = 1;
+  int32 start = 2;                 // first neuron index
+  int32 size = 3;
+  string kind = 4;                 // "head" | "q" | "k" | "v"
 }
 
 message ModelLayerDetailsResponse {
@@ -1342,6 +1359,7 @@ message ModelLayerDetailsResponse {
   // signed, so it is the nonlinearity after it that says a neuron is dead.
   string health_source = 13;
   int32 model_age = 14;            // training step the weights were read at
+  repeated ModelNeuronGroup neuron_groups = 15;   // attention heads (q / k / v)
 }
 
 message ModelLayerEditRequest {

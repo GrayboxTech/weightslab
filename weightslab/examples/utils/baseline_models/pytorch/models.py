@@ -1908,6 +1908,213 @@ class Yolov11(nn.Module):
         return self.yolo.predict(x, **kwargs)
 
 
+# --- Transformers (decoder-only language models) ------------------------------
+# Two small GPTs for the Modeling tab: same architectures as Karpathy's
+# microgpt and nanoGPT, scaled down (2 blocks, tiny widths) so the zoo sweep
+# stays fast. Input: token ids (B, T) as int64; output: logits (B, T, vocab).
+# `vocab_size` and `input_dtype` tell the tooling to feed token ids, not floats.
+
+class RMSNorm(nn.Module):
+    """Parameter-free RMS normalisation over the last dim (as in microgpt)."""
+
+    def __init__(self, eps: float = 1e-5):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+
+
+class MicroGPTAttention(nn.Module):
+    """Multi-head causal self-attention with separate q / k / v / o projections."""
+
+    def __init__(self, n_embd: int, n_head: int, block_size: int):
+        super().__init__()
+        assert n_embd % n_head == 0
+        self.n_head = n_head
+        self.wq = nn.Linear(n_embd, n_embd, bias=False)
+        self.wk = nn.Linear(n_embd, n_embd, bias=False)
+        self.wv = nn.Linear(n_embd, n_embd, bias=False)
+        self.wo = nn.Linear(n_embd, n_embd, bias=False)
+        self.register_buffer("mask", torch.tril(torch.ones(block_size, block_size)).view(1, 1, block_size, block_size),
+                             persistent=False)
+
+    def forward(self, x):
+        B, T, C = x.shape
+        hs = C // self.n_head
+        q = self.wq(x).view(B, T, self.n_head, hs).transpose(1, 2)
+        k = self.wk(x).view(B, T, self.n_head, hs).transpose(1, 2)
+        v = self.wv(x).view(B, T, self.n_head, hs).transpose(1, 2)
+        att = (q @ k.transpose(-2, -1)) * (hs ** -0.5)
+        att = att.masked_fill(self.mask[:, :, :T, :T] == 0, float("-inf"))
+        att = F.softmax(att, dim=-1)
+        y = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
+        return self.wo(y)
+
+
+class MicroGPTMLP(nn.Module):
+    def __init__(self, n_embd: int):
+        super().__init__()
+        self.fc1 = nn.Linear(n_embd, 4 * n_embd, bias=False)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(4 * n_embd, n_embd, bias=False)
+
+    def forward(self, x):
+        return self.fc2(self.relu(self.fc1(x)))
+
+
+class MicroGPTBlock(nn.Module):
+    def __init__(self, n_embd: int, n_head: int, block_size: int):
+        super().__init__()
+        self.attn_norm = RMSNorm()
+        self.attn = MicroGPTAttention(n_embd, n_head, block_size)
+        self.mlp_norm = RMSNorm()
+        self.mlp = MicroGPTMLP(n_embd)
+
+    def forward(self, x):
+        x = x + self.attn(self.attn_norm(x))
+        return x + self.mlp(self.mlp_norm(x))
+
+
+class MicroGPT(nn.Module):
+    """Karpathy's microgpt as a torch module: token + position embeddings,
+    RMSNorm, n_layer blocks of (RMSNorm -> attention, RMSNorm -> ReLU MLP)
+    with residuals, no biases, an untied lm_head. Defaults are tiny (2 blocks,
+    16-d, 4 heads) -- the architecture is what is under test."""
+
+    def __init__(self, vocab_size: int = 32, block_size: int = 16, n_embd: int = 16,
+                 n_head: int = 4, n_layer: int = 2):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.block_size = block_size
+        self.input_dtype = torch.long
+        self.input_shape = (1, block_size)
+        self.task_type = "language_modeling"
+        self.wte = nn.Embedding(vocab_size, n_embd)
+        self.wpe = nn.Embedding(block_size, n_embd)
+        self.norm_in = RMSNorm()
+        self.layers = nn.ModuleList([MicroGPTBlock(n_embd, n_head, block_size) for _ in range(n_layer)])
+        self.lm_head = nn.Linear(n_embd, vocab_size, bias=False)
+
+    def forward(self, idx):
+        B, T = idx.shape
+        pos = torch.arange(T, device=idx.device)
+        x = self.norm_in(self.wte(idx) + self.wpe(pos))
+        for layer in self.layers:
+            x = layer(x)
+        return self.lm_head(x)
+
+
+class NanoGPTLayerNorm(nn.Module):
+    """LayerNorm with an optional bias (nanoGPT's)."""
+
+    def __init__(self, ndim: int, bias: bool = True):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(ndim))
+        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+
+    def forward(self, x):
+        return F.layer_norm(x, self.weight.shape, self.weight, self.bias, 1e-5)
+
+
+class NanoGPTSelfAttention(nn.Module):
+    """nanoGPT's CausalSelfAttention: one fused c_attn for q, k, v."""
+
+    def __init__(self, n_embd: int, n_head: int, block_size: int, bias: bool = True, dropout: float = 0.0):
+        super().__init__()
+        assert n_embd % n_head == 0
+        self.n_head = n_head
+        self.n_embd = n_embd
+        self.c_attn = nn.Linear(n_embd, 3 * n_embd, bias=bias)
+        self.c_proj = nn.Linear(n_embd, n_embd, bias=bias)
+        self.attn_dropout = nn.Dropout(dropout)
+        self.resid_dropout = nn.Dropout(dropout)
+        self.dropout = dropout
+
+    def forward(self, x):
+        B, T, C = x.size()
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None,
+                                           dropout_p=self.dropout if self.training else 0, is_causal=True)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        return self.resid_dropout(self.c_proj(y))
+
+
+class NanoGPTMLP(nn.Module):
+    def __init__(self, n_embd: int, bias: bool = True, dropout: float = 0.0):
+        super().__init__()
+        self.c_fc = nn.Linear(n_embd, 4 * n_embd, bias=bias)
+        self.gelu = nn.GELU()
+        self.c_proj = nn.Linear(4 * n_embd, n_embd, bias=bias)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        return self.dropout(self.c_proj(self.gelu(self.c_fc(x))))
+
+
+class NanoGPTBlock(nn.Module):
+    def __init__(self, n_embd: int, n_head: int, block_size: int, bias: bool = True, dropout: float = 0.0):
+        super().__init__()
+        self.ln_1 = NanoGPTLayerNorm(n_embd, bias=bias)
+        self.attn = NanoGPTSelfAttention(n_embd, n_head, block_size, bias, dropout)
+        self.ln_2 = NanoGPTLayerNorm(n_embd, bias=bias)
+        self.mlp = NanoGPTMLP(n_embd, bias, dropout)
+
+    def forward(self, x):
+        x = x + self.attn(self.ln_1(x))
+        return x + self.mlp(self.ln_2(x))
+
+
+class NanoGPT(nn.Module):
+    """Karpathy's nanoGPT (GPT-2 style): transformer.{wte, wpe, drop, h[i],
+    ln_f} and an lm_head tied to wte. Scaled down (2 blocks, 32-d, 4 heads).
+    Unlike nanoGPT's inference shortcut, it returns the logits of every
+    position, so each token's representation is visible."""
+
+    def __init__(self, vocab_size: int = 64, block_size: int = 16, n_embd: int = 32,
+                 n_head: int = 4, n_layer: int = 2, bias: bool = True, dropout: float = 0.0):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.block_size = block_size
+        self.input_dtype = torch.long
+        self.input_shape = (1, block_size)
+        self.task_type = "language_modeling"
+        self.transformer = nn.ModuleDict(dict(
+            wte=nn.Embedding(vocab_size, n_embd),
+            wpe=nn.Embedding(block_size, n_embd),
+            drop=nn.Dropout(dropout),
+            h=nn.ModuleList([NanoGPTBlock(n_embd, n_head, block_size, bias, dropout) for _ in range(n_layer)]),
+            ln_f=NanoGPTLayerNorm(n_embd, bias=bias),
+        ))
+        self.lm_head = nn.Linear(n_embd, vocab_size, bias=False)
+        self.transformer.wte.weight = self.lm_head.weight      # weight tying
+        self.apply(self._init_weights)
+        for name, p in self.named_parameters():
+            if name.endswith("c_proj.weight"):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02 / (2 * n_layer) ** 0.5)
+
+    @staticmethod
+    def _init_weights(module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, idx):
+        B, T = idx.size()
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+        x = self.transformer.drop(self.transformer.wte(idx) + self.transformer.wpe(pos))
+        for block in self.transformer.h:
+            x = block(x)
+        x = self.transformer.ln_f(x)
+        return self.lm_head(x)
+
+
 if __name__ == "__main__":
     model = Yolov11()
 

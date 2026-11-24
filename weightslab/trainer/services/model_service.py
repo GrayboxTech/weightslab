@@ -515,6 +515,7 @@ class ModelService:
             children=details["children"],
         )
         response.neurons.extend(pb2.ModelNeuronStat(**n) for n in details["neurons"])
+        response.neuron_groups.extend(pb2.ModelNeuronGroup(**g) for g in details.get("neuron_groups", []))
         response.previews.extend(pb2.ModelTensorPreview(**p) for p in details["previews"])
         if details.get("activation") and len(details["activation"]) > 1:
             response.activation.CopyFrom(self._summary_pb(details["activation"]))

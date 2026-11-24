@@ -513,6 +513,7 @@ around here.
 - `components/` — `global_monitoring.py` (locks, `guard_*`, pause), `checkpoint_manager.py`, `evaluation_controller.py`.
   `model_representation.py` -- Modeling tab: traced graph, representation sessions, layer edits.
   `model_comparison.py` -- Modeling tab: compare A vs B (pair: activation-map distance; group: per-neuron Cohen's d).
+  Transformers: residual adds as "+" nodes, attention maps per head, q/k/v head groups, token previews, per-neuron freeze on any layer (`FrozenRows`).
 - `data/` — `dataframe_manager.py`, `data_samples_with_ops.py`, `sample_stats.py`, H5 storage (`h5_dataframe_store.py`, `h5_array_store.py`, `array_proxy.py`).
 - `backend/` — `ledgers.py` (`GLOBAL_LEDGER`), `logger.py`, `audit_logger.py`, `cli.py`.
 - `projection/parametric_umap.py` — live 3-D projection (§3.6b): feature hook, UMAP encoder, coordinate write-back, checkpoint pairing; `projection/custom.py` — user projections (`save_projection_coords`); served by `trainer/services/projection_service.py` (`GetProjection`).
