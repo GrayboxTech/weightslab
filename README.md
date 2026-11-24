@@ -285,7 +285,7 @@ If WeightsLab is part of your development process / project / publication, pleas
 
 WeightsLab is free for noncommercial use. Commercial use needs a paid licence.
 
-- **Noncommercial use is free**, under the [PolyForm Noncommercial License 1.0.0](LICENSE-PolyForm-Noncommercial-1.0.0.md). It covers:
+- **Noncommercial use is free**, under the [PolyForm Noncommercial License 1.0.0](LICENSE). It covers:
   - personal use for research, experiment, testing, study and hobby projects;
   - use by charities, educational institutions, public research organisations and government.
 - **Commercial use needs a commercial licence.** This includes any use by or for a company, whatever its size. The licence is sold per seat. A seat is one user, and includes support, updates and the custom features your team needs. Write to [hello@graybx.com](mailto:hello@graybx.com).
