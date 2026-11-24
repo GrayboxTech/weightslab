@@ -1616,8 +1616,12 @@ class LayerWiseOperations(NeuronWiseOperations):
                     )
                     if perturbation_ratio is not None:
                         # weights
-                        neuron_weights = self.weight[neuron_indice] if not \
-                            is_incoming else self.weight[:, neuron_indice]
+                        # Read the neuron where it is written below: a
+                        # transposed conv keeps its outputs on dim 1 and its
+                        # inputs on dim 0, the opposite of the other layers.
+                        on_dim1 = transposed != is_incoming
+                        neuron_weights = self.weight[:, neuron_indice] if \
+                            on_dim1 else self.weight[neuron_indice]
                         weights_perturbation = \
                             perturbation_ratio * neuron_weights * \
                             th.randint_like(neuron_weights, -1, 2).float()
