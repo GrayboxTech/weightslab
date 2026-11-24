@@ -1913,6 +1913,8 @@ class Yolov11(nn.Module):
 # microgpt and nanoGPT, scaled down (2 blocks, tiny widths) so the zoo sweep
 # stays fast. Input: token ids (B, T) as int64; output: logits (B, T, vocab).
 # `vocab_size` and `input_dtype` tell the tooling to feed token ids, not floats.
+# Their forwards read head sizes from the tensors (`view(B, T, n_head, -1)`),
+# never from constructor numbers, so neuron prune / add can resize them.
 
 class RMSNorm(nn.Module):
     """Parameter-free RMS normalisation over the last dim (as in microgpt)."""
@@ -1940,15 +1942,14 @@ class MicroGPTAttention(nn.Module):
                              persistent=False)
 
     def forward(self, x):
-        B, T, C = x.shape
-        hs = C // self.n_head
-        q = self.wq(x).view(B, T, self.n_head, hs).transpose(1, 2)
-        k = self.wk(x).view(B, T, self.n_head, hs).transpose(1, 2)
-        v = self.wv(x).view(B, T, self.n_head, hs).transpose(1, 2)
-        att = (q @ k.transpose(-2, -1)) * (hs ** -0.5)
+        B, T, _ = x.shape
+        q = self.wq(x).view(B, T, self.n_head, -1).transpose(1, 2)
+        k = self.wk(x).view(B, T, self.n_head, -1).transpose(1, 2)
+        v = self.wv(x).view(B, T, self.n_head, -1).transpose(1, 2)
+        att = (q @ k.transpose(-2, -1)) * (q.size(-1) ** -0.5)
         att = att.masked_fill(self.mask[:, :, :T, :T] == 0, float("-inf"))
         att = F.softmax(att, dim=-1)
-        y = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
+        y = (att @ v).transpose(1, 2).reshape(B, T, -1)
         return self.wo(y)
 
 
@@ -2032,14 +2033,14 @@ class NanoGPTSelfAttention(nn.Module):
         self.dropout = dropout
 
     def forward(self, x):
-        B, T, C = x.size()
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        B, T, _ = x.size()
+        q, k, v = self.c_attn(x).chunk(3, dim=2)
+        k = k.view(B, T, self.n_head, -1).transpose(1, 2)
+        q = q.view(B, T, self.n_head, -1).transpose(1, 2)
+        v = v.view(B, T, self.n_head, -1).transpose(1, 2)
         y = F.scaled_dot_product_attention(q, k, v, attn_mask=None,
                                            dropout_p=self.dropout if self.training else 0, is_causal=True)
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        y = y.transpose(1, 2).reshape(B, T, -1)
         return self.resid_dropout(self.c_proj(y))
 
 

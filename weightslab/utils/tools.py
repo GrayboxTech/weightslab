@@ -484,6 +484,18 @@ def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=False
     """
     seed_everything(42) if rand else None # Set seed for reproducibility
     n_layers = len(model.layers)
+    blocker = getattr(model, "neuron_edit_blocker", None)
+
+    def structural_blocked(n):
+        # Neurons the neuron graph keeps fixed (the model output ...) are
+        # not pruned / added; the other operations still run.
+        if not callable(blocker):
+            return False
+        try:
+            return bool(blocker(model._reverse_indexing(n, n_layers)))
+        except Exception:
+            return False
+
     for n in range(n_layers-1, 0, -1):
         if rand and th.rand(1) > 0.5 and layer_id is None and dummy_input is None:
             continue
@@ -495,11 +507,13 @@ def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=False
                 if n != n_layers + layer_id: # - -layer_id != + -layer_id
                     continue
         logger.debug(f'\nOperate on neurons at layer {n}')
+        blocked = structural_blocked(n)
         if op is None:
-            with model as m:
-                logger.debug('Adding operation - 5 neurons added.')
-                m.operate(n, {0, 1}, op_type=1)
-                m(dummy_input) if dummy_input is not None else None
+            if not blocked:
+                with model as m:
+                    logger.debug('Adding operation - 5 neurons added.')
+                    m.operate(n, {0, 1}, op_type=1)
+                    m(dummy_input) if dummy_input is not None else None
             with model as m:
                 logger.debug('Reseting operation - every neurons reset.')
                 m.operate(n, {}, op_type=4)
@@ -508,11 +522,14 @@ def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=False
                 logger.debug('Freezing operation - last neuron froze.')
                 m.operate(n, {-1}, op_type=3)
                 m(dummy_input) if dummy_input is not None else None
-            with model as m:
-                logger.debug('Pruning operation - first neuron removed.')
-                m.operate(n, {0}, op_type=2)
-                m(dummy_input) if dummy_input is not None else None
+            if not blocked:
+                with model as m:
+                    logger.debug('Pruning operation - first neuron removed.')
+                    m.operate(n, {0}, op_type=2)
+                    m(dummy_input) if dummy_input is not None else None
         else:
+            if blocked and op in (1, 2):
+                continue
             with model as m:
                 m.operate(
                     n,

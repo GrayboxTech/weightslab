@@ -21,10 +21,33 @@ from weightslab.components.global_monitoring import guard_training_context, guar
 from weightslab.backend.ledgers import get_hyperparams, get_optimizer, get_optimizers, register_model
 from weightslab.backend import ledgers
 from weightslab.utils.tools import restore_rng_state
+from weightslab.utils.neuron_graph import NeuronEditor
 
 
 # Global logger
 logger = logging.getLogger(__name__)
+
+
+def _to_device(example, device):
+    if isinstance(example, th.Tensor):
+        return example.to(device)
+    if isinstance(example, dict):
+        return {k: _to_device(v, device) for k, v in example.items()}
+    if isinstance(example, (list, tuple)):
+        return type(example)(_to_device(v, device) for v in example)
+    return example
+
+
+def _example_input(model, device):
+    """An input the model accepts, from ``model.input_shape``: token ids for
+    models that read them (``vocab_size`` / an integer ``input_dtype``)."""
+    shape = tuple(model.input_shape)
+    dtype = getattr(model, "input_dtype", None)
+    vocab = getattr(model, "vocab_size", None)
+    if (isinstance(dtype, th.dtype) and not dtype.is_floating_point) or (vocab and dtype is None):
+        high = int(vocab) if vocab else 2
+        return th.randint(0, high, shape, dtype=dtype if isinstance(dtype, th.dtype) else th.long).to(device)
+    return th.randn(shape).to(device)
 
 
 class ModelInterface(NetworkWithOps):
@@ -146,15 +169,24 @@ class ModelInterface(NetworkWithOps):
 
             # Move dummy input to the correct device, or create a default one if not provided
             if dummy_input is not None:
-                self.dummy_input = dummy_input.to(self.device)
+                self.dummy_input = _to_device(dummy_input, self.device)
             else:
-                self.dummy_input = th.randn(model.input_shape).to(self.device)
+                self.dummy_input = _example_input(model, self.device)
 
+        self.traced_model = None
+        self.print_graph = print_graph
         if compute_dependencies and not use_onnx:
-            self.print_graph = print_graph
             self.print_graph_filename = print_graph_filename
-            self.traced_model = symbolic_trace(self.model)
-            self.traced_model.name = "N.A."
+            try:
+                self.traced_model = symbolic_trace(self.model)
+                self.traced_model.name = "N.A."
+            except Exception as exc:
+                # torch.fx cannot trace every model (data-dependent slicing,
+                # control flow ...). The neuron graph does not need it.
+                logger.info(
+                    f"torch.fx cannot trace {type(model).__name__} ({type(exc).__name__}: {exc}); "
+                    "neuron prune / add use the neuron graph.")
+                self.traced_model = None
         # self.guard_training_context = guard_training_context
         # self.guard_testing_context = guard_testing_context
 
@@ -163,7 +195,7 @@ class ModelInterface(NetworkWithOps):
 
         # Compute dependencies and generate graph visualization if enabled
         if compute_dependencies:
-            if not use_onnx:
+            if not use_onnx and self.traced_model is not None:
                 # Only propagate shapes if we need them for visualization
                 if self.print_graph:
                     self.shape_propagation()
@@ -188,7 +220,7 @@ class ModelInterface(NetworkWithOps):
         # know when they happen)
         if compute_dependencies:
             if not use_onnx:
-                del self.traced_model
+                self.traced_model = None
 
         # Hook optimizer update on architecture change
         self.register_hook_fn_for_architecture_change(
@@ -898,28 +930,91 @@ class ModelInterface(NetworkWithOps):
 
         # Patch the torch model with WeightsLab features
         self.monkey_patching()
+        self._legacy_onnx = bool(use_onnx)
+        self._opset_version = opset_version
 
-        # Generate the graph dependencies
+        # Layer-to-layer dependencies (torch.fx / ONNX): what freeze / reset
+        # propagate along. Not every model can be analysed this way; prune /
+        # add do not need it (the neuron graph below covers any model).
+        try:
+            self.dependencies_with_ops, self.mapped_dependencies_with_ops = \
+                self._legacy_dependencies(use_onnx, dummy_input, opset_version)
+            self._legacy_deps = True
+        except Exception as exc:
+            logger.info(
+                f"Layer dependency analysis unavailable for {type(self.model).__name__} "
+                f"({type(exc).__name__}: {exc}); freeze / reset act on the layer itself.")
+            self._clear_legacy_state()
+            self.dependencies_with_ops, self.mapped_dependencies_with_ops = [], []
+            self._legacy_deps = False
+
+        # Register the dependencies
+        self.register_dependencies(self.mapped_dependencies_with_ops)
+
+        # Neuron graph: which neurons of which tensors go together, for
+        # prune / add on any model (weightslab.utils.neuron_graph).
+        self._neuron_editor = None
+        try:
+            self._neuron_editor = NeuronEditor(self.model, dummy_input)
+        except Exception as exc:
+            logger.warning(
+                f"Neuron graph unavailable for {type(self.model).__name__} "
+                f"({type(exc).__name__}: {exc}); prune / add use the layer dependencies.")
+
+    def _legacy_dependencies(self, use_onnx: bool, dummy_input, opset_version: int):
         if not use_onnx:
-            # self.shape_propagation()
-            self.dependencies_with_ops = generate_graph_dependencies_from_torchfx(
+            if self.traced_model is None:
+                raise RuntimeError("torch.fx could not trace the model")
+            deps = generate_graph_dependencies_from_torchfx(
                 self.model,
                 self.traced_model.graph
             )
         else:
-            self.dependencies_with_ops = generate_layer_dependencies_from_onnx(
+            deps = generate_layer_dependencies_from_onnx(
                 self.model,
                 dummy_input=dummy_input,
                 opset_version=opset_version
             )
-
         # Map dependencies between layers and their operations
-        self.mapped_dependencies_with_ops = generate_index_maps(
-            self.dependencies_with_ops
-        )
+        return deps, generate_index_maps(deps)
 
-        # Register the dependencies
-        self.register_dependencies(self.mapped_dependencies_with_ops)
+    def _clear_legacy_state(self):
+        """Forget the layer-to-layer index maps (they describe an old architecture)."""
+        for layer in self.layers:
+            for attr in ("src_to_dst_mapping_tnsrs", "dst_to_src_mapping_tnsrs",
+                         "related_src_to_dst_mapping_tnsrs", "related_dst_to_src_mapping_tnsrs"):
+                if hasattr(layer, attr):
+                    setattr(layer, attr, {})
+            if "bypass" in layer.__dict__:
+                del layer.bypass
+            if getattr(layer, "wl_same_flag", False) and not list(layer.parameters(recurse=False)):
+                # Pass-through layers learn their size from their neighbours.
+                for attr in ("in_neurons", "out_neurons"):
+                    if attr in layer.__dict__:
+                        setattr(layer, attr, None)
+        self._dep_manager.dependency_2_id_2_id.clear()
+
+    def _rebuild_legacy_dependencies(self):
+        """After a neuron edit: layer dependencies for the new architecture."""
+        if not getattr(self, "_legacy_deps", False):
+            return
+        self._clear_legacy_state()
+        try:
+            if not self._legacy_onnx:
+                self.traced_model = symbolic_trace(self.model)
+            deps, mapped = self._legacy_dependencies(
+                self._legacy_onnx, self.dummy_input, getattr(self, "_opset_version", 17))
+            self.register_dependencies(mapped)
+            self.dependencies_with_ops, self.mapped_dependencies_with_ops = deps, mapped
+        except Exception as exc:
+            logger.warning(
+                f"Layer dependencies could not be rebuilt after the edit ({type(exc).__name__}: {exc}); "
+                "freeze / reset now act on the layer itself.")
+            self._clear_legacy_state()
+            self.dependencies_with_ops, self.mapped_dependencies_with_ops = [], []
+            self._legacy_deps = False
+        finally:
+            self.traced_model = None
 
     def forward(self, *args, **kwargs) -> th.Tensor:
         """

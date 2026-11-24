@@ -15,6 +15,39 @@ from weightslab.utils.modules_dependencies import _ModulesDependencyManager, Dep
 logger = logging.getLogger(__name__)
 
 
+def _remap_keys(per_neuron: dict, mapping: Dict[int, int]) -> None:
+    """Re-key a {neuron index: value} dict after neurons were removed / inserted."""
+    items = [(mapping[k], v) for k, v in list(per_neuron.items()) if k in mapping]
+    per_neuron.clear()
+    per_neuron.update(items)
+
+
+def _remap_tracker(tracker, mapping: Dict[int, int], new_size: int) -> None:
+    """Move a neuron tracker's per-neuron statistics to the new indexing."""
+    old_idx = [o for o in mapping]
+    new_idx = [mapping[o] for o in old_idx]
+    for attr in ("triggrs_by_neuron", "updates_by_neuron"):
+        old = getattr(tracker, attr, None)
+        if isinstance(old, th.Tensor):
+            new = th.zeros(new_size, dtype=old.dtype, device=old.device)
+            keep = [(o, n) for o, n in zip(old_idx, new_idx) if o < len(old)]
+            if keep:
+                new[[n for _, n in keep]] = old[[o for o, _ in keep]]
+            setattr(tracker, attr, new)
+    for attr in ("triggers_by_in_id", "triggers_by_class"):
+        old = getattr(tracker, attr, None)
+        if isinstance(old, list):
+            from collections import defaultdict
+            fill = set if attr == "triggers_by_in_id" else (lambda: defaultdict(lambda: 0))
+            new = [fill() for _ in range(new_size)]
+            for o, n in zip(old_idx, new_idx):
+                if o < len(old):
+                    new[n] = old[o]
+            setattr(tracker, attr, new)
+    if hasattr(tracker, "number_of_neurons"):
+        tracker.number_of_neurons = th.tensor(new_size)
+
+
 class NetworkWithOps(nn.Module):
     def __init__(self):
         super(NetworkWithOps, self).__init__()
@@ -277,19 +310,35 @@ class NetworkWithOps(nn.Module):
             )
         return indices
 
-    def add_neurons(self, layer_id: int, count: int = 1) -> None:
-        """Append ``count`` neurons and propagate the change through the graph."""
+    def add_neurons(self, layer_id: int, count: int = 1):
+        """Append ``count`` neurons and propagate the change through the graph.
+
+        With the neuron graph (``compute_dependencies=True``) every coupled
+        tensor follows -- the next layers' inputs, norms, residual partners,
+        heads, tied weights -- and the returned ``EditResult`` says what changed.
+        """
         self.get_layer_by_id(layer_id)
         if not isinstance(count, int) or isinstance(count, bool) or count < 1:
             raise ValueError("count must be a positive integer.")
+        if getattr(self, "_neuron_editor", None) is not None:
+            return self._edit_neurons(layer_id, "add", count=count)
         self.operate(
             layer_id=layer_id,
             neuron_indices=set(range(count)),
             op_type=ArchitectureNeuronsOpType.ADD,
         )
 
-    def prune_neurons(self, layer_id: int, neuron_indices: Iterable[int] | int) -> None:
+    def prune_neurons(self, layer_id: int, neuron_indices: Iterable[int] | int):
         """Remove selected neurons and update dependent layers."""
+        if getattr(self, "_neuron_editor", None) is not None:
+            if isinstance(neuron_indices, int):
+                neuron_indices = [neuron_indices]
+            indices = list(neuron_indices or [])
+            if not indices:
+                raise ValueError("neuron_indices cannot be empty for this operation.")
+            if not all(isinstance(i, int) and not isinstance(i, bool) for i in indices):
+                raise TypeError("neuron_indices must contain integers only.")
+            return self._edit_neurons(layer_id, "prune", indices=indices)
         indices = self._validated_neuron_indices(
             layer_id, neuron_indices, allow_empty=False
         )
@@ -298,6 +347,100 @@ class NetworkWithOps(nn.Module):
             neuron_indices=indices,
             op_type=ArchitectureNeuronsOpType.PRUNE,
         )
+
+    # ------------------------------------------------------------------
+    # Neuron graph edits (weightslab.utils.neuron_graph)
+    # ------------------------------------------------------------------
+    def neuron_edit_blocker(self, layer_id: int) -> Optional[str]:
+        """Why neurons of this layer cannot be pruned / added (None: they can)."""
+        editor = getattr(self, "_neuron_editor", None)
+        if editor is None:
+            return None
+        return editor.pinned_reason(self.get_layer_by_id(layer_id))
+
+    def _edit_neurons(self, layer_id: int, op: str, indices=(), count: int = 1):
+        layer = self.get_layer_by_id(layer_id)
+        editor = self._neuron_editor
+        nodes = editor.neuron_nodes(layer)
+        if nodes is None:
+            raise ValueError(f"Layer {layer_id} has no neurons to {op}.")
+        if op == "prune":
+            invalid = sorted(i for i in indices if not -len(nodes) <= i < len(nodes))
+            if invalid:
+                raise ValueError(
+                    f"Neuron indices {invalid} are outside layer {layer_id}'s "
+                    f"valid range [-{len(nodes)}, {len(nodes) - 1}]."
+                )
+            result = editor.prune(layer, indices)
+        else:
+            result = editor.add(layer, count)
+        self._after_neuron_edit(result, layer, op)
+        for hook_fn in self._architecture_change_hook_fns:
+            hook_fn(self)
+        return result
+
+    def _after_neuron_edit(self, result, target: nn.Module, op: str) -> None:
+        """Keep each edited layer's per-neuron state (frozen learning rates,
+        trackers, frozen rows, gradient hooks) on the same neurons."""
+        from weightslab.utils.neuron_graph import neuron_axis
+
+        per_module: Dict[int, Dict[str, Any]] = {}
+        for ch in result.changes:
+            entry = per_module.setdefault(id(ch.module), {"module": ch.module, "out": None, "in": None})
+            mod = ch.module
+            weight = getattr(mod, "weight", None)
+            primary = "weight" if isinstance(weight, th.Tensor) and weight.ndim > 0 else None
+            if primary is None:
+                primary = next((n for n, p in mod.named_parameters(recurse=False) if p.ndim > 0), None)
+            out_axis = neuron_axis(mod) if (primary == "weight" and weight.ndim > 1) else 0
+            if ch.name == primary and ch.dim == out_axis:
+                entry["out"] = ch
+            elif ch.name == "weight" and isinstance(weight, th.Tensor) and weight.ndim > 1 \
+                    and ch.dim == (1 - out_axis):
+                entry["in"] = ch
+
+        for entry in per_module.values():
+            mod = entry["module"]
+            weight = getattr(mod, "weight", None)
+            if entry["out"] is not None:
+                ch = entry["out"]
+                tensor = getattr(mod, ch.name)
+                new_size = int(tensor.shape[ch.dim])
+                old_size = new_size + len(ch.positions) - sum(n for _, n in ch.inserts)
+                mapping = ch.index_map(old_size)
+                for lrs in (getattr(mod, "neuron_2_lr", None) or {}).values():
+                    _remap_keys(lrs, mapping)
+                for tracker_name in ("train_dataset_tracker", "eval_dataset_tracker"):
+                    tracker = getattr(mod, tracker_name, None)
+                    if tracker is not None:
+                        _remap_tracker(tracker, mapping, new_size)
+                frozen = getattr(mod, "_wl_frozen_rows", None)
+                if frozen is not None and frozen.rows:
+                    axis, idx, values = frozen.rows.get("weight", (0, [], None))
+                    kept = sorted(mapping[i] for i in idx if i in mapping)
+                    frozen.rows = {"weight": (axis, kept, values)} if kept else {}
+                    frozen.recapture(mod)
+            if entry["in"] is not None:
+                ch = entry["in"]
+                new_size = int(weight.shape[ch.dim])
+                old_size = new_size + len(ch.positions) - sum(n for _, n in ch.inserts)
+                mapping = ch.index_map(old_size)
+                for lrs in (getattr(mod, "incoming_neuron_2_lr", None) or {}).values():
+                    _remap_keys(lrs, mapping)
+            # The weights are new tensors: hooks on the old ones are gone.
+            register = getattr(mod, "register_grad_hook", None)
+            if callable(register) and isinstance(weight, th.Tensor):
+                try:
+                    register()
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("grad hook re-registration failed: %s", exc)
+            if mod is target and hasattr(mod, "operation_age"):
+                key = "ADD" if op == "add" else "PRUNE"
+                mod.operation_age[key] = mod.operation_age.get(key, 0) + 1
+
+        rebuild = getattr(self, "_rebuild_legacy_dependencies", None)
+        if callable(rebuild):
+            rebuild()
 
     def freeze_neurons(
         self,
@@ -489,6 +632,20 @@ class NetworkWithOps(nn.Module):
         :type dependency: Optional[Callable], optional
         :raises ValueError: [description]
         """
+        # Structural edits go through the neuron graph when there is one.
+        if getattr(self, "_neuron_editor", None) is not None and op_type is not None:
+            op = op_type if isinstance(op_type, ArchitectureNeuronsOpType) \
+                else ArchitectureNeuronsOpType(op_type)
+            if op in (ArchitectureNeuronsOpType.ADD, ArchitectureNeuronsOpType.PRUNE):
+                layer_id = self._reverse_indexing(layer_id, len(self.layers))
+                if isinstance(neuron_indices, int):
+                    indices = [neuron_indices]
+                else:
+                    indices = list(neuron_indices or [])
+                if op == ArchitectureNeuronsOpType.ADD:
+                    return self._edit_neurons(layer_id, "add", count=max(1, len(indices)))
+                return self._edit_neurons(layer_id, "prune", indices=indices or [-1])
+
         # Reset visited nodes memory
         self.visited_nodes = set()
         self.visited_incoming_nodes = set()
