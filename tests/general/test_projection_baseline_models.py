@@ -79,7 +79,12 @@ class TestBaselineModelZoo(unittest.TestCase):
                 model.eval()
                 # Batch of 2 at the model's own declared shape; a batch of 1
                 # would hide any batch-dim mistake.
-                sample = th.randn((2,) + shape[1:])
+                vocab = getattr(model, "vocab_size", None)
+                if vocab:
+                    # Language models (the zoo GPTs) read token ids, not floats.
+                    sample = th.randint(0, int(vocab), (2,) + tuple(shape[1:]))
+                else:
+                    sample = th.randn((2,) + shape[1:])
                 try:
                     with th.no_grad():
                         output = model(sample)
