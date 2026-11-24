@@ -19,6 +19,60 @@ list lives.
    time? Start at :doc:`quickstart`.
 
 .. card::
+   :link: https://github.com/GrayboxTech/weightslab/releases/tag/v2.0.5
+   :class-card: wl-release-card
+
+   .. rst-class:: wl-release-date
+
+   November 23, 2026
+
+   .. rst-class:: wl-release-version
+
+   v2.0.5
+
+   - `PR #334 <https://github.com/GrayboxTech/weightslab/pull/334>`__
+
+     **Summary**
+
+     - Release 2.0.5: ``dev`` → ``main``. ``dev`` now holds #333 (the ``v2.0.5--fx``
+       release branch: #326, the release CI changes and the fixes below), on top of
+       what ``dev`` already had since 2.0.4. A pre-release of this content is on
+       TestPyPI: tag ``v2.0.5.dev1``, version ``2.0.5.dev1310346532``, with the
+       weights_studio UI of the same release. **Merge and split runs** (#326, issue
+       #302)
+     - Two or more runs become one run, but only if no two of them trained the same
+       step.
+
+     *Full description in the pull request.*
+
+.. card::
+   :link: https://github.com/GrayboxTech/weightslab/releases/tag/v2.0.4
+   :class-card: wl-release-card
+
+   .. rst-class:: wl-release-date
+
+   November 19, 2026
+
+   .. rst-class:: wl-release-version
+
+   v2.0.4
+
+   - `PR #316 <https://github.com/GrayboxTech/weightslab/pull/316>`__
+
+     **Summary**
+
+     - Release 2.0.4: ``dev`` → ``main``. Two changes since 2.0.3. **Viewer over a
+       root of experiments** (#315)
+     - When ``root_log_dir`` points at a folder that holds several experiments, the
+       Studio opens the most recent one without creating a new experiment.
+     - Every run under the root is listed, and any run's last state can be loaded from
+       the UI: signals, predictions, ground truth and data frame.
+     - In code: ``wl.load_experiment(...)``, and ``@wl.on_experiment_load`` for hooks
+       that run after a load.
+
+     *Full description in the pull request.*
+
+.. card::
    :link: https://github.com/GrayboxTech/weightslab/releases/tag/v2.0.3
    :class-card: wl-release-card
 
@@ -318,54 +372,12 @@ list lives.
 
      *Full description in the pull request.*
 
-.. card::
-   :link: https://github.com/GrayboxTech/weightslab/releases/tag/v1.3.2
-   :class-card: wl-release-card
-
-   .. rst-class:: wl-release-date
-
-   July 7, 2026
-
-   .. rst-class:: wl-release-version
-
-   v1.3.2
-
-   - `PR #243 <https://github.com/GrayboxTech/weightslab/pull/243>`__
-
-     Fix histogram generation (previously interpreted numeric values as categorical
-     values)
-
-.. card::
-   :link: https://github.com/GrayboxTech/weightslab/releases/tag/v1.3.1
-   :class-card: wl-release-card
-
-   .. rst-class:: wl-release-date
-
-   July 7, 2026
-
-   .. rst-class:: wl-release-version
-
-   v1.3.1
-
-   - `PR #242 <https://github.com/GrayboxTech/weightslab/pull/242>`__
-
-     - Improve agent:
-     - Add new agent actions, e.g., dump model or architecture, data state, and
-       modelling actions
-     - Change default model used from 70B to "~google/gemini-flash-latest"
-     - Optimize agent pipeline
-     - Revamp the documentation (new widgets and content)
-     - Allow user to generate categorical histogram from metadata
-     - Improve CLI
-     - New WeightsLab Banner
-     - Improve, fix, and add new user weightslab commands (e.g., weightslab cli)
-
 
 ----
 
 `Every release on GitHub → <https://github.com/GrayboxTech/weightslab/releases>`__
 
-.. This page is generated. CI (.github/workflows/whats-new.yml) refreshes it
+.. This page is generated. CI (.github/workflows/release.yml) refreshes it
 .. after every stable release; to refresh it by hand:
 ..     python docs/_scripts/update_whats_new.py
-.. Last generated: 2026-10-20
+.. Last generated: 2026-11-24
