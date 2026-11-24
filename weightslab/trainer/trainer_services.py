@@ -375,6 +375,17 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         logger.debug(f"\nExperimentServiceServicer.GetModelLayerComparison({request})")
         return self._exp_service.model_service.GetModelLayerComparison(request, context)
 
+    def StartFailureAnalysis(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.StartFailureAnalysis({request})")
+        return self._exp_service.model_service.StartFailureAnalysis(request, context)
+
+    def GetFailureAnalysis(self, request, context):
+        return self._exp_service.model_service.GetFailureAnalysis(request, context)
+
+    def AnswerFailureAnalysis(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.AnswerFailureAnalysis({request})")
+        return self._exp_service.model_service.AnswerFailureAnalysis(request, context)
+
     # -------------------------------------------------------------------------
     # Data service helpers + RPCs (for weights_studio UI)
     # -------------------------------------------------------------------------

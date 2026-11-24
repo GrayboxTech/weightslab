@@ -128,6 +128,14 @@ service ExperimentService {
   rpc GetModelComparison (GetModelComparisonRequest) returns (ModelComparisonResponse);
   // One layer of a comparison, neuron by neuron.
   rpc GetModelLayerComparison (ModelLayerComparisonRequest) returns (ModelLayerComparisonResponse);
+  // "Why do these fail?": a guided analysis of failing samples (similar
+  // healthy samples, suspect neurons, a silencing test, top samples) and an
+  // optional repair, as a conversation that asks before each step unless it
+  // runs automatically. Returns at once; poll GetFailureAnalysis, answer the
+  // pending question with AnswerFailureAnalysis.
+  rpc StartFailureAnalysis (FailureAnalysisRequest) returns (FailureAnalysisState);
+  rpc GetFailureAnalysis (GetFailureAnalysisRequest) returns (FailureAnalysisState);
+  rpc AnswerFailureAnalysis (FailureAnalysisAnswer) returns (FailureAnalysisState);
 }
 
 // --- Logger Data Sync ---
@@ -1480,4 +1488,78 @@ message ModelLayerComparisonResponse {
   string mode = 5;
   string neuron_axis = 6;          // "channel" | "feature" | ""
   ModelComparisonStatus status = 7;
+}
+
+// --- Failure analysis ("Why do these fail?") ---------------------------------
+message FailureAnalysisRequest {
+  string tag = 1;                  // every sample with this tag...
+  repeated string sample_ids = 2;  // ...or these
+  repeated string origins = 3;     // parallel to sample_ids, may be empty
+  string origin = 4;               // restrict the tag to one split
+  bool automatic = 5;              // answer every question with its default
+  // Overrides of the size caps (pool, failures, steps...), see
+  // weightslab/components/failure_analysis.py DEFAULTS. "" = defaults.
+  string options_json = 6;
+}
+
+message GetFailureAnalysisRequest {
+  string session_id = 1;           // "" = the latest
+  int32 since = 2;                 // messages with seq > since only
+  bool cancel = 3;                 // stop it (a repair in progress rolls back)
+  bool set_automatic = 4;          // apply `automatic` below
+  bool automatic = 5;
+}
+
+message FailureAnalysisAnswer {
+  string session_id = 1;
+  string question_id = 2;          // must match the pending question
+  string choice = 3;               // the chosen choice id
+  repeated string choices = 4;     // a multiple-choice question's ids
+}
+
+message FailureAnalysisChoice {
+  string id = 1;
+  string label = 2;
+  string hint = 3;                 // a tooltip
+  bool primary = 4;                // the default (what automatic mode picks)
+}
+
+message FailureAnalysisQuestion {
+  string id = 1;                   // "" = no question pending
+  string text = 2;
+  repeated FailureAnalysisChoice choices = 3;
+  bool multiple = 4;               // several choices + a confirm
+  repeated string defaults = 5;    // preselected ids (multiple)
+  string confirm_label = 6;        // the confirm button (multiple)
+}
+
+message FailureAnalysisMessage {
+  int32 seq = 1;
+  string role = 2;                 // "agent" | "user" | "auto"
+  string step = 3;                 // step key ("check", "lookalikes" ...)
+  string text = 4;                 // plain text, may hold **bold** and `code`
+  // A card (thumbnails, tables, bars...) as JSON: {"kind": ..., ...}, see
+  // failure_analysis.py. "" = text only.
+  string card_json = 5;
+}
+
+message FailureAnalysisState {
+  bool success = 1;
+  string message = 2;
+  string session_id = 3;
+  // "running" | "waiting" (a question is pending) | "done" | "error" |
+  // "cancelled" | "none"
+  string state = 4;
+  string step = 5;
+  string step_label = 6;           // what it is doing now
+  int32 done = 7;                  // progress of the current step
+  int32 total = 8;
+  bool automatic = 9;
+  repeated FailureAnalysisMessage messages = 10;
+  FailureAnalysisQuestion question = 11;
+  int32 last_seq = 12;
+  string title = 13;               // "Why do these 40 samples fail?"
+  repeated string steps = 14;      // the step keys, in order
+  repeated string step_titles = 15;
+  int32 step_index = 16;           // index of `step` in `steps`
 }

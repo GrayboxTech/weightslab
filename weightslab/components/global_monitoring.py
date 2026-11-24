@@ -157,7 +157,21 @@ class PauseController:
         self._event.set()
         set_hyperparam(key_path='is_training', value=True)
 
+    def hold(self, reason: str) -> None:
+        """Keep training paused until release(): resume() is refused meanwhile
+        (a repair in the failure analysis trains the live weights itself)."""
+        self._hold_reason = str(reason or "busy")
+
+    def release(self) -> None:
+        self._hold_reason = ""
+
+    def held_reason(self) -> str:
+        return getattr(self, "_hold_reason", "")
+
     def resume(self, force: bool = False) -> bool:
+        if self.held_reason():
+            logger.warning(f'\nCannot resume training: {self.held_reason()}.')
+            return False
         hash_by_module = None
         logger.info('\nAttempting to resume training...')
 
