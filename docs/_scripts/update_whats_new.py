@@ -9,9 +9,11 @@ which is the worst time to discover it. Regenerating is a deliberate step::
 
     python docs/_scripts/update_whats_new.py
 
-After every stable release the ``whats-new.yml`` workflow runs it, commits
-the page to ``main`` and ``dev`` and redeploys the docs; it can also be run
-from the Actions tab after a release's notes are edited. ``GITHUB_TOKEN`` (or
+After every stable release, ``release.yml``'s ``sync-version-file`` job runs
+it, commits the page to ``main`` together with ``weightslab/VERSION`` and
+redeploys the docs. The ``whats-new.yml`` workflow does the same on its own,
+from the Actions tab or when a person publishes or edits a release's notes.
+``GITHUB_TOKEN`` (or
 ``GH_TOKEN``), when set, authenticates the API calls. The page is only
 rewritten when a release's content changed, not just the generation date.
 
@@ -302,7 +304,7 @@ FOOTER = """
 
 `Every release on GitHub → <https://github.com/{repo}/releases>`__
 
-.. This page is generated. CI (.github/workflows/whats-new.yml) refreshes it
+.. This page is generated. CI (.github/workflows/release.yml) refreshes it
 .. after every stable release; to refresh it by hand:
 ..     python docs/_scripts/update_whats_new.py
 .. Last generated: {generated}

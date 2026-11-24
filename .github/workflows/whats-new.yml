@@ -4,14 +4,18 @@ name: Docs What's New
 # (docs/_scripts/update_whats_new.py), commits it to main, then redeploys the
 # docs site. (There is no dev branch any more: main is the only long-lived one.)
 #
+# The release pipeline does not use this workflow: release.yml's
+# sync-version-file job regenerates the page itself, in the same commit as
+# weightslab/VERSION. That release is created with GITHUB_TOKEN, and events
+# caused by GITHUB_TOKEN start no workflow, so the `release` trigger below never
+# fires for it. (release.yml used to call this workflow from a trailing job;
+# that job was lost in a merge, so v2.0.4 and v2.0.5 never reached the page.)
+#
 # Triggers:
-#   - workflow_call: release.yml calls it once a stable release is published.
-#     That release is created with GITHUB_TOKEN, and events caused by
-#     GITHUB_TOKEN start no workflow, so the `release` trigger below never
-#     fires for it; hence the explicit call.
 #   - release published/edited by a person, e.g. release notes fixed in the
 #     GitHub UI. Pre-releases are skipped: the page lists stable releases only.
-#   - workflow_dispatch: by hand from the Actions tab.
+#   - workflow_dispatch: by hand from the Actions tab, e.g. when the release
+#     job's What's New step failed.
 #
 # main rejects pushes from GITHUB_TOKEN (PR + status-check rulesets), so
 # the commit is pushed with VERSION_SYNC_TOKEN (a ruleset bypass actor), the
@@ -21,7 +25,6 @@ name: Docs What's New
 # GITHUB_TOKEN is allowed to trigger.
 
 on:
-  workflow_call:
   workflow_dispatch:
   release:
     types: [published, edited]
@@ -113,4 +116,5 @@ jobs:
         if: ${{ steps.commit.outputs.pushed == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run docs-pages.yml --repo "${GITHUB_REPOSITORY}" --ref main
+        # refs/heads/main, not "main": the repo also has a tag named "main".
+        run: gh workflow run docs-pages.yml --repo "${GITHUB_REPOSITORY}" --ref refs/heads/main
