@@ -380,6 +380,23 @@ class TestMergeRuns(_RunsFixture):
 
         self.assertIn("both logged 'train/loss' at step 10", self.cm.merge_runs(A, K)["message"])
 
+    def test_runs_ending_on_the_same_step_are_refused_and_nothing_changes(self):
+        # No shared signal, so no curve overlaps, but neither run goes on past
+        # the other: there is no continuation to note. This used to raise
+        # ValueError (min() of an empty sequence) out of merge_runs.
+        self.runs(**{A: "first", K: "second"})
+        log_run(self.lg, A, range(0, 11), metrics=("val/acc",))
+        log_run(self.lg, K, range(0, 11), metrics=("train/loss",))
+        rows, manifest = all_rows(self.lg), self.cm._load_manifest()
+
+        for order in ((A, K), (K, A)):
+            result = self.cm.merge_runs(*order)
+
+            self.assertFalse(result["success"])
+            self.assertIn("both end at step 10", result["message"])
+            self.assertEqual(all_rows(self.lg), rows)
+            self.assertEqual(self.cm._load_manifest(), manifest)
+
     def test_refusals(self):
         self.runs(**{A: "first", K: "second", C: "empty"})
         log_run(self.lg, A, range(0, 5))

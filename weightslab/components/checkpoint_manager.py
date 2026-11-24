@@ -1356,8 +1356,13 @@ class CheckpointManager:
             # other merged run that goes on past its end. At a boundary the two
             # can share a step through different signals (see _first_overlap),
             # so it may start ON `end`, not after it.
-            nxt, start = min(((h, lo) for h in wanted if h != a for _, lo, hi in segments[h] if hi > end),
-                             key=lambda item: item[1])
+            later = [(h, lo) for h in wanted if h != a for _, lo, hi in segments[h] if hi > end]
+            if not later:
+                # Runs that stop on the same step: none of them goes on past the other.
+                other = next(h for h in wanted if h != a and last_step(h) == end)
+                return refuse(f"Runs {label(a)} and {label(other)} both end at step {end}, so neither "
+                              f"continues the other; only runs that follow one another can be merged.")
+            nxt, start = min(later, key=lambda item: item[1])
             gap = max(0, start - end - 1)
             notes[a] = (f"Merged: run {label(a)} continues as {label(nxt)} at step {start}"
                         + (f", after a gap of {gap} step{'' if gap == 1 else 's'}" if gap > 0 else "") + ".")
